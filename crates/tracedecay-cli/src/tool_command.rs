@@ -53,8 +53,8 @@ use tracedecay::application_surface::{
     parse_application_surface_request,
 };
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_daemon_protocol::{
     DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
 };

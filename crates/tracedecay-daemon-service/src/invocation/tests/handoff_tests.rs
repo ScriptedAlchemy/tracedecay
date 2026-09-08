@@ -8,12 +8,10 @@ fn handoff_open_wire_is_closed_project_scoped_and_debug_redacted() {
     let request = DaemonInvocationRequest::handoff_application(
         "request.handoff.wire",
         HandoffApplicationInvocationV1::OpenTaskHandoff(
-            tracedecay_application::OpenTaskHandoffRequestV1 {
+            tracedecay_contracts::OpenTaskHandoffRequestV1 {
                 token: secret.to_owned(),
-                session_id: tracedecay_application::HandoffSessionId::new(
-                    "lsp-session.handoff.wire",
-                )
-                .expect("session"),
+                session_id: tracedecay_contracts::HandoffSessionId::new("lsp-session.handoff.wire")
+                    .expect("session"),
             },
         ),
         UtcMicros(10),

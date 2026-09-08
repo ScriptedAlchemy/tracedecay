@@ -1,4 +1,4 @@
-use tracedecay_application::remote::{
+use tracedecay_contracts::remote::{
     capture::RemoteCapturePersistenceErrorV1,
     query::RemoteExactObservationQueryErrorV1,
     replay::{RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1, RemoteReplayFrameV1},

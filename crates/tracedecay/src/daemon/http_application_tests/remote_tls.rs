@@ -7,8 +7,8 @@ use axum::routing::get;
 use rustls::pki_types::pem::PemObject;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracedecay_api::remote::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
-use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_application::{
+use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef,
     ResolvedScope,
 };

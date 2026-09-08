@@ -3,7 +3,7 @@ members = [
     "crates/tracedecay",
     "crates/tracedecay-agent-hosts",
     "crates/tracedecay-api",
-    "crates/tracedecay-application",
+    "crates/tracedecay-contracts",
     "crates/tracedecay-automation",
     "crates/tracedecay-automation-runtime",
     "crates/tracedecay-capture",
@@ -48,7 +48,7 @@ members = [
     "crates/tracedecay-store",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
-    "crates/tracedecay-usecases",
+    "crates/tracedecay-application",
 ]
 exclude = [
     ".worktrees",

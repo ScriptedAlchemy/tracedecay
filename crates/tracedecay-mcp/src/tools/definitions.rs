@@ -402,7 +402,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         "tracedecay-catalog-workflow",
         workflow::workflow_definitions,
     )?;
-    let application_registry = tracedecay_application::mcp_executable_binding_registry()
+    let application_registry = tracedecay_contracts::mcp_executable_binding_registry()
         .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
     let request_schema = |operation: &'static str| {
         canonical_application_request_schema(&application_registry, operation)

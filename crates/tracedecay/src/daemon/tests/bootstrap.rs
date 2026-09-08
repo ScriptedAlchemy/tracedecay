@@ -1863,7 +1863,7 @@ async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
     // hang, a transport error, or an empty success.
     assert!(matches!(
         registry.for_repository_root(&repository).await,
-        Err(tracedecay_application::GitIndexTransactionPortError::DaemonUnavailable)
+        Err(tracedecay_contracts::GitIndexTransactionPortError::DaemonUnavailable)
     ));
 
     // The idempotent receipt proves engine shutdown already closed the one

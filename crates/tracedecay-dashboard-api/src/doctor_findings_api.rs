@@ -16,7 +16,7 @@ use tracedecay_api::doctor::{
     KNOWN_DOCTOR_FINDING_FAMILIES, doctor_report_failure_note, parse_doctor_finding_family,
     project_doctor_report,
 };
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1,
 };
 
@@ -166,7 +166,7 @@ mod tests {
 
     use super::*;
     use tracedecay_api::doctor::doctor_findings_refresh_action;
-    use tracedecay_application::doctor::{
+    use tracedecay_contracts::doctor::{
         AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
         CodeIndexMountReadV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
         DoctorReportComposerV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
@@ -176,7 +176,7 @@ mod tests {
         ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort,
         RuntimeHealthReadV1, StorageDoctorPort,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestContext, RequestId, ResolvedScope,
     };
@@ -428,8 +428,7 @@ mod tests {
         // profile-authority findings.
         assert_eq!(envelope.payload.entries.len(), 11);
         assert!(envelope.payload.entries.iter().all(|entry| {
-            entry.finding().state()
-                == tracedecay_application::doctor::DoctorEvidenceStateV1::Unknown
+            entry.finding().state() == tracedecay_contracts::doctor::DoctorEvidenceStateV1::Unknown
         }));
         assert_eq!(
             envelope

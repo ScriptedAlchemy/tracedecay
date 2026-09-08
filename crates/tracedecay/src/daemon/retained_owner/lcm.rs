@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmDagDepthStatusV1, LcmDagStatusV1,
     LcmDescribeRequestV1, LcmDoctorFindingKindV1, LcmDoctorFindingV1, LcmDoctorHealthStatusV1,
     LcmDoctorHealthV1, LcmDoctorProjectionStateV1, LcmDoctorProjectionV1, LcmDoctorRequestV1,
@@ -14,7 +14,7 @@ use tracedecay_application::retained_surfaces::{
     RetainedSurfaceOperation, RetainedSurfaceResultV1, RetainedTimeFilterV1,
     RetrievalWorkerStatusV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, CancellationSignal, RequestContext, RetainedLcmExecutionPortV1,
     RetainedLcmRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1,
@@ -666,13 +666,13 @@ fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErro
         LcmAuthorityOutcome::Cancelled => {
             hotpath::gauge!("daemon.retained.lcm.authority.cancelled").inc(1.0);
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             )
         }
         LcmAuthorityOutcome::TimedOut => {
             hotpath::gauge!("daemon.retained.lcm.authority.timed_out").inc(1.0);
             RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             )
         }
         LcmAuthorityOutcome::Ready => {

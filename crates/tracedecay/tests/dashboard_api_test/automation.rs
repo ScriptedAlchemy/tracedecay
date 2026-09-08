@@ -37,7 +37,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
             agent
                 .post(&curate_url)
                 .header(
-                    tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
+                    tracedecay_contracts::APPLICATION_REQUEST_ID_HEADER,
                     "request.dashboard.fact-store-curate-single-launcher",
                 )
                 .send_json(serde_json::json!({
@@ -69,7 +69,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
                 agent
                     .post(&curate_url)
                     .header(
-                        tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
+                        tracedecay_contracts::APPLICATION_REQUEST_ID_HEADER,
                         "request.dashboard.fact-store-curate-reject-operations",
                     )
                     .send_json(serde_json::json!({

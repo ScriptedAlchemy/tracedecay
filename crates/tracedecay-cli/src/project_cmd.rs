@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
-use tracedecay_application::{ProjectRegistryView, render_project_registry_view};
+use tracedecay_contracts::{ProjectRegistryView, render_project_registry_view};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
     AdmitWorkSynthesisCommand, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
     DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
@@ -57,7 +57,7 @@ pub(super) fn dashboard_router_with_executor(
 /// Refuse to mount Work unless the executable catalog advertises every
 /// canonical descriptor operation at the application path this build serves.
 pub(crate) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
-    let registry = tracedecay_application::work_executable_binding_registry()
+    let registry = tracedecay_contracts::work_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
     for operation in WorkOperation::ALL {
         let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
@@ -229,7 +229,7 @@ pub(crate) async fn invoke_work_operation(
         WorkOperation::RetryAttempt => core!(
             boxed RetryWorkAttemptCommandV1,
             RetryAttempt,
-            tracedecay_application::WorkRetryAttemptOutcomeV1
+            tracedecay_contracts::WorkRetryAttemptOutcomeV1
         ),
         WorkOperation::ListAttempts => {
             core!(WorkAttemptListRequestV1, ListAttempts, WorkAttemptListV1)

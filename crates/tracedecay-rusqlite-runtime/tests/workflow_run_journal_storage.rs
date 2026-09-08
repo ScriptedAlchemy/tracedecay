@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, WorkflowAdmissionSnapshot, WorkflowArtifactPayload,
     WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError, WorkflowArtifactStorePort,
     WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutRequest,

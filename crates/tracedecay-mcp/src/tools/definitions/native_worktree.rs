@@ -2,7 +2,7 @@
 //!
 //! The catalog declares these five operations on three surfaces —
 //! `NATIVE_WORKTREE_SURFACES = [Cli, Mcp, Http]`
-//! (`tracedecay-application/src/git/native_integration_surface.rs`) — but only
+//! (`tracedecay-contracts/src/git/native_integration_surface.rs`) — but only
 //! HTTP was ever mounted. `tracedecay tool` and MCP publish the SAME
 //! `ToolDefinition` list, so a family absent from that list is absent from both
 //! agent-facing surfaces at once, which is how five declared operations stayed
@@ -18,7 +18,7 @@ use schemars::generate::SchemaSettings;
 use serde_json::{Value, json};
 // Imported through the `git` module rather than the crate root: the root
 // re-export list does not carry this family.
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     NATIVE_INTEGRATION_WORKTREE_CONFIRM_OPERATION, NATIVE_INTEGRATION_WORKTREE_INSPECT_OPERATION,
     NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,
     NATIVE_INTEGRATION_WORKTREE_RECONCILE_OPERATION, NATIVE_INTEGRATION_WORKTREE_REMOVE_OPERATION,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rusqlite::Savepoint;
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay_application::remote::{
+use tracedecay_contracts::remote::{
     auth::{
         OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1,
         RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentCommitReceiptV1,
@@ -35,7 +35,7 @@ use tracedecay_application::remote::{
         RemoteFrameTransferDispositionV1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
     },
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
     PolicyDecisionRef, RequestId, ResolvedScope,
 };

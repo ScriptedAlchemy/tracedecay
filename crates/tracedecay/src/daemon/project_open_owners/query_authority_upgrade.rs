@@ -11,7 +11,7 @@
 //! deferred feedback-cycle upgrade.
 
 use std::path::{Path, PathBuf};
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 
 use super::DaemonInvocationState;
 use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;

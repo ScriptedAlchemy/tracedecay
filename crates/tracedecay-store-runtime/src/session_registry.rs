@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tracedecay_application::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
 use tracedecay_automation_runtime::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
 };
-use tracedecay_usecases::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};

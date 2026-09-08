@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn terminal_application_definitions_project_canonical_request_schemas() {
-    let registry = tracedecay_application::mcp_executable_binding_registry()
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");
     let definitions = get_tool_definitions().expect("tool definitions");
     for (operation, tool_name, admits_project_selector) in [
@@ -133,7 +133,7 @@ fn fact_store_curate_exposes_only_caller_owned_bounds() {
 /// undiscoverable to MCP clients.
 #[test]
 fn work_definitions_cover_the_canonical_operation_registry() {
-    let registry = tracedecay_application::work_executable_binding_registry().unwrap();
+    let registry = tracedecay_contracts::work_executable_binding_registry().unwrap();
     let work_definitions = get_tool_definitions()
         .expect("tool definitions")
         .into_iter()

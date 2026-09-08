@@ -1,5 +1,5 @@
 use super::*;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeNavigationSurfaceRequest,
     CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest, RegisteredRootLocatorV1,
@@ -168,24 +168,24 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     let phrase = CodePhraseSearchSurfaceRequest {
         query: "daemon invocation".to_owned(),
         phrases: vec!["daemon invocation".to_owned()],
-        field_filters: vec![tracedecay_application::retrieval::CodeLexicalFieldFilter {
-            field: tracedecay_application::retrieval::CodeLexicalField::Path,
+        field_filters: vec![tracedecay_contracts::retrieval::CodeLexicalFieldFilter {
+            field: tracedecay_contracts::retrieval::CodeLexicalField::Path,
             include: true,
         }],
         fuzzy_budget: 7,
-        scope: tracedecay_application::CodeQueryScope::new(
+        scope: tracedecay_contracts::CodeQueryScope::new(
             tracedecay_domain::CodeGenerationId::new("generation.callable-code")
                 .expect("generation"),
             Some("src/daemon".to_owned()),
         )
         .expect("scope"),
         meta: CallableCodeSurfaceMeta {
-            projection: tracedecay_application::ResultProjection::Evidence,
-            order: tracedecay_application::RetrievalOrder::Relevance,
+            projection: tracedecay_contracts::ResultProjection::Evidence,
+            order: tracedecay_contracts::RetrievalOrder::Relevance,
             cursor: None,
         },
     };
-    let page = tracedecay_application::PageRequest::first(16).expect("page");
+    let page = tracedecay_contracts::PageRequest::first(16).expect("page");
     let canonical = phrase
         .clone()
         .into_application_request(
@@ -204,8 +204,8 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     );
     assert_eq!(
         canonical.field_filters,
-        [tracedecay_application::retrieval::CodeLexicalFieldFilter {
-            field: tracedecay_application::retrieval::CodeLexicalField::Path,
+        [tracedecay_contracts::retrieval::CodeLexicalFieldFilter {
+            field: tracedecay_contracts::retrieval::CodeLexicalField::Path,
             include: true,
         }]
     );
@@ -248,14 +248,14 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
 
 #[test]
 fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
-    let scope = tracedecay_application::CodeQueryScope::new(
+    let scope = tracedecay_contracts::CodeQueryScope::new(
         tracedecay_domain::CodeGenerationId::new("generation.callable-code").expect("generation"),
         None,
     )
     .expect("scope");
     let meta = CallableCodeSurfaceMeta {
-        projection: tracedecay_application::ResultProjection::Evidence,
-        order: tracedecay_application::RetrievalOrder::Relevance,
+        projection: tracedecay_contracts::ResultProjection::Evidence,
+        order: tracedecay_contracts::RetrievalOrder::Relevance,
         cursor: None,
     };
     #[derive(Clone, Copy)]
@@ -302,7 +302,7 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
             meta: meta.clone(),
         }),
         RequestCase::Facets => CallableCodeSurfaceRequest::Facets(CodeFacetSurfaceRequest {
-            dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
+            dimension: tracedecay_contracts::retrieval::CodeFacetDimension::Kind,
             scope: scope.clone(),
             meta: meta.clone(),
         }),
@@ -358,7 +358,7 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
             RequestCase::References,
         ),
     ];
-    let page = tracedecay_application::PageRequest::first(16).expect("page");
+    let page = tracedecay_contracts::PageRequest::first(16).expect("page");
     let deadline = Deadline::new(UtcMicros(90)).expect("deadline");
     let cancellation =
         CancellationContext::active("cancel.callable-code.matrix").expect("cancellation");
@@ -623,7 +623,7 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
                 scope_set_id.clone(),
                 None,
                 vec![
-                    tracedecay_application::RegisteredRootSelectorV1::new(
+                    tracedecay_contracts::RegisteredRootSelectorV1::new(
                         ProjectId::new("project.quarantined").expect("project"),
                         project_root.clone(),
                     )
@@ -639,19 +639,19 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     let revision = ScopeSetRevision::new(1).expect("revision");
     let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("scope digest");
     for (index, operation) in [
-        tracedecay_application::MultiRootOperationV1::Work {
+        tracedecay_contracts::MultiRootOperationV1::Work {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Git {
+        tracedecay_contracts::MultiRootOperationV1::Git {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Feedback {
+        tracedecay_contracts::MultiRootOperationV1::Feedback {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Impact {
+        tracedecay_contracts::MultiRootOperationV1::Impact {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Query {
+        tracedecay_contracts::MultiRootOperationV1::Query {
             request: serde_json::json!({}),
         },
     ]
@@ -1219,7 +1219,7 @@ fn feedback_observation_invocation_accepts_only_content_free_events() {
         subject,
         UtcMicros(1),
         FeedbackSourceEventV1::SseLifecycle {
-            lifecycle: tracedecay_application::feedback::observations::FeedbackSseLifecycleV1::Gap,
+            lifecycle: tracedecay_contracts::feedback::observations::FeedbackSseLifecycleV1::Gap,
             sequence: Some(1),
             item_count: 0,
             duration_micros: None,

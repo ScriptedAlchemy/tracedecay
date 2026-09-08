@@ -1,4 +1,4 @@
-use tracedecay_application::{ApplicationProblem, RequestId, SafeDiagnostic};
+use tracedecay_contracts::{ApplicationProblem, RequestId, SafeDiagnostic};
 
 use tracedecay_daemon_protocol::DaemonInvocationError;
 
@@ -10,7 +10,7 @@ pub(crate) trait RegisteredHttpOperation: Copy {
     fn application_problem_is_bound(
         self,
         _request_id: &RequestId,
-        scope: Option<&tracedecay_application::ResolvedScope>,
+        scope: Option<&tracedecay_contracts::ResolvedScope>,
         _problem: &ApplicationProblem,
     ) -> bool {
         scope.is_none()
@@ -64,12 +64,12 @@ where
         })),
         Err(DaemonInvocationError::Cancelled { stage }) => Err(ApplicationProblem::Cancelled {
             stage,
-            retry: tracedecay_application::RetryDirective::Never,
+            retry: tracedecay_contracts::RetryDirective::Never,
             legal_actions: Vec::new(),
         }),
         Err(DaemonInvocationError::TimedOut { stage }) => Err(ApplicationProblem::TimedOut {
             stage,
-            retry: tracedecay_application::RetryDirective::Never,
+            retry: tracedecay_contracts::RetryDirective::Never,
             legal_actions: Vec::new(),
         }),
         Err(DaemonInvocationError::Unavailable) => {

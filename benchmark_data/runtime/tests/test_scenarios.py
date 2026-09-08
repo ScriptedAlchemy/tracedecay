@@ -253,7 +253,7 @@ class ScenarioCatalogTest(unittest.TestCase):
             "tracedecay-query",
             "tracedecay-code-index",
             "tracedecay-capture",
-            "tracedecay-application",
+            "tracedecay-contracts",
             "tracedecay-hooks",
             "tracedecay-api",
             "tracedecay-rusqlite-runtime",

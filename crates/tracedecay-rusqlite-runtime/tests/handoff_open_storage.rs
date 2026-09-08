@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     HandoffAuthoritySnapshotV1, HandoffOpenAuthorityError, HandoffOpenAuthorityPort,
     HandoffOpenBindingV1, HandoffOpenError, HandoffOpenExpectationV1, HandoffOpenKindV1,

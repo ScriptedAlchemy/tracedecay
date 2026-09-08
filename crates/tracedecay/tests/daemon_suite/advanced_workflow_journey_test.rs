@@ -10,10 +10,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_application::configuration::{
+use tracedecay_contracts::configuration::{
     ConfigurationGetRequestV1, ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdmitWorkSynthesisCommand, PrepareWorkProductMutationRequestV1, TaskHandoffIssueRequest,
     TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptStatusRequestV1,
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkGraphReadRequestV1,
@@ -555,7 +555,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("repository Work selection");
     let reference = tracedecay_runtime_core::branch::current_branch(&project)
         .map(|branch| id::<RefId>(&format!("refs/heads/{branch}")));
-    let scope = tracedecay_application::ResolvedScope::new(
+    let scope = tracedecay_contracts::ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
         worktree_id.clone(),
@@ -570,7 +570,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     ))
     .expect("project-open policy digest");
     let catalog_digest =
-        tracedecay_application::work_executable_catalog_digest().expect("Work catalog digest");
+        tracedecay_contracts::work_executable_catalog_digest().expect("Work catalog digest");
     let definition_id: WorkflowDefinitionId = id("workflow.advanced-production-journey");
     let step_id: WorkflowStepId = id("fan-out");
     let downstream_step_id: WorkflowStepId = id("collect-results");
@@ -919,7 +919,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     .expect("synthesis attempt identity");
     let synthesis = client
         .execute::<WorkSynthesize>(&AdmitWorkSynthesisCommand {
-            start: tracedecay_application::StartWorkAttemptCommand {
+            start: tracedecay_contracts::StartWorkAttemptCommand {
                 task_id: synthesis_task.clone(),
                 run_id: run_id.clone(),
                 attempt_id: synthesis_attempt_id.clone(),

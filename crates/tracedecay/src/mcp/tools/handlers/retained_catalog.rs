@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::{LazyLock, OnceLock};
 
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, RetainedSurfaceOperation,
     retained_surface_application_operation,
 };
@@ -184,9 +184,9 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     runtime_registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
     authority: &crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
     lcm_authority: Option<&dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-    protocol_request_id: Option<tracedecay_application::RequestId>,
-    protocol_deadline: Option<tracedecay_application::Deadline>,
-    protocol_cancellation: Option<tracedecay_application::CancellationSignal>,
+    protocol_request_id: Option<tracedecay_contracts::RequestId>,
+    protocol_deadline: Option<tracedecay_contracts::Deadline>,
+    protocol_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     project_root: Option<&std::path::Path>,
 ) -> Result<ToolResult> {
     if let Some(arguments) = args.as_object_mut() {

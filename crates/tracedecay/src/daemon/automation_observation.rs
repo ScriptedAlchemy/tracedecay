@@ -1,14 +1,14 @@
 use std::path::Path;
 
+use tracedecay_application::observability::{
+    BoundedObservabilityProducerV1, WorkOwnerObservationResultV1,
+    record_automation_funnel_observation,
+};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, canonical_record_completion_micros,
 };
 use tracedecay_domain::{
     AutomationFunnelObservedV1, AutomationTerminalV1, CoverageStateV1, ObservedTernaryV1, UtcMicros,
-};
-use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, WorkOwnerObservationResultV1,
-    record_automation_funnel_observation,
 };
 
 use super::log_daemon_event;

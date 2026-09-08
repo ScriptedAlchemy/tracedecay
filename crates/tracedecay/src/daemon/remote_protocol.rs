@@ -8,43 +8,43 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use axum::Router;
-use tracedecay_application::remote::auth::{
+use tracedecay_contracts::remote::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentProtocolAdapterV1,
 };
-use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
-use tracedecay_application::remote::capture_protocol::{
+use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_contracts::remote::capture_protocol::{
     RemoteCaptureRequestV1, RemoteOfflineCaptureProtocolAdapterV1,
     RemoteOfflineCaptureProtocolServiceV1,
 };
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1, RemoteCredentialClassV1,
     RemoteSessionBoundProtocolBodyV1,
 };
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
     RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, remote_capture_result_contract_v1,
     remote_enrollment_result_contract_v1, remote_protocol_problem,
     remote_replay_result_contract_v1,
 };
-use tracedecay_application::remote::protocol_owner::{
+use tracedecay_contracts::remote::protocol_owner::{
     RemoteOperationProtocolPortsV1, RemoteProtocolOwnerV1,
 };
-use tracedecay_application::remote::recovery::{
+use tracedecay_contracts::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
-use tracedecay_application::remote::replay::{
+use tracedecay_contracts::remote::replay::{
     RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1,
     RemoteReplayServiceV1,
 };
-use tracedecay_application::remote::transfer::{
+use tracedecay_contracts::remote::transfer::{
     REMOTE_FRAME_TRANSFER_USE_CASE_ID_V1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
     remote_frame_transfer_result_contract_v1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope,
     CancellationSignal, Deadline, EffectId, EffectReceipt, EffectResult, EffectTermination,
     IdempotencyKey, OperationBudgetUsage, OperationReceipt, ReconciliationState, RequestId,
@@ -67,7 +67,7 @@ mod observability;
 pub(super) fn remote_query_result_observation(
     operation_ref: &str,
     expected_shards: usize,
-    result: &tracedecay_application::remote::query::RemoteQueryResultV1,
+    result: &tracedecay_contracts::remote::query::RemoteQueryResultV1,
     terminal_succeeded: tracedecay_domain::ObservedTernaryV1,
 ) -> tracedecay_domain::RemoteCoverageObservedV1 {
     observability::remote_query_result_observation(
@@ -189,7 +189,7 @@ impl RemoteProtocolPortV1<RemoteCaptureRequestV1> for DaemonRemoteCaptureProtoco
             shared.clone(),
             shared,
             storage,
-            tracedecay_application::clock::now_micros,
+            tracedecay_contracts::clock::now_micros,
         ))
         .execute(request, credential)
     }
@@ -242,7 +242,7 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         let request_id = request.request_id.clone();
         let observed_at = request.sent_at;
         let contract = remote_frame_transfer_result_contract_v1()?;
-        let now = tracedecay_application::clock::now_micros();
+        let now = tracedecay_contracts::clock::now_micros();
         if control.cancellation.is_cancelled() {
             return frame_transfer_interrupted_response(
                 request_id,
@@ -264,8 +264,8 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         );
         let session = match admission.admit_before_body(
             &credential,
-            tracedecay_application::remote::credential_admission::RemoteCredentialUseV1::TransferFrame,
-            tracedecay_application::clock::now_micros(),
+            tracedecay_contracts::remote::credential_admission::RemoteCredentialUseV1::TransferFrame,
+            tracedecay_contracts::clock::now_micros(),
         ) {
             Ok(session) => session,
             Err(_) => return unavailable_response(request_id, observed_at, contract),
@@ -278,7 +278,7 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
             return unavailable_response(request_id, observed_at, contract);
         }
         let session = match admission
-            .reauthorize_publication(&session, tracedecay_application::clock::now_micros())
+            .reauthorize_publication(&session, tracedecay_contracts::clock::now_micros())
         {
             Ok(session) => session,
             Err(_) => return unavailable_response(request_id, observed_at, contract),
@@ -324,7 +324,7 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
             )?;
             return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
         }
-        let now = tracedecay_application::clock::now_micros();
+        let now = tracedecay_contracts::clock::now_micros();
         if now >= control.deadline || now.0 >= request.body.expires_at_micros {
             return frame_transfer_interrupted_response(
                 request_id,
@@ -398,7 +398,7 @@ fn frame_transfer_interrupted_response(
 
 fn frame_transfer_effect_envelope(
     request: &RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,
-    session: &tracedecay_application::remote::credential_admission::RemoteAuthenticatedSessionV1,
+    session: &tracedecay_contracts::remote::credential_admission::RemoteAuthenticatedSessionV1,
     receipt: RemoteFrameTransferReceiptV1,
     contract: ResultContractRef,
 ) -> std::result::Result<ApplicationEnvelope<RemoteFrameTransferReceiptV1>, RemoteProtocolFailureV1>
@@ -427,7 +427,7 @@ fn frame_transfer_effect_envelope(
         .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
     let execution = OperationReceipt::completed(
         request.sent_at,
-        tracedecay_application::clock::now_micros(),
+        tracedecay_contracts::clock::now_micros(),
         deadline,
         OperationBudgetUsage {
             units_consumed: 1,
@@ -645,10 +645,10 @@ macro_rules! impl_daemon_remote_recovery_protocol {
                         credentials: Arc::clone(&self.credentials),
                         cancellation: control.cancellation,
                         deadline: control.deadline,
-                        clock: tracedecay_application::clock::now_micros,
+                        clock: tracedecay_contracts::clock::now_micros,
                         interruption: AtomicU8::new(0),
                     }),
-                    tracedecay_application::clock::now_micros,
+                    tracedecay_contracts::clock::now_micros,
                 );
                 owner.execute(request, credential)
             }
@@ -699,7 +699,7 @@ pub(crate) fn build_daemon_remote_protocol_router(
     Ok(tracedecay_api::remote::remote_protocol_router(
         owner,
         admission,
-        tracedecay_application::clock::now_micros,
+        tracedecay_contracts::clock::now_micros,
     ))
 }
 

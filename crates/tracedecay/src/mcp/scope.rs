@@ -8,7 +8,7 @@
 //!
 //! Query-facing tool entry points resolve their project scope ONCE, through
 //! the already-authorized registry context, into the transport-neutral
-//! `tracedecay_application::ResolvedScope`. The session-memory boundary first
+//! `tracedecay_contracts::ResolvedScope`. The session-memory boundary first
 //! authorizes and canonicalizes the registered or linked-worktree root; the
 //! composition root then invokes the code-index daemon's identity authority
 //! for the exact repository/worktree IDs before any retained route lookup.
@@ -20,7 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_session_memory::context::ApplicationScopeError;
 
@@ -179,7 +179,7 @@ mod tests {
     fn resolve_query_scope(
         owner: &ProjectRegistryContext,
         requested_root: &Path,
-    ) -> Result<tracedecay_application::ResolvedScope, QueryScopeError> {
+    ) -> Result<tracedecay_contracts::ResolvedScope, QueryScopeError> {
         resolve_query_scope_with_root(owner, requested_root).map(|(_, scope)| scope)
     }
 

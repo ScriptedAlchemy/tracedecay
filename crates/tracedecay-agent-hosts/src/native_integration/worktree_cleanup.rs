@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     NativeWorktreeTargetV1, WorktreeCleanupReconcileRequestV1, WorktreeCleanupReconciliationV1,
     WorktreeCleanupRemovalV1, WorktreeCleanupRemoveRequestV1, WorktreeContractError,
     WorktreePresenceV1, worktree_confirmation_digest,
 };
-use tracedecay_application::{AuthorizedScopeSet, CancellationSignal};
+use tracedecay_contracts::{AuthorizedScopeSet, CancellationSignal};
 use tracedecay_domain::{
     NativeWorktreeCleanupCommandV1, NativeWorktreeCleanupOutcomeV1, NativeWorktreeCleanupPhaseV1,
     NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, UtcMicros,
@@ -92,7 +92,7 @@ impl DaemonNativeWorktreeAuthority {
         let fenced = self.observe_target(
             &request.target,
             scope_set,
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
             true,
         )?;
         if fenced.presence != WorktreePresenceV1::Present
@@ -410,12 +410,8 @@ impl DaemonNativeWorktreeAuthority {
             repository_id: transaction.command.repository_id.clone(),
             worktree_id: transaction.command.worktree_id.clone(),
         };
-        let inspection = self.observe_target(
-            &target,
-            scope_set,
-            tracedecay_application::now_micros(),
-            true,
-        )?;
+        let inspection =
+            self.observe_target(&target, scope_set, tracedecay_contracts::now_micros(), true)?;
         Ok(match inspection.presence {
             WorktreePresenceV1::Present => CleanupNativeStateV1::Present,
             WorktreePresenceV1::Foreign => CleanupNativeStateV1::Foreign,
@@ -573,7 +569,7 @@ fn run_worktree_remove(repository_root: &Path, worktree_root: &Path) -> Result<O
 }
 
 fn now_at_least(floor: UtcMicros) -> UtcMicros {
-    let now = tracedecay_application::now_micros();
+    let now = tracedecay_contracts::now_micros();
     UtcMicros(now.0.max(floor.0))
 }
 

@@ -714,7 +714,7 @@ impl ProjectOpenTasks {
     pub(super) async fn wait_for_lsp_upgrade(
         &self,
         route: &ProjectRouteKey,
-        deadline: &tracedecay_application::Deadline,
+        deadline: &tracedecay_contracts::Deadline,
         request_cancellation: &CancellationToken,
     ) -> ProjectOpenWaitOutcome {
         let mut state = {
@@ -729,7 +729,7 @@ impl ProjectOpenTasks {
             if request_cancellation.is_cancelled() {
                 return ProjectOpenWaitOutcome::Cancelled;
             }
-            let now = tracedecay_application::clock::now_micros();
+            let now = tracedecay_contracts::clock::now_micros();
             if deadline.is_elapsed_at(now) {
                 return ProjectOpenWaitOutcome::TimedOut;
             }

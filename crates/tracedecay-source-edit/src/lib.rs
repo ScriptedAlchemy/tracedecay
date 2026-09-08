@@ -2,7 +2,7 @@
 //! durable journal, rollback, crash recovery, and reconciliation.
 //!
 //! Request, result, and authorization contracts come from
-//! `tracedecay-application`. Graph evidence is admitted through
+//! `tracedecay-contracts`. Graph evidence is admitted through
 //! `tracedecay_graph_query`. The composition root injects the edit
 //! primitives and diagnostics through [`SourceEditRuntimePort`] and is this
 //! crate's only consumer; nothing here depends on the use-case spine.
@@ -10,7 +10,7 @@
 //! Hotpath labels stay `usecases.edit.*` for dashboard continuity. A later
 //! dual-rename to `source_edit.*` can land with the dashboard cutover.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, SourceEditAuthorizationPort, SourceEditEffectRequestV1,
     SourceEditReconciliationRequestV1, SourceEditRequest,
 };
@@ -63,7 +63,7 @@ use verify::config_error;
 pub async fn preview_source_edit_expected_state(
     graph: &SourceEditRuntime,
     code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
-    context: &tracedecay_application::RequestContext,
+    context: &tracedecay_contracts::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,
     edit: SourceEditRequest,
 ) -> Result<ManifestDigest> {
@@ -122,7 +122,7 @@ where
 pub async fn execute_source_edit_rollback<A>(
     graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
-    request: tracedecay_application::SourceEditRollbackRequestV1,
+    request: tracedecay_contracts::SourceEditRollbackRequestV1,
     authorization: &A,
 ) -> Result<SourceEditApplicationResult>
 where
@@ -134,7 +134,7 @@ where
 pub async fn execute_source_edit_rollback_with_control<A>(
     graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
-    request: tracedecay_application::SourceEditRollbackRequestV1,
+    request: tracedecay_contracts::SourceEditRollbackRequestV1,
     authorization: &A,
     control: &SourceEditEffectControlV1,
 ) -> Result<SourceEditApplicationResult>

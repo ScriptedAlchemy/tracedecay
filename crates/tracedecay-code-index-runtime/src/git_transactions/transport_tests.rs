@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     GitIndexTransactionPort, GitIndexTransactionPortError, OperationTermination,
 };
 use tracedecay_domain::{GitIndexReceiptOutcomeV1, GitIndexTransactionOperationV1, UtcMicros};

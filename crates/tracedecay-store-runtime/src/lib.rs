@@ -1,12 +1,12 @@
 //! Project-store and session-registry runtime.
 //!
 //! Owns the daemon session registry that implements
-//! [`tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1`], the Remote
+//! [`tracedecay_application::tracedecay::ProjectStoreRuntimeV1`], the Remote
 //! Brain credential authority it mounts, and the remote-replay transaction
 //! worker. The composition root (`tracedecay`) wires these against daemon
 //! engine state; this crate never depends on the root aggregate.
 //!
-//! The `tracedecay-usecases` dependency is only for that store-runtime port
+//! The `tracedecay-application` dependency is only for that store-runtime port
 //! and for implementing [`tracedecay_code_index_runtime::CodeGraphSeatLeaseV1`]
 //! / verified semantic-vector adapters, whose signatures already name
 //! usecases semantic-runtime types. Observation cancellation comes from

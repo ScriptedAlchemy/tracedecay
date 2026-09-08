@@ -6,7 +6,7 @@
 //! never re-notifies. See [`crate::native_integration`] for the gateway
 //! constraint: this path admits no client method.
 
-use tracedecay_application::NativeIntegrationStatusProjectionV1;
+use tracedecay_contracts::NativeIntegrationStatusProjectionV1;
 use tracedecay_domain::{NativeIntegrationTransactionId, RepositoryId};
 
 use super::{
@@ -93,7 +93,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use serde_json::Value;
-    use tracedecay_application::NativeIntegrationStatusProjectionV1;
+    use tracedecay_contracts::NativeIntegrationStatusProjectionV1;
     use tracedecay_domain::{
         ManifestDigest, NativeIntegrationPhaseV1, NativeIntegrationPreviewId,
         NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId, RefId, RepositoryId,

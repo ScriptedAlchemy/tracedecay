@@ -505,7 +505,7 @@ renders evidence fields from generated dashboard envelopes through the
 `EvidenceTruthStrip`: authority outcomes, freshness, coverage, server rank,
 typed scores, retriever contributions, server-authored why-this-result
 reasons, citations, omissions, and late-context state. The Rust
-`tracedecay_application::EvidencePacket` is a separate live application type
+`tracedecay_contracts::EvidencePacket` is a separate live application type
 with production consumers and a public export; this frontend correction is
 not permission to delete or deprecate it. Every compact result renders the
 truth strip with authority, coverage, freshness, citation count, omission

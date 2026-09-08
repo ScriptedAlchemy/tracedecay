@@ -5,21 +5,21 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use tracedecay_application::session_sync::{
+use tracedecay_code_index::git_projection::{
+    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitBranchStackBindingV1, GitTopologyProjectionStore,
+    GitWorktreeOccupancyV1, build_git_topology_manifest_checked, git_topology_idempotency_key,
+    git_topology_namespace, git_topology_projection_identity,
+};
+use tracedecay_contracts::session_sync::{
     SessionSyncCommandV1, SessionSyncCompletionReceiptV1, SessionSyncCoverageV1,
     SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
     SessionSyncScopeV1, SessionSyncServicePort, SessionSyncSourceCoverageV1, SessionSyncStatsV1,
     SessionTranscriptImportV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, IdempotencyKey, OperationTermination,
     RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
-};
-use tracedecay_code_index::git_projection::{
-    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitBranchStackBindingV1, GitTopologyProjectionStore,
-    GitWorktreeOccupancyV1, build_git_topology_manifest_checked, git_topology_idempotency_key,
-    git_topology_namespace, git_topology_projection_identity,
 };
 use tracedecay_domain::{
     ActorId, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
@@ -58,7 +58,7 @@ impl GraphCancellation for NeverCancelled {
 
 fn active_session_sync_deadline() -> Deadline {
     Deadline::new(UtcMicros(
-        tracedecay_application::now_micros()
+        tracedecay_contracts::now_micros()
             .0
             .saturating_add(60_000_000),
     ))
@@ -81,7 +81,7 @@ async fn session_sync_interruption_wait_wakes_on_request_cancellation() {
     });
     tokio::task::yield_now().await;
 
-    cancellation.cancel(tracedecay_application::now_micros());
+    cancellation.cancel(tracedecay_contracts::now_micros());
 
     let interruption = tokio::time::timeout(Duration::from_secs(1), waiter)
         .await
@@ -119,9 +119,7 @@ async fn session_sync_interruption_wait_uses_the_request_deadline() {
     let service = DaemonSessionSyncService::default();
     let cancellation = CancellationSignal::active("session-sync.event-deadline").unwrap();
     let deadline = Deadline::new(UtcMicros(
-        tracedecay_application::now_micros()
-            .0
-            .saturating_add(20_000),
+        tracedecay_contracts::now_micros().0.saturating_add(20_000),
     ))
     .unwrap();
 
@@ -380,7 +378,7 @@ fn native_topology_context(
     use_case: &UseCaseId,
 ) -> RequestContext {
     let grant = CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new(format!("grant.session-sync.{suffix}"))
+        tracedecay_contracts::CapabilityGrantId::new(format!("grant.session-sync.{suffix}"))
             .expect("grant"),
         1,
         native_topology_digest('c'),
@@ -630,12 +628,12 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
             reference: Some(feature_ref),
         },
     ];
-    let projection = tracedecay_usecases::git_intelligence::NativeGitIntelligence::new(
+    let projection = tracedecay_application::git_intelligence::NativeGitIntelligence::new(
         roots[0].clone(),
         repository.clone(),
         main_worktree.clone(),
     )
-    .topology_projection(tracedecay_usecases::git_intelligence::GIT_HISTORY_MAX_COUNT_LIMIT)
+    .topology_projection(tracedecay_application::git_intelligence::GIT_HISTORY_MAX_COUNT_LIMIT)
     .expect("native topology projection")
     .with_declared_topology(vec![branch_binding], occupancies)
     .expect("declared topology projection");
@@ -953,7 +951,7 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let cancel_service = service.clone();
     let cancel_barrier = Arc::clone(&barrier);
-    let control = tracedecay_application::session_sync::SessionSyncControlV1::new(
+    let control = tracedecay_contracts::session_sync::SessionSyncControlV1::new(
         scope,
         alias_request.idempotency_key().clone(),
     );

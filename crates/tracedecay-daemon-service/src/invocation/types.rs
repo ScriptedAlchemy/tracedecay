@@ -2,9 +2,9 @@
 
 use super::*;
 use futures_util::FutureExt;
-use tracedecay_application::RegisteredRootLocatorV1;
+use tracedecay_contracts::RegisteredRootLocatorV1;
 
-pub use tracedecay_application::HookOrchestrationAdmissionV1;
+pub use tracedecay_contracts::HookOrchestrationAdmissionV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookOrchestrationTriggerV1 {
@@ -726,8 +726,7 @@ pub struct RegisteredRetainedRuntime {
     pub(super) scope: ResolvedScope,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
-    pub(super) ports:
-        Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+    pub(super) ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
 }
 
 pub struct RegisteredFeedbackRuntime {
@@ -851,7 +850,7 @@ pub struct RuntimeLspSession {
     pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub actor: RuntimeLspActor,
     pub(super) delivery_settlements:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
     /// Captured at the first poll of the current outbound frame. Retries and
     /// terminalization must reuse its exact timestamps and identity.
     pub(super) in_flight_delivery_attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
@@ -1069,7 +1068,7 @@ pub struct DaemonLspInvocationOwner {
     pub(super) scope_set_storage:
         Option<tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage>,
     pub(super) delivery_settlements:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
 }
 
 #[derive(Clone)]
@@ -1111,7 +1110,7 @@ impl DaemonLspInvocationOwner {
     pub fn with_delivery_settlements(
         mut self,
         delivery_settlements: Arc<
-            tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1,
+            tracedecay_application::observability::BoundedDeliverySettlementRecorderV1,
         >,
     ) -> Self {
         self.delivery_settlements = Some(delivery_settlements);
@@ -1129,7 +1128,7 @@ impl DaemonLspInvocationOwner {
         scope_grant: CapabilityGrantSnapshot,
         scope_set_storage: tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
         delivery_settlements: Arc<
-            tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1,
+            tracedecay_application::observability::BoundedDeliverySettlementRecorderV1,
         >,
     ) -> Self {
         Self {

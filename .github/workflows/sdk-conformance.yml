@@ -6,7 +6,7 @@ on:
       - ".github/workflows/**"
       - ".github/release-targets.json"
       - "crates/tracedecay-api/**"
-      - "crates/tracedecay-application/**"
+      - "crates/tracedecay-contracts/**"
       - "crates/tracedecay-domain/**"
       - "crates/tracedecay-sdk/**"
       - "crates/tracedecay-tool-catalog/**"

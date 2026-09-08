@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread::ThreadId;
 
-use tracedecay_application::CancellationSignal;
+use tracedecay_contracts::CancellationSignal;
 use tracedecay_query::code_search::{
     CodeIndexSearchAuthorityV1, CodeIndexSearchModeV1, CodeIndexSearchOutcomeV1,
     CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
@@ -195,7 +195,7 @@ async fn cancelled_lexical_scan_releases_the_search_permit_to_the_next_request()
     );
 
     assert!(
-        cancellation.cancel(tracedecay_application::clock::now_micros()),
+        cancellation.cancel(tracedecay_contracts::clock::now_micros()),
         "the request cancels exactly once"
     );
     resume_tx

@@ -13,21 +13,21 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 hotpath = [
     "tracedecay-domain/hotpath",
     "hotpath/hotpath",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-store/hotpath",
 ]
 hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
 ]
 hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
 ]
 test-transport = []
@@ -44,7 +44,7 @@ thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
 tracing = "0.1"
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 
 [dev-dependencies]

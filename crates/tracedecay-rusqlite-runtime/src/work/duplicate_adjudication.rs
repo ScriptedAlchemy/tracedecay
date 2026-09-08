@@ -1,6 +1,6 @@
 //! Revision-CAS persistence for explicit duplicate-Work adjudications.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     MAX_WORK_DUPLICATE_CLASSIFICATION_ATTEMPTS_V1, WorkDuplicateAdjudicationAppendOutcomeV1,
     WorkDuplicateAdjudicationPortV1, WorkDuplicateAdjudicationStorageErrorV1,
     WorkDuplicateAdjudicationWriteV1, WorkOwnerObservationReceiptV1,

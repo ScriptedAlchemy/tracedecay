@@ -1,6 +1,6 @@
 use super::*;
 
-use tracedecay_usecases::semantic_runtime::{
+use tracedecay_application::semantic_runtime::{
     project_committed_semantic_pins, project_semantic_retained_vector_generations,
 };
 
@@ -1396,7 +1396,7 @@ async fn committed_rollback_serves_the_restored_profile_after_the_branch_label_m
         "the restored pair is installed under the rollback's own revision"
     );
 
-    let moved_label_scope = tracedecay_application::ResolvedScope::new(
+    let moved_label_scope = tracedecay_contracts::ResolvedScope::new(
         scope.project_id.clone(),
         scope.repository_id.clone(),
         scope.worktree_id.clone(),

@@ -5,7 +5,7 @@
 //! enforced once per run, and artifact payloads are digest-addressed rows that
 //! are verified against their declared reference on every hydration.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1, WorkflowActiveRunRecoveryCursorV1,
     WorkflowActiveRunRecoveryPageV1, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
     WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowFanOutAttemptBindingV1,

@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_application::historical_query::HistoricalGitReadUnavailableReasonV1;
-use tracedecay_application::is_canonical_repository_relative_path;
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_contracts::historical_query::HistoricalGitReadUnavailableReasonV1;
+use tracedecay_contracts::is_canonical_repository_relative_path;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
@@ -168,7 +168,7 @@ pub struct ProfileSpecV1 {
     ///
     /// The semantic lane *also* abstains on
     /// `SemanticCalibrationProfileV1::maximum_distance_micros`, which
-    /// `tracedecay_usecases::semantic_runtime::measure_acceptance_calibration`
+    /// `tracedecay_application::semantic_runtime::measure_acceptance_calibration`
     /// measures from the committed generation's own vectors — deliberately,
     /// because a cosine cut-off is a property of the model and corpus rather
     /// than of a checked-in profile. This field therefore imposes a *second*,

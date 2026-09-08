@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::time::{Duration, timeout};
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_tool_catalog::CatalogSnapshotV1;

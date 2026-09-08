@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use tracedecay_application::{CancellationSignal, VerifiedWorkGraphVersionV1};
+use tracedecay_contracts::{CancellationSignal, VerifiedWorkGraphVersionV1};
 use tracedecay_domain::{
     AttemptId, CodeGenerationId, ComponentVersion, ContentDigest, CursorPayloadDigest,
     DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,

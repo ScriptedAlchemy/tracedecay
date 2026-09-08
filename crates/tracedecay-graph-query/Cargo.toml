@@ -12,7 +12,7 @@ include = ["/src/**"]
 hotpath.workspace = true
 serde_json = "1"
 thiserror = "2"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 # Grammar-free entry only: `markdown_structure` compiles with no language
 # feature enabled, so section structure reaches retrieval without linking a
 # tree-sitter bundle into this crate.
@@ -28,7 +28,7 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
     "hotpath/hotpath",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-domain/hotpath",
@@ -39,7 +39,7 @@ hotpath = [
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
@@ -50,7 +50,7 @@ hotpath-alloc = [
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",

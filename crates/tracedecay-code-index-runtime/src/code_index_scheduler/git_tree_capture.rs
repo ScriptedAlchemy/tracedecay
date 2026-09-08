@@ -203,12 +203,12 @@ impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadCon
     fn is_cancelled(&self) -> bool {
         self.cancellation
             .as_ref()
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
     }
 
     fn is_deadline_exceeded(&self) -> bool {
         self.deadline.as_ref().is_some_and(|deadline| {
-            deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+            deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
         })
     }
 }

@@ -1,6 +1,6 @@
 //! Transactional workflow mutations applied from durable preparations.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkHandoffFrontierV1,
     WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
     WorkflowDefinitionTransitionOutcome, WorkflowEffectAuthorityErrorV1, WorkflowEffectMutationV1,

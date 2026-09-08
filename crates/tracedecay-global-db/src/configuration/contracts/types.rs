@@ -14,7 +14,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{ActorId, ManifestDigest, canonical_sha256};
 use zeroize::Zeroizing;
 
-pub use tracedecay_application::configuration::{
+pub use tracedecay_contracts::configuration::{
     ActivationDriftV1, ComponentConfigurationState, ConfigurationAuditPage,
     ConfigurationMutationReceipt, ConfigurationSettlementAuthorityV1, ResolvedSetting,
     SettingSummary,

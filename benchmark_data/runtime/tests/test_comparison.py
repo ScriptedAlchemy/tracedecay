@@ -25,7 +25,7 @@ def comparison_identity(**overrides: object) -> dict:
         "treatment_candidate_id": "candidate-b",
         "run_id": "run-1",
         "capture_id": "capture-1",
-        "crate_id": "tracedecay-application",
+        "crate_id": "tracedecay-contracts",
         "journey_id": "indexed-query",
         "workload_id": "exact-symbol",
         "platform": "linux-x86_64",

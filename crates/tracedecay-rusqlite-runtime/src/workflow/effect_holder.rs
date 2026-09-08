@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tracedecay_application::{WorkflowEffectAuthorityErrorV1, WorkflowEffectIdentityV1};
+use tracedecay_contracts::{WorkflowEffectAuthorityErrorV1, WorkflowEffectIdentityV1};
 use tracedecay_domain::WorktreeId;
 
 use crate::exact_sql::{ExactSqlHandle, ExactSqlStatement};

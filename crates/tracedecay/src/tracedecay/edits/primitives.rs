@@ -15,7 +15,7 @@ use tracedecay_source_edit::{
     validate_planned_source_edit,
 };
 
-use tracedecay_application::source_edit::{EditResult, InsertResult, MultiEditResult};
+use tracedecay_contracts::source_edit::{EditResult, InsertResult, MultiEditResult};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;

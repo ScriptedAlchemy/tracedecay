@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     SourceEditDiagnosticV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
 };
 
@@ -121,7 +121,7 @@ fn failed_edit_verification(error: TraceDecayError) -> SourceEditVerificationV1 
 }
 
 pub(super) fn application_contract_error(
-    error: tracedecay_application::ApplicationContractError,
+    error: tracedecay_contracts::ApplicationContractError,
 ) -> TraceDecayError {
     config_error(format!(
         "source edit application contract is invalid: {error}"
@@ -129,7 +129,7 @@ pub(super) fn application_contract_error(
 }
 
 pub(super) fn application_problem(
-    _error: tracedecay_application::ApplicationProblem,
+    _error: tracedecay_contracts::ApplicationProblem,
 ) -> TraceDecayError {
     config_error("source edit was not found or not authorized")
 }

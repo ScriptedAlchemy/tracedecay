@@ -5,14 +5,14 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
-use tracedecay_application::session_sync::{
+use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncAdmissionErrorV1, SessionSyncCommandV1,
     SessionSyncCompletionReceiptV1, SessionSyncControlV1, SessionSyncCoverageV1, SessionSyncFuture,
     SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
     SessionSyncScopeV1, SessionSyncServicePort, SessionSyncShutdownFuture,
     SessionSyncSourceCoverageV1, SessionSyncSourceFrontierV1, SessionSyncStatsV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, now_micros,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
@@ -37,14 +37,14 @@ pub struct DaemonSessionSyncService {
     project_gates: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
     completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
-    shutdown: tracedecay_usecases::observation::ObservationCancellation,
+    shutdown: tracedecay_application::observation::ObservationCancellation,
     shutdown_notify: Arc<tokio::sync::Notify>,
     journal_changed: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
 struct ActiveSessionImport {
-    admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
+    admission: tracedecay_contracts::session_sync::SessionSyncAdmissionReceiptV1,
     journal_key: String,
 }
 
@@ -131,7 +131,7 @@ impl Default for DaemonSessionSyncService {
             project_gates: Arc::new(Mutex::new(BTreeMap::new())),
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
             completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
-            shutdown: tracedecay_usecases::observation::ObservationCancellation::default(),
+            shutdown: tracedecay_application::observation::ObservationCancellation::default(),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             journal_changed: Arc::new(tokio::sync::Notify::new()),
         }
@@ -410,7 +410,7 @@ impl DaemonSessionSyncService {
         project_sessions: RegisteredGlobalDbLeaseV1,
         key: String,
         request: SessionSyncRequestV1,
-        admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
+        admission: tracedecay_contracts::session_sync::SessionSyncAdmissionReceiptV1,
     ) -> bool {
         let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         if active.contains_key(&key) {
@@ -921,10 +921,10 @@ pub mod test_harness {
     use std::time::Duration;
 
     use tokio::sync::Semaphore;
-    use tracedecay_application::session_sync::{
+    use tracedecay_contracts::session_sync::{
         SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
     };
     use tracedecay_domain::UtcMicros;
@@ -1111,7 +1111,7 @@ impl DaemonSessionSyncService {
     }
 }
 
-fn sleep_until_deadline(deadline: &tracedecay_application::Deadline) -> impl Future<Output = ()> {
+fn sleep_until_deadline(deadline: &tracedecay_contracts::Deadline) -> impl Future<Output = ()> {
     let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
     let remaining = u64::try_from(remaining_micros).unwrap_or(0);
     tokio::time::sleep(Duration::from_micros(remaining))

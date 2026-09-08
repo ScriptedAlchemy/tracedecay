@@ -880,7 +880,7 @@ impl SessionTemporalRefreshWake {
     }
 }
 
-impl tracedecay_application::SessionTemporalRefreshWakePort for SessionTemporalRefreshWake {
+impl tracedecay_contracts::SessionTemporalRefreshWakePort for SessionTemporalRefreshWake {
     fn wake(&self) -> bool {
         SessionTemporalRefreshWake::wake(self)
     }
@@ -892,7 +892,7 @@ impl tracedecay_application::SessionTemporalRefreshWakePort for SessionTemporalR
     fn wake_and_wait_until_idle(
         &self,
         timeout: std::time::Duration,
-    ) -> tracedecay_application::SessionTemporalRefreshWakeFuture<'_> {
+    ) -> tracedecay_contracts::SessionTemporalRefreshWakeFuture<'_> {
         Box::pin(SessionTemporalRefreshWake::wake_and_wait_until_idle(
             self, timeout,
         ))

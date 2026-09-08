@@ -14,10 +14,10 @@ use super::{
     register_production_feedback_and_advisory, register_production_feedback_cycle,
 };
 use crate::daemon::log_daemon_event;
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
 };
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -62,7 +62,7 @@ pub(in crate::daemon) async fn spawn_semantic_owner_registration(
     invocation: DaemonInvocationState,
     project_root: PathBuf,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     mut production_runtime_ready: tokio::sync::watch::Receiver<bool>,
     route_registered: Arc<AtomicBool>,
     route_cancellation: CancellationToken,

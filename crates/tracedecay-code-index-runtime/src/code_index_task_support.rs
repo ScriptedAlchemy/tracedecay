@@ -42,10 +42,10 @@ pub fn code_index_search_hydration_budget(
 
 pub async fn generation_for_hydration(
     schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     generation_id: &tracedecay_domain::CodeGenerationId,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<
     code_index_scheduler::LatestCompleteCodeIndexV1,
     tracedecay_query::code_search::CodeIndexSearchOutcomeV1,
@@ -116,7 +116,7 @@ pub fn exact_source_is_complete(
 
 pub async fn verify_exact_source_cursor(
     schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     cursor: Option<&tracedecay_domain::RetrievalCursor>,
     source: &tracedecay_domain::CodeSourceCursorBindingV1,
 ) -> Result<(), code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1> {
@@ -145,7 +145,7 @@ pub enum ExactCursorPublicationErrorV1 {
 
 pub async fn bind_exact_source_cursor(
     schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     cursor: Option<&mut tracedecay_domain::RetrievalCursor>,
     source: Option<tracedecay_domain::CodeSourceCursorBindingV1>,
 ) -> Result<(), ExactCursorPublicationErrorV1> {

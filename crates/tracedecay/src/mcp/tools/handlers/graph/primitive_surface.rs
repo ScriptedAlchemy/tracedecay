@@ -1,10 +1,10 @@
 //! Typed wire projections shared by the primitive graph handlers.
 
-use tracedecay_application::retrieval::{
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_contracts::retrieval::{
     PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
     PrimitiveSearchCoverageV1, PrimitiveSemanticModeV1, PrimitiveSymbolLocationV1,
 };
-use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::handlers::graph::{
     graph_symbol_end_line, required_graph_file_path, required_graph_metadata,

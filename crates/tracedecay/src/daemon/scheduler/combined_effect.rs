@@ -49,7 +49,7 @@ pub(super) enum CombinedEffectAdmission {
         skill: Box<AutomationSettledTerminal>,
     },
     Conflict,
-    PreAdmissionProblem(Vec<tracedecay_application::ApplicationProblemEnvelope>),
+    PreAdmissionProblem(Vec<tracedecay_contracts::ApplicationProblemEnvelope>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1107,9 +1107,7 @@ mod tests {
 
     use fs2::FileExt;
     use tempfile::TempDir;
-    use tracedecay_application::{
-        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
-    };
+    use tracedecay_application::observability::RegisteredObservabilityPortV1;
     use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_automation_runtime::automation::backend::{
         AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
@@ -1124,11 +1122,13 @@ mod tests {
         CombinedReviewAutomationOptions, RetainedAutomationSettlementDisposition,
         run_skill_writer_with_backend_and_retrieval,
     };
+    use tracedecay_contracts::{
+        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+    };
     use tracedecay_domain::{
         AutomationTerminalV1, ManifestDigest, ObservabilityPayloadV1, ProjectId, RunId, SessionId,
         canonical_sha256,
     };
-    use tracedecay_usecases::observability::RegisteredObservabilityPortV1;
 
     use super::{
         AdmissionState, AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome,
@@ -1185,7 +1185,7 @@ mod tests {
                 &project_id,
             )
             .expect("combined admission scope");
-            let observed_at = tracedecay_application::now_micros();
+            let observed_at = tracedecay_contracts::now_micros();
             let configuration = memory
                 .configuration_runtime()
                 .client()

@@ -1,8 +1,8 @@
 //! Cross-field result validation selected by generated operation metadata.
 
 use serde_json::Value;
-use tracedecay_application::RequestId;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::RequestId;
+use tracedecay_contracts::retained_surfaces::{
     AutomationRunResultV1, FactStoreCurateRequestV1, SdkResultSemanticsV1,
 };
 
@@ -38,7 +38,7 @@ pub(crate) fn response_matches(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_application::retained_surfaces::SdkResultSemanticsV1;
+    use tracedecay_contracts::retained_surfaces::SdkResultSemanticsV1;
 
     use super::response_matches;
 

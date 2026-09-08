@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     GitIndexApplyRequestV1, GitIndexOperationBindingV1, GitIndexTransactionPortError, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
@@ -28,10 +28,10 @@ use super::{
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
 use crate::ports::ApplicationCatalogProviderV1;
+use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_application::configuration::ConfigurationControlStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 const GIT_POLICY_REVISION: u64 = 2;
 
@@ -407,7 +407,7 @@ impl DaemonGitInvocationOwner {
 
     pub fn current_read_authority(
         &self,
-        request: &tracedecay_application::git::GitReadRequestV1,
+        request: &tracedecay_contracts::git::GitReadRequestV1,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let capability = CapabilityId::new(request.capability_id().to_owned())
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;

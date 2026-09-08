@@ -112,7 +112,7 @@ fn dispatch_capacity_for_host() -> usize {
 }
 
 struct ActiveDispatch {
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
     live_cancellable: bool,
     settlement: Arc<DispatchExecutionSettlement>,
     _gauge: ActiveDispatchGaugeGuard,
@@ -243,7 +243,7 @@ impl RetainedDispatchRegistry {
 
     async fn spawn<T, F>(
         &self,
-        cancellation: tracedecay_application::CancellationSignal,
+        cancellation: tracedecay_contracts::CancellationSignal,
         live_cancellable: bool,
         future: F,
     ) -> Result<(
@@ -333,7 +333,7 @@ impl RetainedDispatchRegistry {
     pub(super) async fn shutdown(&self) {
         let mut state = self.state.lock().await;
         self.accepting.store(false, Ordering::Release);
-        let requested_at = tracedecay_application::clock::now_micros();
+        let requested_at = tracedecay_contracts::clock::now_micros();
         for active in state.active.values() {
             if active.live_cancellable {
                 let _ = active.cancellation.cancel(requested_at);
@@ -357,7 +357,7 @@ impl RetainedDispatchRegistry {
 }
 
 pub(super) struct RetainedDispatchAuthority {
-    cancellations: std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    cancellations: std::sync::Mutex<HashMap<String, tracedecay_contracts::CancellationSignal>>,
     /// Signalled on every cancellation registration so a cancellation
     /// notification that raced route resolution can sleep until the request
     /// registers instead of polling the map.
@@ -378,14 +378,14 @@ impl RetainedDispatchAuthority {
 
     pub(super) fn cancellations(
         &self,
-    ) -> &std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>> {
+    ) -> &std::sync::Mutex<HashMap<String, tracedecay_contracts::CancellationSignal>> {
         &self.cancellations
     }
 
     pub(super) fn register_cancellation(
         &self,
         request_id: String,
-        cancellation: tracedecay_application::CancellationSignal,
+        cancellation: tracedecay_contracts::CancellationSignal,
     ) {
         super::requests::recover_lock(&self.cancellations).insert(request_id, cancellation);
         self.cancellation_registered.notify_waiters();
@@ -405,7 +405,7 @@ impl RetainedDispatchAuthority {
 
     #[hotpath::skip]
     pub(super) async fn shutdown(&self) {
-        let requested_at = tracedecay_application::clock::now_micros();
+        let requested_at = tracedecay_contracts::clock::now_micros();
         for cancellation in super::requests::recover_lock(&self.cancellations).values() {
             let _ = cancellation.cancel(requested_at);
         }
@@ -414,13 +414,13 @@ impl RetainedDispatchAuthority {
 }
 
 pub(super) struct ApplicationCancellationRegistration<'a> {
-    registry: &'a std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    registry: &'a std::sync::Mutex<HashMap<String, tracedecay_contracts::CancellationSignal>>,
     request_id: Option<String>,
 }
 
 impl<'a> ApplicationCancellationRegistration<'a> {
     pub(super) fn new(
-        registry: &'a std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+        registry: &'a std::sync::Mutex<HashMap<String, tracedecay_contracts::CancellationSignal>>,
         request_id: Option<String>,
     ) -> Self {
         Self {
@@ -439,7 +439,7 @@ impl Drop for ApplicationCancellationRegistration<'_> {
 }
 
 pub(super) struct PreparedDispatchControl<'a> {
-    pub(super) request_id: Option<tracedecay_application::RequestId>,
+    pub(super) request_id: Option<tracedecay_contracts::RequestId>,
     pub(super) control: DispatchControl,
     pub(super) _registration: ApplicationCancellationRegistration<'a>,
 }
@@ -447,9 +447,9 @@ pub(super) struct PreparedDispatchControl<'a> {
 #[derive(Clone)]
 pub(super) struct DispatchControl {
     tool_name: Arc<str>,
-    deadline: tracedecay_application::Deadline,
+    deadline: tracedecay_contracts::Deadline,
     deadline_at: tokio::time::Instant,
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
     live_cancellable: bool,
     canonical_effect_settlement: bool,
 }
@@ -461,15 +461,15 @@ impl super::McpServer {
         tool_name: &str,
         memory_request_scope: &str,
         pre_cancelled: bool,
-        caller_deadline: Option<tracedecay_application::Deadline>,
+        caller_deadline: Option<tracedecay_contracts::Deadline>,
     ) -> Result<PreparedDispatchControl<'a>> {
         let request_id = super::application_surface_request_id(id, memory_request_scope)
-            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
+            .and_then(|request_id| tracedecay_contracts::RequestId::new(request_id).ok());
         let cancellation_id = request_id.as_ref().map_or_else(
             || format!("cancellation.mcp.{tool_name}"),
             |request_id| format!("cancellation.{}", request_id.as_str()),
         );
-        let cancellation = tracedecay_application::CancellationSignal::active(cancellation_id)
+        let cancellation = tracedecay_contracts::CancellationSignal::active(cancellation_id)
             .map_err(|error| TraceDecayError::Config {
                 message: format!("could not create MCP dispatch cancellation: {error}"),
             })?;
@@ -504,7 +504,7 @@ impl super::McpServer {
             super::requests::dispatch_deadline_horizon_micros(controlled_read || source_edit)
         };
         let carried_deadline = carried_horizon.and_then(|horizon| {
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
                 super::requests::mcp_now_micros().0.saturating_add(horizon),
             ))
             .ok()
@@ -513,7 +513,7 @@ impl super::McpServer {
             i64::try_from(ceiling.as_micros()).map_err(|_| TraceDecayError::Config {
                 message: "MCP dispatch ceiling exceeds the domain clock".to_owned(),
             })?;
-        let ceiling_deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+        let ceiling_deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
             super::requests::mcp_now_micros()
                 .0
                 .saturating_add(ceiling_micros),
@@ -553,8 +553,8 @@ impl super::McpServer {
 impl DispatchControl {
     pub(super) fn new(
         tool_name: impl Into<Arc<str>>,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
     ) -> Result<Self> {
         let tool_name = tool_name.into();
         let remaining = tracedecay_daemon_protocol::deadline_remaining(&deadline)
@@ -578,11 +578,11 @@ impl DispatchControl {
         })
     }
 
-    pub(super) fn deadline(&self) -> tracedecay_application::Deadline {
+    pub(super) fn deadline(&self) -> tracedecay_contracts::Deadline {
         self.deadline.clone()
     }
 
-    pub(super) fn cancellation(&self) -> tracedecay_application::CancellationSignal {
+    pub(super) fn cancellation(&self) -> tracedecay_contracts::CancellationSignal {
         self.cancellation.clone()
     }
 
@@ -609,7 +609,7 @@ impl DispatchControl {
         if tokio::time::Instant::now() >= self.deadline_at {
             let _ = self
                 .cancellation
-                .cancel(tracedecay_application::clock::now_micros());
+                .cancel(tracedecay_contracts::clock::now_micros());
             return RetainedDispatchOutcome::failed(dispatch_deadline_error(
                 &self.tool_name,
                 DispatchSettlement::NotStarted,
@@ -648,7 +648,7 @@ impl DispatchControl {
             () = &mut deadline => {
                 let _ = self
                     .cancellation
-                    .cancel(tracedecay_application::clock::now_micros());
+                    .cancel(tracedecay_contracts::clock::now_micros());
                 Err(DispatchFailure::new(dispatch_deadline_error(
                     &self.tool_name,
                     settlement.snapshot(),
@@ -690,7 +690,7 @@ impl DispatchControl {
         if tokio::time::Instant::now() >= self.deadline_at {
             let _ = self
                 .cancellation
-                .cancel(tracedecay_application::clock::now_micros());
+                .cancel(tracedecay_contracts::clock::now_micros());
             return RetainedDispatchOutcome::failed(dispatch_deadline_error(
                 &self.tool_name,
                 DispatchSettlement::NotStarted,
@@ -748,7 +748,7 @@ impl DispatchControl {
                     receive_canonical_result(&mut result).await
                 } else if self
                     .cancellation
-                    .cancel(tracedecay_application::clock::now_micros())
+                    .cancel(tracedecay_contracts::clock::now_micros())
                 {
                     Err(DispatchFailure::new(dispatch_deadline_error(
                         &self.tool_name,
@@ -874,10 +874,10 @@ mod tests {
 
     use super::{DispatchControl, DispatchSettlement, RetainedDispatchRegistry};
 
-    fn deadline_after(duration: std::time::Duration) -> tracedecay_application::Deadline {
+    fn deadline_after(duration: std::time::Duration) -> tracedecay_contracts::Deadline {
         let micros = i64::try_from(duration.as_micros()).expect("fixture duration");
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-            tracedecay_application::clock::now_micros()
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+            tracedecay_contracts::clock::now_micros()
                 .0
                 .saturating_add(micros),
         ))
@@ -887,9 +887,8 @@ mod tests {
     #[tokio::test]
     async fn live_cancellation_before_commit_returns_cancelled_while_the_worker_remains_owned() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
-        let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.before-commit")
-                .expect("cancellation");
+        let cancellation = tracedecay_contracts::CancellationSignal::active("cancel.before-commit")
+            .expect("cancellation");
         let control = DispatchControl::new(
             "tracedecay_search",
             deadline_after(std::time::Duration::from_mins(1)),
@@ -913,7 +912,7 @@ mod tests {
 
         worker_started.notified().await;
         assert_eq!(registry.active_count_for_test().await, 1);
-        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
         let cancelled = runner.await.expect("dispatch runner");
         let settlement = Arc::clone(&cancelled.settlement);
         let failure = cancelled
@@ -934,9 +933,8 @@ mod tests {
     #[tokio::test]
     async fn non_cancellable_effect_returns_the_canonical_result_after_admission() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
-        let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.after-commit")
-                .expect("cancellation");
+        let cancellation = tracedecay_contracts::CancellationSignal::active("cancel.after-commit")
+            .expect("cancellation");
         let control = DispatchControl::new(
             "tracedecay_configuration_set",
             deadline_after(std::time::Duration::from_mins(1)),
@@ -959,7 +957,7 @@ mod tests {
         });
 
         effect_started.notified().await;
-        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
         assert!(
             !runner.is_finished(),
             "an admitted non-cancellable effect owns canonical settlement"
@@ -983,9 +981,9 @@ mod tests {
     async fn pre_cancelled_cooperative_dispatch_still_reaches_its_worker() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.pre-admission-cooperative")
+            tracedecay_contracts::CancellationSignal::active("cancel.pre-admission-cooperative")
                 .expect("cancellation");
-        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
         let control = DispatchControl::new(
             "tracedecay_search",
             deadline_after(std::time::Duration::from_mins(1)),
@@ -1027,9 +1025,9 @@ mod tests {
     async fn pre_cancelled_cooperative_effect_reports_cancelled_not_effect_unknown() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.pre-admission-effect")
+            tracedecay_contracts::CancellationSignal::active("cancel.pre-admission-effect")
                 .expect("cancellation");
-        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
         let control = DispatchControl::new(
             "tracedecay_str_replace",
             deadline_after(std::time::Duration::from_mins(1)),
@@ -1059,9 +1057,9 @@ mod tests {
     async fn pre_cancelled_non_cooperative_dispatch_is_refused_before_admission() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.pre-admission-refused")
+            tracedecay_contracts::CancellationSignal::active("cancel.pre-admission-refused")
                 .expect("cancellation");
-        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
         let control = DispatchControl::new(
             "tracedecay_configuration_set",
             deadline_after(std::time::Duration::from_mins(1)),
@@ -1098,7 +1096,7 @@ mod tests {
     async fn live_cancellation_after_admission_reports_effect_unknown_for_an_effect_tool() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.effect-in-flight")
+            tracedecay_contracts::CancellationSignal::active("cancel.effect-in-flight")
                 .expect("cancellation");
         let control = DispatchControl::new(
             "tracedecay_str_replace",
@@ -1124,7 +1122,7 @@ mod tests {
         });
 
         worker_started.notified().await;
-        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
         let abandoned = runner.await.expect("dispatch runner");
         let settlement = Arc::clone(&abandoned.settlement);
         let failure = abandoned
@@ -1153,7 +1151,7 @@ mod tests {
         let read_control = DispatchControl::new(
             "tracedecay_status",
             deadline_after(std::time::Duration::from_mins(1)),
-            tracedecay_application::CancellationSignal::active("capacity.inline-read")
+            tracedecay_contracts::CancellationSignal::active("capacity.inline-read")
                 .expect("read cancellation"),
         )
         .expect("read control");
@@ -1177,7 +1175,7 @@ mod tests {
         let effect_control = DispatchControl::new(
             "tracedecay_configuration_set",
             deadline_after(std::time::Duration::from_mins(1)),
-            tracedecay_application::CancellationSignal::active("capacity.retained-effect")
+            tracedecay_contracts::CancellationSignal::active("capacity.retained-effect")
                 .expect("effect cancellation"),
         )
         .expect("effect control");
@@ -1207,7 +1205,7 @@ mod tests {
         let effect_control = DispatchControl::new(
             "tracedecay_configuration_set",
             deadline_after(std::time::Duration::from_mins(1)),
-            tracedecay_application::CancellationSignal::active("capacity.retained-owner")
+            tracedecay_contracts::CancellationSignal::active("capacity.retained-owner")
                 .expect("effect cancellation"),
         )
         .expect("effect control");
@@ -1231,7 +1229,7 @@ mod tests {
         let read_control = DispatchControl::new(
             "tracedecay_status",
             deadline_after(std::time::Duration::from_mins(1)),
-            tracedecay_application::CancellationSignal::active("capacity.inline-refused")
+            tracedecay_contracts::CancellationSignal::active("capacity.inline-refused")
                 .expect("read cancellation"),
         )
         .expect("read control");
@@ -1269,7 +1267,7 @@ mod tests {
     #[tokio::test]
     async fn connection_owned_cancellation_drops_the_read_and_joins_settlement() {
         let registry = RetainedDispatchRegistry::new();
-        let cancellation = tracedecay_application::CancellationSignal::active("inline.cancel-drop")
+        let cancellation = tracedecay_contracts::CancellationSignal::active("inline.cancel-drop")
             .expect("cancellation");
         let control = DispatchControl::new(
             "tracedecay_search",
@@ -1290,7 +1288,7 @@ mod tests {
             tokio::spawn(async move { control.run_connection_owned(&registry, dispatch).await });
 
         started.notified().await;
-        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
         let cancelled = runner.await.expect("join inline dispatch");
         assert_eq!(
             cancelled
@@ -1314,7 +1312,7 @@ mod tests {
         let control = DispatchControl::new(
             "tracedecay_status",
             deadline_after(std::time::Duration::from_secs(1)),
-            tracedecay_application::CancellationSignal::active("inline.deadline-drop")
+            tracedecay_contracts::CancellationSignal::active("inline.deadline-drop")
                 .expect("cancellation"),
         )
         .expect("control");

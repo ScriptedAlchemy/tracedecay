@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1, WorkflowActiveRunRecoveryCursorV1,
     WorkflowFanOutCensusBackfillPageV1, WorkflowFanOutCensusError,
     WorkflowFanOutCensusObservationV1, WorkflowFanOutCensusPersistOutcomeV1,

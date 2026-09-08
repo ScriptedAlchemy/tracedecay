@@ -12,7 +12,7 @@ use crate::workspace_diagnostics::{
 };
 use std::cell::RefCell;
 use std::sync::Mutex;
-use tracedecay_application::{application_catalog_contributions, application_handler_descriptors};
+use tracedecay_contracts::{application_catalog_contributions, application_handler_descriptors};
 use tracedecay_domain::ManifestDigest;
 use tracedecay_tool_catalog::{BindingSurface, CatalogContributionInputV1, CatalogContributionV1};
 

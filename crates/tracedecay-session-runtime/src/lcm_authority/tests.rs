@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestId,
 };

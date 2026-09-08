@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use tracedecay_application::RequestId;
-use tracedecay_application::remote::recovery::{
+use tracedecay_contracts::RequestId;
+use tracedecay_contracts::remote::recovery::{
     RecoveryAuthorityExpectationV1, RemoteRecoveryInterruptionV1, StagedRestoreConfirmationV1,
     StagedRestoreProgressV1,
 };
@@ -54,7 +54,7 @@ pub(super) fn committed_restore(
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?,
         output,
         policy_digest,
-        committed_at: tracedecay_application::clock::now_micros(),
+        committed_at: tracedecay_contracts::clock::now_micros(),
         units_consumed: 1,
         bytes_consumed,
         interruption_observed_after_commit: interruption,

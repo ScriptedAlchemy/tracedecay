@@ -24,7 +24,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use tower::ServiceExt;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, RequestId, WORK_APPLICATION_OPERATION_IDS_V1,
     work_executable_binding_registry,
 };

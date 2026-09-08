@@ -769,7 +769,7 @@ impl DaemonSemanticOwnerRuntimeRegistrar {
     pub async fn state(
         &self,
         project_root: &Path,
-    ) -> Option<tracedecay_application::doctor::SemanticOwnerStateV1> {
+    ) -> Option<tracedecay_contracts::doctor::SemanticOwnerStateV1> {
         self.service
             .project_runtimes
             .read::<RegisteredSemanticOwnerTaskV1, _, _>(
@@ -1046,13 +1046,13 @@ impl DaemonConfigurationRuntimeRegistrar {
         &self,
         project_root: &Path,
         coordinator: Arc<
-            tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+            tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
         >,
         lifecycle_events: tokio::sync::watch::Receiver<
             tracedecay_semantic_contracts::SemanticLifecycleVerifiedReadyEventV1,
         >,
     ) -> Result<
-        Arc<tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
+        Arc<tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
         TraceDecayError,
     > {
         let committed_activation_wake = self
@@ -1111,7 +1111,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         &self,
         project_root: &Path,
         expected: &Arc<
-            tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+            tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
         >,
     ) -> bool {
         match self
@@ -1341,7 +1341,7 @@ impl DaemonRetainedRuntimeRegistrar {
         scope: ResolvedScope,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
-        ports: Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+        ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
     ) -> Result<(), TraceDecayError> {
         if grant.scope != scope || grant.issuer != actor {
             return Err(TraceDecayError::Config {
@@ -1399,7 +1399,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         observed_at: UtcMicros,
     ) -> Result<
         tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner,
-        tracedecay_application::NativeIntegrationPortError,
+        tracedecay_contracts::NativeIntegrationPortError,
     > {
         self.registry
             .ensure(
@@ -1419,7 +1419,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         repository_root: &Path,
     ) -> Result<
         Option<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner>,
-        tracedecay_application::NativeIntegrationPortError,
+        tracedecay_contracts::NativeIntegrationPortError,
     > {
         self.registry.for_repository_root(repository_root).await
     }
@@ -1429,7 +1429,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         &self,
         project_id: &ProjectId,
         database_path: &Path,
-    ) -> Result<(), tracedecay_application::NativeIntegrationPortError> {
+    ) -> Result<(), tracedecay_contracts::NativeIntegrationPortError> {
         self.registry
             .retire_project_database(project_id, database_path)
             .await
@@ -1438,7 +1438,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
     #[hotpath::skip]
     pub async fn shutdown(
         &self,
-    ) -> Result<usize, tracedecay_application::NativeIntegrationPortError> {
+    ) -> Result<usize, tracedecay_contracts::NativeIntegrationPortError> {
         self.registry.shutdown().await
     }
 }

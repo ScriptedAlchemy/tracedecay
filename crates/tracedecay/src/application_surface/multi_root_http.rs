@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use tracedecay_api::MultiRootHttpOperation;
-use tracedecay_application::multi_root::{
+use tracedecay_contracts::multi_root::{
     MultiRootApplicationOperation, multi_root_executable_binding_registry,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, AuthorizedScopeSet, LegalAction, MultiRootExecuteRequestV1,
     MultiRootQueryPageV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
     MultiRootScopeSetReadRequestV1, RequestId, RetryDirective, SafeDiagnostic,
@@ -226,7 +226,7 @@ mod tests {
     use tracedecay_domain::ProjectId;
 
     use crate::application_surface::http_application_router_with_executor;
-    use tracedecay_usecases::operation_stream::OperationEventAuthority;
+    use tracedecay_application::operation_stream::OperationEventAuthority;
 
     /// Records the daemon operation every mounted multi-root route reaches,
     /// then refuses it. The refusal is the point: it proves the HTTP path
@@ -237,18 +237,18 @@ mod tests {
         operations: Mutex<Vec<tracedecay_daemon_protocol::DaemonInvocationOperation>>,
     }
 
-    impl tracedecay_application::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
+    impl tracedecay_contracts::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
         fn invoke(
             &self,
-            _invocation: tracedecay_application::ApplicationInvocation,
-        ) -> tracedecay_application::ApplicationInvocationFuture<
+            _invocation: tracedecay_contracts::ApplicationInvocation,
+        ) -> tracedecay_contracts::ApplicationInvocationFuture<
             '_,
             std::result::Result<
-                tracedecay_application::ApplicationResponse,
-                tracedecay_application::InvocationError,
+                tracedecay_contracts::ApplicationResponse,
+                tracedecay_contracts::InvocationError,
             >,
         > {
-            Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+            Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
         }
     }
 
@@ -256,8 +256,8 @@ mod tests {
         fn invoke_controlled(
             &self,
             request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-            _deadline: tracedecay_application::Deadline,
-            _cancellation: tracedecay_application::CancellationSignal,
+            _deadline: tracedecay_contracts::Deadline,
+            _cancellation: tracedecay_contracts::CancellationSignal,
             _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
         ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
@@ -277,7 +277,7 @@ mod tests {
             &self,
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: tracedecay_domain::UtcMicros,
-            _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
         ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
             tracedecay_domain::errors::Result<()>,

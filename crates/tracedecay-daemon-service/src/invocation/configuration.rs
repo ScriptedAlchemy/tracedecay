@@ -202,12 +202,12 @@ pub(super) async fn execute_configuration(
                     .mutations
                     .into_iter()
                     .map(|mutation| match mutation {
-                        tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
+                        tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
                             layer,
                             key,
                             value,
                         } => DirectConfigurationMutation::Set { layer, key, value },
-                        tracedecay_application::ConfigurationDirectMutationRequestV1::Unset {
+                        tracedecay_contracts::ConfigurationDirectMutationRequestV1::Unset {
                             layer,
                             key,
                         } => DirectConfigurationMutation::Unset { layer, key },
@@ -698,7 +698,7 @@ fn configuration_request_authority(
         ));
     }
     let application_operation =
-        tracedecay_application::configuration::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
             .map_err(|_| invalid_configuration_request())?
             .ok_or_else(invalid_configuration_request)?;
     let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
@@ -761,7 +761,7 @@ pub(super) fn context_scout_request_authority(
         ));
     }
     let application_operation =
-        tracedecay_application::context_scout::context_scout_surface_operation(operation.as_str())
+        tracedecay_contracts::context_scout::context_scout_surface_operation(operation.as_str())
             .map_err(|_| invalid_configuration_request())?
             .ok_or_else(invalid_configuration_request)?;
     let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
@@ -945,7 +945,7 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
                     message: "The configuration request conflicts with current state".to_owned(),
                 },
                 retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![tracedecay_application::LegalAction::Refresh],
+                legal_actions: vec![tracedecay_contracts::LegalAction::Refresh],
             }
         }
         ConfigurationError::PlanExpired | ConfigurationError::PlanStale => {
@@ -1046,7 +1046,7 @@ impl DaemonSemanticRuntimeRegistrar {
         // This separate process-wide projection has no reservation rollback
         // authority. Join it only after the owning project slot commits, in
         // the same poll that observes commit success.
-        tracedecay_usecases::semantic_runtime::register_project_semantic_runtime(
+        tracedecay_application::semantic_runtime::register_project_semantic_runtime(
             project_root,
             handle,
         );
@@ -1108,7 +1108,7 @@ mod terminal_problem_tests {
         assert_eq!(retry, RetryDirective::Never);
         assert_eq!(
             legal_actions,
-            vec![tracedecay_application::LegalAction::Reset]
+            vec![tracedecay_contracts::LegalAction::Reset]
         );
     }
 

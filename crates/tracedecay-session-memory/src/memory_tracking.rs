@@ -1,6 +1,6 @@
 //! Canonical retrieval telemetry for explicit retained-memory search.
 
-use tracedecay_application::{RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1};
+use tracedecay_contracts::{RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1};
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProvenanceId};
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_store::{

@@ -4,8 +4,8 @@
 //! descriptors and binds them to one caller-supplied canonical dispatcher.
 
 use thiserror::Error;
-use tracedecay_application::handlers::BoundApplicationHandler;
-use tracedecay_application::{
+use tracedecay_contracts::handlers::BoundApplicationHandler;
+use tracedecay_contracts::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID, ApplicationContractError,
     ApplicationHandlerDescriptors, application_catalog_contributions,
@@ -242,8 +242,8 @@ mod tests {
     use crate::mcp::tools::{
         default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
     };
-    use tracedecay_application::handlers::CanonicalApplicationDispatcher;
-    use tracedecay_application::{
+    use tracedecay_contracts::handlers::CanonicalApplicationDispatcher;
+    use tracedecay_contracts::{
         ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_mcp::{ToolRegistryMode, project_catalog_discovery_scope};

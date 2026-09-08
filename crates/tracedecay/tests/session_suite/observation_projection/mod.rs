@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
@@ -23,7 +24,6 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
-use tracedecay_usecases::observation::ObservationCancellation;
 
 use crate::common::isolated_lcm_db_path;
 

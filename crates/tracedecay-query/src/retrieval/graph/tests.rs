@@ -6,12 +6,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use tracedecay_application::CancellationSignal;
-use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_code_index::graph_projection::{
     CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionStore,
     HermeticCodeGraphProjectionStore,
 };
+use tracedecay_contracts::CancellationSignal;
+use tracedecay_contracts::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate, ContentDigest, EdgeAuthorityV1,

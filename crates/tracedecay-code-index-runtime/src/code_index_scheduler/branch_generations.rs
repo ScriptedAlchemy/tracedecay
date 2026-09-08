@@ -13,8 +13,8 @@ use super::{
 
 #[derive(Clone)]
 pub struct BranchGenerationReadControlV1 {
-    pub deadline: Option<tracedecay_application::Deadline>,
-    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub deadline: Option<tracedecay_contracts::Deadline>,
+    pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 impl BranchGenerationReadControlV1 {
@@ -22,14 +22,14 @@ impl BranchGenerationReadControlV1 {
         if self
             .cancellation
             .as_ref()
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
         {
             return Some(CodeIndexSearchUnavailableReasonV1::Cancelled);
         }
         self.deadline
             .as_ref()
             .is_some_and(|deadline| {
-                deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
             })
             .then_some(CodeIndexSearchUnavailableReasonV1::TimedOut)
     }
@@ -231,7 +231,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
 impl CodeIndexSchedulerRegistryV1 {
     pub async fn generations_for_revisions(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -256,7 +256,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn bounded_generations_for_revisions(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -286,7 +286,7 @@ impl CodeIndexSchedulerRegistryV1 {
     )]
     async fn generations_for_revisions_with_bounds(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -436,7 +436,7 @@ mod tests {
     use std::process::Command;
 
     use tempfile::TempDir;
-    use tracedecay_application::ResolvedScope;
+    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{GitOidV1, ProjectId};
     use tracedecay_query::code_search;
 
@@ -726,9 +726,9 @@ mod tests {
         );
 
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.large-generation")
+            tracedecay_contracts::CancellationSignal::active("cancel.large-generation")
                 .expect("cancellation");
-        cancellation.cancel(tracedecay_application::clock::now_micros());
+        cancellation.cancel(tracedecay_contracts::clock::now_micros());
         assert_eq!(
             bounded_diff(
                 large_generation.generation(),
@@ -743,7 +743,7 @@ mod tests {
             Err(CodeIndexSearchUnavailableReasonV1::Cancelled)
         );
         let expired =
-            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
+            tracedecay_contracts::Deadline::new(tracedecay_contracts::clock::now_micros())
                 .expect("expired deadline");
         assert_eq!(
             bounded_diff(

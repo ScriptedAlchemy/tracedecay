@@ -273,7 +273,7 @@ mod circular_render_tests {
     fn wide_component_is_bounded_within_the_response_budget() {
         let members: Vec<String> = (0..400)
             .map(|index| {
-                format!("crates/tracedecay-application/src/deeply/nested/module_{index:04}.rs")
+                format!("crates/tracedecay-contracts/src/deeply/nested/module_{index:04}.rs")
             })
             .collect();
         let member_count = members.len();

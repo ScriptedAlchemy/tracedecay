@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use tracedecay_application::{RequestContext, WorkflowRunStoragePort};
+use tracedecay_contracts::{RequestContext, WorkflowRunStoragePort};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_runtime_core::workflow_topology::WorkflowTopologyError;
 
@@ -26,15 +26,15 @@ use super::workflow_fan_out::reconcile_workflow_fan_out;
 /// before any event is journaled.
 pub(super) fn start_workflow_run(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
-    request: tracedecay_application::WorkflowRunStartRequest,
+    request: tracedecay_contracts::WorkflowRunStartRequest,
     input_digest: &ManifestDigest,
     observed_at: UtcMicros,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
     project_root: &Path,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
     match services.effects().projection(&request.run_id) {
@@ -59,7 +59,7 @@ pub(super) fn start_workflow_run(
                 observability_producer,
             );
         }
-        Err(tracedecay_application::WorkflowRunStorageError::NotFound) => {}
+        Err(tracedecay_contracts::WorkflowRunStorageError::NotFound) => {}
         Err(error) => return Err(workflow_run_storage_problem(error)),
     }
     let definition = services
@@ -73,11 +73,11 @@ pub(super) fn start_workflow_run(
         .definitions()
         .disposition(&request.definition_id, request.definition_version)
         .map_err(workflow_coordination_problem)?;
-    if disposition.state != tracedecay_application::WorkflowDefinitionLifecycleState::Active {
+    if disposition.state != tracedecay_contracts::WorkflowDefinitionLifecycleState::Active {
         return Err(DaemonInvocationProblem::InvalidRequest);
     }
     let provider_registration = request.provider.clone();
-    let registry = tracedecay_application::WorkflowProviderRegistry::new(
+    let registry = tracedecay_contracts::WorkflowProviderRegistry::new(
         registered.configuration_digest.clone(),
         vec![request.provider],
     )
@@ -106,11 +106,11 @@ pub(super) fn start_workflow_run(
         .compute_digest()
         .map_err(|_| DaemonInvocationProblem::Unavailable)?
         .0;
-    let placement = tracedecay_application::WorkflowProviderPlacementService::new(registry.clone());
+    let placement = tracedecay_contracts::WorkflowProviderPlacementService::new(registry.clone());
     for step_id in &ready_steps {
         placement
             .place(
-                &tracedecay_application::WorkflowTopologyPlacementRequest {
+                &tracedecay_contracts::WorkflowTopologyPlacementRequest {
                     run_id: request.run_id.clone(),
                     step_id: step_id.clone(),
                     configuration_digest: registered.configuration_digest.clone(),
@@ -120,10 +120,10 @@ pub(super) fn start_workflow_run(
             )
             .map_err(workflow_placement_problem)?;
     }
-    let admission = tracedecay_application::WorkflowAdmissionSnapshot {
+    let admission = tracedecay_contracts::WorkflowAdmissionSnapshot {
         policy_digest: registered.policy_digest.clone(),
         configuration_digest: registered.configuration_digest.clone(),
-        catalog_digest: tracedecay_application::work_executable_catalog_digest()
+        catalog_digest: tracedecay_contracts::work_executable_catalog_digest()
             .map_err(|_| DaemonInvocationProblem::Unavailable)?,
         topology_digest: topology_digest.clone(),
         provider_registry_digest: registry.digest().clone(),
@@ -137,7 +137,7 @@ pub(super) fn start_workflow_run(
             {
                 return Err(DaemonInvocationProblem::InvalidRequest);
             }
-            tracedecay_application::require_registered_work_topology(
+            tracedecay_contracts::require_registered_work_topology(
                 &fan_out.execution_snapshot,
                 topology,
             )
@@ -156,7 +156,7 @@ pub(super) fn start_workflow_run(
             if fan_out_steps.next().is_some() {
                 return Err(DaemonInvocationProblem::InvalidRequest);
             }
-            let provider = tracedecay_application::WorkflowProviderAdmission {
+            let provider = tracedecay_contracts::WorkflowProviderAdmission {
                 execution_snapshot: fan_out.execution_snapshot,
                 topology_digest: topology_digest.clone(),
                 provider_registry_digest: registry.digest().clone(),
@@ -166,8 +166,8 @@ pub(super) fn start_workflow_run(
                 cancellation_generation: 1,
                 effect_state: fan_out.effect_state,
             };
-            let plan = tracedecay_application::prepare_workflow_fan_out(
-                &tracedecay_application::WorkflowFanOutRequest {
+            let plan = tracedecay_contracts::prepare_workflow_fan_out(
+                &tracedecay_contracts::WorkflowFanOutRequest {
                     definition: definition.clone(),
                     run_id: request.run_id.clone(),
                     step_id: entry_step,
@@ -182,7 +182,7 @@ pub(super) fn start_workflow_run(
             )
             .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
             vec![
-                tracedecay_application::durable_workflow_fan_out_plan(
+                tracedecay_contracts::durable_workflow_fan_out_plan(
                     &plan,
                     &provider,
                     tracedecay_domain::WorkAuthority::new(
@@ -198,7 +198,7 @@ pub(super) fn start_workflow_run(
             ]
         }
     };
-    let projection = tracedecay_application::WorkflowRunService::new(services.effects().clone())
+    let projection = tracedecay_contracts::WorkflowRunService::new(services.effects().clone())
         .admit_with_fan_out(
             request.run_id,
             definition,
@@ -224,7 +224,7 @@ pub(super) fn start_workflow_run(
 }
 
 pub(super) fn apply_workflow_run_command(
-    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     run_id: &tracedecay_domain::RunId,
     expected_sequence: u64,
     command: tracedecay_domain::WorkflowRunCommand,
@@ -232,7 +232,7 @@ pub(super) fn apply_workflow_run_command(
     input_digest: &ManifestDigest,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
-    tracedecay_application::WorkflowRunService::new(services.effects().clone())
+    tracedecay_contracts::WorkflowRunService::new(services.effects().clone())
         .apply(
             run_id,
             expected_sequence,
@@ -251,15 +251,15 @@ pub(super) fn apply_workflow_run_command(
 /// command identity derived from the caller's, so replays settle identically.
 pub(super) fn cancel_workflow_run(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
-    request: tracedecay_application::WorkflowRunCancelRequest,
+    request: tracedecay_contracts::WorkflowRunCancelRequest,
     input_digest: &ManifestDigest,
     observed_at: UtcMicros,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
     project_root: &Path,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
     let reconcile_command_id = tracedecay_domain::WorkCommandId::try_from(format!(
@@ -308,79 +308,79 @@ pub(super) fn cancel_workflow_run(
 }
 
 pub(super) fn workflow_run_problem(
-    error: tracedecay_application::WorkflowRunServiceError,
+    error: tracedecay_contracts::WorkflowRunServiceError,
 ) -> DaemonInvocationProblem {
     match error {
-        tracedecay_application::WorkflowRunServiceError::PolicyDigestMismatch
-        | tracedecay_application::WorkflowRunServiceError::ConfigurationDigestMismatch
-        | tracedecay_application::WorkflowRunServiceError::CatalogDigestMismatch
-        | tracedecay_application::WorkflowRunServiceError::State(_) => {
+        tracedecay_contracts::WorkflowRunServiceError::PolicyDigestMismatch
+        | tracedecay_contracts::WorkflowRunServiceError::ConfigurationDigestMismatch
+        | tracedecay_contracts::WorkflowRunServiceError::CatalogDigestMismatch
+        | tracedecay_contracts::WorkflowRunServiceError::State(_) => {
             DaemonInvocationProblem::InvalidRequest
         }
-        tracedecay_application::WorkflowRunServiceError::Storage(error) => {
+        tracedecay_contracts::WorkflowRunServiceError::Storage(error) => {
             workflow_run_storage_problem(error)
         }
     }
 }
 
 pub(super) fn workflow_coordination_problem(
-    error: tracedecay_application::WorkflowCoordinationError,
+    error: tracedecay_contracts::WorkflowCoordinationError,
 ) -> DaemonInvocationProblem {
     match error {
-        tracedecay_application::WorkflowCoordinationError::AuthorityUnavailable(_) => {
+        tracedecay_contracts::WorkflowCoordinationError::AuthorityUnavailable(_) => {
             DaemonInvocationProblem::Unavailable
         }
         // A catalog that could not be composed is an unavailable authority,
         // not a caller mistake; only a definition the live catalog actually
         // refused is an invalid request.
-        tracedecay_application::WorkflowCoordinationError::CatalogAdmissionDenied(
-            tracedecay_application::WorkflowCatalogAdmissionError::CatalogUnavailable(_),
+        tracedecay_contracts::WorkflowCoordinationError::CatalogAdmissionDenied(
+            tracedecay_contracts::WorkflowCatalogAdmissionError::CatalogUnavailable(_),
         ) => DaemonInvocationProblem::Unavailable,
-        tracedecay_application::WorkflowCoordinationError::DefinitionNotFound
-        | tracedecay_application::WorkflowCoordinationError::ScopeMismatch => {
+        tracedecay_contracts::WorkflowCoordinationError::DefinitionNotFound
+        | tracedecay_contracts::WorkflowCoordinationError::ScopeMismatch => {
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
-        tracedecay_application::WorkflowCoordinationError::InvalidDefinition
-        | tracedecay_application::WorkflowCoordinationError::CatalogAdmissionDenied(_)
-        | tracedecay_application::WorkflowCoordinationError::ImmutableDefinitionConflict
-        | tracedecay_application::WorkflowCoordinationError::IllegalLifecycleTransition
-        | tracedecay_application::WorkflowCoordinationError::LifecycleRevisionConflict => {
+        tracedecay_contracts::WorkflowCoordinationError::InvalidDefinition
+        | tracedecay_contracts::WorkflowCoordinationError::CatalogAdmissionDenied(_)
+        | tracedecay_contracts::WorkflowCoordinationError::ImmutableDefinitionConflict
+        | tracedecay_contracts::WorkflowCoordinationError::IllegalLifecycleTransition
+        | tracedecay_contracts::WorkflowCoordinationError::LifecycleRevisionConflict => {
             DaemonInvocationProblem::InvalidRequest
         }
     }
 }
 
 pub(super) fn workflow_run_storage_problem(
-    error: tracedecay_application::WorkflowRunStorageError,
+    error: tracedecay_contracts::WorkflowRunStorageError,
 ) -> DaemonInvocationProblem {
     match error {
-        tracedecay_application::WorkflowRunStorageError::NotFound => {
+        tracedecay_contracts::WorkflowRunStorageError::NotFound => {
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
-        tracedecay_application::WorkflowRunStorageError::VersionConflict
-        | tracedecay_application::WorkflowRunStorageError::IdempotencyConflict => {
+        tracedecay_contracts::WorkflowRunStorageError::VersionConflict
+        | tracedecay_contracts::WorkflowRunStorageError::IdempotencyConflict => {
             DaemonInvocationProblem::InvalidRequest
         }
-        tracedecay_application::WorkflowRunStorageError::InvalidHistory => {
+        tracedecay_contracts::WorkflowRunStorageError::InvalidHistory => {
             DaemonInvocationProblem::ResetRequired
         }
-        tracedecay_application::WorkflowRunStorageError::Unavailable => {
+        tracedecay_contracts::WorkflowRunStorageError::Unavailable => {
             DaemonInvocationProblem::Unavailable
         }
     }
 }
 
 fn workflow_placement_problem(
-    error: tracedecay_application::WorkflowProviderPlacementError,
+    error: tracedecay_contracts::WorkflowProviderPlacementError,
 ) -> DaemonInvocationProblem {
     match error {
-        tracedecay_application::WorkflowProviderPlacementError::InvalidRegistry
-        | tracedecay_application::WorkflowProviderPlacementError::ConfigurationDigestMismatch
-        | tracedecay_application::WorkflowProviderPlacementError::TopologyDigestMismatch
-        | tracedecay_application::WorkflowProviderPlacementError::InvalidTopology => {
+        tracedecay_contracts::WorkflowProviderPlacementError::InvalidRegistry
+        | tracedecay_contracts::WorkflowProviderPlacementError::ConfigurationDigestMismatch
+        | tracedecay_contracts::WorkflowProviderPlacementError::TopologyDigestMismatch
+        | tracedecay_contracts::WorkflowProviderPlacementError::InvalidTopology => {
             DaemonInvocationProblem::InvalidRequest
         }
-        tracedecay_application::WorkflowProviderPlacementError::Unavailable => {
+        tracedecay_contracts::WorkflowProviderPlacementError::Unavailable => {
             DaemonInvocationProblem::Unavailable
         }
     }

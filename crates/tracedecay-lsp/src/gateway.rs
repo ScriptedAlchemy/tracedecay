@@ -303,7 +303,7 @@ pub enum FeedbackCycleResponse {
 /// Port implemented by the daemon/application adapter.
 ///
 /// The implementation must delegate to the existing feedback-cycle operation
-/// (ultimately `tracedecay_application::feedback::FeedbackCycleService`) and
+/// (ultimately `tracedecay_contracts::feedback::FeedbackCycleService`) and
 /// must not create a second gateway-local finding store.
 pub trait FeedbackCyclePort {
     fn request_feedback_cycle(&self, request: FeedbackCycleRequest) -> FeedbackCycleResponse;

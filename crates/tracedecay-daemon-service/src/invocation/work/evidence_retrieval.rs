@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, RequestContext, WorkEvidenceRetrievalServiceV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1,
 };
@@ -25,13 +25,13 @@ pub(super) async fn retrieve(
 ) -> Result<WorkEvidenceRetrievalV1, ApplicationProblem> {
     let capability = CapabilityId::new(capability).map_err(|_| {
         work_product_problem(
-            tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
         )
     })?;
-    let binding = tracedecay_application::WorkProductBindingV1::new(capability, use_case);
+    let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case);
     let storage = registered.database.work_storage().map_err(|_| {
         work_product_problem(
-            tracedecay_application::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
+            tracedecay_contracts::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
         )
     })?;
     let evidence_retrieval = Arc::clone(&registered.evidence_retrieval);

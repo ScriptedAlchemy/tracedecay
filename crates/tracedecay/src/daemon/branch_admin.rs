@@ -1066,7 +1066,7 @@ impl StoreAdministration {
 
     #[hotpath::measure(label = "daemon.branch_admin.session_sync.shutdown", future = true)]
     pub(super) async fn shutdown_session_sync(&self) {
-        tracedecay_application::session_sync::SessionSyncServicePort::shutdown(
+        tracedecay_contracts::session_sync::SessionSyncServicePort::shutdown(
             self.session_sync_service.as_ref(),
         )
         .await;

@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tracedecay_application::{
+use tracedecay_configuration::DirectConfigurationMutation;
+use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, SafeDiagnostic,
 };
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
@@ -110,8 +110,8 @@ impl DashboardProfileCodeIndexWorkerSettingsPort
         let project_root = self.project_root.clone();
         let registrar = self.registrar.clone();
         Box::pin(async move {
-            let request_id = tracedecay_application::request_identity::mint_global_request_id(
-                tracedecay_application::request_identity::GlobalRequestSurface::DashboardSettings,
+            let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+                tracedecay_contracts::request_identity::GlobalRequestSurface::DashboardSettings,
             )
             .map_err(|_| DashboardCodeIndexWorkerSettingsErrorV1::Unavailable)?;
             let committed = registrar
@@ -162,7 +162,7 @@ fn dashboard_code_index_worker_configuration(
 
 struct DashboardInvocationExecutorAdapter {
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
-    configuration_batch_contract: tracedecay_application::ResultContractRef,
+    configuration_batch_contract: tracedecay_contracts::ResultContractRef,
     user_profile_id: Option<UserProfileId>,
 }
 
@@ -172,7 +172,7 @@ impl DashboardInvocationExecutorAdapter {
         user_profile_id: Option<UserProfileId>,
     ) -> Result<Self> {
         let operation =
-            tracedecay_application::configuration_surface_operation("configuration_batch")
+            tracedecay_contracts::configuration_surface_operation("configuration_batch")
                 .map_err(|error| TraceDecayError::Config {
                     message: format!(
                         "dashboard configuration batch application contract is invalid: {error}"
@@ -222,7 +222,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
     ) -> std::result::Result<DashboardApplicationRouters, String> {
         let http = crate::application_surface::assemble_http_application_router(
             Arc::clone(&self.executor),
-            tracedecay_usecases::operation_stream::OperationEventAuthority::default(),
+            tracedecay_application::operation_stream::OperationEventAuthority::default(),
             active_project_id,
         )
         .map_err(|error| error.to_string())?;
@@ -267,8 +267,8 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                 ApplicationSurfaceOperation::ConfigurationBatch,
                 request_id,
                 crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                    tracedecay_application::ConfigurationWireRequestV1::Batch(
-                        tracedecay_application::ConfigurationBatchRequestV1 {
+                    tracedecay_contracts::ConfigurationWireRequestV1::Batch(
+                        tracedecay_contracts::ConfigurationBatchRequestV1 {
                             mutations: direct_mutations,
                             expected_revision,
                             idempotency_key,
@@ -306,10 +306,10 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
     ) -> DashboardScopeSetReadFuture<'_> {
         let executor = Arc::clone(&self.executor);
         Box::pin(async move {
-            let request = tracedecay_application::MultiRootScopeSetReadRequestV1::new(scope_set_id)
+            let request = tracedecay_contracts::MultiRootScopeSetReadRequestV1::new(scope_set_id)
                 .map_err(|error| DashboardDaemonReadUnavailableV1 {
-                    detail: error.to_string(),
-                })?;
+                detail: error.to_string(),
+            })?;
             let invocation =
                 tracedecay_daemon_protocol::DaemonInvocationRequest::multi_root_scope_set_read(
                     control.request_id().as_str(),
@@ -331,7 +331,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                 })?;
             match response.outcome {
                 tracedecay_daemon_protocol::DaemonInvocationOutcome::MultiRootScopeSetRead {
-                    outcome: tracedecay_application::ApplicationOutcome::Evidence(packet),
+                    outcome: tracedecay_contracts::ApplicationOutcome::Evidence(packet),
                     ..
                 } => packet
                     .payload
@@ -380,7 +380,7 @@ pub(crate) async fn dashboard_native_integration_status(
     control: &tracedecay_dashboard_api::DashboardHttpRequestControlV1,
     transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
 ) -> std::result::Result<
-    tracedecay_application::NativeIntegrationSurfaceResultV1,
+    tracedecay_contracts::NativeIntegrationSurfaceResultV1,
     tracedecay_dashboard_api::DashboardDaemonReadUnavailableV1,
 > {
     use tracedecay_dashboard_api::DashboardDaemonReadUnavailableV1;
@@ -389,7 +389,7 @@ pub(crate) async fn dashboard_native_integration_status(
         control.request_id().as_str(),
         ApplicationSurfaceOperation::NativeIntegrationStatus,
         crate::application_surface::NativeIntegrationSurfaceRequest::Status(
-            tracedecay_application::NativeIntegrationStatusSurfaceRequest { transaction_id },
+            tracedecay_contracts::NativeIntegrationStatusSurfaceRequest { transaction_id },
         ),
         control.observed_at(),
         control.deadline(),
@@ -408,7 +408,7 @@ pub(crate) async fn dashboard_native_integration_status(
         })?;
     let payload = match response.outcome {
         tracedecay_daemon_protocol::DaemonInvocationOutcome::NativeIntegration {
-            outcome: tracedecay_application::ApplicationOutcome::Evidence(packet),
+            outcome: tracedecay_contracts::ApplicationOutcome::Evidence(packet),
             ..
         } => packet
             .payload
@@ -445,12 +445,12 @@ pub(crate) async fn dashboard_native_integration_status(
 
 fn append_direct_configuration_mutations(
     mutation: DirectConfigurationMutation,
-    direct_mutations: &mut Vec<tracedecay_application::ConfigurationDirectMutationRequestV1>,
+    direct_mutations: &mut Vec<tracedecay_contracts::ConfigurationDirectMutationRequestV1>,
 ) {
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
             direct_mutations.push(
-                tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
+                tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
                     layer,
                     key,
                     value,
@@ -459,7 +459,7 @@ fn append_direct_configuration_mutations(
         }
         DirectConfigurationMutation::Unset { layer, key } => {
             direct_mutations.push(
-                tracedecay_application::ConfigurationDirectMutationRequestV1::Unset { layer, key },
+                tracedecay_contracts::ConfigurationDirectMutationRequestV1::Unset { layer, key },
             );
         }
         DirectConfigurationMutation::Batch { mutations } => {
@@ -471,9 +471,9 @@ fn append_direct_configuration_mutations(
 }
 
 fn dashboard_configuration_unavailable(
-    contract: tracedecay_application::ResultContractRef,
+    contract: tracedecay_contracts::ResultContractRef,
     request_id: RequestId,
-) -> std::result::Result<ApplicationProblemEnvelope, tracedecay_application::ApplicationContractError>
+) -> std::result::Result<ApplicationProblemEnvelope, tracedecay_contracts::ApplicationContractError>
 {
     ApplicationProblemEnvelope::new(
         contract,
@@ -667,7 +667,7 @@ pub(super) async fn handle_dashboard(
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     remote_operational_status: Option<
-        std::sync::Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>,
+        std::sync::Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>,
     >,
     code_index_freshness_reader: Option<
         tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
@@ -681,7 +681,7 @@ pub(super) async fn handle_dashboard(
         Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     >,
     delivery_settlement_authority: Option<
-        Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+        Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     >,
     daemon_invocation_service: Option<tracedecay_daemon_service::DaemonInvocationService>,
 ) -> Result<ToolResult> {

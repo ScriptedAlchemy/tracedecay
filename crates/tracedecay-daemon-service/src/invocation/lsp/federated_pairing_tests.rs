@@ -18,7 +18,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CapabilityGrantId, DisclosureClass, RegisteredRootLocatorV1, ResolvedScope,
     SharedProfileStoreLocatorV1,
 };

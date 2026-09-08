@@ -20,27 +20,27 @@ use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::remote::auth::OpaqueRemoteCredential;
-use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
-use tracedecay_application::remote::capture_protocol::RemoteCaptureRequestV1;
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
+use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionPortV1, RemoteSessionBoundProtocolBodyV1,
 };
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
     RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, RemoteProtocolServiceV1, remote_protocol_problem,
 };
-use tracedecay_application::remote::query::{RemoteQueryRequestV1, RemoteQueryResultV1};
-use tracedecay_application::remote::recovery::{
+use tracedecay_contracts::remote::query::{RemoteQueryRequestV1, RemoteQueryResultV1};
+use tracedecay_contracts::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
-use tracedecay_application::remote::transfer::{
+use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblemKind, CancellationSignal, RequestId,
     ResultContractRef,
 };

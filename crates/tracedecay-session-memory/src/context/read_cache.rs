@@ -14,7 +14,7 @@
 
 use std::time::UNIX_EPOCH;
 
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::canonical_json_value;
 use tracedecay_domain::canonical_text::sha256_hex;
 

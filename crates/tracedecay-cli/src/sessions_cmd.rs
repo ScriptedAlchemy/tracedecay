@@ -11,7 +11,7 @@ use crate::{
     resolve_cli_project_root,
 };
 use serde_json::{Map, Value, json};
-use tracedecay_application::retained_surfaces::{MessageSearchResultV1, RetainedOutcomeStatusV1};
+use tracedecay_contracts::retained_surfaces::{MessageSearchResultV1, RetainedOutcomeStatusV1};
 
 mod session_sync;
 use session_sync::{await_session_sync_completion, run_git_sync};

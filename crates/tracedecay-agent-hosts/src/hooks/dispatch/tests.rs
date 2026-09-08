@@ -2,7 +2,7 @@ use super::*;
 use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
 use crate::hooks::daemon_ports::daemon_admission_response;
 use std::sync::Mutex;
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutFeedbackKindV1,
     ContextScoutFeedbackV1,
 };
@@ -145,7 +145,7 @@ fn daemon_admission_response_rejects_open_or_incoherent_actions() {
 
 #[test]
 fn daemon_feedback_notice_survives_into_host_delivery() {
-    let notice = tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+    let notice = tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -204,8 +204,10 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
-        serde_json::from_str::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(encoded)
-            .unwrap(),
+        serde_json::from_str::<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>(
+            encoded
+        )
+        .unwrap(),
         notice
     );
 }
@@ -243,13 +245,13 @@ struct RecordingFeedbackDeliveryPort {
     calls: Mutex<usize>,
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>
+impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>
     for RecordingFeedbackDeliveryPort
 {
     fn deliver_hook_v2<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
@@ -261,15 +263,15 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
     fn deliver_legacy<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
     }
 }
 
-fn sample_notice() -> tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
-    tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+fn sample_notice() -> tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
+    tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -287,7 +289,7 @@ fn sample_notice() -> tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 
 }
 
 fn sample_envelope(
-    notice: &tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+    notice: &tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
 ) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
@@ -482,7 +484,7 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
     );
     assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
     assert_eq!(
-        serde_json::from_value::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(
+        serde_json::from_value::<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>(
             calls[2].1["feedback_notice"].clone()
         )
         .unwrap(),

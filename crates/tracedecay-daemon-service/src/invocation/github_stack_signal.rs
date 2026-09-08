@@ -4,7 +4,7 @@ use super::*;
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalExpandPort,
     GitHubStackSignalExpandSurfaceRequest, git_surface_operation,
 };
@@ -201,6 +201,6 @@ fn invalid_github_stack_signal_request() -> ApplicationProblem {
                 .to_owned(),
         },
         retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
     }
 }

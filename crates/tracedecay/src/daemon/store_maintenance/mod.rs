@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use crate::config::RetentionConfig;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use tracedecay_runtime_core::branch::BranchAdminAction;
 use tracedecay_semantic_contracts::SemanticConfig;
-use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
@@ -326,7 +326,7 @@ pub(super) enum VectorRetentionInventoryV1 {
     Online {
         sources: std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
         configuration:
-            tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+            tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
         expected_vector_revision: tracedecay_store::SemanticVectorStageCensusRevision,
     },
     SemanticUnseated,
@@ -391,7 +391,7 @@ pub(super) async fn resolve_vector_retention_inventory(
                     .graph_for_current()
                     .await
                     .map_err(|error| error.to_string())?;
-                let store = tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1::read_only(&retained)
+                let store = tracedecay_application::store::vector_generations::GraphVectorGenerationStoreV1::read_only(&retained)
                     .await
                     .map_err(|error| error.to_string())?;
                 let census = store
@@ -444,7 +444,7 @@ pub(super) async fn resolve_vector_retention_inventory(
 /// read cannot prove which sources a mounted activation lease binds.
 fn classify_vector_readable_sources(
     sources: tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources,
-    configuration: tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     expected_vector_revision: tracedecay_store::SemanticVectorStageCensusRevision,
 ) -> VectorRetentionInventoryV1 {
     match sources {
@@ -772,7 +772,7 @@ async fn apply_code_generation_retention(
     } = &vector_inventory
     {
         let Some(vector_runtime) =
-            tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+            tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                 &layout.project_root,
             )
         else {
@@ -838,7 +838,7 @@ async fn apply_code_generation_retention(
             );
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
-        tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
+        tracedecay_application::semantic_runtime::retain_project_semantic_code_sources(
             &layout.project_root,
             &pinned_vector_sources,
         );
@@ -913,7 +913,7 @@ async fn apply_code_generation_retention(
     // every deletion receipt with a seconds value in a micros-typed field
     // (live receipts read as 1970). The receipt is durable journal evidence,
     // so it takes the canonical micros clock.
-    let completed_at = tracedecay_application::clock::now_micros();
+    let completed_at = tracedecay_contracts::clock::now_micros();
     let execution_root = store_root.clone();
     let execution_pool_root = graph_replay_pool_root.clone();
     let execution_cancellation = cancellation.clone();
@@ -1347,7 +1347,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
     };
     if let Some(replay) = pending_binding_cleanup {
         let Some(vector_runtime) =
-            tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+            tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                 graph.project_root(),
             )
         else {
@@ -1513,9 +1513,9 @@ pub(super) async fn run_code_index_scope_reconciliation(
     };
     // Same micros-typed receipt contract as the code-generation pass above:
     // `current_timestamp()` is a seconds clock and must not be stored as micros.
-    let completed_at = tracedecay_application::clock::now_micros();
+    let completed_at = tracedecay_contracts::clock::now_micros();
     let Some(vector_runtime) =
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+        tracedecay_application::semantic_runtime::project_semantic_production_runtime(
             graph.project_root(),
         )
     else {
@@ -1719,7 +1719,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
         );
         return false;
     }
-    tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
+    tracedecay_application::semantic_runtime::retain_project_semantic_code_sources(
         graph.project_root(),
         &revalidated_inputs.vector_sources,
     );
@@ -2133,11 +2133,9 @@ fn compaction_is_scheduled(
     freelist: u64,
     config: &CompactionThresholdConfig,
 ) -> Result<bool, ()> {
-    use tracedecay_application::storage::compaction::CompactionTriggerPolicyV1;
-    use tracedecay_application::storage::identity::{
-        FreePageRatioV1, StorageByteSizeV1, StoreKeyV1,
-    };
-    use tracedecay_application::storage::telemetry::StoreSizeSampleV1;
+    use tracedecay_contracts::storage::compaction::CompactionTriggerPolicyV1;
+    use tracedecay_contracts::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
+    use tracedecay_contracts::storage::telemetry::StoreSizeSampleV1;
     use tracedecay_domain::UtcMicros;
 
     if page_size == 0 || page_count == 0 {

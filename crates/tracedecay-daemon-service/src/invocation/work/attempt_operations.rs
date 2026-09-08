@@ -3,19 +3,19 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_application::observability::BoundedObservabilityProducerV1;
+use tracedecay_contracts::{
     AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline,
     RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryWorkAttemptCommandV1,
     SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkSynthesisAttemptV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1};
 use tracedecay_tool_catalog::UseCaseId;
-use tracedecay_usecases::observability::BoundedObservabilityProducerV1;
 
-use tracedecay_daemon_protocol::{DaemonInvocationResponse, WorkApplicationOutcomeV1};
-use tracedecay_usecases::work::{
+use tracedecay_application::work::{
     RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1,
 };
+use tracedecay_daemon_protocol::{DaemonInvocationResponse, WorkApplicationOutcomeV1};
 
 use super::super::work_attempt_exec::{WorkAttemptProcessRegistryV1, spawn_attempt_execution};
 use super::preparation;
@@ -29,7 +29,7 @@ use super::{
 pub(super) fn start_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
-    binding: tracedecay_application::WorkProductBindingV1,
+    binding: tracedecay_contracts::WorkProductBindingV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<&Arc<BoundedObservabilityProducerV1>>,
     project_root: Option<&PathBuf>,
@@ -50,7 +50,7 @@ pub(super) fn start_attempt(
             RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
                 .map_err(|_| {
                     work_product_problem(
-                        tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+                        tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
                     )
                 })
                 .and_then(|product| {
@@ -98,7 +98,7 @@ pub(super) fn start_attempt(
 pub(super) fn synthesize(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
-    binding: tracedecay_application::WorkProductBindingV1,
+    binding: tracedecay_contracts::WorkProductBindingV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<&Arc<BoundedObservabilityProducerV1>>,
     project_root: Option<&PathBuf>,
@@ -119,13 +119,13 @@ pub(super) fn synthesize(
             RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
                 .map_err(|_| {
                     work_product_problem(
-                        tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+                        tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
                     )
                 })
                 .and_then(|product| {
                     preparation::current_work_product_revision_pins(registered).and_then(
                         |revisions| {
-                            tracedecay_application::admit_work_synthesis_against_registered_topology(
+                            tracedecay_contracts::admit_work_synthesis_against_registered_topology(
                                 product.synthesis(),
                                 context,
                                 &binding,
@@ -234,7 +234,7 @@ pub(super) fn cancel_attempt(
 pub(super) fn retry_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
-    binding: tracedecay_application::WorkProductBindingV1,
+    binding: tracedecay_contracts::WorkProductBindingV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<&Arc<BoundedObservabilityProducerV1>>,
     project_root: Option<&PathBuf>,
@@ -265,7 +265,7 @@ pub(super) fn retry_attempt(
                 RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
                     .map_err(|_| {
                         work_product_problem(
-                            tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+                            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
                         )
                     })
                     .and_then(|product| {
@@ -285,13 +285,13 @@ pub(super) fn retry_attempt(
             })
     };
     if let Ok(outcome) = &retried {
-        let _ = tracedecay_usecases::observability::record_work_retry_observation(
+        let _ = tracedecay_application::observability::record_work_retry_observation(
             observability_producer.map(Arc::as_ref),
             context.scope().project_id.as_str(),
             outcome.receipt(),
         );
         if let (
-            tracedecay_application::WorkRetryAttemptOutcomeV1::Created { attempt, .. },
+            tracedecay_contracts::WorkRetryAttemptOutcomeV1::Created { attempt, .. },
             Some(project_root),
         ) = (outcome, project_root)
         {
@@ -348,8 +348,8 @@ pub(super) fn resume_attempts(
                 message: "Work attempt recovery requires the current worktree to have no live provider holder."
                     .to_owned(),
             },
-            retry: tracedecay_application::RetryDirective::AfterRevalidate,
-            legal_actions: vec![tracedecay_application::LegalAction::Refresh],
+            retry: tracedecay_contracts::RetryDirective::AfterRevalidate,
+            legal_actions: vec![tracedecay_contracts::LegalAction::Refresh],
         })
     } else {
         services.attempts().resume(context, &command)

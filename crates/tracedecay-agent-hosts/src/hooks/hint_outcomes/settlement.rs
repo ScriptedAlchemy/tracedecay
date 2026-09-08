@@ -13,13 +13,13 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_application::{
+use tracedecay_application::analytics_bridge::HookImportSource;
+use tracedecay_application::observability::record_adoption_outcome;
+use tracedecay_contracts::{
     HintEmission, HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError,
     HintOutcomePortFuture, HintOutcomePortOperation, HintOutcomeResolution, HintToolActivity,
 };
 use tracedecay_domain::{AdoptionOutcomeLinkedV1, CoverageStateV1};
-use tracedecay_usecases::analytics_bridge::HookImportSource;
-use tracedecay_usecases::observability::record_adoption_outcome;
 
 use tracedecay_global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb, SessionActivityRow,
@@ -251,7 +251,7 @@ pub async fn settle_project_hint_outcomes(
     };
 
     let import =
-        tracedecay_usecases::analytics_bridge::import_hook_analytics(analytics, sources).await;
+        tracedecay_application::analytics_bridge::import_hook_analytics(analytics, sources).await;
     let import_errors: Vec<String> = import
         .sources
         .iter()

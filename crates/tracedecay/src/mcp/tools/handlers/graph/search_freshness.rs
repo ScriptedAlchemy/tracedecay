@@ -13,7 +13,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1, PrimitiveSearchFreshnessV1,
 };
 use tracedecay_dashboard_api::code_index_freshness_api::{

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::response::{IntoResponse, Response};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
     FactStoreCurateRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
     FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
@@ -30,7 +30,7 @@ pub(super) fn router_with_executor(
 }
 
 fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
-    let registry = tracedecay_application::retained_surface_executable_binding_registry()
+    let registry = tracedecay_contracts::retained_surface_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::Contract)?;
     for operation in RetainedSurfaceOperation::CALLABLE {
         let operation_id = tracedecay_tool_catalog::OperationId::new(
@@ -54,7 +54,7 @@ fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
 }
 
 pub(super) fn active_request_conflict_response(
-    request_id: tracedecay_application::RequestId,
+    request_id: tracedecay_contracts::RequestId,
 ) -> Response {
     match active_request_conflict(request_id) {
         Ok(result) => result.into_http_response(),
@@ -63,7 +63,7 @@ pub(super) fn active_request_conflict_response(
 }
 
 fn active_request_conflict(
-    request_id: tracedecay_application::RequestId,
+    request_id: tracedecay_contracts::RequestId,
 ) -> Result<
     tracedecay_api::CanonicalInvocationResult<serde_json::Value>,
     ApplicationSurfaceAdapterError,
@@ -79,23 +79,23 @@ fn active_request_conflict(
     let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
         return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
     };
-    let contract = tracedecay_application::ResultContractRef::new(
+    let contract = tracedecay_contracts::ResultContractRef::new(
         binding.result_schema().schema_ref().schema_id().clone(),
         binding.result_schema().schema_ref().revision(),
     )?;
-    let problem = tracedecay_application::ApplicationProblemEnvelope::new(
+    let problem = tracedecay_contracts::ApplicationProblemEnvelope::new(
         contract,
         request_id,
-        tracedecay_application::ApplicationProblem::Conflict {
-            diagnostic: tracedecay_application::SafeDiagnostic {
+        tracedecay_contracts::ApplicationProblem::Conflict {
+            diagnostic: tracedecay_contracts::SafeDiagnostic {
                 code: "retained.request_already_active".to_owned(),
                 message: "The retained application request is already active".to_owned(),
             },
-            retry: tracedecay_application::RetryDirective::SameRequest,
-            legal_actions: vec![tracedecay_application::LegalAction::Retry],
+            retry: tracedecay_contracts::RetryDirective::SameRequest,
+            legal_actions: vec![tracedecay_contracts::LegalAction::Retry],
         },
     )?
-    .with_owning_layer(tracedecay_application::ProblemOwningLayer::Adapter);
+    .with_owning_layer(tracedecay_contracts::ProblemOwningLayer::Adapter);
     Ok(tracedecay_api::CanonicalInvocationResult::new(
         binding_id.clone(),
         Err(problem),
@@ -109,7 +109,7 @@ mod conflict_tests {
     #[test]
     fn active_replay_collision_preserves_same_request_retry_authority() {
         let request_id =
-            tracedecay_application::RequestId::new("request.sdk.curate").expect("request id");
+            tracedecay_contracts::RequestId::new("request.sdk.curate").expect("request id");
         let envelope = serde_json::to_value(
             active_request_conflict(request_id)
                 .expect("conflict")
@@ -131,7 +131,7 @@ impl RegisteredHttpOperation for RetainedSurfaceOperation {
     }
 
     fn is_read_only(self) -> bool {
-        !tracedecay_application::retained_surfaces::retained_surface_operation_is_effect(self)
+        !tracedecay_contracts::retained_surfaces::retained_surface_operation_is_effect(self)
     }
 
     fn problem_family(self) -> &'static str {
@@ -144,11 +144,11 @@ impl RegisteredHttpOperation for RetainedSurfaceOperation {
 
     fn application_problem_is_bound(
         self,
-        request_id: &tracedecay_application::RequestId,
-        scope: Option<&tracedecay_application::ResolvedScope>,
-        problem: &tracedecay_application::ApplicationProblem,
+        request_id: &tracedecay_contracts::RequestId,
+        scope: Option<&tracedecay_contracts::ResolvedScope>,
+        problem: &tracedecay_contracts::ApplicationProblem,
     ) -> bool {
-        tracedecay_application::retained_surface_problem_matches_terminal(
+        tracedecay_contracts::retained_surface_problem_matches_terminal(
             self, request_id, scope, problem,
         )
     }
@@ -159,7 +159,7 @@ impl RegisteredHttpOperation for RetainedSurfaceOperation {
         std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
         ApplicationSurfaceAdapterError,
     > {
-        tracedecay_application::retained_surface_executable_binding_registry()
+        tracedecay_contracts::retained_surface_executable_binding_registry()
             .map(std::borrow::Cow::Owned)
             .map_err(ApplicationSurfaceAdapterError::Contract)
     }
@@ -209,7 +209,7 @@ async fn invoke_operation(
         invocation,
         move |outcome| match outcome {
             DaemonInvocationOutcome::RetainedApplication { scope, outcome } => {
-                tracedecay_application::retained_surface_outcome_matches_terminal(
+                tracedecay_contracts::retained_surface_outcome_matches_terminal(
                     operation,
                     &selected_request_id,
                     &scope,
@@ -334,13 +334,13 @@ fn named_argument_error(error: serde_path_to_error::Error<serde_json::Error>) ->
 }
 
 pub(crate) fn result_value(
-    result: tracedecay_application::ApplicationResult<RetainedSurfaceResultV1>,
+    result: tracedecay_contracts::ApplicationResult<RetainedSurfaceResultV1>,
 ) -> Result<
-    tracedecay_application::ApplicationResult<serde_json::Value>,
+    tracedecay_contracts::ApplicationResult<serde_json::Value>,
     ApplicationSurfaceAdapterError,
 > {
     match result {
-        Ok(envelope) => Ok(Ok(tracedecay_application::ApplicationEnvelope {
+        Ok(envelope) => Ok(Ok(tracedecay_contracts::ApplicationEnvelope {
             contract: envelope.contract,
             request_id: envelope.request_id,
             scope: envelope.scope,
@@ -351,12 +351,12 @@ pub(crate) fn result_value(
 }
 
 pub(super) fn outcome_value(
-    outcome: tracedecay_application::ApplicationOutcome<RetainedSurfaceResultV1>,
+    outcome: tracedecay_contracts::ApplicationOutcome<RetainedSurfaceResultV1>,
 ) -> Result<
-    tracedecay_application::ApplicationOutcome<serde_json::Value>,
+    tracedecay_contracts::ApplicationOutcome<serde_json::Value>,
     ApplicationSurfaceAdapterError,
 > {
-    use tracedecay_application::ApplicationOutcome;
+    use tracedecay_contracts::ApplicationOutcome;
 
     fn payload(
         payload: Option<RetainedSurfaceResultV1>,
@@ -369,7 +369,7 @@ pub(super) fn outcome_value(
 
     Ok(match outcome {
         ApplicationOutcome::Evidence(packet) => {
-            ApplicationOutcome::Evidence(tracedecay_application::EvidencePacket {
+            ApplicationOutcome::Evidence(tracedecay_contracts::EvidencePacket {
                 temporal: packet.temporal,
                 authority: packet.authority,
                 evidence_authorities: packet.evidence_authorities,
@@ -383,7 +383,7 @@ pub(super) fn outcome_value(
             })
         }
         ApplicationOutcome::Preview(preview) => {
-            ApplicationOutcome::Preview(tracedecay_application::PreviewResult {
+            ApplicationOutcome::Preview(tracedecay_contracts::PreviewResult {
                 preview_id: preview.preview_id,
                 preview_digest: preview.preview_digest,
                 effect_class: preview.effect_class,
@@ -394,7 +394,7 @@ pub(super) fn outcome_value(
             })
         }
         ApplicationOutcome::Effect(effect) => {
-            ApplicationOutcome::Effect(tracedecay_application::EffectResult {
+            ApplicationOutcome::Effect(tracedecay_contracts::EffectResult {
                 effect_id: effect.effect_id,
                 effect_class: effect.effect_class,
                 idempotency_key: effect.idempotency_key,

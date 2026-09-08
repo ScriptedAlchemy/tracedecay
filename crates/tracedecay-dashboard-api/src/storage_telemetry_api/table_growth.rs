@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_application::storage::telemetry::TableGrowthTelemetryReadV1;
-use tracedecay_application::storage::{
+use tracedecay_contracts::storage::telemetry::TableGrowthTelemetryReadV1;
+use tracedecay_contracts::storage::{
     SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES, SIGNIFICANT_TABLE_GROWTH_PERCENT,
     SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES, is_significant_table_growth,
 };
@@ -280,9 +280,9 @@ pub(super) fn table_growth_payload_coverage(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use tracedecay_application::storage::identity::StoreKeyV1;
-    use tracedecay_application::storage::telemetry::TableGrowthTelemetryReadV1;
-    use tracedecay_application::storage::{
+    use tracedecay_contracts::storage::identity::StoreKeyV1;
+    use tracedecay_contracts::storage::telemetry::TableGrowthTelemetryReadV1;
+    use tracedecay_contracts::storage::{
         StorageByteSizeV1, TableGrowthBaselinePendingV1, TableGrowthSampleV1, TableNameV1,
     };
     use tracedecay_domain::UtcMicros;

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
-use tracedecay_application::VerifiedWorkGraphVersionV1;
+use tracedecay_contracts::VerifiedWorkGraphVersionV1;
 use tracedecay_domain::{
     ComponentRevision, CursorPayloadDigest, EphemeralSanitizedQueryViewV1, ManifestDigest,
     ObservationSourceIdentityV1, RankedCandidate, RetrievalAnchorId, RetrievalBudgetUsage,

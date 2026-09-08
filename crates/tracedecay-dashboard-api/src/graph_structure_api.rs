@@ -26,10 +26,10 @@ use super::util::{JsonPath, JsonQuery, query_rows};
 use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
-use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::params;

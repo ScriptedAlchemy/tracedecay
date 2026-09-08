@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 use tracedecay_api::read_model::multi_root::MultiRootCapabilityV1;
-use tracedecay_application::{
+use tracedecay_contracts::{
     MultiRootCollectionResolutionV1, MultiRootCollectionSelectorV1,
     MultiRootCollectionUnavailableV1,
 };

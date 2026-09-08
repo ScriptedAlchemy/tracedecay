@@ -11,7 +11,7 @@ use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
-use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::ManifestDigest;
 use tracedecay_lsp::analyzer::adapters::LspAdapterDefinition;
 use tracedecay_lsp::analyzer::broker::DiagnosticsSnapshot;
@@ -266,7 +266,7 @@ mod tests {
         CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture,
         CodeGraphReadRequest,
     };
-    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
     use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
 

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::{
+use tracedecay_contracts::{
     SourceCanonicalRefetchAuthorityV1, SourceCaptureAdmissionErrorV1, SourceCaptureApplicationV1,
     try_now_micros,
 };
@@ -28,7 +28,7 @@ use tracedecay_store::{
     SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit, build_source_projection,
 };
 
-use tracedecay_application::request_identity::{
+use tracedecay_contracts::request_identity::{
     LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
 };
 use tracedecay_runtime_core::db::DatabaseRuntimeClientV1;

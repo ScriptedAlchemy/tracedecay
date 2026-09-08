@@ -10,7 +10,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationProblemKind, CancellationSignal, Deadline, OpaqueCursor, PageRequest,
     ProblemOwningLayer, RequestId, ResultContractRef, RetainedSurfaceOperation, RetryDirective,

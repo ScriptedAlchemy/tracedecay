@@ -4,7 +4,7 @@
 //! graph, and records the version before committing either row. There is no
 //! independently callable publication or restart-reconciliation authority.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     VerifiedWorkGraphVersionV1, WorkProductEventPortErrorV1, WorkProductPortContextV1,
 };
 use tracedecay_domain::WorkProductEventV1;

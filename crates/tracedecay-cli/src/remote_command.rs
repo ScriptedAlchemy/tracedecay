@@ -7,18 +7,18 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracedecay_application::remote::composition::{
+use tracedecay_contracts::remote::composition::{
     PendingLocalEvidenceV1, PendingLocalUnavailableReasonV1, ShardCoverageStateV1,
 };
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
-use tracedecay_application::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
-use tracedecay_application::remote::status::{
+use tracedecay_contracts::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
+use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1, RemoteOperationalStatusV1,
     RemoteSpoolOperationalStatusV1,
 };
-use tracedecay_application::{ApplicationOutcome, RemoteListenerReadV1};
+use tracedecay_contracts::{ApplicationOutcome, RemoteListenerReadV1};
 use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
@@ -530,14 +530,14 @@ mod tests {
         RemoteProtocolArgs, build_client, canonical_json_line, emit_protocol_response,
         render_protocol_response, render_status_human, status_json_line,
     };
-    use tracedecay_application::remote::protocol::{
+    use tracedecay_contracts::remote::protocol::{
         RemoteProtocolFailureV1, RemoteProtocolResponseV1, remote_enrollment_result_contract_v1,
         remote_protocol_problem,
     };
-    use tracedecay_application::remote::status::{
+    use tracedecay_contracts::remote::status::{
         RemoteOperationalStatusReadV1, RemoteOperationalStatusV1,
     };
-    use tracedecay_application::{DoctorCoverageCompletenessV1, RemoteListenerReadV1, RequestId};
+    use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1, RequestId};
     use tracedecay_domain::{
         CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1, UtcMicros,
     };
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn query_human_render_surfaces_remote_and_local_coverage_honestly() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
             serde_json::from_value(serde_json::json!({
                 "composition": {
                     "contributions": [{
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn query_human_render_names_an_unavailable_local_spool() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
             serde_json::from_value(serde_json::json!({
                 "composition": {
                     "contributions": [],
@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn query_human_render_composes_the_callers_own_spool_when_not_supplied() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
             serde_json::from_value(serde_json::json!({
                 "composition": {
                     "contributions": [],
@@ -766,7 +766,7 @@ mod tests {
                 "observation": { "state": "not_found" }
             }))
             .expect("query result fixture");
-        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+        let spool = tracedecay_contracts::remote::status::RemoteSpoolOperationalStatusV1 {
             pending_count: 4,
             quarantined_count: 1,
             has_sequence_gap: true,
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn query_human_render_keeps_other_absences_typed_even_with_local_evidence() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
             serde_json::from_value(serde_json::json!({
                 "composition": {
                     "contributions": [],
@@ -797,7 +797,7 @@ mod tests {
                 "observation": { "state": "not_found" }
             }))
             .expect("query result fixture");
-        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+        let spool = tracedecay_contracts::remote::status::RemoteSpoolOperationalStatusV1 {
             pending_count: 4,
             quarantined_count: 0,
             has_sequence_gap: false,

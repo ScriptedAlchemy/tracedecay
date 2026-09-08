@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CancellationStage, Deadline, EffectTermination, IdempotencyKey,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1,
     source_edit_operation,

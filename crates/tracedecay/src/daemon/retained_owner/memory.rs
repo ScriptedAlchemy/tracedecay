@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     FactFeedbackRequestV1, FactRetrievalTelemetryV1, FactStoreAddRequestV1,
     FactStoreContradictRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
     FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
@@ -10,7 +10,7 @@ use tracedecay_application::retained_surfaces::{
     FactStoreUpdateRequestV1, MemoryScopeV1, MemoryStatusRequestV1, RetainedProjectSelectorV1,
     RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, now_micros,
@@ -391,7 +391,7 @@ async fn execute_add_on_db(
     prepared.complete_with_digest(
         context,
         &committed_state,
-        tracedecay_application::ReconciliationState::Reconciled,
+        tracedecay_contracts::ReconciliationState::Reconciled,
         result,
         memory_expiry_partial(settled_after_expiry),
     )
@@ -443,7 +443,7 @@ async fn execute_update_on_db(
     prepared.complete_with_digest(
         context,
         commit.committed_state_digest(),
-        tracedecay_application::ReconciliationState::Reconciled,
+        tracedecay_contracts::ReconciliationState::Reconciled,
         result,
         memory_expiry_partial(settled_after_expiry),
     )
@@ -503,7 +503,7 @@ async fn execute_remove_on_db(
         return prepared.complete_with_digest(
             context,
             commit.committed_state_digest(),
-            tracedecay_application::ReconciliationState::Reconciled,
+            tracedecay_contracts::ReconciliationState::Reconciled,
             result,
             partial,
         );
@@ -511,7 +511,7 @@ async fn execute_remove_on_db(
     prepared.complete(
         context,
         &public,
-        tracedecay_application::ReconciliationState::Reconciled,
+        tracedecay_contracts::ReconciliationState::Reconciled,
         result,
         partial,
     )
@@ -563,7 +563,7 @@ async fn execute_supersede_on_db(
         return prepared.complete_with_digest(
             context,
             commit.committed_state_digest(),
-            tracedecay_application::ReconciliationState::Reconciled,
+            tracedecay_contracts::ReconciliationState::Reconciled,
             result,
             partial,
         );
@@ -571,7 +571,7 @@ async fn execute_supersede_on_db(
     prepared.complete(
         context,
         &public,
-        tracedecay_application::ReconciliationState::Reconciled,
+        tracedecay_contracts::ReconciliationState::Reconciled,
         result,
         partial,
     )
@@ -623,7 +623,7 @@ async fn execute_feedback_on_db(
     prepared.complete_with_digest(
         context,
         commit.committed_state_digest(),
-        tracedecay_application::ReconciliationState::Reconciled,
+        tracedecay_contracts::ReconciliationState::Reconciled,
         result,
         memory_expiry_partial(settled_after_expiry),
     )
@@ -786,7 +786,7 @@ async fn search_on_db(
     if tracked.settled_after_expiry {
         let Some(committed_state) = tracked.committed_state() else {
             return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             ));
         };
         let prepared = prepared.as_ref().ok_or_else(|| {
@@ -804,11 +804,11 @@ async fn search_on_db(
     match evidence_outcome(context, RetainedSurfaceOperation::FactStoreSearch, result) {
         Ok(outcome) => Ok(outcome),
         Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         )) => {
             let Some(committed_state) = tracked.committed_state() else {
                 return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                    tracedecay_application::CancellationStage::DuringRead,
+                    tracedecay_contracts::CancellationStage::DuringRead,
                 ));
             };
             let prepared = prepared.as_ref().ok_or_else(|| {

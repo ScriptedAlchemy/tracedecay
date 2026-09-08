@@ -72,9 +72,9 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
             payload: DaemonInvocationPayload::GitRead {
                 surface_operation: ApplicationSurfaceOperation::GitStatus,
                 request: GitReadSurfaceRequest {
-                    request: tracedecay_application::git::GitReadRequestV1::Status,
-                    max_entries: tracedecay_usecases::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES,
-                    max_bytes: tracedecay_usecases::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
+                    request: tracedecay_contracts::git::GitReadRequestV1::Status,
+                    max_entries: tracedecay_application::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES,
+                    max_bytes: tracedecay_application::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
                 },
                 observed_at: now,
                 deadline,
@@ -104,7 +104,7 @@ fn storage_status_request(request_id: &str) -> DaemonInvocationRequest {
         request_id,
         ApplicationSurfaceOperation::StorageStatus,
         PrimitiveRequest::StorageStatus(
-            tracedecay_application::retrieval::StorageStatusPrimitiveRequest {
+            tracedecay_contracts::retrieval::StorageStatusPrimitiveRequest {
                 include_details: false,
             },
         ),
@@ -303,7 +303,7 @@ async fn same_authority_routes_alias_one_retained_runtime() {
     let scope = retained_scope("project.retained.alias");
     let actor = ActorId::new("actor.retained.alias").expect("retained actor");
     let incumbent_ports =
-        Arc::new(tracedecay_application::retained_surfaces::RetainedSurfacePortsV1::default());
+        Arc::new(tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1::default());
     let (first, second) = tokio::join!(
         registrar.register(
             project_root.clone(),
@@ -317,7 +317,7 @@ async fn same_authority_routes_alias_one_retained_runtime() {
             scope.clone(),
             actor.clone(),
             retained_grant(&scope, &actor, 2),
-            Arc::new(tracedecay_application::retained_surfaces::RetainedSurfacePortsV1::default()),
+            Arc::new(tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1::default()),
         ),
     );
     first.expect("first same-authority route must register");
@@ -338,7 +338,7 @@ async fn same_authority_routes_alias_one_retained_runtime() {
             retained_scope("project.retained.foreign"),
             actor.clone(),
             retained_grant(&retained_scope("project.retained.foreign"), &actor, 3),
-            Arc::new(tracedecay_application::retained_surfaces::RetainedSurfacePortsV1::default()),
+            Arc::new(tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1::default()),
         )
         .await;
     assert!(

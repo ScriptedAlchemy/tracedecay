@@ -6,11 +6,11 @@ mod automatic_fact_receipts;
 
 struct StructuralBudgetRefusalRetrieval {
     anchor_session_id: SessionId,
-    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
 }
 
 impl StructuralBudgetRefusalRetrieval {
-    fn new(stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1) -> Self {
+    fn new(stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1) -> Self {
         Self {
             anchor_session_id: SessionId::new("session.structural-budget-refusal").unwrap(),
             stage,
@@ -30,7 +30,7 @@ impl AutomationSessionRetrieval for StructuralBudgetRefusalRetrieval {
         let stage = self.stage;
         Box::pin(async move {
             AutomationTemporalRetrieval::StructuralRefusal(
-                tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                     stage,
                 },
             )
@@ -292,10 +292,10 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
         ..AutomationConfig::default()
     };
     let reflector_retrieval = StructuralBudgetRefusalRetrieval::new(
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
     );
     let skill_retrieval = StructuralBudgetRefusalRetrieval::new(
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
     );
 
     let reflector = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(

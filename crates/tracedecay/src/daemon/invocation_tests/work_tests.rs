@@ -3,7 +3,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GenerateProposalRequest, PrepareWorkProductMutationRequestV1,
     WorkGraphReadRequestV1, WorkProductChangeDraftV1, WorkProductMutationRequestV1,
@@ -94,11 +94,11 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     .expect("resolved scope");
     let grant_digest =
         ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest");
-    let capabilities = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+    let capabilities = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
         .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
         .collect();
-    let use_cases = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+    let use_cases = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
         .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
         .collect();
@@ -523,11 +523,11 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
         UtcMicros(1),
         UtcMicros(10_000),
         scope.clone(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
             .collect(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
             .collect(),

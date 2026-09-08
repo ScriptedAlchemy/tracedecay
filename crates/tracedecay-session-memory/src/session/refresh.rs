@@ -1,7 +1,7 @@
 use std::fmt;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     RetrievalGrainV1, SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1,

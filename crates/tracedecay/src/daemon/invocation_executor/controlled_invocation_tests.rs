@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::settle_in_process_invocation;
-use tracedecay_application::{CancellationSignal, clock::now_micros};
+use tracedecay_contracts::{CancellationSignal, clock::now_micros};
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_protocol::{
     DAEMON_TOOL_RESPONSE_GRACE, DaemonInvocationOutcome, DaemonInvocationProblem,

@@ -8,7 +8,7 @@ use tracedecay_agent_hosts::hooks::{
     cursor_session_start_json, native_capture_material,
 };
 use tracedecay_agent_hosts::ports::hook_runtime;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_hooks::{

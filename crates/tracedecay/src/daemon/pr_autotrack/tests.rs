@@ -714,7 +714,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     seeder.shutdown().await;
 
     let identity = IndexingIdentityV1::resolve(&linked).expect("linked-worktree identity");
-    let scope = tracedecay_application::ResolvedScope::new(
+    let scope = tracedecay_contracts::ResolvedScope::new(
         project_id,
         identity.repository_id().clone(),
         identity.worktree_id().clone(),

@@ -9,7 +9,7 @@
 //! invents a deadline; it is read back out of the attempt's own pinned
 //! execution snapshot.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptStorageError, WorkRunAdmissionV1, WorkRunControlFrontierV1,
     WorkRunControlStorageError, WorkRunControlStoragePort, WorkRunLiveAttemptV1,
     WorkflowRunStorageError, WorkflowRunStoragePort,

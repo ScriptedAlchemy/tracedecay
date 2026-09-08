@@ -1,6 +1,6 @@
 //! Registered-store adapter for canonical observability envelopes.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ExecutionTopologyRollupFragmentPageV1,
     ExecutionTopologyRollupFragmentQueryV1, ExecutionTopologyRollupQueryPort, ObservabilityFuture,
     ObservabilityPageV1, ObservabilityQueryPort, ObservabilityQueryV1, ObservabilityRecordPort,

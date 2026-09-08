@@ -12,12 +12,12 @@ use tracedecay_agent_hosts::agents::context_scout_v2::{
 use tracedecay_agent_hosts::agents::host_bundle_v2::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
 };
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
     TemporalState, feedback_surface_catalog_contribution,

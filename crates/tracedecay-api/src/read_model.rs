@@ -613,11 +613,11 @@ impl<T> DashboardEnvelopeV1<T> {
 /// Current wall-clock time in microseconds since the Unix epoch.
 ///
 /// Dashboard read models carry raw `i64` micros, so this unwraps the canonical
-/// [`tracedecay_application::now_micros`] rather than restating its saturating
+/// [`tracedecay_contracts::now_micros`] rather than restating its saturating
 /// clamp.
 #[must_use]
 pub fn now_micros() -> i64 {
-    tracedecay_application::now_micros().0
+    tracedecay_contracts::now_micros().0
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 pub(super) fn log_scheduler_pre_admission_problem(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
-    problem: &tracedecay_application::ApplicationProblemEnvelope,
+    problem: &tracedecay_contracts::ApplicationProblemEnvelope,
 ) {
     let mut fields = vec![
         ("project", project_path.display().to_string()),
@@ -110,23 +110,20 @@ pub(super) async fn scheduler_automation_effect(
     configuration_digest: tracedecay_domain::ManifestDigest,
     request: impl FnOnce(
         &str,
-    )
-        -> Result<tracedecay_application::retained_surfaces::AutomationRunRequestV1>,
+    ) -> Result<tracedecay_contracts::retained_surfaces::AutomationRunRequestV1>,
 ) -> Result<(
     crate::daemon::automation_effect::AutomationEffectAdmission,
     String,
     AutomationRunControl,
 )> {
     let request_id = scheduler_automation_request_id(requested_run_id)?;
-    let cancellation = tracedecay_application::CancellationSignal::active(format!(
-        "cancel.{}",
-        request_id.as_str()
-    ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("automation scheduler cancellation is invalid: {error}"),
-    })?;
-    let observed_at = tracedecay_application::now_micros();
-    let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active(format!("cancel.{}", request_id.as_str()))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("automation scheduler cancellation is invalid: {error}"),
+            })?;
+    let observed_at = tracedecay_contracts::now_micros();
+    let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
         .map_err(|error| TraceDecayError::Config {
             message: format!("automation scheduler deadline is invalid: {error}"),
         })?;
@@ -193,7 +190,7 @@ impl Drop for SchedulerCancellationBridge {
 /// channel.
 fn spawn_scheduler_cancellation_bridge<Interrupted>(
     interrupted: Interrupted,
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
 ) -> SchedulerCancellationBridge
 where
     Interrupted: Fn() -> bool + Send + 'static,
@@ -209,7 +206,7 @@ where
                 return;
             }
             if interrupted() {
-                let _ = cancellation.cancel(tracedecay_application::now_micros());
+                let _ = cancellation.cancel(tracedecay_contracts::now_micros());
                 return;
             }
             if started.elapsed() >= SCHEDULER_CANCELLATION_BRIDGE_MAX_LIFETIME {
@@ -222,8 +219,8 @@ where
 
 fn scheduler_effect_run_control(
     run_control: &AutomationRunControl,
-    cancellation: tracedecay_application::CancellationSignal,
-    deadline: tracedecay_application::Deadline,
+    cancellation: tracedecay_contracts::CancellationSignal,
+    deadline: tracedecay_contracts::Deadline,
 ) -> AutomationRunControl {
     let parent = run_control.read_control().clone();
     let bridge = spawn_scheduler_cancellation_bridge(
@@ -237,7 +234,7 @@ fn scheduler_effect_run_control(
         // Load-bearing capture: the bridge is owned by this predicate, so it
         // is aborted exactly when the effect run control is dropped.
         let _bridge = &bridge;
-        let observed_at = tracedecay_application::now_micros();
+        let observed_at = tracedecay_contracts::now_micros();
         if parent.interrupted() {
             let _ = cancellation.cancel(observed_at);
         }
@@ -378,7 +375,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                 session_database.as_ref(),
             )
             .await;
-        let schedule_now_secs = tracedecay_application::now_micros().0.div_euclid(1_000_000);
+        let schedule_now_secs = tracedecay_contracts::now_micros().0.div_euclid(1_000_000);
         let memory_curator_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
@@ -732,7 +729,7 @@ fn run_automation_scheduler_tick_inner<'a>(
 
 pub(crate) fn scheduler_automation_request_id(
     requested_run_id: Option<&str>,
-) -> Result<tracedecay_application::RequestId> {
+) -> Result<tracedecay_contracts::RequestId> {
     match requested_run_id {
         Some(run_id) => {
             let digest = tracedecay_domain::canonical_sha256(&(
@@ -742,7 +739,7 @@ pub(crate) fn scheduler_automation_request_id(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("automation scheduler stable request digest is invalid: {error}"),
             })?;
-            tracedecay_application::RequestId::new(format!(
+            tracedecay_contracts::RequestId::new(format!(
                 "request.automation-scheduler.{}",
                 digest.as_str().trim_start_matches("sha256:")
             ))
@@ -752,8 +749,8 @@ pub(crate) fn scheduler_automation_request_id(
                 ),
             })
         }
-        None => tracedecay_application::request_identity::mint_global_request_id(
-            tracedecay_application::request_identity::GlobalRequestSurface::AutomationScheduler,
+        None => tracedecay_contracts::request_identity::mint_global_request_id(
+            tracedecay_contracts::request_identity::GlobalRequestSurface::AutomationScheduler,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("automation scheduler request identity is unavailable: {error}"),
@@ -767,8 +764,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use tracedecay_application::{CancellationSignal, Deadline};
     use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_contracts::{CancellationSignal, Deadline};
     use tracedecay_domain::UtcMicros;
 
     use super::{

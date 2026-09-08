@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{
     ActorId, HydrationStateV1, ProjectId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1,

@@ -57,7 +57,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::storage::{
+use tracedecay_contracts::storage::{
     RetentionBacklogRecordV1, StorageByteSizeV1, StoreKeyV1, TableNameV1,
 };
 use tracedecay_domain::UtcMicros;

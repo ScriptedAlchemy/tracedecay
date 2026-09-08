@@ -13,7 +13,7 @@
 //! this module compacts them directly: open a short-lived, best-effort
 //! `rusqlite` connection, sample the free-page ratio, and run
 //! `PRAGMA incremental_vacuum(N)` when the same
-//! [`tracedecay_application::storage::compaction::CompactionTriggerPolicyV1`]
+//! [`tracedecay_contracts::storage::compaction::CompactionTriggerPolicyV1`]
 //! threshold used for the live stores is met. This never competes with a live
 //! writer: a busy/locked file is skipped, not an error, and the next
 //! maintenance tick retries it.
@@ -42,9 +42,9 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use tracedecay_application::storage::compaction::CompactionTriggerPolicyV1;
-use tracedecay_application::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
-use tracedecay_application::storage::telemetry::StoreSizeSampleV1;
+use tracedecay_contracts::storage::compaction::CompactionTriggerPolicyV1;
+use tracedecay_contracts::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
+use tracedecay_contracts::storage::telemetry::StoreSizeSampleV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_runtime_core::sqlite_read_snapshot::{BOUNDED_PROBE_BUSY_TIMEOUT, pragma_u64};
 

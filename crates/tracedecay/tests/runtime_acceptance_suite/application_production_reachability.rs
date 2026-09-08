@@ -18,8 +18,8 @@ use tracedecay::application_surface::{
     resolve_http_application_surface,
 };
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
-use tracedecay_application::retrieval::SymbolGraphScope;
-use tracedecay_application::{
+use tracedecay_contracts::retrieval::SymbolGraphScope;
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
     ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
 };
@@ -1109,7 +1109,7 @@ fn callable_code_meta(cursor: Option<&str>) -> Value {
 /// the freshness-resolved latest complete generation.
 fn code_query_scope() -> Value {
     serde_json::json!({
-        "generation": tracedecay_application::UNPINNED_LATEST_GENERATION_SENTINEL,
+        "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
         "path_prefix": Value::Null,
     })
 }

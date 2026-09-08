@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::{EffectResult, SourceEditVerificationV1};
+use tracedecay_contracts::{EffectResult, SourceEditVerificationV1};
 use tracedecay_domain::ManifestDigest;
 
-use tracedecay_application::source_edit::{
+use tracedecay_contracts::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
 };
 

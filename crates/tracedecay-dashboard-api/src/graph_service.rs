@@ -2,10 +2,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_graph_query::{

@@ -9,7 +9,7 @@ use crate::invocation::{
     RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredRetainedRuntime,
     RegisteredWorkRuntime,
 };
-use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
+use tracedecay_application::feedback::concrete::FeedbackRuntime;
 
 use super::{
     ProjectRuntime, ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryV1,
@@ -237,7 +237,7 @@ mod tests {
         DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationPort,
         DaemonAdvisoryCycleInvocationRequest,
     };
-    use tracedecay_application::{ApplicationProblem, SafeDiagnostic};
+    use tracedecay_contracts::{ApplicationProblem, SafeDiagnostic};
     use tracedecay_domain::ProjectId;
 
     struct UnavailableAdvisoryCycle;

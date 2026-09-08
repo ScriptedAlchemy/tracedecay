@@ -14,7 +14,7 @@
 
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     NativeIntegrationApplySurfaceRequest, NativeIntegrationApproveSurfaceRequest,
     NativeIntegrationCancelSurfaceRequest, NativeIntegrationPreflightSurfaceRequest,
     NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusSurfaceRequest,
@@ -100,7 +100,7 @@ pub(super) fn def_cancel_native_integration() -> ToolDefinition {
 mod tests {
     use schemars::JsonSchema;
     use schemars::generate::SchemaSettings;
-    use tracedecay_application::git::{
+    use tracedecay_contracts::git::{
         NativeIntegrationApplySurfaceRequest, NativeIntegrationApproveSurfaceRequest,
         NativeIntegrationCancelSurfaceRequest, NativeIntegrationPreflightSurfaceRequest,
         NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusSurfaceRequest,

@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tracedecay_application::{
+use tracedecay_application::observability::{
+    BoundedObservabilityProducerV1, work_blocked_interval_observation_envelope,
+};
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, CapabilityGrantSnapshot, RequestContext,
 };
 use tracedecay_domain::{ActorId, WorkBlockedIntervalReceiptV1};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, work_blocked_interval_observation_envelope,
-};
 
 use super::recovery_schedule::{RecoveryWarningTrackerV1, run_recovery_loop};
 use super::work_blocked_interval_recovery_context;
@@ -280,7 +280,7 @@ fn read_pending_receipts(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     context: &RequestContext,
 ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, RecoveryFailureV1> {
-    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(database)
+    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(database)
         .map_err(RecoveryFailureV1::Database)?;
     work.run_control()
         .next_settled_blocked_intervals_for_observation(context, RECOVERY_PAGE_LIMIT)
@@ -292,7 +292,7 @@ fn mark_receipt_durable(
     context: &RequestContext,
     receipt: &WorkBlockedIntervalReceiptV1,
 ) -> Result<(), RecoveryFailureV1> {
-    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(database)
+    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(database)
         .map_err(RecoveryFailureV1::Database)?;
     work.run_control()
         .mark_settled_blocked_interval_durable(context, receipt)

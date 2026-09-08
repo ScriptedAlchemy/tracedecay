@@ -26,15 +26,15 @@ struct UnavailableEffectExecutor {
     >,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffectExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for UnavailableEffectExecutor {
     fn invoke(
         &self,
-        invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
         self.invocations.fetch_add(1, Ordering::SeqCst);
@@ -47,7 +47,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffect
                 .unwrap()
                 .push((binding.operation().as_str().to_owned(), payload.clone()));
         }
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -55,8 +55,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        _deadline: tracedecay_application::Deadline,
-        _cancellation: tracedecay_application::CancellationSignal,
+        _deadline: tracedecay_contracts::Deadline,
+        _cancellation: tracedecay_contracts::CancellationSignal,
         policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -85,7 +85,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,
@@ -109,7 +109,7 @@ async fn available_configuration_effect_reaches_canonical_executor() {
     .await
     .unwrap();
     let executor = UnavailableEffectExecutor::default();
-    let request = serde_json::to_value(tracedecay_application::ConfigurationSetRequestV1 {
+    let request = serde_json::to_value(tracedecay_contracts::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
         key: tracedecay_domain::configuration::SettingKey::new("mcp.tool_timings").unwrap(),
         value: tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
@@ -124,7 +124,7 @@ async fn available_configuration_effect_reaches_canonical_executor() {
     })
     .unwrap();
     let cancellation =
-        tracedecay_application::CancellationSignal::active("configuration-set-canonical-effect")
+        tracedecay_contracts::CancellationSignal::active("configuration-set-canonical-effect")
             .unwrap();
 
     let result = handle_tool_call_with_registry_options(
@@ -244,7 +244,7 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
     ];
 
     for (tool_name, _, _, request) in &effects {
-        let cancellation = tracedecay_application::CancellationSignal::active(format!(
+        let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
             "cancellation.{}",
             tool_name.strip_prefix("tracedecay_").unwrap()
         ))

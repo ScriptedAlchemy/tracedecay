@@ -5,7 +5,7 @@
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptProviderOutcomeV1, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
 use tracedecay_domain::{

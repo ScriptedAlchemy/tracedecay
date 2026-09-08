@@ -1,7 +1,7 @@
 use schemars::{JsonSchema, schema_for};
 use serde_json::Value;
 use tracedecay_api::read_model::multi_root::MultiRootQueryReadModelV1;
-use tracedecay_application::{MultiRootContinuationV1, MultiRootQueryPageV1};
+use tracedecay_contracts::{MultiRootContinuationV1, MultiRootQueryPageV1};
 use tracedecay_domain::{
     CollectionRevision, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome,
     ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,

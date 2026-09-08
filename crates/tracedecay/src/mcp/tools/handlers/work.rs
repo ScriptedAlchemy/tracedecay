@@ -8,11 +8,11 @@
 use axum::body::to_bytes;
 use serde_json::Value;
 use tracedecay_api::{HttpApplicationControls, WorkHttpRequest, WorkOperation};
-use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::ToolResult;
@@ -122,7 +122,7 @@ fn work_controls(
             format!("The canonical Work operation identity is invalid: {error}"),
         )
     })?;
-    let binding = tracedecay_application::work_executable_binding(&operation_id)
+    let binding = tracedecay_contracts::work_executable_binding(&operation_id)
         .map_err(|error| {
             TraceDecayError::project_route(
                 "work.catalog_unavailable",
@@ -175,7 +175,7 @@ mod tests {
     use axum::body::to_bytes;
     use serde_json::{Value, json};
     use tracedecay_api::{HttpApplicationControls, WorkHttpRequest};
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
         ApplicationResponse, CancellationSignal, Deadline, InvocationError, RequestId,
     };
@@ -227,7 +227,7 @@ mod tests {
             &self,
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: UtcMicros,
-            _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
         ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
             tracedecay_domain::errors::Result<()>,

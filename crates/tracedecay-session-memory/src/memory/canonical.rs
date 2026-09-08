@@ -1,6 +1,6 @@
 //! Root store adapters for canonical memory application use cases.
 
-use tracedecay_application::memory::{
+use tracedecay_contracts::memory::{
     CommitFactPort, CurrentFactsPort, FactAsOfPort, FactCurrentPort, FactLineagePort,
     MemoryApplication as CanonicalMemoryApplication, MemoryApplicationInvariantError,
     MemoryCommitFactCommand, MemoryCommitFactDisposition, MemoryCommitFactPortResult,

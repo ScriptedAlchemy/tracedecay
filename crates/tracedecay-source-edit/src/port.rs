@@ -12,11 +12,11 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_application::source_edit::{
+use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_contracts::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
     RenameSymbolBindingV1,
 };
-use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_domain::errors::Result;
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::storage::StoreLayout;

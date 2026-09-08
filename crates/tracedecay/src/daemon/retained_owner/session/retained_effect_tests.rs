@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceOperation, RetainedSurfaceRequestV1, SessionRefreshActionRequestV1,
     SessionRefreshActionV1, SessionRefreshFrontierV1, SessionRefreshGrainV1,
     SessionRefreshProjectV1, SessionRefreshRequestV1, SessionRefreshSessionV1,
     SessionRefreshSourceV1, SessionRefreshTargetV1, SessionRefreshTemporalModeV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemKind, CancellationContext, CancellationSignal,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectReceipt,
     EffectTermination, LegalAction, ProblemTerminality, RequestContext, RequestId,
@@ -202,7 +202,7 @@ fn application_context(
     request_id: &str,
 ) -> (RequestContext, CancellationSignal) {
     let route = &request.request.project;
-    let scope = tracedecay_application::ResolvedScope::new(
+    let scope = tracedecay_contracts::ResolvedScope::new(
         ProjectId::new(route.id.clone()).expect("scope project"),
         RepositoryId::new(route.repository_id.clone()).expect("scope repository"),
         WorktreeId::new(route.worktree_id.clone()).expect("scope worktree"),

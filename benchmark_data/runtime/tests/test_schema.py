@@ -24,7 +24,7 @@ from benchmark_data.runtime.schema import (  # noqa: E402
 
 CRATE_LANES = (
     "tracedecay-api",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay-capture",
     "tracedecay-domain",
     "tracedecay-hooks",
@@ -44,7 +44,7 @@ def valid_sample(**overrides: object) -> dict:
             "candidate_id": "candidate-1",
             "run_id": "run-1",
             "capture_id": "capture-1",
-            "crate_id": "tracedecay-application",
+            "crate_id": "tracedecay-contracts",
             "journey_id": "indexed-query",
             "workload_id": "exact-symbol",
             "variant": "baseline",
@@ -111,7 +111,7 @@ def valid_report() -> dict:
             "candidate_id": "candidate-1",
             "run_id": "run-1",
             "capture_id": "capture-1",
-            "crate_id": "tracedecay-application",
+            "crate_id": "tracedecay-contracts",
             "journey_id": "indexed-query",
             "workload_id": "exact-symbol",
             "variant": "baseline",
@@ -539,7 +539,7 @@ class GeneratedArtifactModelTests(unittest.TestCase):
         self.assertEqual(sample.kind, "sample")
         self.assertEqual(report.kind, "report")
         self.assertEqual(sample.identity["workload_id"], "exact-symbol")
-        self.assertEqual(report.identity["crate_id"], "tracedecay-application")
+        self.assertEqual(report.identity["crate_id"], "tracedecay-contracts")
 
     def test_generated_schema_uses_canonical_model_sections(self) -> None:
         schema = generated_artifact_schema()

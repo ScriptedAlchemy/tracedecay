@@ -10,8 +10,8 @@ use crate::{
 
 const BASELINE_REPORT_RESOURCE_CHILD_ENV: &str = "TRACEDECAY_BASELINE_REPORT_RESOURCE_CHILD";
 
-fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_application::ResolvedScope> {
-    tracedecay_application::ResolvedScope::new(
+fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_contracts::ResolvedScope> {
+    tracedecay_contracts::ResolvedScope::new(
         tracedecay_domain::ProjectId::new("project.search-eval-direct-report").ok()?,
         tracedecay_domain::RepositoryId::new("repository.search-eval-direct-report").ok()?,
         tracedecay_domain::WorktreeId::new("worktree.search-eval-direct-report").ok()?,

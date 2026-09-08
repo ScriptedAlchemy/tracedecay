@@ -17,7 +17,7 @@ doctest = false
 hotpath = [
     "tracedecay-domain/hotpath",
     "hotpath/hotpath",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-automation/hotpath",
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-daemon-protocol/hotpath",
@@ -36,13 +36,13 @@ hotpath = [
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-tool-catalog/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-application/hotpath",
 ]
 hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
@@ -61,13 +61,13 @@ hotpath-alloc = [
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
 ]
 hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
@@ -86,7 +86,7 @@ hotpath-cpu = [
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
 ]
 default = []
 # Exact token counting for automation artifact budgeting (tiktoken BPE).
@@ -124,7 +124,7 @@ tracing = "0.1"
 url = "2"
 yaml-edit = { version = "0.2.3", default-features = false }
 
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
@@ -144,7 +144,7 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 
 # Linux-only extended-attribute probe in `agents::mod` (host install provenance).
 [target.'cfg(target_os = "linux")'.dependencies]

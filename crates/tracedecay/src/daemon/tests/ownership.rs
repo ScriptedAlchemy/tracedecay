@@ -4,7 +4,7 @@ use std::process::Command;
 use super::*;
 use crate::daemon::ProjectServerRequirement;
 #[cfg(unix)]
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     DoctorReportV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
 };
 

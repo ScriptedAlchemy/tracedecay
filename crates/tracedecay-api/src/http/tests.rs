@@ -7,7 +7,7 @@ use super::{
     parse_configuration_operation, parse_context_scout_operation, parse_feedback_read_operation,
     parse_git_read_operation, parse_native_integration_operation,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     configuration::CONFIGURATION_SURFACE_OPERATION_NAMES, configuration_executable_binding_registry,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId, RouteExposureV1};

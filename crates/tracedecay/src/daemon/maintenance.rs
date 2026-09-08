@@ -10,19 +10,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
-use tracedecay_application::storage::{
+use tracedecay_contracts::storage::{
     StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1, StoreKeyV1,
     StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthBaselinePendingV1, TableGrowthSampleV1,
     TableGrowthTelemetryReadV1, TableNameV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestAdmission, RequestContext, ResolvedScope, now_micros,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use super::branch_admin::StoreAdministration;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 
 pub(super) mod generation;
@@ -2174,7 +2174,7 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::Notify;
-    use tracedecay_application::storage::{
+    use tracedecay_contracts::storage::{
         StorageByteSizeV1, StoreKeyV1, TableGrowthTelemetryReadV1, TableNameV1,
     };
     use tracedecay_domain::UtcMicros;
@@ -2657,7 +2657,7 @@ mod tests {
         .expect("telemetry fixture database");
         let project_id = tracedecay_domain::ProjectId::new("project.maintenance-shutdown")
             .expect("project identity");
-        let scope = tracedecay_application::ResolvedScope::new(
+        let scope = tracedecay_contracts::ResolvedScope::new(
             project_id,
             tracedecay_domain::RepositoryId::new("repository.maintenance-shutdown")
                 .expect("repository identity"),

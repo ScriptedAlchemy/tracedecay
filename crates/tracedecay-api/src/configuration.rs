@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::{ApplicationProblemEnvelope, ApplicationProblemKind};
+use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind};
 use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 

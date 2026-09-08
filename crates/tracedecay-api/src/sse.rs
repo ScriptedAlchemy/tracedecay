@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt, stream};
 use serde::Serialize;
-use tracedecay_application::{RequestId, StreamEvent, StreamFrontier};
+use tracedecay_contracts::{RequestId, StreamEvent, StreamFrontier};
 
 use crate::{HttpAdapterError, HttpSseEvent};
 
@@ -83,7 +83,7 @@ mod tests {
     use futures_util::Stream;
     use futures_util::task::noop_waker_ref;
     use serde_json::json;
-    use tracedecay_application::{StreamEvent, StreamTermination};
+    use tracedecay_contracts::{StreamEvent, StreamTermination};
 
     use super::{encode_events, stream};
     use crate::HttpAdapterError;

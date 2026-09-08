@@ -24,12 +24,15 @@ use gix::{
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::canonical_text::{
     encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
 };
 use tracedecay_graph_db::GraphConflictContextV1;
 
+use tracedecay_application::code_index::{
+    DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
+};
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CodeGenerationSourceCommitmentsV1, ComponentRevision,
     ContentDigest, ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -48,9 +51,6 @@ use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
     ResidentMemoryReservationV1, detected_process_resident_memory_limit_v1,
     sampled_process_resident_bytes_v1,
-};
-use tracedecay_usecases::code_index::{
-    DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
 };
 
 use self::freshness_witness::{
@@ -5735,7 +5735,7 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     progress_producer_incarnation: u64,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
-        Option<tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
+        Option<tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
 
 /// Immutable authority for historical-generation reads and their detached
@@ -6175,7 +6175,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// exact/lexical/graph search. `None` retires a stale runtime.
     pub fn replace_semantic_schedule_hook(
         &mut self,
-        hook: Option<tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
+        hook: Option<tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
     ) {
         self.semantic_schedule = hook;
     }

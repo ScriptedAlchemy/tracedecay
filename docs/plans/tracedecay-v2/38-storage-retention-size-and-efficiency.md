@@ -262,7 +262,7 @@ measurements, not inferred table sizes.
   "no compaction policy exists"; both were stale. `CompactionTriggerPolicyV1`
   (free-page-ratio threshold plus a reclaimable-bytes floor) and
   `CompactionPlacementV1::DeferredBackground` live in
-  `crates/tracedecay-application/src/storage/compaction.rs`. The placement enum
+  `crates/tracedecay-contracts/src/storage/compaction.rs`. The placement enum
   is the type-level enforcement of the "no background compaction that competes
   with foreground writes" non-goal: a compaction cannot be constructed into a
   foreground lane. The daemon maintenance cadence applies the policy from

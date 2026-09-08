@@ -13,7 +13,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 hotpath = [
     "hotpath/hotpath",
     "hotpath/tokio",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-domain/hotpath",
     "tracedecay-graph-db/hotpath",
@@ -25,7 +25,7 @@ hotpath = [
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
@@ -37,7 +37,7 @@ hotpath-alloc = [
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
@@ -57,7 +57,7 @@ serde_json = "1"
 sha2 = "0.11"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 # Grammar-free entry only: the admitted graph handle wraps the interactive
 # reader, so no tree-sitter bundle is linked into this crate.
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }

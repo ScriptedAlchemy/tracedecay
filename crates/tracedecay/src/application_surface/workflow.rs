@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use tracedecay_api::WorkflowOperation;
-use tracedecay_application::{
+use tracedecay_contracts::{
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
     WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
@@ -28,7 +28,7 @@ pub(super) fn router_with_executor(
 }
 
 pub(super) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
-    let registry = tracedecay_application::workflow_executable_binding_registry()
+    let registry = tracedecay_contracts::workflow_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
     for operation in WorkflowOperation::ALL {
         let operation_id =
@@ -103,7 +103,7 @@ pub(crate) async fn invoke_workflow_operation(
             else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            invoke::<tracedecay_application::WorkflowDefinitionDisposition>(
+            invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
                 executor,
                 operation,
                 request_id,
@@ -118,7 +118,7 @@ pub(crate) async fn invoke_workflow_operation(
             else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            invoke::<tracedecay_application::WorkflowDefinitionDisposition>(
+            invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
                 executor,
                 operation,
                 request_id,
@@ -133,7 +133,7 @@ pub(crate) async fn invoke_workflow_operation(
             else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            invoke::<tracedecay_application::WorkflowDefinitionDisposition>(
+            invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
                 executor,
                 operation,
                 request_id,
@@ -148,7 +148,7 @@ pub(crate) async fn invoke_workflow_operation(
             else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            invoke::<tracedecay_application::WorkflowDefinitionValidation>(
+            invoke::<tracedecay_contracts::WorkflowDefinitionValidation>(
                 executor,
                 operation,
                 request_id,
@@ -205,7 +205,7 @@ pub(crate) async fn invoke_workflow_operation(
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionDiffRequest>(body) else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            invoke::<tracedecay_application::WorkflowDefinitionDiff>(
+            invoke::<tracedecay_contracts::WorkflowDefinitionDiff>(
                 executor,
                 operation,
                 request_id,
@@ -219,7 +219,7 @@ pub(crate) async fn invoke_workflow_operation(
             let Ok(decoded) = serde_json::from_value::<TaskHandoffIssueRequest>(body) else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            invoke::<tracedecay_application::TaskHandoffGrant>(
+            invoke::<tracedecay_contracts::TaskHandoffGrant>(
                 executor,
                 operation,
                 request_id,
@@ -233,7 +233,7 @@ pub(crate) async fn invoke_workflow_operation(
             let Ok(decoded) = serde_json::from_value::<TaskHandoffRedeemRequest>(body) else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            invoke::<tracedecay_application::TaskHandoffRedeemed>(
+            invoke::<tracedecay_contracts::TaskHandoffRedeemed>(
                 executor,
                 operation,
                 request_id,
@@ -319,14 +319,14 @@ pub(crate) async fn invoke_workflow_operation(
 async fn invoke<T>(
     executor: Option<&dyn DaemonInvocationExecutor>,
     operation: WorkflowOperation,
-    request_id: tracedecay_application::RequestId,
+    request_id: tracedecay_contracts::RequestId,
     controls: tracedecay_api::HttpApplicationControls,
     request: WorkflowApplicationInvocation,
     select: fn(
         tracedecay_daemon_protocol::DaemonInvocationOutcome,
     ) -> Option<(
-        tracedecay_application::ResolvedScope,
-        tracedecay_application::ApplicationOutcome<T>,
+        tracedecay_contracts::ResolvedScope,
+        tracedecay_contracts::ApplicationOutcome<T>,
     )>,
 ) -> Response
 where
@@ -353,8 +353,8 @@ macro_rules! workflow_selector {
         fn $name(
             outcome: tracedecay_daemon_protocol::DaemonInvocationOutcome,
         ) -> Option<(
-            tracedecay_application::ResolvedScope,
-            tracedecay_application::ApplicationOutcome<$output>,
+            tracedecay_contracts::ResolvedScope,
+            tracedecay_contracts::ApplicationOutcome<$output>,
         )> {
             match outcome {
                 tracedecay_daemon_protocol::DaemonInvocationOutcome::WorkflowApplication {
@@ -375,22 +375,22 @@ workflow_selector!(
 workflow_selector!(
     activate_definition_outcome,
     ActivateDefinition,
-    tracedecay_application::WorkflowDefinitionDisposition
+    tracedecay_contracts::WorkflowDefinitionDisposition
 );
 workflow_selector!(
     retire_definition_outcome,
     RetireDefinition,
-    tracedecay_application::WorkflowDefinitionDisposition
+    tracedecay_contracts::WorkflowDefinitionDisposition
 );
 workflow_selector!(
     reject_definition_outcome,
     RejectDefinition,
-    tracedecay_application::WorkflowDefinitionDisposition
+    tracedecay_contracts::WorkflowDefinitionDisposition
 );
 workflow_selector!(
     validate_definition_outcome,
     ValidateDefinition,
-    tracedecay_application::WorkflowDefinitionValidation
+    tracedecay_contracts::WorkflowDefinitionValidation
 );
 workflow_selector!(
     get_definition_outcome,
@@ -410,17 +410,17 @@ workflow_selector!(
 workflow_selector!(
     diff_definition_outcome,
     DiffDefinition,
-    tracedecay_application::WorkflowDefinitionDiff
+    tracedecay_contracts::WorkflowDefinitionDiff
 );
 workflow_selector!(
     handoff_issue_outcome,
     HandoffIssue,
-    tracedecay_application::TaskHandoffGrant
+    tracedecay_contracts::TaskHandoffGrant
 );
 workflow_selector!(
     handoff_redeem_outcome,
     HandoffRedeem,
-    tracedecay_application::TaskHandoffRedeemed
+    tracedecay_contracts::TaskHandoffRedeemed
 );
 workflow_selector!(
     start_run_outcome,

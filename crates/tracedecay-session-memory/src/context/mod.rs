@@ -1,7 +1,7 @@
 //! Request-context value types and the bounded read cache.
 //!
 //! The code-index-backed source-read helpers (`source_read`, `read_modes`,
-//! `markdown_sections`) stayed in `tracedecay-usecases`; its `context`
+//! `markdown_sections`) stayed in `tracedecay-application`; its `context`
 //! module re-exports this one alongside them.
 
 pub mod read_cache;
@@ -9,7 +9,7 @@ mod registered_scope;
 
 use std::fmt;
 
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::{AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId};
 
 pub use registered_scope::RegisteredScopeResolver;
@@ -181,7 +181,7 @@ impl ResolvedSessionIdentity {
     /// those fields from a path or the current working directory.
     pub fn application_scope(
         &self,
-    ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
+    ) -> Result<tracedecay_contracts::ResolvedScope, ApplicationScopeError> {
         let project_id = self
             .project_id()
             .ok_or(ApplicationScopeError::ProfileIdentityWithoutProject)?;
@@ -193,7 +193,7 @@ impl ResolvedSessionIdentity {
         let reference =
             tracedecay_domain::RefId::new(format!("refs/heads/{}", git_route.branch_id().as_str()))
                 .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-        tracedecay_application::ResolvedScope::new(
+        tracedecay_contracts::ResolvedScope::new(
             project_id.clone(),
             git_route.repository_id().clone(),
             git_route.worktree_id().clone(),
@@ -216,14 +216,14 @@ impl ResolvedSessionIdentity {
     /// scope from ever comparing equal to a real project scope.
     pub fn session_request_scope(
         &self,
-    ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
+    ) -> Result<tracedecay_contracts::ResolvedScope, ApplicationScopeError> {
         let SessionOwner::Profile { profile_id } = &self.owner else {
             return self.application_scope();
         };
         let contract = |error: tracedecay_domain::DomainError| {
             ApplicationScopeError::Contract(error.to_string())
         };
-        tracedecay_application::ResolvedScope::new(
+        tracedecay_contracts::ResolvedScope::new(
             ProjectId::new(format!("{PROFILE_SESSION_SCOPE_PREFIX}.{profile_id}"))
                 .map_err(contract)?,
             RepositoryId::new(format!("{PROFILE_SESSION_SCOPE_PREFIX}.{}", self.store_id))
@@ -393,19 +393,19 @@ pub fn application_observed_at() -> tracedecay_domain::UtcMicros {
 /// Rechecks immutable application admission together with the live transport
 /// cancellation token retained by the root runtime.
 pub fn application_request_interruption(
-    context: &tracedecay_application::RequestContext,
+    context: &tracedecay_contracts::RequestContext,
     cancellation: &CancellationToken,
 ) -> Option<RequestInterruption> {
     if cancellation.is_cancelled()
         || matches!(
             context.admission_at(application_observed_at()),
-            tracedecay_application::RequestAdmission::Cancelled
+            tracedecay_contracts::RequestAdmission::Cancelled
         )
     {
         Some(RequestInterruption::Cancelled)
     } else if !matches!(
         context.admission_at(application_observed_at()),
-        tracedecay_application::RequestAdmission::Admitted
+        tracedecay_contracts::RequestAdmission::Admitted
     ) {
         Some(RequestInterruption::DeadlineExceeded)
     } else {
@@ -417,7 +417,7 @@ pub fn application_request_interruption(
 /// and the live cancellation token owned by the transport/runtime boundary.
 #[hotpath::measure(label = "usecases.context.interruptible", future = true)]
 pub async fn run_application_request_interruptible<T, F>(
-    context: &tracedecay_application::RequestContext,
+    context: &tracedecay_contracts::RequestContext,
     cancellation: &CancellationToken,
     future: impl std::future::Future<Output = T>,
     on_interruption: F,
@@ -450,8 +450,8 @@ where
 /// application cancellation signal. The wait itself terminates even when
 /// `future` never wakes cooperatively.
 pub async fn run_deadline_signal_interruptible<T>(
-    deadline: &tracedecay_application::Deadline,
-    cancellation: &tracedecay_application::CancellationSignal,
+    deadline: &tracedecay_contracts::Deadline,
+    cancellation: &tracedecay_contracts::CancellationSignal,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, RequestInterruption> {
     if cancellation.is_cancelled() {
@@ -605,7 +605,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestAdmission,
     };
@@ -682,7 +682,7 @@ mod tests {
     }
 
     fn grant_for(
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         expires_at: UtcMicros,
     ) -> CapabilityGrantSnapshot {
         CapabilityGrantSnapshot::new(
@@ -701,16 +701,16 @@ mod tests {
     }
 
     fn application_context(
-        scope: tracedecay_application::ResolvedScope,
+        scope: tracedecay_contracts::ResolvedScope,
         grant: CapabilityGrantSnapshot,
         deadline: UtcMicros,
         cancellation: CancellationContext,
-    ) -> tracedecay_application::RequestContext {
-        tracedecay_application::RequestContext::new(
+    ) -> tracedecay_contracts::RequestContext {
+        tracedecay_contracts::RequestContext::new(
             ActorId::new("actor.cursor").unwrap(),
             scope,
             grant,
-            tracedecay_application::RequestId::new("request.application-slice-1").unwrap(),
+            tracedecay_contracts::RequestId::new("request.application-slice-1").unwrap(),
             Deadline::new(deadline).unwrap(),
             cancellation,
         )
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn canonical_application_context_rejects_grant_for_another_scope() {
         let scope = project_identity().application_scope().unwrap();
-        let other_scope = tracedecay_application::ResolvedScope::new(
+        let other_scope = tracedecay_contracts::ResolvedScope::new(
             ProjectId::new("project.other").unwrap(),
             RepositoryId::new("repository.other").unwrap(),
             WorktreeId::new("worktree.other").unwrap(),
@@ -868,11 +868,11 @@ mod tests {
 
         // A grant minted for a different scope must fail closed, never be
         // rebound onto this request's scope.
-        let error = tracedecay_application::RequestContext::new(
+        let error = tracedecay_contracts::RequestContext::new(
             ActorId::new("actor.cursor").unwrap(),
             scope,
             grant,
-            tracedecay_application::RequestId::new("request.application-slice-1").unwrap(),
+            tracedecay_contracts::RequestId::new("request.application-slice-1").unwrap(),
             Deadline::new(UtcMicros(50)).unwrap(),
             CancellationContext::active("request.application-slice-1").unwrap(),
         )
@@ -880,7 +880,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                tracedecay_application::ApplicationContractError::Inconsistent {
+                tracedecay_contracts::ApplicationContractError::Inconsistent {
                     field: "request context grant scope"
                 }
             ),
@@ -900,10 +900,10 @@ mod tests {
 
         assert!(application.cancellation().is_cancelled());
         match application.cancellation().state {
-            tracedecay_application::CancellationState::Cancelled { requested_at } => {
+            tracedecay_contracts::CancellationState::Cancelled { requested_at } => {
                 assert_eq!(requested_at, UtcMicros(10));
             }
-            tracedecay_application::CancellationState::Active => {
+            tracedecay_contracts::CancellationState::Active => {
                 panic!("cancelled token must cross as cancelled")
             }
         }

@@ -8,7 +8,7 @@
 //! produces a *typed* refusal; the index is what makes the rule survive a crash
 //! between the read and the write.
 
-use tracedecay_application::{WorkPlacementStorageError, WorkPlacementStoragePort};
+use tracedecay_contracts::{WorkPlacementStorageError, WorkPlacementStoragePort};
 use tracedecay_domain::{
     ProjectId, RepositoryId, RunId, TaskId, WorkAuthority, WorkPlacementIdentityV1,
     WorkPlacementKindV1, WorkPlacementStateV1, WorkPlacementV1,

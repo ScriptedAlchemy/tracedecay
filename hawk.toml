@@ -11,7 +11,7 @@ reason = "shipped CLI, daemon, MCP, and dashboard binary"
 # workspace `cargo test --doc` rebuilds every library as rustdoc.
 
 [[doctest]]
-package = "tracedecay-application"
+package = "tracedecay-contracts"
 
 [[doctest]]
 package = "tracedecay-code-index"

@@ -8,7 +8,7 @@ versioned, explainable decisions; it never performs storage, provider, runtime,
 Git, configuration, or delivery effects.
 
 The canonical mechanism is the callable evaluator API consumed directly by
-`tracedecay-application`, together with the decision revision and explanation
+`tracedecay-contracts`, together with the decision revision and explanation
 carried in the application result. Historical type names, module layouts, and
 contract fixtures are implementation evidence, not an inventory to recreate.
 An evaluator required by a production journey but not callable from that

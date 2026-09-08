@@ -7,13 +7,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracedecay_application::{
-    ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestId,
-};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
     CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_contracts::{
+    ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestId,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -675,7 +675,7 @@ pub async fn open_verified_graph_query(
     request: VerifiedGraphQueryRequest<'_>,
     source: Option<&dyn CodeGraphSourceAuthorityPort>,
 ) -> Result<VerifiedGraphQuery> {
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let context = await_graph_port_wait(
         &request.deadline,
         request.cancellation,
@@ -693,7 +693,7 @@ pub async fn open_verified_graph_query(
     let source = match source {
         None => None,
         Some(port) => {
-            let observed_at = tracedecay_application::now_micros();
+            let observed_at = tracedecay_contracts::now_micros();
             let runtime = await_graph_port_wait(
                 &request.deadline,
                 request.cancellation,
@@ -712,7 +712,7 @@ pub async fn open_verified_graph_query(
         }
     };
     let graph_cancellation = application_graph_cancellation(request.cancellation);
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
     let verified = await_graph_port_wait(
         &request.deadline,
@@ -726,7 +726,7 @@ pub async fn open_verified_graph_query(
     .await?
     .map_err(map_code_graph_read_runtime_error)?;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let reader = verified
         .reader_with_cancellation(&context, observed_at, Arc::clone(&graph_cancellation))
         .map_err(map_code_graph_read_runtime_error)?;
@@ -767,20 +767,20 @@ fn refuse_if_query_closed(
             super::CodeGraphReadError::Cancelled,
         ));
     }
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     if deadline.is_elapsed_at(observed_at) {
         return Err(map_code_graph_read_runtime_error(
             super::CodeGraphReadError::TimedOut,
         ));
     }
     match context.admission_at(observed_at) {
-        tracedecay_application::RequestAdmission::Admitted => Ok(()),
-        tracedecay_application::RequestAdmission::Cancelled => Err(
+        tracedecay_contracts::RequestAdmission::Admitted => Ok(()),
+        tracedecay_contracts::RequestAdmission::Cancelled => Err(
             map_code_graph_read_runtime_error(super::CodeGraphReadError::Cancelled),
         ),
-        tracedecay_application::RequestAdmission::TimedOut => Err(
-            map_code_graph_read_runtime_error(super::CodeGraphReadError::TimedOut),
-        ),
+        tracedecay_contracts::RequestAdmission::TimedOut => Err(map_code_graph_read_runtime_error(
+            super::CodeGraphReadError::TimedOut,
+        )),
     }
 }
 

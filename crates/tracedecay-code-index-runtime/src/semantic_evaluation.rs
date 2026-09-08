@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, ComponentRevision, ManifestDigest,
     SemanticSearchIndexProfileV1, VectorGenerationIdV1, canonical_sha256,
@@ -31,13 +31,13 @@ use crate::search_eval::{
     ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
     evaluate_default_activation_candidate,
 };
-use tracedecay_usecases::semantic_runtime::{
+use tracedecay_application::semantic_runtime::{
     SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
     SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationProfileCandidateV1,
     SemanticEvaluationPublicationSnapshotPortV1, SemanticEvaluationPublicationSnapshotV1,
     SemanticEvaluationSnapshotPortV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
 };
-use tracedecay_usecases::store::vector_generations::{
+use tracedecay_application::store::vector_generations::{
     BaseGenerationIncompatibilityV1, GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
     VectorGenerationStoreErrorV1,
 };
@@ -266,7 +266,7 @@ pub async fn build_daemon_semantic_evaluation_candidate(
 
     let status = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.runtime_status",
-        tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+        tracedecay_application::semantic_runtime::project_semantic_application_status(
             project_root,
             None,
         )
@@ -334,7 +334,7 @@ pub async fn build_daemon_semantic_evaluation_candidate(
     }
     let runtime = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.production_runtime",
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
+        tracedecay_application::semantic_runtime::project_semantic_production_runtime(project_root)
     );
     let Some(runtime) = runtime else {
         tracing::warn!("semantic evaluation candidate production runtime is unavailable");
@@ -433,9 +433,9 @@ fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
 }
 
 pub fn semantic_publication_generation(
-    state: &tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
+    state: &tracedecay_application::semantic_runtime::SemanticRuntimeStateV1,
 ) -> Result<VectorGenerationIdV1, SemanticActivationCoordinationErrorV1> {
-    use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1;
+    use tracedecay_application::semantic_runtime::SemanticRuntimeStateV1;
 
     match state {
         SemanticRuntimeStateV1::Current { receipt } => Ok(receipt.activated_generation.clone()),
@@ -513,13 +513,15 @@ fn daemon_semantic_evaluation_candidate(
         // certifying reader recomputes the identical bound from the same
         // immutable generation, so exact-equality certification still holds.
         maximum_distance_micros:
-            tracedecay_usecases::semantic_runtime::measure_acceptance_calibration(vector.vectors())
-                .maximum_distance_micros,
+            tracedecay_application::semantic_runtime::measure_acceptance_calibration(
+                vector.vectors(),
+            )
+            .maximum_distance_micros,
         minimum_margin_micros: 0,
     };
     Ok(SemanticEvaluationProfileCandidateV1 {
         evaluated_profile_id: evaluated_profile_id.to_owned(),
-        profile: tracedecay_usecases::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
+        profile: tracedecay_application::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
             profile_id: material.profile.profile_id.clone(),
             calibrations: material.profile.calibrations.clone(),
             score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
@@ -532,16 +534,17 @@ fn daemon_semantic_evaluation_candidate(
             rerank_policy_id: material.profile.rerank_policy_id.clone(),
             retrieval_budget: material.profile.retrieval_budget,
         },
-        diversity: tracedecay_usecases::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
-            policy_id: material.diversity.policy_id.clone(),
-            per_source_namespace: material.diversity.per_source_namespace,
-            per_source_instance: material.diversity.per_source_instance,
-            per_repository: material.diversity.per_repository,
-            per_file: material.diversity.per_file,
-            per_session_or_thread: material.diversity.per_session_or_thread,
-            per_copy_cluster: material.diversity.per_copy_cluster,
-            per_evidence_role: material.diversity.per_evidence_role,
-        },
+        diversity:
+            tracedecay_application::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
+                policy_id: material.diversity.policy_id.clone(),
+                per_source_namespace: material.diversity.per_source_namespace,
+                per_source_instance: material.diversity.per_source_instance,
+                per_repository: material.diversity.per_repository,
+                per_file: material.diversity.per_file,
+                per_session_or_thread: material.diversity.per_session_or_thread,
+                per_copy_cluster: material.diversity.per_copy_cluster,
+                per_evidence_role: material.diversity.per_evidence_role,
+            },
         rerank: None,
         compatibility: RetrievalCompatibilityPinsV1 {
             semantic: Some(SemanticCompatibilityPinsV1 {
@@ -897,7 +900,7 @@ pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
         Mutex<
             BTreeMap<
                 CodeGenerationId,
-                Arc<tracedecay_usecases::semantic_runtime::PreparedSemanticEvaluationGenerationV1>,
+                Arc<tracedecay_application::semantic_runtime::PreparedSemanticEvaluationGenerationV1>,
             >,
         >,
     >,
@@ -1031,7 +1034,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 .next()
                 .map(|generation| generation.query_factory().clone());
             let runtime =
-                tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                     &self.project_root,
                 )
                 .ok_or_else(|| {
@@ -1110,7 +1113,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     .next()
                     .map(|generation| generation.query_factory().clone());
                 let runtime =
-                    tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                    tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                         &self.project_root,
                     )
                     .ok_or_else(|| {
@@ -1156,7 +1159,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 )
             })?;
             let runtime =
-                tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                     &self.project_root,
                 )
                 .ok_or_else(|| {
@@ -1442,7 +1445,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                                 )
                             })?;
                         let runtime =
-                        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                        tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                             &self.project_root,
                         )
                         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
@@ -1620,7 +1623,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                     vector_generation_id,
                 ) {
                     (Some(verification), Some(revision), Some(generation)) => Some((
-                        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                        tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                             &self.snapshot.project_root,
                         )
                         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?,

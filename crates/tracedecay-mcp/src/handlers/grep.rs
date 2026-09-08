@@ -10,13 +10,13 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_application::{
-    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
-    OmissionReason,
-};
 use tracedecay_code_index::grep_search::{
     GrepScanOmissionsV1, GrepSearchHit, GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
     MAX_LINE_BYTES, search_tree_with_cancel,
+};
+use tracedecay_contracts::{
+    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
+    OmissionReason,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
@@ -65,8 +65,8 @@ pub async fn handle_grep(
     graph: std::result::Result<&VerifiedGraphQuery, &TraceDecayError>,
     args: Value,
     scope_prefix: Option<&str>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let pattern =
         args.get("pattern")
@@ -122,7 +122,7 @@ pub async fn handle_grep(
                     cancelled.load(std::sync::atomic::Ordering::Acquire)
                         || transport_cancellation
                             .as_ref()
-                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
                 })
             },
         ),

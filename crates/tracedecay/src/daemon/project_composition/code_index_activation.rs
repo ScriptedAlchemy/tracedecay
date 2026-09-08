@@ -22,7 +22,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) semantic_resources: SemanticResourceCeilings,
     pub(super) semantic_document_composition: EmbeddingDocumentCompositionV1,
     pub(super) native_graph_activation: bool,
-    pub(super) scope: tracedecay_application::ResolvedScope,
+    pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
@@ -106,7 +106,7 @@ pub(super) fn code_index_activation_mount(
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked after code-index mount".to_owned());
                 }
-                if tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                if tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                     &project_root,
                 )
                 .is_some()
@@ -145,7 +145,7 @@ struct QueryAuthorityWaitInputs {
     project_id: tracedecay_domain::ProjectId,
     graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     profile_id: tracedecay_domain::configuration::UserProfileId,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     route_registered: Arc<AtomicBool>,
     cancellation: CancellationToken,
 }

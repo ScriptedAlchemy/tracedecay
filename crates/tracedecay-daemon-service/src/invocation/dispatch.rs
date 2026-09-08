@@ -652,7 +652,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                let request = match tracedecay_application::primitive_code_into_primitive(
+                let request = match tracedecay_contracts::primitive_code_into_primitive(
                     request,
                     tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(
                     ),

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, Deadline, RequestContext, RequestId, SafeDiagnostic,
     WorkAttemptListRequestV1, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
     WorkExperienceRequestV1, WorkExpertiseConsentSnapshotV1, WorkProductBindingV1,
@@ -34,18 +34,18 @@ pub(super) fn generate_proposal(
     context: &RequestContext,
     capability: &str,
     use_case: &UseCaseId,
-    request: tracedecay_application::GenerateProposalRequest,
-) -> Result<tracedecay_application::GeneratedWorkProposal, ApplicationProblem> {
+    request: tracedecay_contracts::GenerateProposalRequest,
+) -> Result<tracedecay_contracts::GeneratedWorkProposal, ApplicationProblem> {
     let capability = CapabilityId::new(capability).map_err(|_| {
         work_product_problem(
-            tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
         )
     })?;
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    tracedecay_usecases::work::work_intelligence_service(&registered.database, binding)
+    tracedecay_application::work::work_intelligence_service(&registered.database, binding)
         .map_err(|_| {
             work_product_problem(
-                tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+                tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
             )
         })?
         .generate_proposal(
@@ -61,7 +61,7 @@ pub(super) fn generate_proposal(
 #[hotpath::measure(label = "daemon.service.work.execution_history")]
 pub(super) fn execution_history(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -96,7 +96,7 @@ pub(super) fn execution_history(
                 message: "The Work execution timing authority is unavailable.".to_owned(),
             })
         })?;
-        tracedecay_application::project_work_execution_history(&storage, context, attempts)
+        tracedecay_contracts::project_work_execution_history(&storage, context, attempts)
     });
     complete_work_read(
         registered,
@@ -132,11 +132,13 @@ pub(super) async fn experience(
         return unavailable(request_id);
     };
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence =
-        match tracedecay_usecases::work::work_intelligence_service(&registered.database, binding) {
-            Ok(service) => service,
-            Err(_) => return unavailable(request_id),
-        };
+    let intelligence = match tracedecay_application::work::work_intelligence_service(
+        &registered.database,
+        binding,
+    ) {
+        Ok(service) => service,
+        Err(_) => return unavailable(request_id),
+    };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         registered.database.clone(),
     );
@@ -187,11 +189,13 @@ pub(super) fn compare_proposal(
         return unavailable(request_id);
     };
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence =
-        match tracedecay_usecases::work::work_intelligence_service(&registered.database, binding) {
-            Ok(service) => service,
-            Err(_) => return unavailable(request_id),
-        };
+    let intelligence = match tracedecay_application::work::work_intelligence_service(
+        &registered.database,
+        binding,
+    ) {
+        Ok(service) => service,
+        Err(_) => return unavailable(request_id),
+    };
     complete_work_read(
         registered,
         request_id,

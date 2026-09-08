@@ -551,7 +551,7 @@ pub(crate) async fn handle_tool_call(
     // mounts that owner in process — rather than the bare registry path whose
     // missing executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
-    if tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
+    if tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
         let runtime = open_active_project_scoped_runtime(cg).await;
         // The daemon serves retained tools only for registered projects, so
         // mirror `real_mcp_server` and register this graph's identity in the

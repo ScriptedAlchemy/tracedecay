@@ -2,7 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantId,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, RegisteredRootLocatorV1, RequestContext,
     RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
@@ -21,7 +22,6 @@ use tracedecay_lsp::{
     UnavailableSemanticProvider, UpstreamCapabilities,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 
 use super::{
     RecordingFeedbackCycleObservations, UnavailableCancellationAuthority,

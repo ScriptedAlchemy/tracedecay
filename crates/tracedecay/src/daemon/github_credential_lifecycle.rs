@@ -9,7 +9,7 @@ use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::UserProfileId;
 use zeroize::Zeroizing;
 
-use tracedecay_usecases::advisory::github_runtime::{
+use tracedecay_application::advisory::github_runtime::{
     GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
     GitHubReadOnlyCredentialSecretV1, GitHubReadPermissionV1,
     ProfileGitHubReadOnlyCredentialMountOutcomeV1,
@@ -424,7 +424,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
 
-    use tracedecay_usecases::advisory::github_runtime::{
+    use tracedecay_application::advisory::github_runtime::{
         GitHubReadPermissionV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
         RegisteredGitHubReadOnlyCredentialV1,
         mount_profile_github_read_only_credential_authority_v1,

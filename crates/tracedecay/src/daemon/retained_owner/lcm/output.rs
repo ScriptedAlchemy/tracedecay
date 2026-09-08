@@ -1,7 +1,7 @@
 //! Typed projections from daemon session-temporal values to retained results.
 
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+use tracedecay_contracts::retained_surfaces::{
     ClosedUtcIntervalV1, CompactLineageEdgeV1, HydrationStateResultV1, LcmContentRangeV1,
     LcmDescribeExternalPayloadV1, LcmDescribeSourceOverviewV1, LcmDescribeSummaryNodeV1,
     LcmDescriptionV1, LcmExpandQueryBudgetV1, LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1,
@@ -49,7 +49,7 @@ pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporal
             summary: value.watermarks.summary,
         },
         authorized_root: value.authorized_root,
-        coverage: tracedecay_application::retained_surfaces::TemporalCoverageV1 {
+        coverage: tracedecay_contracts::retained_surfaces::TemporalCoverageV1 {
             visible: value.coverage.visible,
             hidden: value.coverage.hidden,
             unknown: value.coverage.unknown,

@@ -255,7 +255,7 @@ fn prepared_error_reason(
 }
 
 fn branch_diff_scope_digest(
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     request: &code_search::CodeIndexBranchDiffRequestV1,
     base_generation: &tracedecay_domain::CodeGenerationId,
     head_generation: &tracedecay_domain::CodeGenerationId,
@@ -555,7 +555,7 @@ where
                     &bindings,
                     completed.changes,
                     page_size,
-                    tracedecay_application::clock::now_micros(),
+                    tracedecay_contracts::clock::now_micros(),
                 ) {
                     Ok(page) => page,
                     Err(error) => {
@@ -874,7 +874,7 @@ mod tests {
 
     #[test]
     fn continuation_binding_covers_exact_refs_commits_trees_generations_and_filters() {
-        let scope = tracedecay_application::ResolvedScope::new(
+        let scope = tracedecay_contracts::ResolvedScope::new(
             tracedecay_domain::ProjectId::new("project.diff-binding").expect("project"),
             tracedecay_domain::RepositoryId::new("repository.diff-binding").expect("repository"),
             tracedecay_domain::WorktreeId::new("worktree.diff-binding").expect("worktree"),

@@ -12,9 +12,9 @@ use tracedecay_runtime_core::storage::StoreLayout;
 use super::TraceDecay;
 
 /// Branch diagnostics are part of the downward graph-runtime port contract, so
-/// `tracedecay-usecases` owns the shape and the root engine produces exactly
+/// `tracedecay-application` owns the shape and the root engine produces exactly
 /// that type rather than a structurally identical twin.
-pub use tracedecay_usecases::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
+pub use tracedecay_application::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
 
 impl TraceDecay {
     pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {

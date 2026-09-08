@@ -1,5 +1,5 @@
 use thiserror::Error;
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
     RemoteCredentialLookupPortV1,
 };
