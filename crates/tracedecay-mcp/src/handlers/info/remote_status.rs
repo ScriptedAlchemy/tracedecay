@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn handler_returns_observed_json_when_provider_is_installed() {
         let expected = observed_fixture();
-        let provider = {
+        let provider: RemoteOperationalStatusReaderV1 = {
             let expected = expected.clone();
             Arc::new(move || expected.clone())
         };
