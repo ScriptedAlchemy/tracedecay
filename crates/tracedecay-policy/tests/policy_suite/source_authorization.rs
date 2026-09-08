@@ -6,7 +6,7 @@ use tracedecay_policy::authorization::{
     TypedOperationV1, issue_source_authorization_proof, public_source_result_shape,
 };
 const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
-    include_str!("fixtures/source_authorization/core.json");
+    include_str!("../fixtures/source_authorization/core.json");
 
 /// Byte-exact `(input_digest, decision_digest)` per truth-table row. These
 /// are the digests the evaluator produced before decision construction was

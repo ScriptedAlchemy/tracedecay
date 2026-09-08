@@ -6,7 +6,7 @@ use tracedecay_policy::authorization::{
 };
 
 const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
-    include_str!("fixtures/source_authorization/core.json");
+    include_str!("../fixtures/source_authorization/core.json");
 
 fn authorized_input() -> tracedecay_policy::authorization::SourceAuthorizationInputV1 {
     serde_json::from_str::<Vec<SourceAuthorizationTruthTableV1>>(SOURCE_AUTHORIZATION_TRUTH_TABLES)
