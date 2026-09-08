@@ -20,8 +20,8 @@ use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_b
 
 use super::{
     CapturedSnapshotV1, CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1,
-    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, StaticLanguageRegistry, now_micros,
-    projection_key,
+    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SourceContentManifestV1,
+    StaticLanguageRegistry, now_micros, projection_key,
 };
 use crate::code_index::languages::LanguageRegistry;
 
@@ -282,7 +282,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.retained_snapshot_bytes = retained_bytes;
         self._retained_snapshot_memory = retained_reservations;
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
-        self.mark_reconciled();
+        self.mark_reconciled(SourceContentManifestV1::for_snapshot(generation.snapshot()));
         let latest = self.bind_latest_complete(Arc::clone(&generation), None);
         let publication = publication_evidence(reextracted_files, &generation)?;
         Ok(CodeIndexIgnoredDependencyBuildV1 {
