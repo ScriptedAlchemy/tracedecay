@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
@@ -1469,7 +1469,7 @@ mod tests {
         // Resolves the product binary from ambient PATH twice (here and inside
         // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
         // PATH between the two reads.
-        let _env = crate::config::lock_user_data_dir_test_env();
+        let _env = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         use crate::agents::host_bundle_registry::{
             HostBundleRegistryError, verified_embedded_default_host_component_set,
         };
@@ -1657,7 +1657,7 @@ mod tests {
         // Resolves the product binary from ambient PATH twice (here and inside
         // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
         // PATH between the two reads.
-        let _env = crate::config::lock_user_data_dir_test_env();
+        let _env = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         for operation in [
             HostBundleLifecycleOpV1::Install,
             HostBundleLifecycleOpV1::Update,
@@ -1763,7 +1763,7 @@ mod tests {
         // Resolves the product binary from ambient PATH twice (here and inside
         // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
         // PATH between the two reads.
-        let _env = crate::config::lock_user_data_dir_test_env();
+        let _env = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         for operation in [
             HostBundleLifecycleOpV1::Install,
             HostBundleLifecycleOpV1::Update,

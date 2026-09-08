@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::skill_targets::SkillInstallSummary;
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// The unslugged managed-skill start marker. Same literal the agent-hosts
 /// prompt-rules block-splicer stops at.

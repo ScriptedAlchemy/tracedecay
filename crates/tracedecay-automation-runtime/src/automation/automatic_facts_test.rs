@@ -8,10 +8,10 @@ use std::{
 
 use super::super::lifecycle::AutomationRunControl;
 use super::*;
-use crate::application::memory::MemoryApplication;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1, ProvenanceId, UtcMicros};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_session_memory::memory::{
     MemoryApplicationError, MemoryMutationError, ProjectMemoryFactAddRequest,
     automatic_fact_add_command,

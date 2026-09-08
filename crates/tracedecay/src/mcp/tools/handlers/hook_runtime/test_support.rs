@@ -1,5 +1,5 @@
-use crate::agents::context_scout_v2::ContextScoutEvidenceEnvelopeExt;
 use serde_json::{Value, json};
+use tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutEvidenceEnvelopeExt;
 use tracedecay_application::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,

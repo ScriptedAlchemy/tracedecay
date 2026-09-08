@@ -1,10 +1,10 @@
-use crate::agents::context_scout_v2::{
-    ContextScoutControlV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
-};
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
+use tracedecay_agent_hosts::agents::context_scout_v2::{
+    ContextScoutControlV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
+};
 use tracedecay_application::context_scout::{
     ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1, ContextScoutFeedbackV1,
     ContextScoutWorkV1,
@@ -38,7 +38,7 @@ use super::required_value;
 async fn hook_v2_context_scout_lifecycle(
     args: &Value,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
+) -> Option<tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
     hook_v2_context_scout_lifecycle_for_session(envelope, hook_v2_native_session_id(args, envelope))
         .await
 }
@@ -46,7 +46,7 @@ async fn hook_v2_context_scout_lifecycle(
 pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     session_id: Option<SessionId>,
-) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
+) -> Option<tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
     let session_id = session_id?;
     crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
         envelope.project_id,
@@ -458,10 +458,12 @@ pub(super) async fn hook_v2_scout_read(
     let Some(lifecycle) = hook_v2_context_scout_lifecycle(args, &envelope).await else {
         return Ok(json!({ "action": action, "status": "unavailable" }));
     };
-    let Some(hook) = crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
-        envelope,
-        &snapshot.binding,
-    ) else {
+    let Some(hook) =
+        tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
+            envelope,
+            &snapshot.binding,
+        )
+    else {
         return Ok(json!({ "action": action, "status": "unavailable" }));
     };
     let Some((address, _)) = cg

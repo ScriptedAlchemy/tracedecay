@@ -61,14 +61,6 @@ pub mod tool_name;
 
 pub use product_version::PRODUCT_VERSION;
 
-// Kernel shims. `tracedecay-runtime-core` owns the substrate these two
-// subsystems were extracted alongside; aliasing the kernel modules into this
-// crate's root keeps every historical `crate::<module>::…` path in the moved
-// code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
-// do on the other side of the split.
-pub(crate) use tracedecay_domain::errors;
-pub(crate) use tracedecay_runtime_core::{config, db, storage};
-
 /// The host-install surface automation borrows from this crate.
 ///
 /// One `Copy` bundle of the managed-skill export sweeps, host-config writes,

@@ -3,8 +3,8 @@ use super::{
     EnvGuard, HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id,
     mint_hint_id, record_hint_emitted, record_hook_invoked,
 };
-use crate::config::USER_DATA_DIR_ENV;
 use std::collections::HashSet;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 /// Terminal event kinds a single `hint_candidate` may resolve to. Every
 /// candidate must be followed by exactly one of these.
@@ -29,8 +29,10 @@ fn test_hint() -> ToolHint {
 /// Enrolls `project_root` in the profile store and materializes its data dir
 /// so `deduped_project_hint` reaches the on-disk dedupe branch.
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
-    crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
+        .unwrap();
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }

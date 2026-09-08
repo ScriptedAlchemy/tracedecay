@@ -333,10 +333,11 @@ fn cursor_native_commands_are_hygienic_slash_commands() {
 
 #[test]
 fn generated_cursor_agents_are_present_and_clean() {
-    let agents: BTreeMap<&str, &str> = tracedecay::agents::plugin_bundle::cursor_files()
-        .into_iter()
-        .filter(|(path, _)| path.starts_with("agents/"))
-        .collect();
+    let agents: BTreeMap<&str, &str> =
+        tracedecay_agent_hosts::agents::plugin_bundle::cursor_files()
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("agents/"))
+            .collect();
     for expected in [
         "automation-auditor.md",
         "change-risk-reviewer.md",

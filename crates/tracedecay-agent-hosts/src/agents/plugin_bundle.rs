@@ -37,7 +37,7 @@
 //! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
 //! `plugin/skills/`, filtered per host) ∪ `<HOST>_MANIFEST_FILES` and extras.
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Stamp the plugin manifest `version` field with the crate version, returning
 /// pretty-printed JSON with a trailing newline. Shared by every host installer
@@ -76,7 +76,7 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     let servers = mcp
         .get_mut("mcpServers")
         .and_then(|value| value.as_object_mut())
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: "plugin MCP config is missing mcpServers object".to_string(),
         })?;
     let key = if servers.contains_key("tracedecay") {
@@ -84,18 +84,18 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     } else if servers.contains_key("graph") {
         "graph"
     } else {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "plugin MCP config must declare mcpServers.tracedecay or mcpServers.graph"
                 .to_string(),
         });
     };
     servers
         .get_mut(key)
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("plugin MCP config is missing mcpServers.{key}"),
         })?
         .as_object_mut()
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("plugin MCP config mcpServers.{key} must be an object"),
         })?
         .insert("command".to_string(), serde_json::json!(bin));
@@ -125,7 +125,7 @@ pub(crate) fn reject_unresolved_placeholders(rendered: &str, host: &str) -> Resu
         .iter()
         .any(|placeholder| rendered.contains(*placeholder))
     {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("{host} retained an unresolved TraceDecay placeholder"),
         });
     }

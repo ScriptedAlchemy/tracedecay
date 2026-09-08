@@ -48,17 +48,14 @@
 // across the tree churns far more than the lint is worth here.
 #![allow(clippy::large_futures)]
 
-pub mod agents;
-pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
 pub mod application_surface;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod host_admission;
-pub use tracedecay_code_index::ast_grep_search;
 pub mod bench;
 pub mod catalog_composition;
 pub mod cloud;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod host_admission;
 pub use tracedecay_code_index as code_index;
 pub use tracedecay_query as query;
 pub mod config;

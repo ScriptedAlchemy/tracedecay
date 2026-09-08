@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tracedecay_domain::canonical_sha256;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
@@ -508,8 +508,10 @@ fn codex_plugin_cached_root(home: &Path, marketplace_name: &str) -> PathBuf {
 }
 
 fn validate_codex_marketplace_name(name: &str) -> Result<&str> {
-    crate::storage::validate_project_id(name).map_err(|_| TraceDecayError::Config {
-        message: format!("Codex marketplace name {name:?} must be a safe ASCII path segment"),
+    tracedecay_runtime_core::storage::validate_project_id(name).map_err(|_| {
+        TraceDecayError::Config {
+            message: format!("Codex marketplace name {name:?} must be a safe ASCII path segment"),
+        }
     })?;
     Ok(name)
 }

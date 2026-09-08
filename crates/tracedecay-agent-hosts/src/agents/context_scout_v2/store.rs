@@ -15,8 +15,8 @@ use super::{
     MAX_SCOUT_RECENT_DELIVERIES, validate_context_scout_delivery_receipt,
     validate_context_scout_feedback, validate_receipt_shape,
 };
-use crate::db::Database;
-use crate::db::engine::params;
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::engine::params;
 
 const STORE_KEY_V1: &str = "agents.context-scout.durable.v1";
 const MAX_STORED_STATE_BYTES_V1: usize = 512 * 1024;

@@ -40,7 +40,7 @@ use super::host_io::{HostIo, home_dir, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
 use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
 use crate::automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub use crate::automation::managed_skill_model::MATERIALIZED_SKILL_MANAGED_BY;
 
@@ -515,7 +515,7 @@ fn lock_package(package_dir: &Path) -> Result<PackageLock> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    crate::storage::retry_transient_file_op(|| file.lock_exclusive())?;
+    tracedecay_runtime_core::storage::retry_transient_file_op(|| file.lock_exclusive())?;
     Ok(PackageLock(file))
 }
 
@@ -1550,8 +1550,8 @@ pub fn reconcile_detected_scopes(
 /// Prefers the tracedecay-registered project root, then the git worktree/repo
 /// checkout root, then falls back to the starting directory.
 pub fn resolve_project_root(start: &Path) -> PathBuf {
-    crate::config::discover_project_root(start)
-        .or_else(|| crate::worktree::git_worktree_root(start))
+    tracedecay_runtime_core::config::discover_project_root(start)
+        .or_else(|| tracedecay_runtime_core::worktree::git_worktree_root(start))
         .unwrap_or_else(|| start.to_path_buf())
 }
 

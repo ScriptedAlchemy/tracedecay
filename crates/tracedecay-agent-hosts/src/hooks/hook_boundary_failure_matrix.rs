@@ -14,11 +14,13 @@ use serde_json::Value;
 use super::analytics::{HOOK_ANALYTICS_FILENAME, record_hook_invoked};
 use super::tool_hints::HintAgent;
 use super::{EnvGuard, TestDaemonHookActionGuard, daemon_hook_action, lock_test_env};
-use crate::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
-    crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
+        .unwrap();
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }

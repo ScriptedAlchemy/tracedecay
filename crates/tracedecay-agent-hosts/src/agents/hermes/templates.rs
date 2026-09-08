@@ -4,8 +4,8 @@
 //! `tracedecay install --agent hermes`, keeping the installer flow in
 //! `super::write_plugin_files` focused on filesystem orchestration.
 
-use crate::errors::{Result, TraceDecayError};
 use crate::ports::mcp_tools::{AdvertisedToolV1, format_capable_tool_names};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) fn plugin_manifest(
     generator_commit: &str,

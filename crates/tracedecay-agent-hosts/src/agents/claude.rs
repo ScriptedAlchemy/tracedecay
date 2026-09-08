@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) use super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 use super::{
@@ -688,7 +688,7 @@ use crate::tool_name::{
 };
 
 /// Every managed tracedecay tool's plugin-namespace permission entry.
-fn plugin_tool_perms() -> crate::errors::Result<Vec<String>> {
+fn plugin_tool_perms() -> tracedecay_domain::errors::Result<Vec<String>> {
     Ok(super::tool_names()?
         .into_iter()
         .map(|name| format!("{PLUGIN_TOOL_PERM_PREFIX}{name}"))
@@ -769,7 +769,7 @@ fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
 /// True when the settings allowlist covers every plugin tool without
 /// prompting: either the single wildcard rule or an explicit per-tool grant
 /// for each managed tool.
-fn plugin_perms_satisfied(installed: &[&str]) -> crate::errors::Result<bool> {
+fn plugin_perms_satisfied(installed: &[&str]) -> tracedecay_domain::errors::Result<bool> {
     // The wildcard rule alone is coverage, so answer it before paying for a
     // catalog read that can fail.
     if installed.contains(&plugin_wildcard_perm().as_str()) {

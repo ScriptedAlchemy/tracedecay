@@ -130,7 +130,7 @@ fn hook_runtime_missing_malformed_or_unknown_action_waits_for_registration() {
 fn hook_event_waits_for_registered_project_authority_publication() {
     let hook_event = json!({
         "jsonrpc": "2.0",
-        "method": crate::daemon::HOOK_EVENT_METHOD,
+        "method": tracedecay_hooks::core_events::HOOK_EVENT_METHOD,
         "params": {}
     })
     .to_string();

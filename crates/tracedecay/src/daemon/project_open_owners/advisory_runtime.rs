@@ -74,21 +74,21 @@ use super::{
     DaemonInvocationState, POLICY_REVISION_V1, daemon_owned_project_source_access_at,
     register_semantic_configuration_owners,
 };
-use crate::agents::context_scout_owner::ProjectContextScoutOwnerV1;
-use crate::agents::context_scout_ports::{
-    ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
-    ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
-};
-use crate::agents::context_scout_v2::{
-    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
-    ContextScoutTriggerV1,
-};
 use crate::daemon::context_scout_lifecycle::{
     AuthorityRegistrationV1, register_context_scout_lifecycle_authority,
     unregister_context_scout_lifecycle_authority,
 };
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
+use tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1;
+use tracedecay_agent_hosts::agents::context_scout_ports::{
+    ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
+    ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
+};
+use tracedecay_agent_hosts::agents::context_scout_v2::{
+    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
+    ContextScoutTriggerV1,
+};
 use tracedecay_daemon_service::RegisteredDeliveryReadAuthorityV1;
 use tracedecay_daemon_service::{
     BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
@@ -505,7 +505,7 @@ async fn install_project_open_context_scout_configuration(
     model_config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<()> {
     let admitted_model_config = pin.control().model_path.and_then(|expected| {
-        (crate::agents::context_scout_model::context_scout_backend_from_automation_config(
+        (tracedecay_agent_hosts::agents::context_scout_model::context_scout_backend_from_automation_config(
             model_config,
         ) == expected)
             .then_some(model_config)

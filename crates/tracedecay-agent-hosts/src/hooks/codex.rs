@@ -107,9 +107,9 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let root = event_project_root_with_identity(runtime, &parsed).await;
     // A compatibility prompt callback can run before TraceDecay is installed
     // for this profile. Only an existing profile can own projectless ingest.
-    let profile = crate::storage::default_profile_root().and_then(|root| {
-        crate::storage::read_existing_profile_identity_record(
-            &root.join(crate::storage::PROFILE_IDENTITY_FILENAME),
+    let profile = tracedecay_runtime_core::storage::default_profile_root().and_then(|root| {
+        tracedecay_runtime_core::storage::read_existing_profile_identity_record(
+            &root.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME),
         )
     });
     match profile {
@@ -608,7 +608,7 @@ fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::config::USER_DATA_DIR_ENV;
+    use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
     #[test]
     fn codex_session_start_event_signals_daemon_with_real_cwd() {
@@ -646,9 +646,14 @@ mod tests {
         let project_root = project.path().canonicalize().unwrap();
         let profile_root = profile.path().canonicalize().unwrap();
         let _profile_env = crate::hooks::EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        crate::storage::pin_fixture_repository_identity(&project_root, "proj_hook_codex_prompt")
-            .unwrap();
-        let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            "proj_hook_codex_prompt",
+        )
+        .unwrap();
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
+                .unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
         let event = serde_json::json!({
             "session_id": "codex-session-1",

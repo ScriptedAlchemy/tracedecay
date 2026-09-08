@@ -101,9 +101,9 @@ async fn observation_authority_audit_ok(
 // === Host/agent integration conformance (Advisory family) ====================
 
 fn host_integration_read_from_report(
-    report: &crate::agents::host_bundle_v2::HostBundleDoctorReportV1,
+    report: &tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleDoctorReportV1,
 ) -> HostIntegrationReadV1 {
-    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1;
+    use tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorStateV1;
 
     if report.native_edit_stop_conformance.is_empty() {
         return HostIntegrationReadV1::Unsupported;
@@ -1003,11 +1003,11 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     host_home
                         .as_ref()
                         .map_or(HostIntegrationReadV1::Unsupported, |home| {
-                            let context = crate::agents::HealthcheckContext {
+                            let context = tracedecay_agent_hosts::agents::HealthcheckContext {
                                 home: home.clone(),
                                 project_path: host_project_root,
                             };
-                            crate::agents::inspect_receipt_backed_host_components(
+                            tracedecay_agent_hosts::agents::inspect_receipt_backed_host_components(
                                 &context,
                                 &host_components_root,
                                 generator_commit,

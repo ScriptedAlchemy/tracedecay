@@ -8,10 +8,12 @@ use tracedecay_store::{
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
 };
 
-use crate::application::memory::MemoryApplication;
 use crate::automation::lifecycle::AutomationRunControl;
-use crate::errors::{Result, TraceDecayError};
-use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::memory::trust::{
+    DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE,
+};
+use tracedecay_session_memory::memory::MemoryApplication;
 
 pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
@@ -433,7 +435,7 @@ fn session_fact_category(category: &str) -> Option<FactCategoryV1> {
 /// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket
 /// labels models frequently emit despite the numeric prompt instruction.
 /// Buckets map to the representative scores defined next to
-/// [`crate::memory::trust::trust_bucket`], so they cannot drift out of their
+/// [`tracedecay_runtime_core::memory::trust::trust_bucket`], so they cannot drift out of their
 /// documented ranges.
 ///
 /// Deliberate decision: the prompt forbids string labels, but they are

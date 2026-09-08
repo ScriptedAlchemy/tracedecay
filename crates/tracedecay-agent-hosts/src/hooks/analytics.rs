@@ -6,8 +6,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::errors::TraceDecayError;
 use crate::ports::hook_runtime::HookRuntimeV1;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_hooks::HookTransportDispositionV1;
 use tracedecay_sessions::admission::{
     HostAdmissionDispositionClass as HookDispositionClass, HostAdmissionStatus,
@@ -686,7 +686,7 @@ fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
         .map(|layout| layout.data_root);
     match enrolled_data_root {
         Some(data_root) => Some(data_root.join(HOOK_ANALYTICS_FILENAME)),
-        None => crate::storage::default_profile_root()
+        None => tracedecay_runtime_core::storage::default_profile_root()
             .ok()
             .filter(|profile_root| profile_root.is_dir())
             .map(|profile_root| profile_root.join(HOOK_ANALYTICS_FILENAME)),
@@ -694,7 +694,7 @@ fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn append_private_jsonl(path: &Path, line: &str) {
-    let _ = crate::storage::PrivateStoreIo::append_line(path, line);
+    let _ = tracedecay_runtime_core::storage::PrivateStoreIo::append_line(path, line);
 }
 
 fn now_unix_millis() -> u64 {

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(crate) use tracedecay_automation_runtime::automation::executable_lookup::resolve_on_path;
 
@@ -636,7 +636,7 @@ mod tests {
 
         impl AmbientKiroHomeGuard {
             fn set(value: &Path) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
+                let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
                 let previous = std::env::var_os("KIRO_HOME");
                 // SAFETY: the shared profile-discovery lock is held for the
                 // guard's lifetime, so no sibling profile test observes this
@@ -750,7 +750,7 @@ exit 0
         std::fs::set_permissions(&launcher, launcher_permissions).unwrap();
 
         let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
-        let _path = crate::config::AmbientPathGuard::set(&path);
+        let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["mcp", "add"], home.path())
             .expect("env-shebang launchers must run after interpreter admission");
 
@@ -813,7 +813,7 @@ printf '%s' "$*" > "$HOME/node-args"
         std::fs::set_permissions(&launcher, permissions).unwrap();
 
         let path = std::env::join_paths([bin_dir.path()]).unwrap();
-        let _path = crate::config::AmbientPathGuard::set(&path);
+        let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["plugin", "add"], home.path())
             .expect("the admitted multicall interpreter must launch");
 

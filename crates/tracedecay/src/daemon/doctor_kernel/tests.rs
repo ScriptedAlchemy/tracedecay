@@ -80,7 +80,8 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
 
 #[test]
 fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
-    let checked_in = crate::agents::host_bundle_v2::HostBundleDoctorReportV1::default();
+    let checked_in =
+        tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleDoctorReportV1::default();
     assert_eq!(
         host_integration_read_from_report(&checked_in),
         HostIntegrationReadV1::Absent
@@ -88,13 +89,13 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
 
     let mut drifted = checked_in;
     drifted.components.push(
-        crate::agents::host_bundle_v2::HostBundleComponentDoctorResultV1 {
+        tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorResultV1 {
             receipt_path: std::path::PathBuf::from("receipt.fixture.json"),
-            host: Some(crate::agents::host_bundle_v2::HostKindV1::Codex),
-            component: Some(crate::agents::host_bundle_v2::HostBundleComponentV1::Core),
-            state: crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1::Repairable,
+            host: Some(tracedecay_agent_hosts::agents::host_bundle_v2::HostKindV1::Codex),
+            component: Some(tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentV1::Core),
+            state: tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorStateV1::Repairable,
             registration: Some(
-                crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
+                tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
             ),
             artifacts: Vec::new(),
             repair_action: "repair fixture".to_owned(),

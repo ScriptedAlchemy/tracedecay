@@ -86,7 +86,9 @@ pub const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
     HookHostV1::OpenCode,
 ];
 
-pub fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8; 16]> {
+pub fn project_id_for_layout(
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
+) -> Option<[u8; 16]> {
     layout
         .identity
         .project_id
@@ -96,21 +98,21 @@ pub fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8
 
 pub fn publish_daemon_bindings(
     runtime: &HookRuntimeV1,
-    layout: &crate::storage::StoreLayout,
-) -> crate::errors::Result<()> {
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
+) -> tracedecay_domain::errors::Result<()> {
     let project_key = layout.identity.project_id.as_deref().ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "cannot publish Hook binding without typed project identity".to_owned(),
         }
     })?;
     let typed_project_id = ProjectId::new(project_key.to_owned()).map_err(|error| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("cannot validate Hook project identity: {error}"),
         }
     })?;
     let scope = runtime
         .resolve_hook_scope(&layout.project_root, &typed_project_id)
-        .map_err(|error| crate::errors::TraceDecayError::Config {
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("cannot resolve Hook repository/worktree scope: {error}"),
         })?;
     let now = now_utc();
@@ -151,7 +153,7 @@ pub fn publish_daemon_bindings(
         );
         tracedecay_hooks::HookConfigurationPublisherV1::new(writer)
             .publish(snapshot)
-            .map_err(|error| crate::errors::TraceDecayError::Config {
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "failed to publish {} Hook binding: {error}",
                     host.hook_key()
@@ -618,7 +620,7 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
 
 struct PreparedBoundHook {
     host: HookHostV1,
-    layout: crate::storage::StoreLayout,
+    layout: tracedecay_runtime_core::storage::StoreLayout,
     snapshot: HookConfigurationSnapshotV1,
     envelope: HookEventEnvelopeV2,
     native_session_id: Option<String>,

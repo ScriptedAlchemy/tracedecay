@@ -253,10 +253,10 @@ fn cursor_project_root_candidate_from_parsed_event(parsed: &Value) -> Option<Pat
 pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
     let resolved = cursor_hook_root_candidates(parsed)
         .into_iter()
-        .find_map(|candidate| crate::config::discover_project_root(&candidate));
+        .find_map(|candidate| tracedecay_runtime_core::config::discover_project_root(&candidate));
     let cwd_root = cursor_hook_cwd(parsed)
         .as_deref()
-        .and_then(crate::config::discover_project_root);
+        .and_then(tracedecay_runtime_core::config::discover_project_root);
     match (cwd_root, resolved) {
         // Prefer the root derived from cwd when available; this avoids routing
         // a root-B event into root A just because workspace_roots listed A first.

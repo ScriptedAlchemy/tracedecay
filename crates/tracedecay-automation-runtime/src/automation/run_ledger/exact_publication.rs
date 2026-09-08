@@ -13,7 +13,7 @@ use super::{
     validate_run_id_component,
 };
 use crate::automation::config_error;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const EXACT_RUN_SPOOL_DIR: &str = "automation_run_spool";
 const EXACT_RUN_SPOOL_LOCK: &str = "automation_run_spool.lock";
@@ -37,23 +37,30 @@ fn replace_file_atomically(
         temporary_file.sync_all()?;
         drop(temporary_file);
     }
-    crate::db::DatabaseAuthority::replace_file_atomically(temporary, destination, label)
-        .map_err(std::io::Error::other)?;
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
+        temporary,
+        destination,
+        label,
+    )
+    .map_err(std::io::Error::other)?;
     #[cfg(windows)]
     tracedecay_runtime_core::windows_security::validate_private_file(destination)?;
     Ok(())
 }
 
 pub(super) fn acquire_run_ledger_lock(path: &Path) -> std::io::Result<std::fs::File> {
-    let lock_path = crate::storage::append_lock_path(path);
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
     acquire_nofollow_lock(&lock_path)
 }
 
 fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = lock_path.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    crate::storage::reject_symlink_components(lock_path, "automation run ledger lock")?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        lock_path,
+        "automation run ledger lock",
+    )?;
     let parent = lock_path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -95,9 +102,9 @@ pub(super) fn open_run_ledger_nofollow(
     if let Some(parent) = path.parent()
         && create
     {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    crate::storage::reject_symlink_components(path, "automation run ledger")?;
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation run ledger")?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -461,7 +468,7 @@ fn publish_staged_run_record_exact_blocking_with_publisher(
     publication.validate()?;
     let ledger = run_ledger_path(dashboard_root);
     if let Some(parent) = ledger.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)
             .map_err(TraceDecayError::from)?;
     }
     let spool = spool_path(dashboard_root, run_id, publication)?;
@@ -643,7 +650,7 @@ fn remove_canonical_spool_durable(path: &Path) -> Result<()> {
     if let Some(file) = open_regular_nofollow(path)? {
         drop(file);
     }
-    crate::storage::PrivateStoreIo::remove_file_durable(path)
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
         .map(|_| ())
         .map_err(TraceDecayError::from)
 }
@@ -904,7 +911,7 @@ fn open_bound_spool(
     run_id: &str,
     publication: &ExactRunPublication,
 ) -> Result<Option<std::fs::File>> {
-    crate::storage::reject_symlink_components(path, "automation run exact spool")
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation run exact spool")
         .map_err(TraceDecayError::from)?;
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1078,8 +1085,11 @@ fn read_append_intent_state(dashboard_root: &Path) -> Result<LedgerAppendIntentS
 
 fn read_append_intent_bytes(dashboard_root: &Path) -> Result<Option<Vec<u8>>> {
     let path = append_intent_path(dashboard_root);
-    crate::storage::reject_symlink_components(&path, "automation run append intent")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &path,
+        "automation run append intent",
+    )
+    .map_err(TraceDecayError::from)?;
     let Some(file) = open_regular_nofollow(&path)? else {
         return Ok(None);
     };
@@ -1105,9 +1115,11 @@ fn read_append_intent_bytes(dashboard_root: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 fn clear_append_intent(dashboard_root: &Path) -> Result<()> {
-    crate::storage::PrivateStoreIo::remove_file_durable(&append_intent_path(dashboard_root))
-        .map(|_| ())
-        .map_err(TraceDecayError::from)
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&append_intent_path(
+        dashboard_root,
+    ))
+    .map(|_| ())
+    .map_err(TraceDecayError::from)
 }
 
 fn quarantine_corrupt_append_intent(dashboard_root: &Path, bytes: &[u8]) -> Result<()> {
@@ -1126,7 +1138,7 @@ fn quarantine_corrupt_append_intent_impl(
 ) -> Result<()> {
     let digest = Sha256::digest(bytes);
     let directory = dashboard_root.join(EXACT_RUN_APPEND_INTENT_QUARANTINE_DIR);
-    crate::storage::PrivateStoreIo::create_dir_all_durable(&directory)
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&directory)
         .map_err(TraceDecayError::from)?;
     cleanup_abandoned_corrupt_append_intent_quarantine_temps(
         &directory,
@@ -1134,8 +1146,11 @@ fn quarantine_corrupt_append_intent_impl(
         quarantine_io,
     )?;
     let path = directory.join(format!("{}.json", hex::encode(digest)));
-    crate::storage::reject_symlink_components(&path, "automation run append-intent quarantine")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &path,
+        "automation run append-intent quarantine",
+    )
+    .map_err(TraceDecayError::from)?;
     let mut count = 0_usize;
     for entry in std::fs::read_dir(&directory).map_err(TraceDecayError::from)? {
         let entry = entry.map_err(TraceDecayError::from)?;
@@ -1215,13 +1230,15 @@ fn cleanup_abandoned_corrupt_append_intent_quarantine_temps(
 }
 
 fn remove_corrupt_append_intent_quarantine_debris(path: &Path) -> Result<()> {
-    crate::storage::PrivateStoreIo::remove_file_durable(path)
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
         .map(|_| ())
         .map_err(TraceDecayError::from)
 }
 
 fn is_private_store_durable_removal_tombstone_name(name: &str) -> bool {
-    let Some(random) = name.strip_prefix(crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX) else {
+    let Some(random) =
+        name.strip_prefix(tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX)
+    else {
         return false;
     };
     random.len() == 6 && random.bytes().all(|byte| byte.is_ascii_alphanumeric())
@@ -1504,7 +1521,7 @@ fn discard_unbound_spools_for_run(dashboard_root: &Path, run_id: &str) -> Result
     visit_spool_rows(&directory, |_, _| Ok(()))?;
     visit_spool_rows(&directory, |path, identity| {
         if identity.run_id == run_id {
-            crate::storage::PrivateStoreIo::remove_file_durable(path)
+            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
                 .map_err(TraceDecayError::from)?;
         }
         Ok(())
@@ -1581,7 +1598,7 @@ fn validate_same_run_spool_history(
 
 fn with_spool_lock<T>(dashboard_root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let directory = dashboard_root.join(EXACT_RUN_SPOOL_DIR);
-    crate::storage::PrivateStoreIo::create_dir_all_durable(&directory)
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&directory)
         .map_err(TraceDecayError::from)?;
     let lock_path = dashboard_root.join(EXACT_RUN_SPOOL_LOCK);
     let lock = acquire_nofollow_lock(&lock_path).map_err(TraceDecayError::from)?;
@@ -1603,7 +1620,7 @@ fn cleanup_abandoned_exact_spool_temps(directory: &Path) -> Result<()> {
         if !is_exact_spool_owned_temp_name(name) {
             continue;
         }
-        crate::storage::PrivateStoreIo::remove_file_durable(&entry.path())
+        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&entry.path())
             .map_err(TraceDecayError::from)?;
     }
     Ok(())
@@ -1648,7 +1665,7 @@ fn is_canonical_decimal(value: &str, maximum: u64) -> bool {
 }
 
 fn digest_regular_file(path: &Path) -> Result<Option<(ManifestDigest, u64)>> {
-    crate::storage::reject_symlink_components(path, "automation run exact spool")
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation run exact spool")
         .map_err(TraceDecayError::from)?;
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -2530,7 +2547,7 @@ mod tests {
             std::fs::write(&owned, retired_bytes).expect("owned temp");
             let tombstone = directory.join(format!(
                 "{}Ab12Z9",
-                crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
             ));
 
             let failure = repair_corrupt_run_ledger_append_intent_with(
@@ -2563,7 +2580,7 @@ mod tests {
 
             let retry_tombstone = directory.join(format!(
                 "{}Z9Ab12",
-                crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
             ));
             let recursive_failure = repair_corrupt_run_ledger_append_intent_with(
                 temp.path(),
@@ -2645,14 +2662,14 @@ mod tests {
             (
                 directory.join(format!(
                     "{}Ab12Z",
-                    crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                    tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
                 )),
                 corrupt.as_slice(),
             ),
             (
                 directory.join(format!(
                     "{}Ab12_9",
-                    crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                    tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
                 )),
                 corrupt.as_slice(),
             ),
@@ -2683,7 +2700,7 @@ mod tests {
         std::fs::write(&quarantine_path, corrupt).expect("existing quarantine");
         let near_miss = directory.join(format!(
             "{}Ab12_9",
-            crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+            tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
         ));
         std::fs::write(&near_miss, b"foreign tombstone near-miss").expect("foreign entry");
 
@@ -2709,7 +2726,7 @@ mod tests {
         std::fs::create_dir_all(directory).expect("quarantine directory");
         let tombstone = directory.join(format!(
             "{}Ab12Z9",
-            crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+            tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
         ));
         std::fs::write(&tombstone, vec![b'x'; MAX_APPEND_INTENT_BYTES as usize + 1])
             .expect("oversized tombstone");
@@ -2736,7 +2753,7 @@ mod tests {
         std::fs::create_dir_all(directory).expect("quarantine directory");
         let tombstone = directory.join(format!(
             "{}Ab12Z9",
-            crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+            tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
         ));
         symlink(&intent_path, &tombstone).expect("nonregular tombstone");
 

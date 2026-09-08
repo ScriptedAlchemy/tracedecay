@@ -34,7 +34,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_hooks::DaemonHookEvent;
 use tracedecay_runtime_core::storage::StoreLayout;
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Invokes one daemon tool by name and yields its single JSON payload.
 pub type DaemonToolInvoker = for<'a> fn(
@@ -142,10 +142,10 @@ pub(crate) use test_runtime::crate_test_runtime;
 #[cfg(test)]
 mod test_runtime {
     use super::{HookRuntimeV1, Result, StoreLayout, Value};
-    use crate::errors::TraceDecayError;
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
+    use tracedecay_domain::errors::TraceDecayError;
 
     fn unavailable(capability: &str) -> TraceDecayError {
         TraceDecayError::Config {
@@ -188,8 +188,8 @@ mod test_runtime {
     /// registered identity authority; this crate's tests seed the markers
     /// directly, so the fixture reads them.
     fn initialized(project_root: &Path) -> bool {
-        crate::config::has_project_database(project_root)
-            || crate::storage::has_repository_identity_marker(project_root)
+        tracedecay_runtime_core::config::has_project_database(project_root)
+            || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
     fn layout(_: &Path) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + '_>> {

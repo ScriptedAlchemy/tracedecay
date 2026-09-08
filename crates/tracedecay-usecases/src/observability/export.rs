@@ -12,8 +12,7 @@ use tracedecay_domain::{
     ObservabilityTerminalResultV1,
 };
 use tracedecay_global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
-
-use super::{EVENT_LIMIT, OBSERVABILITY_PROVIDER};
+use tracedecay_session_memory::observability_store::{EVENT_LIMIT, OBSERVABILITY_PROVIDER};
 
 #[derive(Clone, Copy)]
 pub struct RegisteredAggregateShareExporterV1<'a> {

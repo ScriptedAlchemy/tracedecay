@@ -9,7 +9,7 @@ use super::backend::{
     AgentTaskFailureClass, AgentTaskKind, AgentTaskRetryAttempt, task_key as canonical_task_key,
 };
 use super::config_error;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod cursor;
 mod exact_lookup;
@@ -313,7 +313,7 @@ pub async fn read_run_artifact_payload(
         )));
     }
     let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
-    crate::storage::reject_symlink_components(&path, "automation artifact")
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation artifact")
         .map_err(TraceDecayError::from)?;
     let bytes = tokio::fs::read(&path)
         .await
@@ -361,9 +361,9 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    crate::storage::retry_transient_file_op(|| {
+    tracedecay_runtime_core::storage::retry_transient_file_op(|| {
         let lock = exact_publication::acquire_run_ledger_lock(path)?;
         let write_result: std::io::Result<()> = (|| {
             let dashboard_root = path.parent().ok_or_else(|| {
@@ -433,7 +433,7 @@ fn find_existing_ordinary_run(
             // A failed read must fail the dedup scan: treating it as "row not
             // seen" could admit a duplicate append. Malformed junk rows stay
             // skippable.
-            Err(error @ crate::errors::TraceDecayError::File { .. }) => {
+            Err(error @ tracedecay_domain::errors::TraceDecayError::File { .. }) => {
                 return Err(run_ledger_scan_io_error(error));
             }
             Err(_) => continue,
@@ -1606,7 +1606,9 @@ fn resolve_selected_logical_records(
             Err(error) if fail_on_malformed => return Err(error),
             // Failed reads are not malformed rows; lenient mode may only skip
             // the latter.
-            Err(error @ crate::errors::TraceDecayError::File { .. }) => return Err(error),
+            Err(error @ tracedecay_domain::errors::TraceDecayError::File { .. }) => {
+                return Err(error);
+            }
             Err(_) => continue,
         };
         if let Err(error) = require_projection_identity(&record, &lifecycle.newest) {

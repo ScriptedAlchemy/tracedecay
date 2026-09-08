@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 use url::{Host, Url};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(crate) fn validate_url(raw: &str) -> Result<()> {
     let url = parse_url(raw)?;

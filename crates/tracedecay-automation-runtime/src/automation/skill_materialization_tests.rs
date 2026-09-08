@@ -7,7 +7,7 @@ use crate::automation::host_io::{HostIo, ManagedSkillExportReport, PluginFile};
 use crate::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, SkillInstallTarget,
 };
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::*;
 

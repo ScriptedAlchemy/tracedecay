@@ -33,8 +33,8 @@ use super::backend::AgentTaskKind;
 use super::config_error;
 use super::managed_skills::{ManagedSkillState, list_managed_skills};
 use super::skill_usage::{SkillUsageSummary, summarize_skill_usage};
-use crate::application::memory::MemoryApplication;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_session_memory::memory::MemoryApplication;
 
 const AUTOMATION_OUTCOMES_FILENAME: &str = "automation_outcomes.json";
 /// Outcome refreshes update independent halves of one snapshot. This lock
@@ -322,10 +322,10 @@ async fn save_outcomes_snapshot_unlocked(
     let temporary = path.with_file_name(format!(
         ".{AUTOMATION_OUTCOMES_FILENAME}.{}.{}.{}.tmp",
         std::process::id(),
-        crate::runtime_identity::process_run_id(),
+        tracedecay_runtime_core::runtime_identity::process_run_id(),
         nonce
     ));
-    crate::db::DatabaseAuthority::publish_record_atomically(
+    tracedecay_runtime_core::db::DatabaseAuthority::publish_record_atomically(
         &temporary,
         &path,
         &bytes,

@@ -448,7 +448,7 @@ pub(crate) async fn daemon_hook_action(
     project_root: Option<&Path>,
     mut arguments: Value,
     telemetry: Option<&analytics::HookTimingSpan>,
-) -> crate::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     arguments["format"] = serde_json::json!("json");
     let payload_bytes = analytics::measure_json_payload_bytes(&arguments);
     #[cfg(test)]
@@ -853,7 +853,7 @@ impl Drop for EnvGuard {
 
 #[cfg(test)]
 pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
-    crate::config::lock_user_data_dir_test_env()
+    tracedecay_runtime_core::config::lock_user_data_dir_test_env()
 }
 
 #[cfg(test)]
@@ -939,7 +939,7 @@ impl Drop for TestDaemonHookActionGuard {
 fn take_test_daemon_hook_action(
     project_root: Option<&Path>,
     arguments: &Value,
-) -> Option<crate::errors::Result<Value>> {
+) -> Option<tracedecay_domain::errors::Result<Value>> {
     let mut state = TEST_DAEMON_HOOK_ACTION
         .state
         .lock()
@@ -950,14 +950,11 @@ fn take_test_daemon_hook_action(
     state
         .calls
         .push((project_root.map(Path::to_path_buf), arguments.clone()));
-    Some(
-        state
-            .responses
-            .pop_front()
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                message: "daemon hook test responder has no response".to_string(),
-            }),
-    )
+    Some(state.responses.pop_front().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon hook test responder has no response".to_string(),
+        }
+    }))
 }
 
 const HOOK_SESSION_ID_KEYS: &[&str] = &[
@@ -993,7 +990,7 @@ fn deduped_project_hint_with_id(
         .filter(|layout| layout.data_root.is_dir())
         .map(|layout| layout.data_root.join("tool_hints_seen.json"));
     let path = project_path.or_else(|| {
-        crate::storage::default_profile_root()
+        tracedecay_runtime_core::storage::default_profile_root()
             .ok()
             .map(|profile| profile.join("tool_hints_seen.json"))
     });
@@ -1118,7 +1115,7 @@ fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
 /// event-field readers rather than in any one host's module.
 fn event_project_root(parsed: &Value) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    crate::config::discover_project_root(&cwd)
+    tracedecay_runtime_core::config::discover_project_root(&cwd)
 }
 
 /// [`event_project_root`] for callers that hold only the raw event JSON.
@@ -1131,7 +1128,7 @@ fn event_project_root_from_json(event_json: &str) -> Option<PathBuf> {
 /// surfaces whose payload carries no `cwd` at all.
 fn process_cwd_project_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    crate::config::discover_project_root(&cwd)
+    tracedecay_runtime_core::config::discover_project_root(&cwd)
 }
 
 /// Resolves the project root from the event `cwd`, falling back to the hook
@@ -1141,7 +1138,7 @@ fn process_cwd_project_root() -> Option<PathBuf> {
 /// event into an unrelated project.
 fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
     match event_cwd_from_parsed(parsed) {
-        Some(cwd) => crate::config::discover_project_root(&cwd),
+        Some(cwd) => tracedecay_runtime_core::config::discover_project_root(&cwd),
         None => process_cwd_project_root(),
     }
 }

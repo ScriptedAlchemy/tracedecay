@@ -12,7 +12,7 @@ use std::str::FromStr;
 use yaml_edit::{Document, Mapping, Sequence, YamlNode};
 
 use crate::agents::{backup_config_file, safe_write_bytes_file};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineEnding {

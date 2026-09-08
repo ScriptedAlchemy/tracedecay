@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 #[cfg(unix)]
 use tracedecay_daemon_identity::profile_identity;
+use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
 
 #[cfg(unix)]
 fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {
@@ -177,7 +178,7 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
         })?;
     if matches!(
         owner.startup_outcome(),
-        crate::agents::context_scout_v2::ContextScoutDurableStartupOutcomeV1::Unavailable
+        tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutDurableStartupOutcomeV1::Unavailable
     ) {
         return Err(TraceDecayError::Config {
             message: "project Context Scout durable owner is unavailable".to_owned(),

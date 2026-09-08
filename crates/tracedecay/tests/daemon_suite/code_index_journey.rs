@@ -10,10 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::daemon::{
-    DaemonHandshake, DaemonHookEvent, HookAgent, HookEventNotifyOutcomeV1, call_tool,
-    notify_hook_event,
-};
+use tracedecay::daemon::{DaemonHandshake, call_tool, notify_hook_event};
+use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent, HookEventNotifyOutcomeV1};
 
 use crate::common::{DaemonProcess, tracedecay_command_with_home};
 

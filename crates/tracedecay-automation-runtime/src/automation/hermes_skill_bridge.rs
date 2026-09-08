@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::config_error;
 use super::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 const MAX_SKILL_BODY_CHARS: usize = 100_000;
 const MAX_SKILL_DEPTH: usize = 4;

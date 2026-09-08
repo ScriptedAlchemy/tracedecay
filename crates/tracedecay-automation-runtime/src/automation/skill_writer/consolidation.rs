@@ -14,7 +14,7 @@ use super::{
     SkillProposalAction, optional_proposal_string, optional_proposal_targets,
     required_proposal_string, support_files_from_proposal,
 };
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 #[derive(Debug, Clone)]
 pub(super) struct SkillArchiveProposal {

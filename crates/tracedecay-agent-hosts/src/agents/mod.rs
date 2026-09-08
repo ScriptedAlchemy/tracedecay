@@ -50,11 +50,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 
-use crate::errors::Result;
-use crate::errors::TraceDecayError;
 use crate::ports::mcp_tools::advertised_tools;
 use tracedecay_automation_runtime::automation::host_io::ManagedSkillExportReport;
 use tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary;
+use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::TraceDecayError;
 
 pub use antigravity::AntigravityIntegration;
 pub(crate) use bundle_identity::{
@@ -434,7 +434,7 @@ pub trait AgentIntegration {
         _home: &Path,
         _project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
-        Err(crate::errors::TraceDecayError::Config {
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "{} has no catalog-backed project registration projection",
                 self.name()
@@ -495,7 +495,7 @@ pub trait AgentIntegration {
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
-        Err(crate::errors::TraceDecayError::Config {
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "{} has no catalog-backed project registration projection",
                 self.name()
@@ -510,7 +510,7 @@ pub trait AgentIntegration {
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
-        Err(crate::errors::TraceDecayError::Config {
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "{} has no catalog-backed project registration projection",
                 self.name()
@@ -2953,7 +2953,7 @@ mod git_hook_tests {
 
 /// Every advertised tool name. Errors when the catalog is unavailable, so no
 /// caller can mistake a broken catalog read for "this host advertises nothing".
-pub fn tool_names() -> crate::errors::Result<Vec<String>> {
+pub fn tool_names() -> tracedecay_domain::errors::Result<Vec<String>> {
     Ok(advertised_tools()?
         .into_iter()
         .map(|tool| tool.name)
@@ -2961,7 +2961,7 @@ pub fn tool_names() -> crate::errors::Result<Vec<String>> {
 }
 
 /// The read-only subset of [`tool_names`].
-pub fn read_only_tool_names() -> crate::errors::Result<Vec<String>> {
+pub fn read_only_tool_names() -> tracedecay_domain::errors::Result<Vec<String>> {
     Ok(advertised_tools()?
         .into_iter()
         .filter(|tool| tool.read_only)
@@ -2970,7 +2970,7 @@ pub fn read_only_tool_names() -> crate::errors::Result<Vec<String>> {
 }
 
 /// Legacy-namespace permission entries for every advertised tool.
-pub fn expected_tool_perms() -> crate::errors::Result<Vec<String>> {
+pub fn expected_tool_perms() -> tracedecay_domain::errors::Result<Vec<String>> {
     Ok(advertised_tools()?
         .iter()
         .map(|tool| format!("{}{}", crate::tool_name::LEGACY_TOOL_PREFIX, tool.name))

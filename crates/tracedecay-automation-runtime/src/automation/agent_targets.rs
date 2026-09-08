@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::host_io::{HostIo, PluginFile};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 const MANIFEST_FILE: &str = ".tracedecay-managed-agents.json";
 

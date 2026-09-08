@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
-use crate::agents::AgentIntegration;
+use tracedecay_agent_hosts::agents::AgentIntegration;
 use tracedecay_runtime_core::text::format_bytes;
 
 #[test]

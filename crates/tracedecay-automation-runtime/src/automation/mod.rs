@@ -47,8 +47,8 @@ pub use lifecycle::{
 /// Canonical home for the `config_error` helper duplicated across the
 /// automation module tree; other automation submodules should call this
 /// instead of re-declaring their own copy.
-pub fn config_error(message: impl Into<String>) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Config {
+pub fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
     }
 }

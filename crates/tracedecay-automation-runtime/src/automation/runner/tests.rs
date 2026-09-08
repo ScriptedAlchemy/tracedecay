@@ -52,18 +52,18 @@ use super::{
     combined_skill_writer_evidence_or_not_combined, split_skill_runtime_failure,
     validate_session_fact_candidates,
 };
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
-use crate::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 mod early_gate;
 
 #[test]
 fn combined_skill_runtime_failure_preserves_both_error_causes() {
-    let runtime_error = crate::errors::TraceDecayError::Config {
+    let runtime_error = tracedecay_domain::errors::TraceDecayError::Config {
         message: "skill runtime failed".to_owned(),
     };
-    let record_error = crate::errors::TraceDecayError::Config {
+    let record_error = tracedecay_domain::errors::TraceDecayError::Config {
         message: "skill failed-record publication failed".to_owned(),
     };
 
@@ -97,10 +97,10 @@ fn asymmetric_combined_failure_preserves_the_successful_sibling_record() {
         "completed_at": "2"
     }))
     .expect("failed record");
-    let append_error = crate::errors::TraceDecayError::Config {
+    let append_error = tracedecay_domain::errors::TraceDecayError::Config {
         message: "skill terminal construction failed".to_owned(),
     };
-    let original_error = crate::errors::TraceDecayError::Config {
+    let original_error = tracedecay_domain::errors::TraceDecayError::Config {
         message: "combined output failed".to_owned(),
     };
 
@@ -1035,10 +1035,12 @@ async fn proposal_validation_does_not_wait_for_the_writer_lane() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory.db");
     crate::register_test_schema_installer();
-    let authority =
-        crate::db::DatabaseAuthority::acquire_test(&path, "automation validation writer lane")
-            .unwrap();
-    let (db, _) = crate::db::Database::publish_test_runtime(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &path,
+        "automation validation writer lane",
+    )
+    .unwrap();
+    let (db, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
@@ -1132,10 +1134,12 @@ async fn proposal_validation_quarantines_fields_outside_the_public_receipt_contr
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory.db");
     crate::register_test_schema_installer();
-    let authority =
-        crate::db::DatabaseAuthority::acquire_test(&path, "automation evidence closed fields")
-            .unwrap();
-    let (db, _) = crate::db::Database::publish_test_runtime(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &path,
+        "automation evidence closed fields",
+    )
+    .unwrap();
+    let (db, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
@@ -1247,9 +1251,12 @@ async fn proposal_validation_canonicalizes_public_evidence_before_commit() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory.db");
     crate::register_test_schema_installer();
-    let authority =
-        crate::db::DatabaseAuthority::acquire_test(&path, "canonical automation evidence").unwrap();
-    let (db, _) = crate::db::Database::publish_test_runtime(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &path,
+        "canonical automation evidence",
+    )
+    .unwrap();
+    let (db, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,

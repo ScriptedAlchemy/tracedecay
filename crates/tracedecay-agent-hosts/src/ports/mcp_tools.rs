@@ -20,7 +20,7 @@
 
 use serde_json::Value;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// One advertised MCP tool, reduced to what host installers consume.
 #[derive(Clone, Debug, PartialEq, Eq)]

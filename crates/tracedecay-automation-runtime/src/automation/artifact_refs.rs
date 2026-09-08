@@ -4,7 +4,7 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use super::config_error;
 use super::run_ledger::{AutomationRunArtifact, AutomationRunArtifactKind};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub(super) fn artifact_ref(artifact: &AutomationRunArtifact) -> Value {
     json!({

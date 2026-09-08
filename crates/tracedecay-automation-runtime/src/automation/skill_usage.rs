@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config_error;
 use super::managed_skills::{ManagedSkill, ManagedSkillSource, ManagedSkillState};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 mod analytics;

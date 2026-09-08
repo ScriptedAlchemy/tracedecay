@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// First executable match for `program` across `path_var`.
 pub fn resolve_on_path(
