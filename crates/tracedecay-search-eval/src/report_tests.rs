@@ -48,26 +48,13 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     // ordinary lane always runs it: production retrieval changes must land with
     // a re-pinned workload or they silently break `semantic activate`.
     for profile in &report.profiles {
-        let observed = generated
-            .outputs
-            .iter()
-            .find(|output| {
-                output.profile_id == profile.profile_id && output.partition == profile.partition
-            })
-            .map(|output| {
-                format!(
-                    "observed {} vs pinned {}",
-                    output.query_fallback_digest, output.expected_query_fallback_digest
-                )
-            })
-            .unwrap_or_else(|| "no generated output for this profile".to_owned());
         assert!(
             profile.fallback_matches_expected,
             "{}:{} query fallback digest drifted from \
              `expected_query_fallback_digests.{}` in \
-             tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json \
-             ({observed}). Confirm the new query results are intended, then re-pin \
-             both workload copies and packaged::WORKLOAD_SHA256.",
+             tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json. \
+             Confirm the new query results are intended, then re-pin both workload \
+             copies and packaged::WORKLOAD_SHA256.",
             profile.profile_id, profile.partition, profile.partition
         );
     }
