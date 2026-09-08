@@ -6270,20 +6270,42 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Resolve the graph-independent text owner together with the freshness
     /// decision made by the same scheduler observation. A ready text artifact
     /// is not inherently stale merely because native graph activation is off.
+    ///
+    /// Currency is judged from source truth first: the shared freshness fence
+    /// proves, without the scheduler mutex, that the owner's sealed source is
+    /// the one the last reconcile verified and that the live tree still
+    /// carries it. Only an owner the fence cannot vouch for consults the
+    /// worker — a pending arrival or an in-flight pass then means "stale until
+    /// that pass re-observes the source", and the read leaves the coalesced
+    /// follow-up wake that pass needs. Treating every in-flight pass as
+    /// staleness made a polling reader and the worker livelock: each read
+    /// during a `Noop` pass posted a follow-up, the follow-up was another
+    /// pass, and the owner was never called current although nothing moved.
     pub async fn latest_text_serving_freshness_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<(LatestCodeTextGenerationV1, bool)> {
-        let (root, scheduler, text_generation, wake, pending_wake, reconcile_in_progress) = {
+        let (
+            root,
+            scheduler,
+            source_freshness,
+            text_generation,
+            wake,
+            pending_wake,
+            reconcile_in_progress,
+            shutting_down,
+        ) = {
             let mounted = self.mounted.lock().await;
             let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
             (
                 root.clone(),
                 Arc::clone(&worktree.scheduler),
+                worktree.source_freshness.clone(),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
                 Arc::clone(&worktree.reconcile_in_progress),
+                Arc::clone(&worktree.shutting_down),
             )
         };
         let scope = scope.clone();
@@ -6298,6 +6320,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 .filter(|latest| {
                     latest.text_serving_is_ready() && text_matches_scope_identity(latest, &scope)
                 })?;
+            if source_freshness.serves_current_source(
+                &latest.metadata().snapshot().content_identity,
+                &root,
+                &shutting_down,
+            ) {
+                return Some((latest, true));
+            }
             if pending_wake.has_pending_arrival() {
                 // A pass is already queued behind the current owner work; it
                 // re-observes the source when it starts, so it also supplies
