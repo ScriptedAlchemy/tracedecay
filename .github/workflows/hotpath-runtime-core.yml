@@ -68,21 +68,6 @@ jobs:
           shared-key: hotpath-runtime-core
           cache-on-failure: true
 
-      - name: kache compiler cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-
       # The default dependency graph must resolve the hotpath crate with the
       # profiler compiled out (macros-only: expected activated feature set is
       # exactly "threads"). Any hotpath* feature on that crate here means a
