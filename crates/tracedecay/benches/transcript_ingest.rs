@@ -255,7 +255,7 @@ fn encode_workspace_path(project: &Path) -> String {
 }
 
 fn write_kiro_fixture(sandbox: &Sandbox, config: &BenchConfig) -> PathBuf {
-    let data_dir = tracedecay::agents::kiro_data_dir(&sandbox.home);
+    let data_dir = tracedecay_agent_hosts::agents::kiro_data_dir(&sandbox.home);
     let encoded = encode_workspace_path(&sandbox.project);
     let session_dir = data_dir
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")

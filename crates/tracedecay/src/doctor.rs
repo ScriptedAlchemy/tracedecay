@@ -11,10 +11,10 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::application_surface::{
     ApplicationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
 };
+use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::RequestedOutputFormat;

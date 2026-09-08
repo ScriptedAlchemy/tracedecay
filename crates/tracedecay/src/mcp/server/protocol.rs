@@ -48,7 +48,7 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
     and session-memory tools can mutate local project state \
     and declare readOnlyHint=false. \
     Every tool is also available from the shell: ",
-    crate::cli_fallback_args_invocation_lit!(),
+    tracedecay_agent_hosts::cli_fallback_args_invocation_lit!(),
     " \
     — run `tracedecay tool` to list tools, \
     `tracedecay tool <name> --help` for parameters). If an MCP \

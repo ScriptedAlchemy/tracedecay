@@ -362,7 +362,7 @@ fn handle_wipe_inner(
         if all {
             validate_complete_wipe_profile_root(
                 &profile_root,
-                tracedecay::agents::home_dir().as_deref(),
+                tracedecay_agent_hosts::agents::home_dir().as_deref(),
             )?;
         }
         // A wedged daemon never exits on its own, so the lease is acquired

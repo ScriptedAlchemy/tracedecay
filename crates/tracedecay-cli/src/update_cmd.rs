@@ -29,7 +29,7 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay_domain::errors::Re
     let home = tracedecay_home_dir()?;
     let tracedecay_bin = tracedecay_bin_for_generated_artifacts()?;
     refresh_generated_plugins_at(
-        tracedecay::agents::all_integrations(),
+        tracedecay_agent_hosts::agents::all_integrations(),
         &home,
         &tracedecay_bin,
     )
@@ -49,16 +49,17 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay_domain::errors::Re
 /// map to `cursor`), so an id counts as canonical when ANY host behind it has a
 /// non-empty default component set — the transaction owns that id's artifacts.
 fn host_owns_canonical_component_set(agent_id: &str) -> bool {
-    tracedecay::agents::host_bundle_v2::stock_host_kinds()
+    tracedecay_agent_hosts::agents::host_bundle_v2::stock_host_kinds()
         .into_iter()
         .any(|host| {
-            tracedecay::agents::integration_id_for_host(host) == agent_id
-                && !tracedecay::agents::host_bundle_registry::default_components(host).is_empty()
+            tracedecay_agent_hosts::agents::integration_id_for_host(host) == agent_id
+                && !tracedecay_agent_hosts::agents::host_bundle_registry::default_components(host)
+                    .is_empty()
         })
 }
 
 fn refresh_generated_plugins_at(
-    integrations: Vec<Box<dyn tracedecay::agents::AgentIntegration>>,
+    integrations: Vec<Box<dyn tracedecay_agent_hosts::agents::AgentIntegration>>,
     home: &Path,
     tracedecay_bin: &str,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -80,16 +81,16 @@ fn refresh_generated_plugins_at(
             );
             continue;
         }
-        let ctx = tracedecay::agents::InstallContext {
+        let ctx = tracedecay_agent_hosts::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
-            tool_permissions: tracedecay::agents::expected_tool_perms()?,
+            tool_permissions: tracedecay_agent_hosts::agents::expected_tool_perms()?,
             project_root: None,
             dashboard: true,
         };
         let outcome = ag.update_plugin(&ctx);
         match outcome {
-            Ok(tracedecay::agents::UpdatePluginOutcome::Refreshed(paths)) => {
+            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::Refreshed(paths)) => {
                 refreshed_any = true;
                 for path in paths {
                     eprintln!(
@@ -99,12 +100,14 @@ fn refresh_generated_plugins_at(
                     );
                 }
             }
-            Ok(tracedecay::agents::UpdatePluginOutcome::NotInstalled) => {}
+            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::NotInstalled) => {}
             // Config-managed integrations (claude, copilot, …) are refreshed by
             // the tracked-agent reinstall in `run_post_update_tasks`, so there
             // is nothing to do — and nothing to nag about — here.
-            Ok(tracedecay::agents::UpdatePluginOutcome::ConfigOnly) => {}
-            Ok(tracedecay::agents::UpdatePluginOutcome::DeferredUserAction(deferred)) => {
+            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::ConfigOnly) => {}
+            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::DeferredUserAction(
+                deferred,
+            )) => {
                 refreshed_any = true;
                 eprintln!(
                     "  \x1b[33mwarning:\x1b[0m {} plugin activation deferred: {}",
@@ -139,11 +142,12 @@ fn refresh_daemon_service(
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
     }
-    let tracedecay_bin = tracedecay::agents::which_tracedecay_path().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: "tracedecay not found on PATH".to_string(),
-        }
-    })?;
+    let tracedecay_bin =
+        tracedecay_agent_hosts::agents::which_tracedecay_path().ok_or_else(|| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: "tracedecay not found on PATH".to_string(),
+            }
+        })?;
     let spec = daemon_control::service_spec(tracedecay_bin, None)?;
     refresh_daemon_service_with_spec(previous_state, &spec)
 }
@@ -281,7 +285,7 @@ pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> 
 }
 
 fn tracedecay_home_dir() -> tracedecay_domain::errors::Result<PathBuf> {
-    tracedecay::agents::home_dir().ok_or_else(|| {
+    tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
         }
@@ -289,7 +293,7 @@ fn tracedecay_home_dir() -> tracedecay_domain::errors::Result<PathBuf> {
 }
 
 pub(crate) fn tracedecay_bin_on_path() -> tracedecay_domain::errors::Result<String> {
-    tracedecay::agents::which_tracedecay().ok_or_else(|| {
+    tracedecay_agent_hosts::agents::which_tracedecay().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "tracedecay not found on PATH".to_string(),
         }
@@ -615,8 +619,8 @@ async fn reinstall_tracked_agents_under_lease(
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> ReinstallOutcome {
     let (Some(home), Some(bin)) = (
-        tracedecay::agents::home_dir(),
-        tracedecay::agents::which_tracedecay(),
+        tracedecay_agent_hosts::agents::home_dir(),
+        tracedecay_agent_hosts::agents::which_tracedecay(),
     ) else {
         return ReinstallOutcome::PartialFailure {
             failed: vec![
@@ -680,7 +684,7 @@ async fn run_post_update_mutations(
     let before = config.installed_agents.len();
     config
         .installed_agents
-        .retain(|id| tracedecay::agents::get_integration(id).is_ok());
+        .retain(|id| tracedecay_agent_hosts::agents::get_integration(id).is_ok());
     if config.installed_agents.len() != before
         && let Err(err) = config.save()
     {
@@ -726,7 +730,7 @@ fn reconcile_materialized_managed_skills_after_update() {
     };
     let start = std::env::current_dir()
         .ok()
-        .or_else(tracedecay::agents::home_dir)
+        .or_else(tracedecay_agent_hosts::agents::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
@@ -931,7 +935,9 @@ mod tests {
         std::fs::write(&installed_path, original).unwrap();
 
         let result = refresh_generated_plugins_at(
-            vec![Box::new(tracedecay::agents::kimi::KimiIntegration)],
+            vec![Box::new(
+                tracedecay_agent_hosts::agents::kimi::KimiIntegration,
+            )],
             home.path(),
             "new-tracedecay",
         );
@@ -962,7 +968,7 @@ mod tests {
     /// discriminate instead of answering `true` for anything.
     #[test]
     fn canonical_component_set_hosts_are_not_refreshed_by_a_second_writer() {
-        for integration in tracedecay::agents::all_integrations() {
+        for integration in tracedecay_agent_hosts::agents::all_integrations() {
             assert!(
                 host_owns_canonical_component_set(integration.id()),
                 "{} owns a canonical component set",
@@ -990,7 +996,7 @@ mod tests {
         std::fs::write(&manifest_path, receipt_owned).unwrap();
 
         let result = refresh_generated_plugins_at(
-            vec![Box::new(tracedecay::agents::CursorIntegration)],
+            vec![Box::new(tracedecay_agent_hosts::agents::CursorIntegration)],
             home.path(),
             "new-tracedecay",
         );

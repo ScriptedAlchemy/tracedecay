@@ -55,8 +55,9 @@ pub struct TraceDecay {
     /// new `TraceDecay` rather than mutating an existing one, so the resolved
     /// path is safe to cache for the instance's lifetime.
     db_path_cache: OnceLock<PathBuf>,
-    context_scout_owner:
-        Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
+    context_scout_owner: Option<
+        Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    >,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -68,10 +69,12 @@ const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
 
 #[derive(Clone)]
 struct MountedContextScoutClaimAuthorityV1 {
-    registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-    pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+    registry: Arc<
+        tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1,
+    >,
+    pin: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
     context: tracedecay_application::RequestContext,
-    lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+    lifecycle: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
     address: ContextScoutAddressV1,
     input_watermark: [u8; 32],
 }
@@ -116,7 +119,8 @@ impl TraceDecay {
 
     pub(crate) fn context_scout_owner(
         &self,
-    ) -> Option<&Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>> {
+    ) -> Option<&Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>>
+    {
         self.context_scout_owner.as_ref()
     }
 
@@ -129,11 +133,11 @@ impl TraceDecay {
     #[hotpath::skip]
     pub(crate) async fn mount_current_context_scout_claim_authority(
         &self,
-        registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+        registry: Arc<tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
+        hook: &tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1,
+        pin: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
         context: tracedecay_application::RequestContext,
-        lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        lifecycle: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
         address: ContextScoutAddressV1,
         input_watermark: [u8; 32],
         observed_at: tracedecay_domain::UtcMicros,
@@ -143,7 +147,7 @@ impl TraceDecay {
             || registry
                 .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
                 .await
-                != crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                != tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
                     address,
                 )
         {
@@ -179,8 +183,8 @@ impl TraceDecay {
     #[hotpath::skip]
     pub(crate) async fn resolve_current_context_scout_claim_authority(
         &self,
-        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        lifecycle: &crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        hook: &tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1,
+        lifecycle: &tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let mounted = self
@@ -201,7 +205,7 @@ impl TraceDecay {
             .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
             .await;
         let resolved = (resolved
-            == crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+            == tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
                 mounted.address,
             ))
         .then_some((mounted.address, mounted.input_watermark));
@@ -221,7 +225,7 @@ impl TraceDecay {
     #[hotpath::skip]
     async fn context_scout_configuration_is_current(
         &self,
-        pin: &crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+        pin: &tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
     ) -> bool {
         self.configuration_runtime
             .client()

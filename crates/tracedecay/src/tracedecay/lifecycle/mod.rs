@@ -378,7 +378,7 @@ impl TraceDecay {
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
             ts.context_scout_owner =
-                crate::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
                     ts.db.clone(),
                     project_id,
                     tracedecay_domain::UtcMicros(
@@ -616,7 +616,7 @@ impl TraceDecay {
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
             ts.context_scout_owner =
-                crate::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
                     ts.db.clone(),
                     project_id,
                     tracedecay_domain::UtcMicros(

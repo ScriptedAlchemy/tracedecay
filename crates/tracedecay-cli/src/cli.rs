@@ -91,7 +91,7 @@ Related: tracedecay tool runtime (semantic runtime state), tracedecay tool
 configuration_get (the semantic.runtime.v1 setting).";
 
 fn agent_value_parser() -> PossibleValuesParser {
-    PossibleValuesParser::new(tracedecay::agents::available_integrations())
+    PossibleValuesParser::new(tracedecay_agent_hosts::agents::available_integrations())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

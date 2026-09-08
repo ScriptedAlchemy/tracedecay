@@ -24,7 +24,7 @@ pub(super) fn vscode_storage_root(
     home: &std::path::Path,
     extension_id: &str,
 ) -> std::path::PathBuf {
-    tracedecay::agents::vscode_data_dir(home)
+    tracedecay_agent_hosts::agents::vscode_data_dir(home)
         .join("User/globalStorage")
         .join(extension_id)
         .join("tasks")

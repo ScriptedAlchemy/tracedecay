@@ -620,7 +620,10 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     let mut install = tracedecay_command_without_daemon(home.path(), project.path());
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
     install
-        .env(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &kimi_home)
+        .env(
+            tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
+            &kimi_home,
+        )
         .args(["install", "--agent", "kimi"]);
 
     let output = run_with_timeout(install, cli_timeout());

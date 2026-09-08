@@ -45,7 +45,7 @@ fn write_legacy_chat(
     workspace_hash: &str,
     execution_id: &str,
 ) -> std::path::PathBuf {
-    let data_dir = tracedecay::agents::kiro_data_dir(home);
+    let data_dir = tracedecay_agent_hosts::agents::kiro_data_dir(home);
     let ws_storage = data_dir.join("User/workspaceStorage").join(workspace_hash);
     std::fs::create_dir_all(&ws_storage).unwrap();
     std::fs::write(
@@ -89,7 +89,7 @@ fn write_workspace_session_json(
     project: &std::path::Path,
     session_id: &str,
 ) -> std::path::PathBuf {
-    let data_dir = tracedecay::agents::kiro_data_dir(home);
+    let data_dir = tracedecay_agent_hosts::agents::kiro_data_dir(home);
     let encoded = encode_workspace_path(project);
     let session_dir = data_dir
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")
@@ -118,7 +118,7 @@ fn write_extensionless_execution(
     workspace_hash: &str,
     session_id: &str,
 ) -> std::path::PathBuf {
-    let data_dir = tracedecay::agents::kiro_data_dir(home);
+    let data_dir = tracedecay_agent_hosts::agents::kiro_data_dir(home);
     let ws_storage = data_dir.join("User/workspaceStorage").join(workspace_hash);
     std::fs::create_dir_all(&ws_storage).unwrap();
     std::fs::write(
@@ -764,7 +764,7 @@ async fn kiro_conflicting_native_message_id_does_not_overwrite() {
     init_git_repo(&project);
     mark_test_project(&project);
 
-    let session_dir = tracedecay::agents::kiro_data_dir(&home)
+    let session_dir = tracedecay_agent_hosts::agents::kiro_data_dir(&home)
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")
         .join(encode_workspace_path(&project));
     std::fs::create_dir_all(&session_dir).unwrap();

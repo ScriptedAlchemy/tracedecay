@@ -168,7 +168,7 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
 
 #[test]
 fn claude_bundle_commands_have_valid_frontmatter_and_body() {
-    for (relative, raw) in tracedecay::agents::plugin_bundle::claude_files()
+    for (relative, raw) in tracedecay_agent_hosts::agents::plugin_bundle::claude_files()
         .into_iter()
         .filter(|(path, _)| path.starts_with("commands/"))
     {
@@ -193,7 +193,7 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
     // `read_only_tool_names()` reads the catalog straight from the crate that
     // owns it, so no composition-root registration precedes this and an
     // unavailable catalog is an error rather than an empty allowlist.
-    let live_read_only: BTreeSet<String> = tracedecay::agents::read_only_tool_names()
+    let live_read_only: BTreeSet<String> = tracedecay_agent_hosts::agents::read_only_tool_names()
         .expect("the advertised tool catalog")
         .into_iter()
         .collect();
@@ -202,7 +202,7 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
         "the advertised catalog must expose read-only tools; an empty set would \
          pass every allowlist vacuously"
     );
-    for (relative, raw) in tracedecay::agents::plugin_bundle::claude_files()
+    for (relative, raw) in tracedecay_agent_hosts::agents::plugin_bundle::claude_files()
         .into_iter()
         .filter(|(path, _)| path.starts_with("agents/"))
     {
@@ -277,14 +277,14 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
 
 #[test]
 fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
-    let cursor_files = tracedecay::agents::plugin_bundle::cursor_files();
+    let cursor_files = tracedecay_agent_hosts::agents::plugin_bundle::cursor_files();
     let temp = tempfile::tempdir().unwrap();
     tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
         &tracedecay_agent_hosts::host_io(),
         temp.path(),
     )
     .unwrap();
-    for (relative, claude) in tracedecay::agents::plugin_bundle::claude_files()
+    for (relative, claude) in tracedecay_agent_hosts::agents::plugin_bundle::claude_files()
         .into_iter()
         .filter(|(path, _)| path.starts_with("agents/"))
     {

@@ -6,7 +6,7 @@ use fastembed::{
     EmbeddingModel, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
     UserDefinedEmbeddingModel,
 };
-use tracedecay::agents::host_bundle_registry::FIRST_PARTY_COMPONENT_CATALOG_VERSION;
+use tracedecay_agent_hosts::agents::host_bundle_registry::FIRST_PARTY_COMPONENT_CATALOG_VERSION;
 
 fn read(root: &Path, name: &str) -> Vec<u8> {
     fs::read(root.join(name)).unwrap_or_else(|error| {
