@@ -10013,6 +10013,426 @@ fn edited_reopen_forces_full_reconcile_when_witness_mismatches() {
     );
 }
 
+/// Rewrite one fixture source with bytes of the same length and hand it back
+/// its previous mtime, the way `rsync -a`, `cp --preserve`, `touch -d`, and
+/// restore tools do. Every `(path, len, mtime)` tuple the stat signature hashes
+/// is unchanged afterwards, so only content can tell the two states apart.
+fn rewrite_preserving_stat(fixture: &GitFixture, path: &str, source: &str) {
+    let absolute = fixture.path().join(path);
+    let before = std::fs::metadata(&absolute).expect("source metadata before rewrite");
+    assert_eq!(
+        before.len(),
+        source.len() as u64,
+        "the rewrite must keep the byte length so stat metadata cannot see it"
+    );
+    std::fs::write(&absolute, source).expect("rewrite fixture source");
+    filetime::set_file_mtime(
+        &absolute,
+        filetime::FileTime::from_system_time(before.modified().expect("source mtime")),
+    )
+    .expect("restore the source mtime");
+    let after = std::fs::metadata(&absolute).expect("source metadata after rewrite");
+    assert_eq!(after.len(), before.len());
+    assert_eq!(
+        after.modified().expect("restored mtime"),
+        before.modified().expect("original mtime"),
+        "the rewrite must hand the file its previous mtime back"
+    );
+}
+
+fn served_lexical_texts(scheduler: &CodeIndexWorktreeSchedulerV1, needle: &str) -> Vec<String> {
+    scheduler
+        .latest_complete()
+        .expect("served generation")
+        .lexical()
+        .iter()
+        .filter(|chunk| chunk.sanitized_text.as_str().contains(needle))
+        .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+        .collect()
+}
+
+/// Equal stat metadata is a negative cache, never proof of currency: a
+/// same-length rewrite whose mtime is preserved leaves every
+/// `(path, len, mtime)` tuple unchanged. The live freshness ladder must still
+/// compare the current bytes against the generation's sealed file digests and
+/// reconcile the change instead of serving the retained generation forever.
+#[test]
+fn same_length_rewrite_with_preserved_mtime_reconciles_on_the_live_ladder() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let baseline = published(scheduler.reconcile_now().expect("initial publish"));
+    assert!(
+        scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness")
+    );
+    let stat_before = scheduler
+        .worktree_stat_signature()
+        .expect("stat signature before rewrite");
+
+    rewrite_preserving_stat(&fixture, "src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    assert_eq!(
+        scheduler
+            .worktree_stat_signature()
+            .expect("stat signature after rewrite"),
+        stat_before,
+        "the rewrite is invisible to stat metadata by construction"
+    );
+    assert!(
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after rewrite"),
+        "equal length and mtime must not prove the retained generation current"
+    );
+    // Inside the bounded-staleness window the ladder trusts the last
+    // reconcile by design; once it elapses, the probe must not let an equal
+    // stat signature reset the clock over changed bytes.
+    scheduler.policy.staleness_threshold = Duration::ZERO;
+    assert!(
+        scheduler.request_fresh_for_query_background(),
+        "the query probe must schedule a reconcile for changed bytes under equal metadata"
+    );
+    let outcome = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs")
+        .expect("changed bytes under equal stat metadata must reconcile");
+    assert_ne!(
+        published(outcome).generation_id,
+        baseline.generation_id,
+        "the rewritten source is captured in a freshly published generation"
+    );
+    let served = served_lexical_texts(&scheduler, "fn alpha");
+    assert!(!served.is_empty(), "the rewritten file is still served");
+    assert!(
+        served.iter().all(|text| text.contains("{ 2 }")),
+        "the served generation carries the rewritten bytes: {served:?}"
+    );
+}
+
+/// The retained-generation path across a daemon restart: the persisted
+/// witness still matches Git metadata and the stat signature, but the bytes
+/// on disk changed. The remount must verify content against the retained
+/// generation's file digests, rebuild, and serve the new content.
+#[tokio::test]
+async fn restart_over_same_length_preserved_mtime_rewrite_rebuilds_the_retained_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let sealed = wait_for_live_complete_generation(&first, fixture.path()).await;
+    let sealed_id = sealed.generation().manifest().generation_id.clone();
+    first.shutdown().await;
+
+    rewrite_preserving_stat(&fixture, "src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    restarted
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("remount worktree over the retained store");
+    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = restarted.latest_complete_fresh(fixture.path()).await
+                && latest.generation().manifest().generation_id != sealed_id
+            {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a restart over changed bytes with equal stat metadata must rebuild");
+    let served = rebuilt
+        .lexical()
+        .iter()
+        .filter(|chunk| chunk.sanitized_text.as_str().contains("fn alpha"))
+        .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert!(!served.is_empty(), "the rewritten file is still served");
+    assert!(
+        served.iter().all(|text| text.contains("{ 2 }")),
+        "the restarted daemon serves the rewritten bytes: {served:?}"
+    );
+    restarted.shutdown().await;
+}
+
+/// An explicitly admitted ignored source joins the stat signature and the
+/// generation's file manifest like any ordinary candidate, so its same-length
+/// preserved-mtime rewrite must be caught by the same content comparison.
+#[test]
+fn same_length_rewrite_of_an_admitted_ignored_source_reconciles() {
+    let fixture = GitFixture::new(&[
+        (".gitignore", "node_modules/\n"),
+        (
+            "src/app.ts",
+            "import type { PublicWidget } from \"pkg\";\nexport const anchor = 1;\n",
+        ),
+    ]);
+    write(
+        fixture.path(),
+        "node_modules/pkg/index.d.ts",
+        "export interface PublicWidget { value: string }\n",
+    );
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("initial publish"));
+    let serving = scheduler.latest_complete().expect("serving generation");
+    let generation = serving.generation();
+    let verified_import = generation
+        .imports()
+        .iter()
+        .find(|import| import.module_specifier == "pkg")
+        .expect("verified package import")
+        .clone();
+    let snapshot = generation.snapshot();
+    let scope = ResolvedScope::new(
+        generation.manifest().project_id.clone(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let admitted = scheduler
+        .index_verified_ignored_dependency(
+            &serving,
+            CodeIndexIgnoredDependencyRequestV1 {
+                scope,
+                expected_generation: generation.manifest().generation_id.clone(),
+                verified_imports: vec![verified_import],
+            },
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("admit the verified ignored dependency");
+    assert_eq!(
+        admitted.outcome.admission.logical_path,
+        "node_modules/pkg/index.d.ts"
+    );
+    assert!(
+        scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness")
+    );
+    let stat_before = scheduler
+        .worktree_stat_signature()
+        .expect("stat signature before rewrite");
+
+    rewrite_preserving_stat(
+        &fixture,
+        "node_modules/pkg/index.d.ts",
+        "export interface PublicWidget { value: number }\n",
+    );
+
+    assert_eq!(
+        scheduler
+            .worktree_stat_signature()
+            .expect("stat signature after rewrite"),
+        stat_before,
+        "the admitted source rewrite is invisible to stat metadata by construction"
+    );
+    assert!(
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after rewrite"),
+        "equal length and mtime must not prove the admitted ignored source current"
+    );
+    scheduler.policy.staleness_threshold = Duration::ZERO;
+    let outcome = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs")
+        .expect("changed admitted bytes under equal stat metadata must reconcile");
+    assert_ne!(
+        published(outcome).generation_id,
+        admitted.outcome.generation_id,
+        "the rewritten admitted source is captured in a freshly published generation"
+    );
+    let served = served_lexical_texts(&scheduler, "PublicWidget");
+    assert!(!served.is_empty(), "the admitted source is still served");
+    assert!(
+        served.iter().any(|text| text.contains("value: number")),
+        "the served generation carries the rewritten admitted bytes: {served:?}"
+    );
+    assert!(
+        served.iter().all(|text| !text.contains("value: string")),
+        "the stale admitted bytes are no longer served: {served:?}"
+    );
+}
+
+/// Swapping the contents of two same-length files and handing each its own
+/// mtime back leaves the aggregate stat signature byte-identical, while every
+/// per-file content digest moved. Only the file manifest comparison can tell.
+#[test]
+fn swapping_two_same_length_files_with_preserved_mtimes_reconciles() {
+    let alpha = "pub fn alpha() -> u32 { 1 }\n";
+    let bravo = "pub fn bravo() -> u32 { 2 }\n";
+    assert_eq!(
+        alpha.len(),
+        bravo.len(),
+        "the swap must preserve both lengths"
+    );
+    let fixture = GitFixture::new(&[("src/alpha.rs", alpha), ("src/bravo.rs", bravo)]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let baseline = published(scheduler.reconcile_now().expect("initial publish"));
+    let stat_before = scheduler
+        .worktree_stat_signature()
+        .expect("stat signature before swap");
+
+    rewrite_preserving_stat(&fixture, "src/alpha.rs", bravo);
+    rewrite_preserving_stat(&fixture, "src/bravo.rs", alpha);
+
+    assert_eq!(
+        scheduler
+            .worktree_stat_signature()
+            .expect("stat signature after swap"),
+        stat_before,
+        "the swap leaves the aggregate stat signature unchanged by construction"
+    );
+    assert!(
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after swap"),
+        "an unchanged aggregate stat signature must not prove the swapped files current"
+    );
+    scheduler.policy.staleness_threshold = Duration::ZERO;
+    let outcome = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs")
+        .expect("swapped bytes under an equal aggregate stat signature must reconcile");
+    assert_ne!(
+        published(outcome).generation_id,
+        baseline.generation_id,
+        "the swapped sources are captured in a freshly published generation"
+    );
+    let latest = scheduler.latest_complete().expect("served generation");
+    let path_of = |needle: &str| {
+        let chunk = latest
+            .lexical()
+            .iter()
+            .find(|chunk| chunk.sanitized_text.as_str().contains(needle))
+            .unwrap_or_else(|| panic!("served chunk containing {needle}"));
+        latest
+            .generation()
+            .snapshot()
+            .files
+            .iter()
+            .find(|file| file.file_occurrence_id == chunk.anchor.file_occurrence_id)
+            .map(|file| file.logical_path.clone())
+            .expect("served chunk names a snapshot file")
+    };
+    assert_eq!(
+        path_of("fn bravo"),
+        "src/alpha.rs",
+        "alpha.rs now carries bravo's bytes"
+    );
+    assert_eq!(
+        path_of("fn alpha"),
+        "src/bravo.rs",
+        "bravo.rs now carries alpha's bytes"
+    );
+}
+
+/// A checkout whose clean filters separate the bytes on disk from HEAD's blobs
+/// (`core.autocrlf=true` over CRLF files) seals LF blob digests from the exact
+/// HEAD tree. The content comparison must recognise the unchanged checkout as
+/// current through the repository's own filter pipeline — never looping into a
+/// reconcile every staleness window — while a same-length preserved-mtime
+/// rewrite of the same file is still disproved.
+#[test]
+fn clean_filtered_checkout_verifies_current_and_still_disproves_a_rewrite() {
+    let crlf_source = "pub fn alpha() -> u32 { 1 }\r\n";
+    let fixture = GitFixture::build_fresh(&[("src/lib.rs", crlf_source)]);
+    git(fixture.path(), &["config", "core.autocrlf", "true"]);
+    git(fixture.path(), &["add", "--renormalize", "."]);
+    git(fixture.path(), &["commit", "-qm", "normalise line endings"]);
+    assert_eq!(
+        std::fs::read(fixture.path().join("src/lib.rs")).expect("checkout bytes"),
+        crlf_source.as_bytes(),
+        "the checkout keeps CRLF while HEAD holds the normalised blob"
+    );
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let baseline = published(scheduler.reconcile_now().expect("initial publish"));
+    let sealed_digest = scheduler
+        .latest_complete()
+        .expect("served generation")
+        .generation()
+        .snapshot()
+        .files
+        .iter()
+        .find(|file| file.logical_path == "src/lib.rs")
+        .expect("sealed lib.rs")
+        .content_digest
+        .clone();
+    assert_eq!(
+        sealed_digest,
+        super::content_digest(b"pub fn alpha() -> u32 { 1 }\n"),
+        "the clean tree seals HEAD's LF blob, not the CRLF checkout bytes"
+    );
+
+    assert!(
+        scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness"),
+        "an unchanged filtered checkout is current once its bytes pass the clean filters"
+    );
+    scheduler.policy.staleness_threshold = Duration::ZERO;
+    assert!(
+        !scheduler.request_fresh_for_query_background(),
+        "an unchanged filtered checkout must not reconcile on every elapsed window"
+    );
+
+    rewrite_preserving_stat(&fixture, "src/lib.rs", "pub fn alpha() -> u32 { 2 }\r\n");
+
+    assert!(
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after rewrite"),
+        "the clean filters must not hide a real rewrite under equal metadata"
+    );
+    let outcome = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs")
+        .expect("changed bytes under equal stat metadata must reconcile");
+    assert_ne!(published(outcome).generation_id, baseline.generation_id);
+    let served = served_lexical_texts(&scheduler, "fn alpha");
+    assert!(!served.is_empty(), "the rewritten file is still served");
+    assert!(
+        served.iter().all(|text| text.contains("{ 2 }")),
+        "the served generation carries the rewritten bytes: {served:?}"
+    );
+}
+
 #[test]
 fn restart_rejects_corrupt_sealed_generation() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
