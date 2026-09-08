@@ -19,7 +19,7 @@ use super::{
     PublishedShardRuntime, StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode,
     StoreRuntimeRegistryFailure,
 };
-use crate::store_runtime::shard::{ShardRuntime, ShardRuntimeError};
+use crate::shard_runtime::shard::{ShardRuntime, ShardRuntimeError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedStoreLocator {

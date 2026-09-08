@@ -1,74 +1,147 @@
-//! The single source-edit publish/rollback authority: every primitive in
-//! this module tree funnels its atomic file write through
-//! [`publish_planned_source_edit`], and every crash-recovery path restores
-//! preimages through [`rollback_planned_source_edit_files`]. Both consult the
-//! plan captured by `tracedecay-application` so a preview and its later apply
-//! (or rollback) are always looking at the same recorded expectation.
+//! The single source-edit plan authority.
+//!
+//! A preview runs the edit primitive inside [`capture_source_edit_plan`],
+//! which intercepts every publication as a [`PlannedSourceEditFile`] instead
+//! of writing it. The later apply runs the same primitive inside
+//! [`apply_source_edit_plan`], which admits a write only when it matches the
+//! captured plan byte for byte. Every edit primitive funnels its atomic file
+//! write through [`publish_planned_source_edit`], and every crash-recovery
+//! path restores preimages through [`rollback_planned_source_edit_files`], so
+//! a preview and its later apply (or rollback) are always looking at the same
+//! recorded expectation.
 
+use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-/// The preview/apply plan authority is owned by `tracedecay-application`; the
-/// root source-edit primitives consult that single set of task-locals so a
-/// preview captured by the use case is the same plan the apply validates.
-pub(in crate::tracedecay) use tracedecay_application::tracedecay::{
-    PlannedSourceEditFile, capture_planned_source_edit, validate_planned_source_edit,
-};
-
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::super::TraceDecay;
 use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
 
-impl TraceDecay {
-    /// Restore every retained preimage for a caller-requested rollback of an
-    /// already-completed source edit. Unlike crash recovery this is a live
-    /// operation, so the graph is resynchronized wholesale rather than
-    /// reindexed file by file: a rollback may delete a file the edit created,
-    /// and a deleted path has no bytes left to reindex.
-    #[hotpath::skip]
-    pub(crate) async fn apply_source_edit_rollback(
-        &self,
-        files: &[PlannedSourceEditFile],
-    ) -> Result<()> {
-        rollback_planned_source_edit_files(&self.project_root, files)
-    }
+/// One candidate file's exact preimage and postimage as recorded by a preview.
+/// Serialized verbatim into the durable journal and rollback records.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedSourceEditFile {
+    pub relative_path: String,
+    pub expected: Option<String>,
+    pub intended: Option<String>,
+}
 
-    #[hotpath::skip]
-    pub(crate) async fn recover_source_edit_preimages(
-        &self,
-        files: &[PlannedSourceEditFile],
-    ) -> Result<()> {
-        rollback_planned_source_edit_files(&self.project_root, files)
-    }
+#[derive(Debug)]
+struct SourceEditApplyState {
+    files: Vec<PlannedSourceEditFile>,
+    consumed: BTreeSet<String>,
+}
 
-    /// Confirm that a completed source edit still has every exact postimage.
-    ///
-    /// Code-index generations are immutable and refreshed by the daemon-owned
-    /// scheduler. Crash reconciliation therefore verifies the transaction's
-    /// byte authority here instead of mutating the retired root graph store.
-    #[hotpath::measure(label = "edits.commit_postimages", future = true)]
-    pub(crate) async fn commit_source_edit_postimages(
-        &self,
-        files: &[PlannedSourceEditFile],
-    ) -> Result<()> {
-        for file in files {
-            let current =
-                read_source_edit_candidate(&self.project_root, Path::new(&file.relative_path))?;
-            if current.as_deref() != file.intended.as_deref().map(str::as_bytes) {
+tokio::task_local! {
+    static SOURCE_EDIT_PLAN_CAPTURE: Arc<Mutex<Vec<PlannedSourceEditFile>>>;
+    static SOURCE_EDIT_APPLY_STATE: Arc<Mutex<SourceEditApplyState>>;
+}
+
+#[hotpath::measure(label = "usecases.edit.plan", future = true)]
+pub(crate) async fn capture_source_edit_plan<T>(
+    future: impl Future<Output = T>,
+) -> (T, Vec<PlannedSourceEditFile>) {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let result = SOURCE_EDIT_PLAN_CAPTURE
+        .scope(Arc::clone(&capture), future)
+        .await;
+    let files = capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    (result, files)
+}
+
+#[hotpath::measure(label = "usecases.edit.apply", future = true)]
+pub(crate) async fn apply_source_edit_plan<T>(
+    files: Vec<PlannedSourceEditFile>,
+    future: impl Future<Output = T>,
+) -> (T, bool) {
+    let expected_count = files.len();
+    let state = Arc::new(Mutex::new(SourceEditApplyState {
+        files,
+        consumed: BTreeSet::new(),
+    }));
+    let result = SOURCE_EDIT_APPLY_STATE
+        .scope(Arc::clone(&state), future)
+        .await;
+    let complete = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .consumed
+        .len()
+        == expected_count;
+    (result, complete)
+}
+
+/// Records one planned publication when a preview capture is in scope.
+/// Returns `false` outside a capture, in which case the caller must publish.
+pub fn capture_planned_source_edit(
+    relative_path: &str,
+    expected: Option<&str>,
+    intended: Option<&str>,
+) -> bool {
+    SOURCE_EDIT_PLAN_CAPTURE
+        .try_with(|capture| {
+            capture
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(PlannedSourceEditFile {
+                    relative_path: relative_path.to_owned(),
+                    expected: expected.map(str::to_owned),
+                    intended: intended.map(str::to_owned),
+                });
+        })
+        .is_ok()
+}
+
+/// Admits one publication against the plan an apply is running under.
+/// Outside an apply scope every publication is admitted.
+#[hotpath::measure(label = "usecases.edit.validate")]
+pub fn validate_planned_source_edit(
+    relative_path: &str,
+    expected: Option<&str>,
+    intended: Option<&str>,
+) -> Result<()> {
+    SOURCE_EDIT_APPLY_STATE
+        .try_with(|state| {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(planned) = state
+                .files
+                .iter()
+                .find(|file| file.relative_path == relative_path)
+            else {
                 return Err(TraceDecayError::Config {
                     message: format!(
-                        "source edit postimage changed before reconciliation in {}",
-                        file.relative_path
+                        "source edit apply produced unplanned candidate {relative_path}"
+                    ),
+                });
+            };
+            if planned.expected.as_deref() != expected || planned.intended.as_deref() != intended {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "source edit candidate {relative_path} drifted from its exact preview"
                     ),
                 });
             }
-        }
-        Ok(())
-    }
+            state.consumed.insert(relative_path.to_owned());
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
 }
 
+/// Restore every retained preimage. Refuses foreign bytes outright: a file is
+/// only touched when it can be proven to hold either the preimage or the
+/// intended edit, so unaccountable content fails recovery instead of being
+/// erased.
 #[hotpath::measure(label = "edits.rollback_planned_files")]
-pub(in crate::tracedecay) fn rollback_planned_source_edit_files(
+pub fn rollback_planned_source_edit_files(
     project_root: &Path,
     files: &[PlannedSourceEditFile],
 ) -> Result<()> {
@@ -103,8 +176,34 @@ pub(in crate::tracedecay) fn rollback_planned_source_edit_files(
     Ok(())
 }
 
+/// Confirm that a completed source edit still has every exact postimage.
+///
+/// Code-index generations are immutable and refreshed by the daemon-owned
+/// scheduler. Crash reconciliation therefore verifies the transaction's byte
+/// authority here instead of mutating a graph store.
+#[hotpath::measure(label = "edits.commit_postimages")]
+pub(crate) fn commit_source_edit_postimages(
+    project_root: &Path,
+    files: &[PlannedSourceEditFile],
+) -> Result<()> {
+    for file in files {
+        let current = read_source_edit_candidate(project_root, Path::new(&file.relative_path))?;
+        if current.as_deref() != file.intended.as_deref().map(str::as_bytes) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "source edit postimage changed before reconciliation in {}",
+                    file.relative_path
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Publish one candidate's postimage, or record it into the active preview
+/// plan when a plan capture is in scope.
 #[hotpath::measure(label = "edits.publish_planned")]
-pub(in crate::tracedecay) fn publish_planned_source_edit(
+pub fn publish_planned_source_edit(
     project_root: &Path,
     relative_path: &str,
     expected: Option<&str>,
@@ -113,17 +212,8 @@ pub(in crate::tracedecay) fn publish_planned_source_edit(
     if capture_planned_source_edit(relative_path, expected, Some(intended)) {
         return Ok(());
     }
-    publish_planned_source_edit_state(project_root, relative_path, expected, Some(intended))
-}
-
-pub(super) fn publish_planned_source_edit_state(
-    project_root: &Path,
-    relative_path: &str,
-    expected: Option<&str>,
-    intended: Option<&str>,
-) -> Result<()> {
-    validate_planned_source_edit(relative_path, expected, intended)?;
-    publish_source_edit_state(project_root, relative_path, expected, intended)
+    validate_planned_source_edit(relative_path, expected, Some(intended))?;
+    publish_source_edit_state(project_root, relative_path, expected, Some(intended))
 }
 
 fn publish_source_edit_state(
@@ -163,16 +253,12 @@ fn publish_source_edit_state(
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
-    use tracedecay_application::tracedecay::{PlannedSourceEditFile, capture_source_edit_plan};
 
     use super::{
-        capture_planned_source_edit, publish_planned_source_edit,
-        rollback_planned_source_edit_files,
+        PlannedSourceEditFile, capture_planned_source_edit, capture_source_edit_plan,
+        publish_planned_source_edit, rollback_planned_source_edit_files,
     };
 
-    /// The root primitives must feed the single plan authority owned by
-    /// `tracedecay-application`; capturing through `super` and reading back
-    /// through the use-case scope proves there is no second set of statics.
     #[tokio::test]
     async fn source_edit_plan_capture_retains_exact_pre_and_post_bytes() {
         let ((), files) = capture_source_edit_plan(async {

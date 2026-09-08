@@ -1,9 +1,9 @@
 //! Generation-pinned symbol resolution for symbol-aware source edits.
 
-use tracedecay_application::tracedecay::SourceEditGraphReadV1;
 use tracedecay_code_index::graph_projection::{CodeGraphProjectionError, CodeGraphSymbolSummaryV1};
 use tracedecay_domain::{SourceSpan, SymbolOccurrenceId};
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
+use tracedecay_source_edit::SourceEditGraphReadV1;
 
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
 use tracedecay_domain::errors::{Result, TraceDecayError};

@@ -93,7 +93,7 @@ use source_edit_owner::{
 /// durable startup are both waiting on. Answer that wait with the typed
 /// disabled state at spawn time instead of parking a task that can only ever
 /// contend.
-fn code_index_disabled_for_scope(
+pub(super) fn code_index_disabled_for_scope(
     invocation: &DaemonInvocationState,
     scope: &ResolvedScope,
 ) -> bool {

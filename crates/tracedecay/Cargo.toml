@@ -505,9 +505,9 @@ rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
-# `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
-# resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such
-# file, and `MNT_LOCAL` is the kernel's direct answer to "is this volume local".
+# `kill(2)` for the daemon integration suites' physical-restart journeys
+# (tests/daemon_suite). Store-locality detection moved with the locator
+# resolver to tracedecay-store-runtime.
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"
 

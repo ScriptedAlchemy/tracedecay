@@ -115,16 +115,19 @@ pub fn worktree_stat_sweep(
 
 /// The per-file content identities one sealed generation was reconciled
 /// against: `logical path → content digest` of the sanitized bytes for every
-/// present file in the generation's snapshot manifest. A view of the sealed
-/// generation, not a second authority.
+/// present file in the generation's snapshot manifest, plus the snapshot's
+/// own content identity naming which sealed source these digests belong to.
+/// A view of the sealed generation, not a second authority.
 #[derive(Clone, Debug)]
 pub struct SourceContentManifestV1 {
+    snapshot_content_identity: ContentDigest,
     files: Arc<BTreeMap<String, ContentDigest>>,
 }
 
 impl SourceContentManifestV1 {
     pub fn for_snapshot(snapshot: &SanitizedCodeSnapshotV1) -> Self {
         Self {
+            snapshot_content_identity: snapshot.content_identity.clone(),
             files: Arc::new(
                 snapshot
                     .files
@@ -134,6 +137,12 @@ impl SourceContentManifestV1 {
                     .collect(),
             ),
         }
+    }
+
+    /// Whether this manifest describes the sealed source `snapshot_content_identity`
+    /// names: the reconcile that established it verified exactly that snapshot.
+    pub fn describes_snapshot(&self, snapshot_content_identity: &ContentDigest) -> bool {
+        self.snapshot_content_identity == *snapshot_content_identity
     }
 }
 

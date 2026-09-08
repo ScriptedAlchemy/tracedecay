@@ -12,6 +12,8 @@ use tracedecay_private_fs::framed_log::{
 
 use tracedecay_domain::errors::Result;
 
+use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
+use super::plan::PlannedSourceEditFile;
 use super::verify::{application_contract_error, config_error, domain_error, io_error};
 use super::{
     MAX_DURABLE_RECORD_BYTES, SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1,
@@ -50,7 +52,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
             })
             .collect::<Vec<_>>();
         let value = components.iter().collect::<PathBuf>();
-        tracedecay_application::tracedecay::validate_source_edit_candidate_parent(root, &value)?;
+        SourceEditFileAuthority::open(root, &value)?;
         normalized.push(
             components
                 .iter()
@@ -73,10 +75,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
 pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
-        let state = match tracedecay_application::tracedecay::read_source_edit_candidate(
-            root,
-            Path::new(relative),
-        )? {
+        let state = match read_source_edit_candidate(root, Path::new(relative))? {
             Some(bytes) => {
                 hotpath::gauge!("usecases.edit.digest_bytes").inc(bytes.len() as f64);
                 Some(hash_source_edit_content(&bytes)?)
@@ -89,7 +88,7 @@ pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<
 }
 
 pub(super) fn source_edit_recovery_digest(
-    files: &[tracedecay_application::tracedecay::PlannedSourceEditFile],
+    files: &[PlannedSourceEditFile],
 ) -> Result<ManifestDigest> {
     canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
 }
@@ -97,7 +96,7 @@ pub(super) fn source_edit_recovery_digest(
 #[hotpath::measure(label = "usecases.edit.planned_state_digest")]
 pub(super) fn planned_source_edit_state_digest(
     files: &[String],
-    planned_files: &[tracedecay_application::tracedecay::PlannedSourceEditFile],
+    planned_files: &[PlannedSourceEditFile],
     intended: bool,
 ) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());

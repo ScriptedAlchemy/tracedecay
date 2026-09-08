@@ -8,7 +8,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::ManifestDigest;
 use tracedecay_graph_db::GraphCancellation;
 
-use tracedecay_application::tracedecay::SourceEditRuntime;
 use tracedecay_domain::errors::Result;
 
 use super::JOURNAL_VERSION;
@@ -23,6 +22,8 @@ use super::journal::{
     SourceEditJournalStateV1, SourceEditJournalV1, same_source_edit_authority,
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::{apply_source_edit_plan, capture_source_edit_plan};
+use super::port::SourceEditRuntime;
 use super::reconcile::{recover_or_replay, recover_source_edit_transaction};
 use super::records::{applied_record, durable_record, interrupted_record, unknown_record};
 use super::verify::{
@@ -548,7 +549,7 @@ where
     }
 
     let (effect_result, plan_complete) = hotpath::future!(
-        tracedecay_application::tracedecay::apply_source_edit_plan(
+        apply_source_edit_plan(
             planned_files,
             run_source_edit(
                 graph,
@@ -670,18 +671,17 @@ pub(super) async fn resolve_source_edit_preview(
         SourceEditRequest::RenameSymbol { dry_run: false, .. } => edit,
         _ => edit.with_dry_run(true),
     };
-    let (outcome, planned_files) =
-        tracedecay_application::tracedecay::capture_source_edit_plan(run_source_edit(
-            graph,
-            SourceEditGraphReadAuthorityV1 {
-                port: code_graph,
-                context,
-                observed_at,
-                cancellation,
-            },
-            capture_edit,
-        ))
-        .await;
+    let (outcome, planned_files) = capture_source_edit_plan(run_source_edit(
+        graph,
+        SourceEditGraphReadAuthorityV1 {
+            port: code_graph,
+            context,
+            observed_at,
+            cancellation,
+        },
+        capture_edit,
+    ))
+    .await;
     let mut outcome = outcome?;
     if !outcome.success() {
         return Ok(ResolvedSourceEditPreview {

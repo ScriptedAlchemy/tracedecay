@@ -297,7 +297,7 @@ fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
 fn build_query_projections(
     generation: &CodeIndexPublishedGenerationV1,
     file_scopes: &BTreeMap<String, String>,
-    qualified_names: &BTreeMap<SymbolOccurrenceId, String>,
+    qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
     queries: &[WorkloadQueryV1],
 ) -> Result<
     (
@@ -313,7 +313,10 @@ fn build_query_projections(
         id::<ComponentRevision>("policy.candidate.v1")?,
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let metadata = CodeLexicalProjectionMetadataV1 {
+    // Every scoped projection shares these two immutable inputs; the lexical
+    // build reads only the names of the chunks it projects, so one corpus-wide
+    // map serves every scope without a per-scope slice or clone.
+    let metadata = Arc::new(CodeLexicalProjectionMetadataV1 {
         generation: generation_id.clone(),
         repository_id: Some(generation.snapshot().repository.clone()),
         logical_paths: generation
@@ -330,7 +333,7 @@ fn build_query_projections(
             tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
         )?,
         exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
-    };
+    });
     // Canonical scope keys, deduplicated once; the position is the bucket id.
     let scope_keys = queries
         .iter()
@@ -389,19 +392,14 @@ fn build_query_projections(
         .zip(graph_chunks)
         .zip(semantic_chunks)
     {
-        // The lexical build reads only the names of the chunks it projects, so
-        // a scope receives that slice of the corpus-wide map, never a copy of
-        // all of it.
-        let scoped_names = chunks
-            .iter()
-            .filter_map(|chunk| chunk.chunk().anchor.symbol_occurrence_id.as_ref())
-            .filter_map(|symbol| qualified_names.get_key_value(symbol))
-            .map(|(symbol, name)| (symbol.clone(), name.clone()))
-            .collect::<BTreeMap<_, _>>();
         lexical.insert(
             scope_key.clone(),
-            CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks, scoped_names)
-                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+            CodeLexicalProjectionAdapterV1::new_admitted(
+                Arc::clone(&metadata),
+                chunks,
+                Arc::clone(&qualified_names),
+            )
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
         semantic_allowed_chunks.insert(scope_key.clone(), semantic);
         graph.insert(
@@ -2353,12 +2351,14 @@ fn publish_corpus_with_scale(
         "deletion",
     )?;
 
-    let qualified_names: BTreeMap<_, _> = generation
-        .symbols()
-        .symbols
-        .iter()
-        .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
-        .collect();
+    let qualified_names: Arc<BTreeMap<_, _>> = Arc::new(
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+            .collect(),
+    );
     let mut occurrence_map = BTreeMap::new();
     for chunk in generation.chunks().chunks() {
         let Some(document) = file_to_document.get(chunk.anchor.file_occurrence_id.as_str()) else {
@@ -2409,7 +2409,7 @@ fn publish_corpus_with_scale(
         build_query_projections(
             &generation,
             &file_scopes,
-            &qualified_names,
+            qualified_names,
             &workload.queries,
         )?;
     Ok(PublishedCorpus {
@@ -3969,13 +3969,15 @@ pub(crate) mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let qualified_names = published
-            .generation
-            .symbols()
-            .symbols
-            .iter()
-            .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let qualified_names = Arc::new(
+            published
+                .generation
+                .symbols()
+                .symbols
+                .iter()
+                .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        );
         let mut queries = workload.queries.clone();
         let mut overlapping = queries[0].clone();
         overlapping.allowed_scopes = vec![
@@ -3988,7 +3990,7 @@ pub(crate) mod tests {
         let (lexical, graph, semantic) = build_query_projections(
             &published.generation,
             &file_scopes,
-            &qualified_names,
+            qualified_names,
             &queries,
         )
         .expect("scoped projections");

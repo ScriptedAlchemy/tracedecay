@@ -22,7 +22,7 @@ use tracedecay_graph_db::{
     GraphProjectionIdentity, GraphProjectorRevision, NeverCancelled, VerifiedGraphSnapshot,
     take_graph_db_hydration_counters, take_graph_db_traversal_counters,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_sessions::runtime::git_correlation::{
     CommitEvidence, CommitRelation, CommitRelationFilter, CommitSessionRecord,
     GIT_EVIDENCE_PROJECTOR_REVISION, GitEvidenceGraphHead, GitEvidenceProjectionV1, GitRefFilter,

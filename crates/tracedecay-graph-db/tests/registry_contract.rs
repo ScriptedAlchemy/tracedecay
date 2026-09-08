@@ -13,12 +13,6 @@ use tracedecay_graph_db::{
     GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled,
     SourceGeneration, TraversalRequest,
 };
-use tracedecay_runtime_core::storage;
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeKey;
-use tracedecay_runtime_core::store_runtime::resolver::{
-    LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
-    LocalStoreRuntimeResolverV1,
-};
 use tracedecay_store::{
     BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, RetainedGraphStoreLeaseV1,
     RetainedGraphStoreOwnerAttachmentV1, RetainedGraphStoreOwnerOperationLeaseErrorV1,
@@ -261,66 +255,6 @@ fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
     let mut sidecar = path.as_os_str().to_owned();
     sidecar.push(".wal");
     std::path::PathBuf::from(sidecar)
-}
-
-#[test]
-fn canonical_runtime_resolver_locator_opens_through_graph_registry() {
-    let temporary = TempDir::new().unwrap();
-    let root = temporary.path().canonicalize().unwrap();
-    let profile_root = root.join("profile");
-    let project_root = root.join("project");
-    std::fs::create_dir(&profile_root).unwrap();
-    std::fs::create_dir(&project_root).unwrap();
-
-    let binding = identity("profile-a", "project-a");
-    // No repo-local enrollment marker exists any more: the typed enrollment
-    // authority below is the identity authority and store paths derive from
-    // the typed project id, never from the root.
-    let store_root = storage::profile_sharded_data_root(&profile_root, "project-a");
-    std::fs::create_dir_all(&store_root).unwrap();
-
-    let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
-        binding.shard_id.brain_id.clone(),
-        binding.shard_id.profile_id.clone(),
-        profile_root,
-    ));
-    resolver
-        .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
-            ProjectId::try_from("project-a".to_owned()).unwrap(),
-            [project_root],
-        ))
-        .unwrap();
-    let key = StoreRuntimeKey::new(binding.shard_id.clone(), binding.incarnation);
-    let resolved = match resolver.resolve_graph_key(&key) {
-        LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
-        LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-            panic!("expected canonical graph locator: {unavailable:?}")
-        }
-    };
-    assert_eq!(
-        resolved.locator().path().parent(),
-        Some(store_root.as_path())
-    );
-    assert_eq!(
-        resolved.locator().path().extension(),
-        Some(std::ffi::OsStr::new("grafeo"))
-    );
-
-    let registration = GraphDbRegistration {
-        authority_lease: Arc::new(TestGraphLease {
-            binding,
-            verified_locator: resolved.locator().verified().clone(),
-            canonical_path: resolved.locator().path().to_path_buf(),
-            drop_counter: None,
-        }),
-        cancellation: Arc::new(NeverCancelled),
-        lifecycle_cancellation: Arc::new(NeverCancelled),
-        deadline: std::time::Instant::now() + Duration::from_secs(30),
-    };
-    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
-
-    let database = mount_and_resolve(&registry, registration).unwrap();
-    assert!(database.snapshot().is_ok());
 }
 
 fn entity(value: &str) -> GraphEntity {

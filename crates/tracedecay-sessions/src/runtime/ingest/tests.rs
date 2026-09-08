@@ -6,7 +6,7 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
     ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, SessionId,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_store::{
     CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, ObservationCoverageReason,
     ObservationCoverageV1, ObservationStoreError,

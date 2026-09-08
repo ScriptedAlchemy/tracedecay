@@ -1148,11 +1148,12 @@ fn feedback_cycle_projections_require_the_canonical_handle() {
             serde_json::json!({"request_handle": "rh_feedback-cycle.fixture"}),
         )
         .expect("canonical feedback-cycle request");
+        // Impact and affected-tests reads are handle-addressed feedback reads:
+        // the operation selects the daemon route, the body is the one handle
+        // request every other feedback read decodes into.
+        assert!(request.matches(operation));
         match request {
-            ApplicationSurfaceRequest::FeedbackImpact(request) => {
-                assert_eq!(request.request_handle, "rh_feedback-cycle.fixture");
-            }
-            ApplicationSurfaceRequest::AffectedTests(request) => {
+            ApplicationSurfaceRequest::Feedback(request) => {
                 assert_eq!(request.request_handle, "rh_feedback-cycle.fixture");
             }
             other => panic!("unexpected feedback-cycle request: {other:?}"),

@@ -16,7 +16,7 @@ use tracedecay_graph_db::{
     VerifiedGraphCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::operation_task_owner::RuntimeOperationTaskOwnerV1;
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
@@ -3105,7 +3105,7 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
 
     fn authority(
         &self,
-    ) -> Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1> {
+    ) -> Arc<tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1> {
         Self::authority(self)
     }
 

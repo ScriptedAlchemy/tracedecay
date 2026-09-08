@@ -279,7 +279,7 @@ impl ShardRuntime {
                     last_activity: Instant::now(),
                     health: ShardRuntimeHealth::Unknown,
                 }),
-                label = "runtime_core.store_runtime.shard_state"
+                label = "runtime_core.shard_runtime.shard_state"
             ),
         }
     }

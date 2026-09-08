@@ -39,10 +39,10 @@ use crate::db::{
     ProjectMemoryReconciliationTelemetryObserverV1, TestDatabaseRuntimeMode,
 };
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
+use crate::shard_runtime::VerifiedGraphRuntimePortV1;
 use crate::store::memory::automatic_facts::project_memory_record_automatic_fact_receipt_tx;
 use crate::store::memory::crud::{initial_batch, sanitize_payload};
 use crate::store::memory::{DatabaseFactStore, ProjectMemoryGraphReconciliationScheduleV1};
-use crate::store_runtime::VerifiedGraphRuntimePortV1;
 
 struct RecordingGraphRuntime {
     binding: StoreRuntimeBindingV1,

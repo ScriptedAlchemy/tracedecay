@@ -12,7 +12,7 @@ use tracedecay_runtime_core::{
         DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
         engine::{Executor, IntoParams, QueryExecutor, Rows},
     },
-    store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
+    shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
@@ -953,8 +953,8 @@ mod tests {
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
         TestRuntimeProfileIdentityV1,
     };
-    use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
-    use tracedecay_runtime_core::store_runtime::registry::{
+    use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
+    use tracedecay_runtime_core::shard_runtime::registry::{
         StoreRuntimeRetirementBlocker, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
     };
     use tracedecay_store::{

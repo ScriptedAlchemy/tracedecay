@@ -254,12 +254,15 @@ mod tests {
     /// Grammars with distinct end-of-input behaviour: plain lexers (`rust`,
     /// `cpp`), an indentation scanner that synthesizes tokens at EOF
     /// (`python`), the grammar composite adapters parse their masks with
-    /// (`typescript`), and the Markdown block grammar. Grammars a feature set
+    /// (`typescript`), the Markdown block grammar, and `cobol`, whose external
+    /// scanner skips the sequence-number area and used to spin at EOF on every
+    /// shape here shorter than six columns (#1104). Grammars a feature set
     /// does not link are skipped; the caller decides whether that is vacuous.
-    /// Degenerate inputs are not fed to every bundled grammar because some
-    /// external scanners never terminate on them.
+    /// Degenerate inputs are not fed to every bundled grammar because an
+    /// external scanner that never terminates on them cannot be interrupted by
+    /// any parse deadline.
     fn linked_grammar_keys() -> Vec<&'static str> {
-        ["rust", "cpp", "python", "typescript", "markdown"]
+        ["rust", "cpp", "python", "typescript", "markdown", "cobol"]
             .into_iter()
             .filter(|key| ts_provider::try_language(key).is_ok())
             .collect()

@@ -5,7 +5,7 @@ use std::time::Instant;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1, GraphDbRegistration,
 };
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey, StoreRuntimeRegistry,
 };
 use tracedecay_sessions::observation::ObservationCancellation;

@@ -403,7 +403,6 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
-pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;
 pub(crate) mod work_evidence_retrieval;

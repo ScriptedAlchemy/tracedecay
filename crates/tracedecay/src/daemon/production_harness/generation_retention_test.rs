@@ -94,11 +94,77 @@ async fn disable_automatic_projection_before_indexing(isolation: &Path, project:
     harness.shutdown().await;
 }
 
+/// Linked-worktree indexing is a project opt-in (`sync.watch_linked_worktrees`,
+/// off by default since f347a0a46): a linked route opened without it serves
+/// but never indexes. Commit the opt-in through the public configuration
+/// authority before any composition mounts the linked route; the setting
+/// requires a daemon restart, which the later mount is.
+async fn enable_linked_worktree_indexing_before_open(isolation: &Path, project: &Path) {
+    assert!(!project.join(".git").exists());
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation,
+        [project.to_path_buf()],
+    )
+    .await
+    .expect("configuration-only project composition");
+    let committed = set_project_setting(
+        &harness,
+        project,
+        tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+        tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+        "retention-linked-worktrees",
+    )
+    .await;
+    assert!(committed.config().sync.watch_linked_worktrees);
+    harness.shutdown().await;
+}
+
 async fn set_project_model_selection(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     selected_model: Option<&str>,
 ) {
+    let graph = harness.server(project).expect("project server").cg().await;
+    let mut semantic = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("current production configuration")
+        .config()
+        .semantic
+        .clone();
+    drop(graph);
+    semantic.selected_model = selected_model.map(str::to_owned);
+    semantic.auto_download = false;
+    assert!(semantic.active_profile.is_none());
+    assert!(semantic.rollback_profile.is_none());
+    let committed = set_project_setting(
+        harness,
+        project,
+        crate::config::SEMANTIC_RUNTIME_SETTING_KEY,
+        tracedecay_domain::configuration::ConfigurationValueV1::Text(
+            serde_json::to_string(&semantic).expect("disabled projection configuration"),
+        ),
+        "retention-no-model",
+    )
+    .await;
+    assert_eq!(
+        committed.config().semantic.selected_model.as_deref(),
+        selected_model
+    );
+}
+
+/// Commit one project-layer setting through the public configuration
+/// authority and return the committed configuration as the composition root
+/// reads it (daemon-only policy layered over the shared runtime pin).
+async fn set_project_setting(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    key: &str,
+    value: tracedecay_domain::configuration::ConfigurationValueV1,
+    idempotency_scope: &str,
+) -> crate::config::PinnedRuntimeConfiguration {
     let graph = harness.server(project).expect("project server").cg().await;
     let configuration = graph
         .configuration_runtime()
@@ -106,11 +172,6 @@ async fn set_project_model_selection(
         .current()
         .await
         .expect("current production configuration");
-    let mut semantic = configuration.config().semantic.clone();
-    semantic.selected_model = selected_model.map(str::to_owned);
-    semantic.auto_download = false;
-    assert!(semantic.active_profile.is_none());
-    assert!(semantic.rollback_profile.is_none());
     let request = tracedecay_contracts::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
             project_id: graph
@@ -119,16 +180,11 @@ async fn set_project_model_selection(
                 .project_id
                 .clone(),
         },
-        key: tracedecay_domain::configuration::SettingKey::new(
-            crate::config::SEMANTIC_RUNTIME_SETTING_KEY,
-        )
-        .expect("semantic setting key"),
-        value: tracedecay_domain::configuration::ConfigurationValueV1::Text(
-            serde_json::to_string(&semantic).expect("disabled projection configuration"),
-        ),
+        key: tracedecay_domain::configuration::SettingKey::new(key).expect("setting key"),
+        value,
         idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
             format!(
-                "configuration.idempotency.retention-no-model.{}",
+                "configuration.idempotency.{idempotency_scope}.{}",
                 configuration.revision_id()
             ),
         )
@@ -142,10 +198,10 @@ async fn set_project_model_selection(
             serde_json::to_value(request).expect("configuration request"),
         )
         .await
-        .expect("public model deselection");
+        .expect("public configuration set");
     assert!(
         response.error.is_none(),
-        "model deselection failed: {response:?}"
+        "configuration set of {key} failed: {response:?}"
     );
     assert_ne!(
         response.result.as_ref().expect("configuration result")["isError"],
@@ -156,15 +212,12 @@ async fn set_project_model_selection(
         .client()
         .current()
         .await
-        .expect("committed model selection");
-    assert_eq!(
-        observed.config().semantic.selected_model.as_deref(),
-        selected_model
-    );
+        .expect("committed configuration");
     let root_view = crate::config::PinnedRuntimeConfiguration::from_runtime(observed.clone())
         .expect("root runtime layers policy over the same committed pin");
     assert_eq!(root_view.config().semantic, observed.config().semantic);
     drop(graph);
+    root_view
 }
 
 fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
@@ -1248,7 +1301,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     use super::semantic_activation_journey_test::{
         evaluate_native_profile, install_project_distribution_fixture,
         installed_selection_material, selection, set_semantic_profile,
-        wait_for_semantic_generation,
+        wait_for_semantic_generation, wait_for_semantic_runtime_ready,
     };
 
     // Same byte-pinned FastEmbed prerequisite as the semantic activation
@@ -1270,6 +1323,9 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     let isolation = TempDir::new().expect("linked-worktree journey isolation");
     let primary = isolation.path().join("primary");
     std::fs::create_dir_all(&primary).expect("primary worktree");
+    // The journey indexes both checkouts of one logical project, so the
+    // operator opt-in that admits linked-worktree indexing is part of it.
+    enable_linked_worktree_indexing_before_open(isolation.path(), &primary).await;
     initialize_git_project(&primary);
     let linked = isolation.path().join("linked-b");
     let linked_arg = linked.to_string_lossy().into_owned();
@@ -1341,6 +1397,10 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     let linked_profile = evaluate_native_profile(&harness, &linked).await;
     let primary_selection = selection(primary_profile, &artifact_digest, &artifact_path);
     let linked_selection = selection(linked_profile, &artifact_digest, &artifact_path);
+    // Both checkouts share one project configuration. A coordinated semantic
+    // transition commits it and then settles through the route's runtime;
+    // the next transition is authorized against the settled state, so each
+    // activation converges before the sibling checkout swaps the profiles.
     set_semantic_profile(
         &harness,
         &primary,
@@ -1348,6 +1408,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         Some(linked_selection.clone()),
     )
     .await;
+    wait_for_semantic_runtime_ready(&harness, &primary).await;
     set_semantic_profile(
         &harness,
         &linked,
@@ -1355,6 +1416,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         Some(primary_selection.clone()),
     )
     .await;
+    wait_for_semantic_runtime_ready(&harness, &linked).await;
     let primary_vector_id = primary_vector.generation_id().clone();
     let linked_vector_id = linked_vector.generation_id().clone();
     let primary_graph = harness.server(&primary).expect("primary server").cg().await;

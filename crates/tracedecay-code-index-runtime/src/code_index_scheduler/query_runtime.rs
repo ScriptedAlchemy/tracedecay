@@ -731,9 +731,21 @@ where
         // seating failure (`retriever_unavailable`) after exact and lexical
         // had already completed. Text-only or still-pending generations keep
         // the typed unavailable receipt.
+        //
+        // Graph activation state is owned per sealed generation and shared by
+        // every handle bound to it, so the text owner answers for its own
+        // generation when no decoded complete generation accompanies it. A
+        // clean restart whose retained revision-7 head recovered serves graph
+        // reads from exactly that owner and deliberately leaves the sealed
+        // seat empty; resolving the lane only through the seat reported the
+        // recovered graph as `retriever_unavailable` until the next publish.
         let graph_serving = graph_latest
             .as_ref()
-            .and_then(|latest| latest.production_graph_serving().ok());
+            .map_or_else(
+                || text.production_graph_serving(),
+                |latest| latest.production_graph_serving(),
+            )
+            .ok();
         if graph_seeds.is_empty() {
             if graph_serving.is_some() {
                 RetrieverOutcome::Complete(RetrieverBatch {

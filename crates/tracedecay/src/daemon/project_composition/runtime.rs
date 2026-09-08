@@ -138,7 +138,7 @@ mod tests {
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
         TestRuntimeProfileIdentityV1,
     };
-    use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+    use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
     use super::bind_verified_project_graph_runtime;

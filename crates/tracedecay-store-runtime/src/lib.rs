@@ -1,10 +1,20 @@
-//! Project-store and session-registry runtime.
+//! The canonical TraceDecay store runtime.
 //!
-//! Owns the daemon session registry that implements
-//! [`tracedecay_application::tracedecay::ProjectStoreRuntimeV1`], the Remote
-//! Brain credential authority it mounts, and the remote-replay transaction
-//! worker. The composition root (`tracedecay`) wires these against daemon
-//! engine state; this crate never depends on the root aggregate.
+//! This crate is the single owner of store, shard, and session lifecycle for
+//! a daemon: the session registry that implements
+//! [`tracedecay_application::tracedecay::ProjectStoreRuntimeV1`] (project-store
+//! attachment, retirement, schema convergence, maintenance, graph runtime
+//! binding, and shutdown), the store locator resolver it opens shards through,
+//! the Remote Brain credential authority it mounts, and the remote-replay
+//! transaction worker. The composition root (`tracedecay`) wires these against
+//! daemon engine state; this crate never depends on the root aggregate.
+//!
+//! Database kernels sit below it and hold no lifecycle policy of their own:
+//! `tracedecay_runtime_core::shard_runtime` is the per-shard `SQLite` runtime
+//! and registry this crate drives through `StoreRuntimeResolver` and
+//! `ShardRuntimePublisher`, `tracedecay-rusqlite-runtime` the engine,
+//! `tracedecay-global-db` the registered schema, and `tracedecay-graph-db`
+//! the graph store.
 //!
 //! The `tracedecay-application` dependency is only for that store-runtime port
 //! and for implementing [`tracedecay_code_index_runtime::CodeGraphSeatLeaseV1`]
@@ -19,6 +29,7 @@
 pub mod remote_credentials;
 pub mod remote_replay_transaction;
 pub mod session_registry;
+pub mod store_locator_resolver;
 
 mod schema;
 

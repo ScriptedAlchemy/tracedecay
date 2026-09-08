@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use tracedecay_application::tracedecay::SourceEditGraphReadV1;
 use tracedecay_contracts::source_edit::{
     RenameDispositionCountsV1, RenameFileEditV1, RenameHazardKindV1, RenameHazardV1,
     RenameImpactV1, RenameProtectedValueCategoryV1, RenameProtectedValueV1, RenameResult,
@@ -13,14 +12,14 @@ use tracedecay_contracts::source_edit::{
 use tracedecay_domain::{
     ContentDigest, ManifestDigest, SnapshotFileDispositionV1, canonical_sha256,
 };
+use tracedecay_source_edit::{
+    PlannedSourceEditFile, SourceEditFileAuthority, SourceEditGraphReadV1,
+    capture_planned_source_edit, publish_planned_source_edit,
+};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
-use super::file_authority::SourceEditFileAuthority;
-use super::plan::{
-    PlannedSourceEditFile, capture_planned_source_edit, publish_planned_source_edit,
-};
 use super::preview::{
     MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
 };

@@ -969,7 +969,7 @@ mod tests {
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
         TestRuntimeProfileIdentityV1,
     };
-    use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+    use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_sessions::runtime::SessionRecord;
     use tracedecay_sessions::runtime::git_correlation::{
         CommitRelationFilter, GitCorrelationError, GitEvidenceProjectionV1,

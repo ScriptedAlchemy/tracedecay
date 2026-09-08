@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::shard_runtime::registry::DestructiveMaintenanceTarget;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
-use tracedecay_runtime_core::store_runtime::registry::DestructiveMaintenanceTarget;
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
@@ -202,10 +202,10 @@ impl RemoteRecoveryPublicationContextV1 {
             }
         };
         let store = match self.registry.reserve_retirement_batch(vec![store_target]) {
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(
                 reservation,
             ) => reservation,
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(
                 refusal,
             ) => {
                 let (blockers, mut targets) = refusal.into_parts();
@@ -730,7 +730,7 @@ mod tests {
 
     use tracedecay_domain::ProjectId;
     use tracedecay_graph_db::NeverCancelled;
-    use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult;
+    use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult;
 
     use super::*;
     use crate::session_registry::{

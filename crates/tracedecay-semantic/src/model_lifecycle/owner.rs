@@ -735,7 +735,7 @@ impl SemanticModelLifecycleOwnerV1 {
             return Ok(Some(SemanticModelLifecycleStateV1::Installed {
                 model_id: model.model_id.clone(),
                 revision: model.source.revision.clone(),
-                artifact_digest: record.artifact_digest.to_string(),
+                artifact_digest: catalog_package_digest(model),
                 install_path: self
                     .artifact_store
                     .installed_directory(&record.artifact_digest),
@@ -752,22 +752,22 @@ impl SemanticModelLifecycleOwnerV1 {
             let guard = self.inner.read();
             guard.durable.state.clone()
         };
-        let (was_ready, artifact_digest) = match state {
+        let (was_ready, artifact_digest, durable_install_path) = match state {
             Some(SemanticModelLifecycleStateV1::Installed {
                 model_id,
                 revision,
                 artifact_digest,
-                ..
+                install_path,
             }) if model_id == model.model_id && revision == model.source.revision => {
-                (false, artifact_digest)
+                (false, artifact_digest, install_path)
             }
             Some(SemanticModelLifecycleStateV1::Ready {
                 model_id,
                 revision,
                 artifact_digest,
-                ..
+                install_path,
             }) if model_id == model.model_id && revision == model.source.revision => {
-                (true, artifact_digest)
+                (true, artifact_digest, install_path)
             }
             _ => return Ok(None),
         };
@@ -791,8 +791,13 @@ impl SemanticModelLifecycleOwnerV1 {
                 }
             }));
         }
-        let digest = Sha256DigestHex::new(artifact_digest.clone())
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        // Every other verified install lives in the artifact inventory, whose
+        // content address is the install directory's name — not the lifecycle
+        // digest, which names the catalog package for a scoped acquisition.
+        let digest = self
+            .artifact_store
+            .installed_digest(&durable_install_path)
+            .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
         let environment =
             RuntimeEnvironmentV1::detect_embedding_process(model.backend.runtime_family())
                 .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
@@ -976,11 +981,9 @@ impl SemanticModelLifecycleOwnerV1 {
             return Err(ModelLifecycleErrorV1::Rejected);
         }
         let prior_durable = guard.durable.clone();
-        if install_path_of(&previous)
-            .is_some_and(|path| path.starts_with(self.artifact_root.join("artifacts")))
+        if let Some(digest) = install_path_of(&previous)
+            .and_then(|path| self.artifact_store.installed_digest(path))
         {
-            let digest = Sha256DigestHex::new(previous.artifact_digest().to_owned())
-                .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
             self.artifact_store.activate_artifact_with_rollback(
                 &digest,
                 &self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1),

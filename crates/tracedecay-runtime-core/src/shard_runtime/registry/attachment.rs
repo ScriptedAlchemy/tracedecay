@@ -268,13 +268,13 @@ impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
 /// physical lifetime. The registry is the first code allowed to retain either
 /// resource behind an `Arc`.
 pub struct PublishedShardRuntime {
-    runtime: crate::store_runtime::shard::ShardRuntime,
+    runtime: crate::shard_runtime::shard::ShardRuntime,
     attachment: Box<dyn PhysicalRuntimeAttachment>,
 }
 
 impl PublishedShardRuntime {
     pub fn new(
-        runtime: crate::store_runtime::shard::ShardRuntime,
+        runtime: crate::shard_runtime::shard::ShardRuntime,
         attachment: Box<dyn PhysicalRuntimeAttachment>,
     ) -> Self {
         Self {
@@ -294,7 +294,7 @@ impl PublishedShardRuntime {
     pub(super) fn into_parts(
         self,
     ) -> (
-        Arc<crate::store_runtime::shard::ShardRuntime>,
+        Arc<crate::shard_runtime::shard::ShardRuntime>,
         Arc<dyn PhysicalRuntimeAttachment>,
     ) {
         (Arc::new(self.runtime), Arc::from(self.attachment))

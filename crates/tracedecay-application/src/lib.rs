@@ -13,13 +13,12 @@
 //!
 //! Graph reads use the Grafeo-backed
 //! `tracedecay_global_db::VerifiedGraphRuntimePortV1` (defined in
-//! `tracedecay-runtime-core::store_runtime::verified_graph`) rather than a
+//! `tracedecay_runtime_core::shard_runtime`) rather than a
 //! parallel port owned here.
-//! Source-edit preview/apply still route through this crate's own task-local
-//! plan authority: [`tracedecay::capture_source_edit_plan`],
-//! [`tracedecay::apply_source_edit_plan`], and
-//! [`tracedecay::capture_planned_source_edit`]. Callers should use these
-//! rather than create a second root-owned plan.
+//! Source editing is its own vertical slice in `tracedecay-source-edit`:
+//! planning, preview capture, journal, rollback, and reconciliation live
+//! there, behind ports that crate defines; this crate carries no source-edit
+//! runtime state.
 //! - [`tracedecay_configuration::PinnedRuntimeConfigurationCachePort`], installed
 //!   via [`tracedecay_configuration::install_pinned_runtime_configuration_cache`]
 //!   by the composition root, which owns opening durable configuration.

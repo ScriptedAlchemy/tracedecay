@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::Database;
-use crate::store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
+use crate::shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_db::GraphWatermark;
 
@@ -212,7 +212,7 @@ mod tests {
     use crate::db::{
         DatabaseAuthority, MemoryGraphRuntimeOperationErrorV1, TestDatabaseRuntimeMode,
     };
-    use crate::store_runtime::VerifiedGraphRuntimePortV1;
+    use crate::shard_runtime::VerifiedGraphRuntimePortV1;
 
     struct TestGraphRuntime {
         binding: StoreRuntimeBindingV1,

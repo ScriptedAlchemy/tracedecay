@@ -2,8 +2,9 @@ use tracedecay_contracts::{
     SourceEditDiagnosticV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
 };
 
-use tracedecay_application::tracedecay::SourceEditRuntime;
 use tracedecay_domain::errors::TraceDecayError;
+
+use super::port::SourceEditRuntime;
 
 #[hotpath::measure(label = "usecases.edit.verify.file", future = true)]
 async fn run_edit_verification(

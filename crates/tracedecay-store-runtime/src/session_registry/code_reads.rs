@@ -360,10 +360,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         };
         let store_reservation = match self.registry.reserve_retirement_batch(vec![store_target]) {
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(
                 reservation,
             ) => reservation,
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(
                 refusal,
             ) => {
                 let (blockers, mut targets) = refusal.into_parts();
@@ -486,10 +486,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                     )
                 })?;
             let mut store_reservation = match self.registry.reserve_retirement_batch(vec![target]) {
-                tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+                tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(
                     reservation,
                 ) => reservation,
-                tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+                tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(
                     refusal,
                 ) => {
                     return Err(session_registry_error(
@@ -528,7 +528,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             let store_closed = store.outcomes().iter().all(|outcome| {
                 matches!(
                     outcome,
-                    tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }
+                    tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }
                 )
             });
             retirement.commit_without_memory()?;
@@ -606,10 +606,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         };
         let mut store_reservation = match self.registry.reserve_retirement_batch(vec![store_target]) {
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(
                 reservation,
             ) => reservation,
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(
                 refusal,
             ) => {
                 let (blockers, mut targets) = refusal.into_parts();
@@ -775,7 +775,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let store_closed = store.outcomes().iter().all(|outcome| {
             matches!(
                 outcome,
-                tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }
+                tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }
             )
         });
         if graph_closed && store_closed {

@@ -630,7 +630,7 @@ impl OpenAttemptGuard {
                             database_authority,
                             database_attachments: hotpath::mutex!(
                                 std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                                label = "runtime_core.store_runtime.database_attachments"
+                                label = "runtime_core.shard_runtime.database_attachments"
                             ),
                             next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
                             next_database_owner_id: std::sync::atomic::AtomicU64::new(1),

@@ -31,7 +31,7 @@ use tracedecay_graph_db::{
     SealedReadBundleArtifactStateV1, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
+use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
 /// Sealed-generation replay identity the seat port needs to retain a runtime.

@@ -15,7 +15,7 @@ use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     NeverCancelled, VerifiedGraphSnapshot,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_store::{
     FactReadControl, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
     StoreShardIdV1, VerifiedStoreLocatorV1,
