@@ -3,7 +3,7 @@
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 
 use serde_json::Value;
 
@@ -82,7 +82,18 @@ pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithP
         let reads = SESSION_META_READS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
         let mut reads = reads.lock().unwrap_or_else(|error| error.into_inner());
         let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        *reads.entry(key).or_default() += 1;
+        *reads.entry(key.clone()).or_default() += 1;
+        drop(reads);
+        let gate = SESSION_META_PARSE_GATES.get().and_then(|gates| {
+            gates
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key)
+                .cloned()
+        });
+        if let Some(gate) = gate {
+            gate.park();
+        }
     }
     let file = std::fs::File::open(path).ok()?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
@@ -120,6 +131,74 @@ pub(crate) fn session_meta_read_count_for_test(path: &Path) -> usize {
         .get(&key)
         .copied()
         .unwrap_or_default()
+}
+
+/// Test barrier that parks every `session_meta` parse of one rollout until it
+/// is released, so a test can observe callers while the blocking parse is
+/// genuinely in flight instead of racing a sleep.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct SessionMetaParseGate {
+    state: Mutex<SessionMetaParseGateState>,
+    changed: Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SessionMetaParseGateState {
+    parked: usize,
+    released: bool,
+}
+
+#[cfg(test)]
+impl SessionMetaParseGate {
+    fn park(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.parked += 1;
+        self.changed.notify_all();
+        while !state.released {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Blocks until at least `count` parses have parked at this gate.
+    pub(crate) fn wait_parked(&self, count: usize) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while state.parked < count {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .released = true;
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+static SESSION_META_PARSE_GATES: OnceLock<
+    Mutex<std::collections::HashMap<PathBuf, Arc<SessionMetaParseGate>>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn install_session_meta_parse_gate_for_test(path: &Path) -> Arc<SessionMetaParseGate> {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let gate = Arc::new(SessionMetaParseGate::default());
+    SESSION_META_PARSE_GATES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, Arc::clone(&gate));
+    gate
 }
 
 pub fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
