@@ -31,6 +31,29 @@ fn read_only_git_output_enforces_deadline_and_byte_limit() {
     ));
 }
 
+/// A successful parent exit does not close a pipe a descendant inherited, so
+/// draining after exit must stay under the caller's deadline instead of
+/// waiting for an EOF the descendant controls.
+#[cfg(unix)]
+#[test]
+fn draining_after_exit_is_bounded_when_a_descendant_holds_stdout() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf 'tracedecay 1.2.3\\n'; sleep 20 & exit 0"]);
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + Duration::from_millis(300),
+        ..GitCommandBounds::default()
+    };
+    let started = Instant::now();
+
+    let result = bounded_command_output(command, None, &bounds);
+
+    assert!(matches!(result, Err(GitCommandError::DeadlineExceeded)));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the inherited pipe must not hold the caller past its deadline"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn generic_command_is_interrupted_by_live_cancellation() {
