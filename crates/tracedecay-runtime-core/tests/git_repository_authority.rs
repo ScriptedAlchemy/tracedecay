@@ -1,3 +1,5 @@
+// Its own test binary, not a runtime_core_suite module: the ambient-git test
+// re-executes this binary with a bare `--exact` test name.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::io::Write as _;
