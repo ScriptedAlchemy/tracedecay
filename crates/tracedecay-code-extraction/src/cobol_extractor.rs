@@ -165,6 +165,23 @@ impl CobolExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    ///
+    /// Known grammar defect (#1104): the `cobol` grammar is the copy of
+    /// yutaro-sakamoto/tree-sitter-cobol vendored in `tokensave-large-treesitters`
+    /// 0.5.0 (scanner as of upstream `c7a36d7`). Its external scanner skips the
+    /// sequence-number area with `while (get_column() <= 5) advance()`, which
+    /// never tests for end of input. Whenever a token starts at 0-based column
+    /// 0–5 — a line whose first non-blank byte sits in the sequence-number area,
+    /// or any position re-lexed during error recovery — and no line from there
+    /// to EOF is at least six columns wide, the loop reaches EOF, where
+    /// `advance` is a no-op, and spins forever: `"x"`, `"x\n"`, `"abcde"`, and a
+    /// well-formed program followed by a short trailing line such as `abc` all
+    /// hang, while `"abcdef"` and area-A/B code (six or more leading blanks)
+    /// parse. No boundary in this crate can interrupt it: tree-sitter polls the
+    /// progress callback only between parse actions, never inside a scanner
+    /// call, so the retained parser's cooperative deadline does not fire. The
+    /// fix is upstream yutaro-sakamoto/tree-sitter-cobol#42 (unmerged) and has
+    /// to land through the bundle that vendors the grammar.
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("cobol", "COBOL", source)
     }

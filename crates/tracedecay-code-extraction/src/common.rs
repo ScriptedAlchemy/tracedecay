@@ -256,8 +256,13 @@ mod tests {
     /// (`python`), the grammar composite adapters parse their masks with
     /// (`typescript`), and the Markdown block grammar. Grammars a feature set
     /// does not link are skipped; the caller decides whether that is vacuous.
-    /// Degenerate inputs are not fed to every bundled grammar because some
-    /// external scanners never terminate on them.
+    /// Degenerate inputs are not fed to every bundled grammar because an
+    /// external scanner that never terminates on them cannot be interrupted by
+    /// any parse deadline. `cobol` joins this list once its vendored scanner
+    /// terminates on short trailing lines (#1104): today every shape here whose
+    /// last non-blank line starts in the sequence-number area and is shorter
+    /// than six columns (`"x"`, `"x\n"`, `"x\ny\n"`, `"é\n界"`, ...) spins
+    /// forever inside `tree_sitter_COBOL_external_scanner_scan`.
     fn linked_grammar_keys() -> Vec<&'static str> {
         ["rust", "cpp", "python", "typescript", "markdown"]
             .into_iter()

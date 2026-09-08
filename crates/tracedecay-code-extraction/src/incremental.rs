@@ -26,6 +26,8 @@ pub const DEFAULT_MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// A malformed edit stream cannot make range reporting itself unbounded.
 pub const DEFAULT_MAX_CHANGED_RANGES: usize = 256;
 /// Parsing is synchronous, but every invocation has a cooperative deadline.
+/// Cooperative means tree-sitter polls it between parse actions; a grammar
+/// scanner that never returns from one call is outside its reach (#1104).
 pub const DEFAULT_MAX_PARSE_TIME: Duration = Duration::from_millis(250);
 
 /// Exact authority for source retained by one parser.
