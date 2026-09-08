@@ -12,7 +12,7 @@
 //! asserts the projections carry back exactly the declared numbers: if any
 //! layer ever starts estimating one, these equalities break.
 
-mod work_registered_store;
+use crate::work_registered_store;
 
 use std::collections::BTreeSet;
 

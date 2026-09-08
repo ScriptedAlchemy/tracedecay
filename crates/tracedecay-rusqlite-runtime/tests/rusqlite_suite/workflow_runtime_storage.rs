@@ -22,7 +22,7 @@ use tracedecay_rusqlite_runtime::workflow::{
     WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError,
 };
 
-mod registered_workflow_store;
+use crate::registered_workflow_store;
 
 use registered_workflow_store::RegisteredWorkflowStore;
 

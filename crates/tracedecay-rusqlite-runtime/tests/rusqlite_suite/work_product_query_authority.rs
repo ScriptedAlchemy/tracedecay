@@ -21,7 +21,7 @@
 //! suite keeps the initial declaration route because its read assertions need
 //! evidence present in the first version, not because that mutation is absent.
 
-mod work_registered_store;
+use crate::work_registered_store;
 
 use std::collections::{BTreeMap, BTreeSet};
 

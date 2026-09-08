@@ -1,6 +1,6 @@
 use tracedecay_store::{AdmissionConfigV1, OperationPriorityV1, RuntimeSubmitOutcomeV1};
 
-use crate::support::{
+use super::support::{
     ExecutorControl, TestBinding, TestDatabase, TestProbe, marker_count, request, runtime,
     table_count, writer,
 };

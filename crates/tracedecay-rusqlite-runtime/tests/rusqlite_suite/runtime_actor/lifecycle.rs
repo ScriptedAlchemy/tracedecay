@@ -11,7 +11,7 @@ use tracedecay_store::{
     RuntimeSubmitOutcomeV1, StoreCommitReceiptV1, UnavailableReasonV1,
 };
 
-use crate::support::{
+use super::support::{
     ExecutorControl, LifecycleBarrier, TestBinding, TestDatabase, TestProbe, marker_count, release,
     request, runtime, table_count, unwrap_arc, writer,
 };

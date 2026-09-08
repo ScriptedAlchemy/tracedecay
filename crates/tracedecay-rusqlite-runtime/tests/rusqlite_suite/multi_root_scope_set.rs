@@ -29,7 +29,7 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-mod common;
+use crate::common;
 
 use common::fixture_abs_root;
 

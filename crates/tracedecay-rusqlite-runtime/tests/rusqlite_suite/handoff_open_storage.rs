@@ -18,7 +18,7 @@ use tracedecay_domain::{
 use tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-mod registered_workflow_store;
+use crate::registered_workflow_store;
 
 use registered_workflow_store::RegisteredWorkflowStore;
 

@@ -2,8 +2,8 @@
 //! admission, fenced compare-and-swap transitions, authority isolation, and
 //! restart durability over the registered exact-SQL channel.
 
-mod common;
-mod work_registered_store;
+use crate::common;
+use crate::work_registered_store;
 
 use std::{
     collections::BTreeSet,

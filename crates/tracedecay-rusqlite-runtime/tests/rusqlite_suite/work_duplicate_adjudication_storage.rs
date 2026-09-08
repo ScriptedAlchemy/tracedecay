@@ -1,4 +1,4 @@
-mod work_registered_store;
+use crate::work_registered_store;
 
 use rusqlite::params;
 use std::num::NonZeroU16;

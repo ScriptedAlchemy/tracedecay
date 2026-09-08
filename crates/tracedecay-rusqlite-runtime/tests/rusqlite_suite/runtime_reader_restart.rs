@@ -5,8 +5,7 @@ use std::time::Duration;
 use tracedecay_rusqlite_runtime::reader::{ReaderAcquireError, ReaderPool};
 use tracedecay_store::{AdmissionConfigV1, UnavailableReasonV1};
 
-#[path = "../../../tests/storage_runtime_rusqlite_suite/runtime_test_support.rs"]
-mod runtime_test_support;
+use crate::runtime_test_support;
 
 use runtime_test_support::{
     CountExecutor, Probe, ReaderRuntimeFixture, TestDatabase, read_request, reader_locator,

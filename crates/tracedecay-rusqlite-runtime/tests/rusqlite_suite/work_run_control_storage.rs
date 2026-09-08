@@ -9,8 +9,8 @@
 //! first admitted under is read from the attempt's own pinned execution
 //! snapshot rather than supplied by a caller.
 
-mod common;
-mod work_registered_store;
+use crate::common;
+use crate::work_registered_store;
 
 use std::collections::BTreeSet;
 

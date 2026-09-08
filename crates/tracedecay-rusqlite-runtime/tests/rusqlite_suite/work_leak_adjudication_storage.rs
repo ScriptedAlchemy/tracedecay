@@ -1,7 +1,7 @@
 //! Durable Work leak adjudication replay and integrity checks.
 
-mod common;
-mod work_registered_store;
+use crate::common;
+use crate::work_registered_store;
 
 use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, VerifiedWorkLeakEvidenceV1, WorkAttemptStoragePort,

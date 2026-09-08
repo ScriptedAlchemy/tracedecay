@@ -14,7 +14,7 @@ use tracedecay_domain::{
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-mod work_registered_store;
+use crate::work_registered_store;
 
 use work_registered_store::RegisteredWorkStore;
 

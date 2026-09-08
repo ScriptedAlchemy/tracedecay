@@ -7,8 +7,8 @@
 //! the rule survive a crash between the service's read and its write, so the
 //! rule is tested where it is enforced.
 
-mod common;
-mod work_registered_store;
+use crate::common;
+use crate::work_registered_store;
 
 use std::collections::BTreeSet;
 
