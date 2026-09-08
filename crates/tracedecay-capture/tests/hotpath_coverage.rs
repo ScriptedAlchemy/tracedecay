@@ -1,3 +1,5 @@
+// Its own test binary, not a capture_suite module: it sets HOTPATH_* process
+// environment variables in-process.
 //! Hotpath coverage contract for `tracedecay-capture`.
 //!
 //! Feature-off (default build): every hotpath macro must be a no-op — no
