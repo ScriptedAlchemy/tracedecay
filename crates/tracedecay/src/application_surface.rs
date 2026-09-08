@@ -3453,24 +3453,24 @@ async fn invoke_application_adapter_request(
     let binding_id = binding.binding_id;
     let result_contract = ResultContractRef::from_schema(&binding.result_schema);
     let request_id = request.request_id;
-    let body = apply_http_page_to_surface_body(operation, request.body, &request.page);
-    let application_request = match parse_application_surface_request(operation, body) {
-        Ok(request) => request,
-        Err(error) => {
-            observe_surface_argument_rejection(
-                Some(executor),
-                surface,
-                operation,
-                &request_id,
-                &error,
-            )
-            .await;
-            return Ok(CanonicalInvocationResult::new(
-                binding_id,
-                Err(http_adapter_problem(result_contract, request_id, error)?),
-            ));
-        }
-    };
+    let application_request =
+        match parse_http_application_surface_request(operation, request.body, &request.page) {
+            Ok(request) => request,
+            Err(error) => {
+                observe_surface_argument_rejection(
+                    Some(executor),
+                    surface,
+                    operation,
+                    &request_id,
+                    &error,
+                )
+                .await;
+                return Ok(CanonicalInvocationResult::new(
+                    binding_id,
+                    Err(http_adapter_problem(result_contract, request_id, error)?),
+                ));
+            }
+        };
     let input = match application_surface_dispatch_input_with_controls(
         operation,
         request_id.clone(),
@@ -3568,6 +3568,24 @@ fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProje
         ApplicationSurfaceOperation::DiagnosticsRead => HttpPageProjection::BodyPageControls,
         _ => HttpPageProjection::Unpaged,
     }
+}
+
+/// Decodes one HTTP request body into the canonical surface request.
+///
+/// HTTP is the one transport that carries page controls outside the body (the
+/// `page_size` / `cursor` query), so they are projected into the body first;
+/// CLI and MCP argument objects already carry them and reach
+/// [`parse_application_surface_request`] directly. Every transport therefore
+/// decodes into the same [`ApplicationSurfaceRequest`].
+pub fn parse_http_application_surface_request(
+    operation: ApplicationSurfaceOperation,
+    body: Value,
+    page: &PageRequest,
+) -> Result<ApplicationSurfaceRequest, ApplicationSurfaceAdapterError> {
+    parse_application_surface_request(
+        operation,
+        apply_http_page_to_surface_body(operation, body, page),
+    )
 }
 
 fn apply_http_page_to_surface_body(

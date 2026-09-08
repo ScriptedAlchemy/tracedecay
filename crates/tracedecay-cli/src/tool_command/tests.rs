@@ -1,9 +1,13 @@
 use super::*;
 use serde_json::{Value, json};
-use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
+use tracedecay::application_surface::{
+    parse_http_application_surface_request, resolve_application_surface_dispatch_with_controls,
 };
-use tracedecay_tool_catalog::{BindingId, SchemaId};
+use tracedecay_application::{
+    ApplicationProblem, ApplicationProblemEnvelope, OpaqueCursor, PageRequest, RequestId,
+    ResultContractRef, SafeDiagnostic,
+};
+use tracedecay_tool_catalog::{BindingId, BindingSurface, SchemaId};
 
 fn defs() -> Vec<ToolDefinition> {
     get_tool_definitions().expect("tool definitions")
@@ -1194,6 +1198,169 @@ fn cli_and_mcp_normalize_documented_arguments_identically() {
         )
         .expect("mcp request is serializable");
         assert_eq!(cli_parsed, mcp_parsed, "{tool_name}");
+    }
+}
+
+/// One request the way each transport carries it. CLI and MCP share the
+/// argument object, page controls included; HTTP carries the page in its
+/// query string, so its body omits exactly the fields the query supplies.
+struct TransportEquivalentRequest {
+    tool_name: &'static str,
+    arguments: Value,
+    http_body: Value,
+    http_page: PageRequest,
+}
+
+fn http_page(page_size: u32, cursor: Option<&str>) -> PageRequest {
+    PageRequest::new(
+        page_size,
+        cursor.map(|cursor| OpaqueCursor::new(cursor).expect("cursor")),
+    )
+    .expect("page")
+}
+
+fn transport_equivalent_requests() -> Vec<TransportEquivalentRequest> {
+    let mut requests: Vec<TransportEquivalentRequest> = documented_json_invocations()
+        .into_iter()
+        .map(|(tool_name, arguments)| TransportEquivalentRequest {
+            tool_name,
+            http_body: arguments.clone(),
+            arguments,
+            http_page: http_page(10, None),
+        })
+        .collect();
+    // The diagnostics read is the one operation whose page controls are plain
+    // body fields, so the HTTP query must land exactly there.
+    requests.push(TransportEquivalentRequest {
+        tool_name: "tracedecay_diagnostics_read",
+        arguments: json!({
+            "scope": {"file": "src/update_cmd.rs"},
+            "maximum_diagnostics": 25,
+            "cursor": "diagnostics-page-2",
+        }),
+        http_body: json!({"scope": {"file": "src/update_cmd.rs"}}),
+        http_page: http_page(25, Some("diagnostics-page-2")),
+    });
+    // Callable-code continuations ride in `meta.cursor`; the HTTP query cursor
+    // must be the same continuation, not a second channel.
+    let symbol_search = json!({
+        "query": "ApplicationSurfaceOperation",
+        "scope": {"path_prefix": "src"},
+        "lazy_index_ignored_dependencies": false,
+        "meta": {"projection": "evidence", "order": "source_position"},
+    });
+    let mut symbol_search_arguments = symbol_search.clone();
+    symbol_search_arguments["meta"]["cursor"] = json!("symbols-page-2");
+    requests.push(TransportEquivalentRequest {
+        tool_name: "tracedecay_code_symbol_search",
+        arguments: symbol_search_arguments,
+        http_body: symbol_search,
+        http_page: http_page(10, Some("symbols-page-2")),
+    });
+    requests
+}
+
+/// The same request, decoded by every transport, must reach the same reviewed
+/// request and result contract as the same canonical
+/// [`ApplicationSurfaceRequest`]. CLI and MCP decode through the shared
+/// argument adapter; HTTP decodes through its own body-plus-query projection.
+/// A transport that grew its own request shape would fail here before any
+/// daemon was involved.
+#[test]
+fn cli_mcp_and_http_decode_one_canonical_request() {
+    for equivalent in transport_equivalent_requests() {
+        let tool_name = equivalent.tool_name;
+        let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
+
+        let (cli_body, cli_format) = cli_surface_invocation(
+            tool_name,
+            with_format(equivalent.arguments.clone(), "json"),
+            false,
+        )
+        .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
+        let mcp = normalize_application_tool_args(
+            tool_name,
+            with_format(equivalent.arguments.clone(), "json"),
+        )
+        .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
+        assert_eq!(cli_format, RequestedOutputFormat::Json, "{tool_name}");
+        assert_eq!(
+            mcp.requested_format,
+            RequestedOutputFormat::Json,
+            "{tool_name}"
+        );
+
+        let decoded = [
+            (
+                BindingSurface::Cli,
+                parse_application_surface_request(operation, cli_body)
+                    .unwrap_or_else(|error| panic!("{tool_name} CLI request: {error}")),
+            ),
+            (
+                BindingSurface::Mcp,
+                parse_application_surface_request(operation, mcp.request)
+                    .unwrap_or_else(|error| panic!("{tool_name} MCP request: {error}")),
+            ),
+            (
+                BindingSurface::Http,
+                parse_http_application_surface_request(
+                    operation,
+                    equivalent.http_body.clone(),
+                    &equivalent.http_page,
+                )
+                .unwrap_or_else(|error| panic!("{tool_name} HTTP request: {error}")),
+            ),
+        ];
+
+        let mut contracts = Vec::new();
+        for (surface, request) in decoded {
+            let request_value = serde_json::to_value(&request).expect("decoded request");
+            let dispatched = resolve_application_surface_dispatch_with_controls(
+                surface,
+                operation,
+                RequestId::new(format!(
+                    "request.{}.{}",
+                    format!("{surface:?}").to_ascii_lowercase(),
+                    operation.as_str()
+                ))
+                .expect("request id"),
+                request,
+                equivalent.http_page.clone(),
+                None,
+                CancellationSignal::active(format!("cancel.{}", operation.as_str()))
+                    .expect("cancellation"),
+                RequestedOutputFormat::Json,
+            )
+            .unwrap_or_else(|error| panic!("{tool_name} {surface:?} dispatch: {error}"));
+            assert_eq!(
+                serde_json::to_value(&dispatched.invocation.invocation.request)
+                    .expect("dispatched request"),
+                request_value,
+                "{tool_name} {surface:?} dispatch must carry the decoded request unchanged"
+            );
+            contracts.push((
+                surface,
+                request_value,
+                dispatched.invocation.request_schema.clone(),
+                dispatched.invocation.result_schema.clone(),
+            ));
+        }
+        let (_, cli_request, cli_request_schema, cli_result_schema) = &contracts[0];
+        for (surface, request, request_schema, result_schema) in &contracts[1..] {
+            assert_eq!(
+                request, cli_request,
+                "{tool_name}: {surface:?} decoded a different canonical request than the CLI"
+            );
+            assert_eq!(
+                request_schema, cli_request_schema,
+                "{tool_name}: {surface:?} bound a different request contract than the CLI"
+            );
+            assert_eq!(
+                result_schema, cli_result_schema,
+                "{tool_name}: {surface:?} bound a different result contract than the CLI"
+            );
+        }
     }
 }
 
