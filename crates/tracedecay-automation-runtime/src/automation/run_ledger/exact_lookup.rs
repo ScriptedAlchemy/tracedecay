@@ -15,7 +15,7 @@ use super::{
 };
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config_error;
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 const JSON_SCAN_BUFFER_BYTES: usize = 64 * 1024;
 const JSON_MAX_DEPTH: usize = 128;
@@ -229,7 +229,9 @@ pub(super) fn read_lenient_run_lifecycles(
         let row = match scan_jsonl_row(file, path, line) {
             Ok(Some(row)) => row,
             Ok(None) => continue,
-            Err(error @ crate::errors::TraceDecayError::File { .. }) => return Err(error),
+            Err(error @ tracedecay_domain::errors::TraceDecayError::File { .. }) => {
+                return Err(error);
+            }
             Err(_) => continue,
         };
         if !selected_run_ids.contains(row.run_id.as_str()) {
@@ -303,13 +305,14 @@ pub fn find_run_record_exact_bounded_blocking(
     validate_run_id_component(run_id)?;
     let path = run_ledger_path(dashboard_root);
     let lock = super::exact_publication::acquire_run_ledger_lock(&path)
-        .map_err(crate::errors::TraceDecayError::from)?;
+        .map_err(tracedecay_domain::errors::TraceDecayError::from)?;
     let result = (|| {
         super::exact_publication::ensure_no_exact_append_intent(dashboard_root)
-            .map_err(crate::errors::TraceDecayError::from)?;
+            .map_err(tracedecay_domain::errors::TraceDecayError::from)?;
         read_exact_run_record_bounded(&path, run_id)
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(crate::errors::TraceDecayError::from);
+    let unlock =
+        fs2::FileExt::unlock(&lock).map_err(tracedecay_domain::errors::TraceDecayError::from);
     result.and_then(|record| unlock.map(|()| record))
 }
 
@@ -932,8 +935,8 @@ fn ledger_io_error(
     path: &Path,
     operation: &str,
     error: std::io::Error,
-) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::File {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::File {
         message: format!("failed to {operation} automation run ledger: {error}"),
         path: path.display().to_string(),
     }

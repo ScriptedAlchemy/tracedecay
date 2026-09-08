@@ -9,12 +9,12 @@ use tracedecay_store::{
     ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
 };
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::super::lifecycle::AutomationRunControl;
 use super::super::run_ledger::load_latest_task_validation_pointer;
 use super::{memory_application_error, memory_contract_error};
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 const CURATION_FACT_REVIEW_LIMIT: usize = 1_000;
 

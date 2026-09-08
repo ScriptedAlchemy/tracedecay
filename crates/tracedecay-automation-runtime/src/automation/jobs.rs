@@ -25,8 +25,8 @@ use super::run_ledger::{
 };
 use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
 use super::text::truncate_chars_for_prompt;
-use crate::errors::{Result, TraceDecayError};
-use crate::tracedecay::current_timestamp;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(crate) mod effect_receipt;
 
@@ -602,7 +602,7 @@ async fn run_user_job_with_backend_publication(
 
     let profile_root = match profile_root {
         Some(path) => path,
-        None => crate::storage::default_profile_root()?,
+        None => tracedecay_runtime_core::storage::default_profile_root()?,
     };
     let (skill_sections, attached_skills, missing_skills) =
         attached_skill_sections(&profile_root, &job.skill_ids).await;

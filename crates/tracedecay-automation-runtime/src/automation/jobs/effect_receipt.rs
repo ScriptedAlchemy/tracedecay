@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::automation::artifacts::sha256_bytes;
 use crate::automation::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::{
     AgentTaskResponse, AutomationJob, JOB_OUTPUT_DIR, JobDelivery, TraceDecayError,

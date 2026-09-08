@@ -7,10 +7,10 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::config_error;
-use crate::errors::Result;
-use crate::storage::PrivateStoreIo;
-use crate::tracedecay::current_timestamp;
+use tracedecay_domain::errors::Result;
 use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
+use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 const STATE_FILE: &str = "host_receipts.json";
 const LOCK_FILE: &str = "host_receipts.lock";
@@ -50,26 +50,32 @@ struct HostReceiptState {
 }
 
 fn protect_route_structural_ids(mut route: HookRouteMetadata) -> Result<HookRouteMetadata> {
-    route.session_id =
-        crate::privacy::protect_optional_sensitive_structural_id(route.session_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt route identity"))?;
-    route.thread_id =
-        crate::privacy::protect_optional_sensitive_structural_id(route.thread_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt route identity"))?;
+    route.session_id = tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
+        route.session_id.as_deref(),
+    )
+    .map_err(|_| config_error("invalid host receipt route identity"))?;
+    route.thread_id = tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
+        route.thread_id.as_deref(),
+    )
+    .map_err(|_| config_error("invalid host receipt route identity"))?;
     Ok(route)
 }
 
 fn protect_receipt_structural_ids(mut receipt: HookTerminalReceipt) -> Result<HookTerminalReceipt> {
     receipt.tool_call_id =
-        crate::privacy::protect_optional_sensitive_structural_id(receipt.tool_call_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt identity"))?;
-    receipt.turn_id =
-        crate::privacy::protect_optional_sensitive_structural_id(receipt.turn_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt identity"))?;
-    receipt.transcript_watermark = crate::privacy::protect_optional_sensitive_structural_id(
-        receipt.transcript_watermark.as_deref(),
+        tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
+            receipt.tool_call_id.as_deref(),
+        )
+        .map_err(|_| config_error("invalid host receipt identity"))?;
+    receipt.turn_id = tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
+        receipt.turn_id.as_deref(),
     )
     .map_err(|_| config_error("invalid host receipt identity"))?;
+    receipt.transcript_watermark =
+        tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
+            receipt.transcript_watermark.as_deref(),
+        )
+        .map_err(|_| config_error("invalid host receipt identity"))?;
     Ok(receipt)
 }
 
@@ -181,8 +187,9 @@ pub async fn mark_turn_ingested(
 ) -> Result<()> {
     let root = dashboard_root.to_path_buf();
     let route = route.map(protect_route_structural_ids).transpose()?;
-    let watermark = crate::privacy::protect_sensitive_structural_id(transcript_watermark)
-        .map_err(|_| config_error("invalid host receipt watermark"))?;
+    let watermark =
+        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(transcript_watermark)
+            .map_err(|_| config_error("invalid host receipt watermark"))?;
     tokio::task::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
@@ -317,7 +324,8 @@ mod tests {
     async fn credential_canary_receipt_join_survives_state_reopen() {
         let tmp = tempfile::tempdir().unwrap();
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "5"].concat();
-        let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let protected =
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
         let route = Some(pending_route(&raw));
         let mut terminal = receipt(&raw);
         terminal.turn_id = Some(raw.clone());

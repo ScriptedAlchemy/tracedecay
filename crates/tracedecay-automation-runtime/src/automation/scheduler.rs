@@ -30,8 +30,8 @@ use super::run_ledger::{
     canonical_record_started_at_seconds, is_session_evidence_budget_exhausted_reason,
     latest_record_by_canonical_completion, latest_record_by_canonical_completion_key,
 };
-use crate::errors::{Result, TraceDecayError};
 use crate::ports::session_store::AutomationSessionStore;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const DEFAULT_FAILURE_COOLDOWN_SECS: u64 = 300;
 const DEFAULT_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
@@ -1560,7 +1560,7 @@ disconnected: config error: codex app-server closed stdout before completing";
         // The executable override is process-global. Keep the stamped
         // identity and every later suppression read under one environment
         // lock so the same-path replacement test cannot interleave them.
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
@@ -1597,7 +1597,7 @@ disconnected: config error: codex app-server closed stdout before completing";
 
     #[test]
     fn changing_the_configuration_revision_readmits_a_settled_failure() {
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
@@ -1700,7 +1700,7 @@ evidence about it",
 
     #[test]
     fn typed_permanent_protocol_failure_stays_suppressed_under_the_same_identity() {
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,

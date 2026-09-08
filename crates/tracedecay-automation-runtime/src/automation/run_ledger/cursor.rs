@@ -9,7 +9,7 @@ use super::exact_lookup::{
 use super::run_ledger_path;
 use crate::automation::backend::task_key as canonical_task_key;
 use crate::automation::config_error;
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 const CURSOR_SELECTED_VALUE_MAX_BYTES: usize = 4 * 1024;
 

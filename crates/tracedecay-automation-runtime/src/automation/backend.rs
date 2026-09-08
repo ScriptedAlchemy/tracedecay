@@ -13,10 +13,10 @@ pub use tracedecay_automation::backend::{
     classify_agent_task_error_message, prompt_version, task_key,
 };
 
-use crate::errors::Result;
 use crate::ports::codex_app_server::{
     SummaryConfig as CodexAppServerSummaryConfig, run_prompt as run_prompt_with_codex_app_server,
 };
+use tracedecay_domain::errors::Result;
 
 use super::config::{AutomationBackend, AutomationConfig};
 

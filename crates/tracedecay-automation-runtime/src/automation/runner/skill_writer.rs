@@ -12,7 +12,7 @@ use crate::automation::lifecycle::{
     AutomationRunSettlementGuard, RetainedAutomationRun,
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::curation::unpersisted_rejected_parts;
 use super::session_reflector::{default_include_recent_sessions, default_recent_sessions_limit};

@@ -14,12 +14,12 @@ use crate::automation::skill_writer::{
     skill_improvement_recommendations, support_file_evidence as skill_writer_support_file_evidence,
 };
 use crate::automation::text::truncate_chars_for_prompt;
-use crate::errors::Result;
 use crate::ports::session_store::AutomationSessionStore;
-use crate::tracedecay::current_timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracedecay_automation::analytics::{ToolUsageObservation, underused_tool_family_signals};
+use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 use super::retrieval::{
     AutomationSessionRetrieval, AutomationTemporalRetrieval, automation_structural_refusal_reason,
@@ -758,7 +758,7 @@ pub(super) async fn build_skill_writer_evidence(
 ) -> Result<SkillWriterEvidenceOutcome> {
     let profile_root = match options.profile_root {
         Some(path) => path,
-        None => crate::storage::default_profile_root()?,
+        None => tracedecay_runtime_core::storage::default_profile_root()?,
     };
     let provider =
         normalized_non_empty(&options.provider).unwrap_or_else(default_skill_writer_provider);

@@ -4,10 +4,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::config_error;
-use crate::errors::Result;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
+use tracedecay_domain::errors::Result;
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
 pub use super::managed_skill_model::{

@@ -10,8 +10,8 @@ use super::host_io::HostIo;
 use crate::automation::managed_skills::{
     ManagedSkill, load_active_managed_skills_snapshot, validate_managed_support_files,
 };
-use crate::config::{TRACEDECAY_DIR, USER_DATA_DIR_ENV};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::config::{TRACEDECAY_DIR, USER_DATA_DIR_ENV};
 
 const NATIVE_NAMESPACE_DIR: &str = "agent-managed";
 const NATIVE_MANIFEST_FILE: &str = ".tracedecay-managed-skills.json";

@@ -17,9 +17,9 @@ use super::skill_usage::{
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
 use super::text::truncate_chars_for_prompt;
-use crate::errors::Result;
 use crate::ports::session_evidence::LcmGrepHit;
 use tracedecay_automation::analytics::ToolFamilySignal;
+use tracedecay_domain::errors::Result;
 
 use super::config_error;
 

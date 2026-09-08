@@ -10,9 +10,6 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
 use super::*;
-use crate::application::memory::{
-    MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
-};
 use crate::automation::AutomationRunControl;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
@@ -21,11 +18,14 @@ use crate::automation::config::{
     AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
 };
 use crate::automation::run_ledger::AutomationRunStatus;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
-use crate::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_session_memory::memory::MemoryApplicationError;
+use tracedecay_session_memory::memory::{
+    MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
 use tracedecay_store::{FactStoreError, ProjectMemoryGraphQueryV1};
 
 mod user_scope_graph_runtime;
@@ -68,7 +68,7 @@ impl UserRuntimeHarness {
         let session_runtime = RegisteredGlobalDbTestRuntime::profile(&profile_root)
             .await
             .expect("registered profile session runtime");
-        let memory_path = crate::memory::user::user_memory_db_path(&profile_root);
+        let memory_path = tracedecay_runtime_core::memory::user::user_memory_db_path(&profile_root);
         let authority =
             DatabaseAuthority::acquire_test(&memory_path, "profile automation memory fixture")
                 .expect("profile memory authority");
@@ -221,7 +221,7 @@ impl AutomationSessionRetrieval for TestRetrieval {
 
     fn retrieve(
         &self,
-        _query: crate::application::session::SessionTemporalQuery,
+        _query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'_> {
         Box::pin(async move {
             match &self.outcome {

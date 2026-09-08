@@ -50,7 +50,7 @@ use super::{
 };
 use crate::automation::backend::{AgentTaskKind, task_key as canonical_task_key};
 use crate::automation::config_error;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Bytes hashed before the frontier as the index's content witness.
 const FRONTIER_WITNESS_BYTES: u64 = 4096;

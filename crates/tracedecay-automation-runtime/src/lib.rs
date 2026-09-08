@@ -5,10 +5,6 @@
 //! sessions. It must not depend on `tracedecay-agent-hosts`: host install
 //! helpers that automation used to call on `agents` arrive through
 //! [`automation::host_io`] (registered by agent-hosts / the composition root).
-//!
-//! Historical `crate::automation::*`, `crate::errors`, `crate::ports`, and
-//! `crate::agents::*` paths from the agent-hosts extraction keep resolving
-//! so the moved modules stay a mechanical move.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -58,17 +54,3 @@ pub(crate) fn register_test_schema_installer() {
 
 pub mod automation;
 pub mod ports;
-
-pub(crate) use tracedecay_application::request_identity;
-pub(crate) use tracedecay_domain::errors;
-pub(crate) use tracedecay_runtime_core::{
-    config, db, memory, privacy, runtime_identity, storage, store, worktree,
-};
-pub(crate) use tracedecay_session_memory as application;
-
-/// Kernel-owned timestamp plus the project-runtime port historically reached
-/// as `crate::tracedecay`.
-pub(crate) mod tracedecay {
-    pub(crate) use crate::ports::project_runtime::TraceDecay;
-    pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
-}

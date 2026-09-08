@@ -17,7 +17,7 @@ use super::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     prepare_run_artifact, publish_run_artifact_chain, read_published_artifact_chain,
 };
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub(crate) use super::artifact_refs::{sha256_bytes, sha256_json};
 

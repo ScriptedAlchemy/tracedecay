@@ -20,15 +20,15 @@ use super::lifecycle::{
     failed_backend_fallback_report,
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::errors::{Result, TraceDecayError};
 use crate::ports::project_runtime::ProfileRuntime;
 use crate::ports::project_runtime::TraceDecay;
-use crate::store::memory::DatabaseFactStore;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
 };
@@ -228,7 +228,7 @@ impl MemoryCuratorStore<'_> {
         })
     }
 
-    async fn open_memory_database(&self) -> Result<crate::db::Database> {
+    async fn open_memory_database(&self) -> Result<tracedecay_runtime_core::db::Database> {
         match self {
             Self::Project { cg, .. } => cg.open_project_store_db().await,
             Self::User { runtime, .. } => runtime.open_user_memory_db().await,

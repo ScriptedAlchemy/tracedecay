@@ -30,11 +30,11 @@ use tracedecay_store::{
 };
 
 use super::{config_error, lifecycle::AutomationRunControl};
-use crate::application::memory::{
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::privacy::sanitize_provider_metadata_text;
+use tracedecay_session_memory::memory::{
     MemoryApplication, automatic_fact_add_command, memory_application_error,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::privacy::sanitize_provider_metadata_text;
 use tracedecay_session_memory::memory::{MemoryMutationError, ProjectMemoryFactAddRequest};
 
 const SHIPPED_FACT_PROPOSALS_FILENAME: &str = "fact_proposals.json";
@@ -438,7 +438,10 @@ fn read_opened_shipped_fact_proposal_bytes(
 
 #[cfg(unix)]
 fn open_shipped_fact_proposal_file(path: &Path) -> std::io::Result<std::fs::File> {
-    crate::storage::reject_symlink_components(path, "shipped fact proposal file")?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        path,
+        "shipped fact proposal file",
+    )?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -471,7 +474,10 @@ fn open_shipped_fact_proposal_file(path: &Path) -> std::io::Result<std::fs::File
 
 #[cfg(windows)]
 fn open_shipped_fact_proposal_file(path: &Path) -> std::io::Result<std::fs::File> {
-    crate::storage::reject_symlink_components(path, "shipped fact proposal file")?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        path,
+        "shipped fact proposal file",
+    )?;
     tracedecay_runtime_core::windows_security::open_private_file(path)
 }
 
