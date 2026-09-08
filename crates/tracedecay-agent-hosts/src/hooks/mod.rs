@@ -224,13 +224,21 @@ pub async fn dispatch_opencode_tool_after(
     .flatten()
 }
 
+/// Deliver a response hook's output and retain its delivery receipt.
+///
+/// The receipt spool's writer lock is shared with the daemon's replay
+/// consumer, so admission waits for it, bounded by one synchronous hook budget
+/// measured from this write. The budget is not anchored at hook start: the
+/// body that produced `output` may legitimately have spent longer than one
+/// synchronous budget (a bounded transcript catch-up, a daemon compaction
+/// call), and an already-expired deadline would refuse even an uncontended
+/// lock and fail the hook without delivering anything to the host.
 #[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
 pub(crate) async fn write_hook_output(
     project_root: Option<&Path>,
     host: tracedecay_hooks::HookHostV1,
     event_json: &str,
     output: &str,
-    started: Instant,
 ) -> bool {
     let delivery_writer = match project_root {
         None => None,
@@ -242,7 +250,7 @@ pub(crate) async fn write_hook_output(
                 );
                 return false;
             };
-            let Some(deadline) = started.checked_add(Duration::from_micros(
+            let Some(deadline) = Instant::now().checked_add(Duration::from_micros(
                 tracedecay_hooks::HookSynchronousDeadlineV1::start().remaining_micros(),
             )) else {
                 return false;
@@ -393,7 +401,7 @@ async fn hook_native_event(
         return 0;
     };
     if let Some(guidance) = dispatch(runtime, &event, &root, started).await
-        && !write_hook_output(Some(&root), host, &event, &guidance, started).await
+        && !write_hook_output(Some(&root), host, &event, &guidance).await
     {
         return 1;
     }
@@ -776,7 +784,6 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         &output,
-        started,
     )
     .await
     {

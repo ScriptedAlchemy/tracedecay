@@ -82,7 +82,6 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &output,
-        started,
     )
     .await
     {
@@ -101,7 +100,6 @@ fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
 /// Resets the local counter and injects steering context for the new turn.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.user_prompt_submit")]
 pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
-    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -115,14 +113,8 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     match profile {
         Ok(None) => {
             return i32::from(
-                !super::write_hook_output(
-                    None,
-                    tracedecay_hooks::HookHostV1::Codex,
-                    &event,
-                    "{}",
-                    started,
-                )
-                .await,
+                !super::write_hook_output(None, tracedecay_hooks::HookHostV1::Codex, &event, "{}")
+                    .await,
             );
         }
         Err(error) => {
@@ -168,7 +160,6 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &output,
-        started,
     )
     .await
     {
@@ -244,7 +235,6 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             &additional_context_json("PostToolUse", &guidance),
-            started,
         )
         .await
     {
@@ -261,7 +251,6 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
 /// itself only forwards the boundary and fails open.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.post_compact")]
 pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
-    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -283,7 +272,6 @@ pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &serde_json::json!({}).to_string(),
-        started,
     )
     .await
     {

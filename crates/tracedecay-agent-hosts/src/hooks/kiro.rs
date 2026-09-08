@@ -131,14 +131,8 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     match profile {
         Ok(None) => {
             return i32::from(
-                !super::write_hook_output(
-                    None,
-                    tracedecay_hooks::HookHostV1::Kiro,
-                    &event,
-                    "{}",
-                    started,
-                )
-                .await,
+                !super::write_hook_output(None, tracedecay_hooks::HookHostV1::Kiro, &event, "{}")
+                    .await,
             );
         }
         Err(error) => {
@@ -197,7 +191,6 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::Kiro,
         &event,
         &output,
-        started,
     )
     .await
     {

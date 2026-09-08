@@ -96,7 +96,6 @@ pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &output,
-        started,
     )
     .await
     {
@@ -150,7 +149,6 @@ async fn claude_session_start_response(
 /// transcript or summary state.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.post_compact")]
 pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
-    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -173,7 +171,6 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &serde_json::json!({}).to_string(),
-        started,
     )
     .await
     {
@@ -194,7 +191,6 @@ pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
             &response,
-            started,
         )
         .await
     {
@@ -261,7 +257,6 @@ pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &output,
-        started,
     )
     .await
     {
