@@ -42,76 +42,12 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-privacy/hotpath",
-    "tracedecay-automation/hotpath",
-    "tracedecay-automation-runtime/hotpath",
-    "tracedecay-api/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-configuration/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-graph-query/hotpath",
-    "tracedecay-hooks/hotpath",
-    "tracedecay-lsp/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-session-memory/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-    "tracedecay-application/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-privacy/hotpath-alloc",
-    "tracedecay-automation/hotpath-alloc",
-    "tracedecay-automation-runtime/hotpath-alloc",
-    "tracedecay-api/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-configuration/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-graph-query/hotpath-alloc",
-    "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-lsp/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-privacy/hotpath-cpu",
-    "tracedecay-automation/hotpath-cpu",
-    "tracedecay-automation-runtime/hotpath-cpu",
-    "tracedecay-api/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-configuration/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-graph-query/hotpath-cpu",
-    "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-lsp/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath", "hotpath/axum-0-8"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 default = []
 # Mirrors the root crate's features; the root forwards its own selections here.
 # Exact BPE counting lives in this crate (`tiktoken-rs`); no agent-hosts forward.

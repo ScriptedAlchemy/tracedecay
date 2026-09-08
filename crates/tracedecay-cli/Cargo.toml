@@ -49,86 +49,33 @@ required-features = ["test-transport"]
 
 [features]
 default = ["production"]
+# Opt-in profiling; never in `default`/`production`. Backend selection lives
+# here and in the composition root: `tracedecay/hotpath` names the runtime
+# owners whose compiled behaviour changes, and cargo's feature unification
+# lights every other crate's hotpath macros from `hotpath/hotpath` alone.
+# `tracedecay-sdk` mirrors the selected backend onto its build-script (host)
+# context — see its manifest. `dep:regex` backs the `HOTPATH_FOCUS` validation
+# in `main.rs`.
 hotpath = [
-    "tracedecay-domain/hotpath",
     "dep:regex",
+    "tracedecay/hotpath",
+    "tracedecay-sdk/hotpath",
     "hotpath/hotpath",
     "hotpath/tokio",
     "hotpath/axum-0-8",
     "hotpath/ureq-3",
-    "tracedecay/hotpath",
-    "tracedecay-agent-hosts/hotpath",
-    "tracedecay-automation-runtime/hotpath",
-    "tracedecay-api/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-daemon-control/hotpath",
-    "tracedecay-daemon-identity/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-dashboard-api/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-sdk/hotpath",
-    "tracedecay-hooks/hotpath",
-    "tracedecay-host-integration/hotpath",
-    "tracedecay-lsp/hotpath",
-    "tracedecay-maintenance/hotpath",
-    "tracedecay-mcp/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-    "tracedecay-session-memory/hotpath",
 ]
 hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
     "hotpath",
-    "hotpath/hotpath-alloc",
     "tracedecay/hotpath-alloc",
-    "tracedecay-agent-hosts/hotpath-alloc",
-    "tracedecay-automation-runtime/hotpath-alloc",
-    "tracedecay-api/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-daemon-control/hotpath-alloc",
-    "tracedecay-daemon-identity/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-dashboard-api/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
     "tracedecay-sdk/hotpath-alloc",
-    "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-host-integration/hotpath-alloc",
-    "tracedecay-lsp/hotpath-alloc",
-    "tracedecay-maintenance/hotpath-alloc",
-    "tracedecay-mcp/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
+    "hotpath/hotpath-alloc",
 ]
 hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
     "hotpath",
-    "hotpath/hotpath-cpu",
     "tracedecay/hotpath-cpu",
-    "tracedecay-agent-hosts/hotpath-cpu",
-    "tracedecay-automation-runtime/hotpath-cpu",
-    "tracedecay-api/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-daemon-control/hotpath-cpu",
-    "tracedecay-daemon-identity/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-dashboard-api/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
     "tracedecay-sdk/hotpath-cpu",
-    "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-host-integration/hotpath-cpu",
-    "tracedecay-lsp/hotpath-cpu",
-    "tracedecay-maintenance/hotpath-cpu",
-    "tracedecay-mcp/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
+    "hotpath/hotpath-cpu",
 ]
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 production = ["tracedecay/production"]

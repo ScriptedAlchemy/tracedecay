@@ -11,76 +11,14 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
 hotpath = [
     "hotpath/hotpath",
-    "hotpath/tokio",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-automation-runtime/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-code-index-retention/hotpath",
+    # Type-coupled owner in this crate's graph (see its manifest).
     "tracedecay-code-index-runtime/hotpath",
-    "tracedecay-daemon-identity/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-semantic/hotpath",
-    "tracedecay-session-memory/hotpath",
-    "tracedecay-session-runtime/hotpath",
-    "tracedecay-session-temporal-store/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-application/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-automation-runtime/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-code-index-retention/hotpath-alloc",
-    "tracedecay-code-index-runtime/hotpath-alloc",
-    "tracedecay-daemon-identity/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-semantic/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-    "tracedecay-session-runtime/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-automation-runtime/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-code-index-retention/hotpath-cpu",
-    "tracedecay-code-index-runtime/hotpath-cpu",
-    "tracedecay-daemon-identity/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-semantic/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-    "tracedecay-session-runtime/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
 ]
 # Cross-crate fixture surface for composition-root store-runtime tests:
 # schema-convergence gates and remote-recovery authority reads exercised by

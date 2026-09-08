@@ -16,11 +16,11 @@ include = [
 ]
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = ["hotpath/hotpath", "tracedecay-domain/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-domain/hotpath-alloc"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-domain/hotpath-cpu"]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath"]
 default = ["lite", "medium", "full"]
 test-helpers = []
 # Markdown rides in `lite` as well as `full`: docs are architecture content and

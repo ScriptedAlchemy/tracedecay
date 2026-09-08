@@ -13,31 +13,16 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "tracedecay-api/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-api/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-api/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-]
+# Not for anything this crate measures: `build.rs` pulls contracts and
+# tool-catalog into the *host* context, where their `#[hotpath::measure]`
+# sites expand through the one `hotpath-macros` build cargo shares with the
+# target context. Resolver 3 keeps host and target `hotpath` lib features
+# apart, so whichever backend a binary selects must be mirrored onto the
+# build-dependency below or the host-side expansion references items the
+# host `hotpath` lib does not have. Roots forward these alongside their own.
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
 
 [dependencies]
 hotpath.workspace = true
@@ -53,6 +38,9 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 # `src/codegen.rs`. These mirror the runtime dependencies the descriptors are
 # projected from; no crate here depends on this one, so there is no cycle.
 [build-dependencies]
+# `hotpath` is not used by build.rs itself; it is the host-context handle the
+# `hotpath*` features above forward the selected backend onto (see there).
+hotpath.workspace = true
 serde_json = "1"
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
@@ -64,4 +52,5 @@ tempfile = "3"
 # The TypeScript codegen binary is compiled by sdks/codegen via a [[bin]] path
 # reference; it is intentionally not a target of this crate (autobins = false).
 [package.metadata.cargo-shear]
+ignored = ["hotpath"]
 ignored-paths = ["src/bin/generate.rs"]

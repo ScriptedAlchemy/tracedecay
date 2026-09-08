@@ -8,40 +8,11 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-capture/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-privacy/hotpath",
-    "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-store/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-capture/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-privacy/hotpath-alloc",
-    "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-capture/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-privacy/hotpath-cpu",
-    "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
+# feature only selects the on-mode hotpath test/bench targets of this crate.
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 default = []
 # Forwarded from the root package. Gates daemonless fixture runtimes and the
 # in-process transport doubles used by storage-runtime tests.

@@ -9,34 +9,12 @@ description = "In-process structural code search for TraceDecay"
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-code-extraction/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-runtime-core/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-code-extraction/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-code-extraction/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 default = [
     "lite",
     "medium",

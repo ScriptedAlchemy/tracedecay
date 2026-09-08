@@ -11,71 +11,11 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "hotpath/tokio",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-automation/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-hooks/hotpath",
-    "tracedecay-policy/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-privacy/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-session-temporal-store/hotpath",
-    "tracedecay-lcm/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-temporal-query/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-    "tracedecay-session-memory/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-automation/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-policy/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-privacy/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
-    "tracedecay-lcm/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-automation/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-policy/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-privacy/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
-    "tracedecay-lcm/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath", "hotpath/tokio"]
 default = []
 # Forwards the kernel test-transport seam so this crate's unit tests can
 # reach `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test`.
