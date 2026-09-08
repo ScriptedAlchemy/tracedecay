@@ -92,6 +92,7 @@ use tracedecay_runtime_core::resident_memory::{
 #[global_allocator]
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
+mod branch_publication_tests;
 mod noop_reconcile_tests;
 mod search_permit_release;
 mod semantic_schedule_order_tests;

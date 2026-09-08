@@ -579,15 +579,16 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
     ));
     let synthetic_branch = tracedecay_runtime_core::branch::current_branch(&activation.worktree)
         .expect("manual worktree has an attached synthetic branch");
-    let source = crate::daemon::branch_add::capture_exact_branch_source(
-        &graph,
-        &schedulers,
-        repo.path(),
-        &activation.worktree,
-        &synthetic_branch,
-    )
-    .await
-    .expect("synthetic branch source uses exact Git ref identity");
+    let source = crate::daemon::branch_add::branch_publication_context(&graph)
+        .expect("branch publication context")
+        .capture_exact_branch_source(
+            &schedulers,
+            repo.path(),
+            &activation.worktree,
+            &synthetic_branch,
+        )
+        .await
+        .expect("synthetic branch source uses exact Git ref identity");
     assert_eq!(
         source.reference,
         "refs/heads/tracedecay/track/feature-manual"

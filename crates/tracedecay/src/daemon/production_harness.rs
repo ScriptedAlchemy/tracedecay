@@ -917,14 +917,14 @@ impl ProductionProjectCompositionHarnessV1 {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "production-composition harness is shut down".to_owned(),
             })?;
-        super::branch_add::track_exact_worktree_branch(
-            &graph,
-            &resources.invocation.code_index_schedulers,
-            &canonical_project_root,
-            worktree_root.as_ref(),
-            branch,
-        )
-        .await
+        super::branch_add::branch_publication_context(&graph)?
+            .track_exact_worktree_branch(
+                &resources.invocation.code_index_schedulers,
+                &canonical_project_root,
+                worktree_root.as_ref(),
+                branch,
+            )
+            .await
     }
 
     #[hotpath::measure(label = "daemon.harness.call_tool", future = true)]
