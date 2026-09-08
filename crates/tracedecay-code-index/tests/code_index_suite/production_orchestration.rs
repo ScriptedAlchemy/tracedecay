@@ -988,11 +988,13 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
             .count()
     };
     assert_eq!(label_count("CodeFile"), generation.snapshot().files.len());
-    assert_eq!(label_count("CodeChunk"), generation.chunks().chunks().len());
     assert_eq!(
         label_count("CodeSymbol"),
         generation.symbols().symbols.len()
     );
+    // Chunks bind symbols but are not graph rows: no reader addresses one
+    // through the graph, and a symbol's binding already names its chunk.
+    assert_eq!(label_count("CodeChunk"), 0);
     assert!(
         manifest
             .relations
@@ -1003,7 +1005,11 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
         manifest
             .relations
             .iter()
-            .any(|relation| { relation.kind.as_str() == "CodeChunkDescribesSymbol" })
+            .all(|relation| { relation.kind.as_str() != "CodeChunkDescribesSymbol" })
+    );
+    assert!(
+        manifest.entities.len() < generation.chunks().chunks().len(),
+        "the graph must not scale with the chunk count"
     );
 
     let sealed = generation.encode_sealed().expect("generation seals");
