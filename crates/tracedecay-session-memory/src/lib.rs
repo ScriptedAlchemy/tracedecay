@@ -16,6 +16,7 @@ pub mod memory;
 pub mod memory_mapping;
 pub mod memory_mutation;
 pub mod memory_tracking;
+pub mod monitor_ring;
 pub mod observability_store;
 pub mod provider_pricing;
 pub mod provider_usage;

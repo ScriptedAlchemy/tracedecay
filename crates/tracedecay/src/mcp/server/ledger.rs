@@ -179,7 +179,7 @@ impl McpServer {
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
             let monitor_write = tokio::task::spawn_blocking(move || {
-                tracedecay_runtime_core::monitor_ring::write_entry(
+                tracedecay_session_memory::monitor_ring::write_entry(
                     &monitor_project_root,
                     "tracedecay",
                     &tool_name,

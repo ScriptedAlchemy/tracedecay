@@ -51,7 +51,6 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 test-helpers = []
 
 [dependencies]
-memmap2 = "0.9"
 aho-corasick = "1.1.5"
 hotpath.workspace = true
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }

@@ -41,7 +41,7 @@ pub const LOCK_FILENAME: &str = "monitor.lock";
 
 /// Resolve the user-level data directory (`~/.tracedecay/` by default).
 fn global_tracedecay_dir() -> Option<PathBuf> {
-    crate::config::user_data_dir()
+    tracedecay_runtime_core::config::user_data_dir()
 }
 
 /// A single ring-buffer entry read from the mmap.
@@ -119,7 +119,7 @@ fn write_entry_inner(
     // Exclusive lock for concurrent writer safety. This mmap handle is itself
     // the lock file; the shared helper supplies the cross-platform r/w open and
     // lock semantics without introducing a second sidecar.
-    let file = crate::storage::acquire_sidecar_lock_blocking(mmap_path)?;
+    let file = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(mmap_path)?;
 
     let len = file.metadata()?.len() as usize;
     if len < FILE_SIZE {
