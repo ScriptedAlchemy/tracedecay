@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
@@ -604,20 +604,23 @@ fn remove_opencode_plugin(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    let contents =
-        std::fs::read_to_string(path).map_err(|error| crate::errors::TraceDecayError::Config {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("failed to read {}: {error}", path.display()),
-        })?;
+        }
+    })?;
     if !contents.contains(OPENCODE_PLUGIN_MARKER) {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "refusing to remove non-TraceDecay plugin {}",
                 path.display()
             ),
         });
     }
-    super::safe_remove_host_file(path).map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!("failed to remove {}: {error}", path.display()),
+    super::safe_remove_host_file(path).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        }
     })
 }
 
@@ -1074,7 +1077,7 @@ mod tests {
 
     impl XdgConfigHomeGuard {
         fn set(xdg: &Path, home: &Path) -> Self {
-            let lock = crate::config::lock_user_data_dir_test_env();
+            let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
             let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
             let previous_home = std::env::var_os("HOME");
             // SAFETY: the shared profile-discovery lock is held for the

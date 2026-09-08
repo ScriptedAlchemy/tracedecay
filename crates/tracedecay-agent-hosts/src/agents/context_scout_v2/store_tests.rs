@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use tokio::sync::Barrier;
 
 use super::*;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 async fn database() -> (TempDir, Database) {
     crate::register_test_schema_installer();

@@ -6,7 +6,7 @@
 //! directories are registration state covered by the catalog transaction.
 
 use crate::agents::InstallContext;
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub(super) fn activate_deployed_plugin_registration(ctx: &InstallContext) -> Result<()> {
     let deployed_plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");

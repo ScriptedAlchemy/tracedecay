@@ -14,7 +14,7 @@ use same_file::Handle;
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use super::HostFileMetadataIdentityV1;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Sibling lock held across host-file observation, intent, and rename.
 ///

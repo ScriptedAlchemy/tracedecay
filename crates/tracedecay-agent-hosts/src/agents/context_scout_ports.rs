@@ -41,8 +41,8 @@ use super::context_scout_v2::{
     ContextScoutLimitsV1, ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1,
     ContextScoutServiceStateV1, select_context_scout_delivery_window,
 };
-use crate::db::Database;
-use crate::db::engine::params;
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::engine::params;
 
 const ADDRESS_LEDGER_KEY_V1: &str = "agents.context-scout.addresses.v1";
 const ADDRESS_LEDGER_SCHEMA_VERSION_V1: u16 = 1;
@@ -1065,7 +1065,7 @@ pub fn context_scout_candidates_from_publication(
 }
 
 async fn load_address_ledger(
-    transaction: &crate::db::DatabaseWriteTransaction<'_>,
+    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
     project_id: &ProjectId,
 ) -> Option<StoredContextScoutAddressLedgerV1> {
     let mut rows = transaction
@@ -1147,7 +1147,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
     async fn database() -> (TempDir, Database) {
         crate::register_test_schema_installer();

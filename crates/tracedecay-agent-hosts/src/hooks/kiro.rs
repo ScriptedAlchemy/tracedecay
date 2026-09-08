@@ -123,9 +123,9 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let profile = crate::storage::default_profile_root().and_then(|root| {
-        crate::storage::read_existing_profile_identity_record(
-            &root.join(crate::storage::PROFILE_IDENTITY_FILENAME),
+    let profile = tracedecay_runtime_core::storage::default_profile_root().and_then(|root| {
+        tracedecay_runtime_core::storage::read_existing_profile_identity_record(
+            &root.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME),
         )
     });
     match profile {

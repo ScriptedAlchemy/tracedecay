@@ -70,7 +70,7 @@
 
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// The `opencode.json` key `opencode plugin` writes, and the only key in that
 /// file this integration treats as host-recorded rather than TraceDecay-owned.

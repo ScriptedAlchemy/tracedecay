@@ -126,8 +126,11 @@ mod tests {
     async fn native_compaction_routes_once_to_daemon_within_hook_budget() {
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        crate::storage::pin_fixture_repository_identity(&project_root, "proj_cursor_compaction")
-            .unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            "proj_cursor_compaction",
+        )
+        .unwrap();
         let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
             "status": "scheduled",
             "reason": "accepted",

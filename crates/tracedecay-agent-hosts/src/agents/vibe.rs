@@ -25,7 +25,7 @@ use tracedecay_automation_runtime::automation::skill_targets::{
     SkillInstallSummary, SkillInstallTarget, install_managed_skills,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};

@@ -7,7 +7,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Marker heading shared by every standard prompt-rules host.
 pub(crate) const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";

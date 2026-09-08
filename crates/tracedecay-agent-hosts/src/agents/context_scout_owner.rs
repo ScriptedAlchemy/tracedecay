@@ -30,7 +30,7 @@ use super::context_scout_v2::{
     ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1,
     ContextScoutServiceStateV1, ContextScoutStatusV1, ProjectContextScoutDurableStoreV1,
 };
-use crate::db::Database;
+use tracedecay_runtime_core::db::Database;
 
 const STARTUP_RECOVERY_LIMIT: usize = 32;
 const DELIVERY_LEASE_MICROS: i64 = 30 * 1_000_000;

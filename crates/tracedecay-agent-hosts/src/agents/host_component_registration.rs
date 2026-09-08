@@ -127,7 +127,7 @@ impl CatalogHostComponentRegistrationAuthority {
         home: &Path,
         lifecycle_root: &Path,
         operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
-    ) -> crate::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         let tracedecay_bin = current_tracedecay_binary()?;
         Self::new_with_tracedecay_bin(agent_id, home, lifecycle_root, operation, tracedecay_bin)
     }
@@ -138,7 +138,7 @@ impl CatalogHostComponentRegistrationAuthority {
         lifecycle_root: &Path,
         operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
         tracedecay_bin: String,
-    ) -> crate::errors::Result<Self> {
+    ) -> tracedecay_domain::errors::Result<Self> {
         Self::new_with_tracedecay_bin_and_dashboard(
             agent_id,
             home,
@@ -156,11 +156,12 @@ impl CatalogHostComponentRegistrationAuthority {
         operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
         tracedecay_bin: String,
         dashboard: bool,
-    ) -> crate::errors::Result<Self> {
-        let project_path =
-            std::env::current_dir().map_err(|error| crate::errors::TraceDecayError::Config {
+    ) -> tracedecay_domain::errors::Result<Self> {
+        let project_path = std::env::current_dir().map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to resolve host lifecycle project path: {error}"),
-            })?;
+            }
+        })?;
         let integration = crate::agents::get_integration(agent_id)?;
         let registration_path = integration.primary_config_path(home);
         Ok(Self {
@@ -188,11 +189,11 @@ impl CatalogHostComponentRegistrationAuthority {
 
     fn registration_error(
         host: crate::agents::host_bundle_v2::HostKindV1,
-        error: crate::errors::TraceDecayError,
+        error: tracedecay_domain::errors::TraceDecayError,
     ) -> crate::agents::host_bundle_v2::HostBundleError {
         if matches!(
             &error,
-            crate::errors::TraceDecayError::HostCliUnavailable { .. }
+            tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }
         ) {
             return crate::agents::host_bundle_v2::HostBundleError::HostCliUnavailable { host };
         }
@@ -1312,14 +1313,14 @@ impl CatalogHostComponentRegistrationAuthority {
     }
 }
 
-fn current_tracedecay_binary() -> crate::errors::Result<String> {
+fn current_tracedecay_binary() -> tracedecay_domain::errors::Result<String> {
     std::env::current_exe()
-        .map_err(|error| crate::errors::TraceDecayError::Config {
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("failed to resolve the running tracedecay binary: {error}"),
         })?
         .into_os_string()
         .into_string()
-        .map_err(|path| crate::errors::TraceDecayError::Config {
+        .map_err(|path| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "the running tracedecay binary path is not valid UTF-8: {}",
                 PathBuf::from(path).display()
@@ -1834,7 +1835,7 @@ mod tests {
     fn typed_host_cli_absence_stays_distinct_from_config_failure() {
         let unavailable = CatalogHostComponentRegistrationAuthority::registration_error(
             HostKindV1::Kiro,
-            crate::errors::TraceDecayError::HostCliUnavailable {
+            tracedecay_domain::errors::TraceDecayError::HostCliUnavailable {
                 program: "kiro-cli".to_string(),
                 lifecycle: "kiro MCP registry lifecycle".to_string(),
             },
@@ -1849,7 +1850,7 @@ mod tests {
 
         let config_failure = CatalogHostComponentRegistrationAuthority::registration_error(
             HostKindV1::Kiro,
-            crate::errors::TraceDecayError::Config {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: "malformed Kiro MCP config".to_string(),
             },
         );

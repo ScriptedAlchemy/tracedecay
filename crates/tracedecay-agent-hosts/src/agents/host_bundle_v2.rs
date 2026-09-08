@@ -68,8 +68,8 @@ static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
 /// Resolve the lifecycle authority from the active `TraceDecay` user profile.
 /// Host homes contain deployed artifacts only; receipts, journals, locks, and
 /// rollback backups are owned by this profile-scoped root.
-pub fn resolved_host_bundle_lifecycle_root() -> crate::errors::Result<PathBuf> {
-    Ok(crate::storage::default_profile_root()?.join("host-components"))
+pub fn resolved_host_bundle_lifecycle_root() -> tracedecay_domain::errors::Result<PathBuf> {
+    Ok(tracedecay_runtime_core::storage::default_profile_root()?.join("host-components"))
 }
 
 /// Canonical stock-host enumeration shared by packaging, delivery, and

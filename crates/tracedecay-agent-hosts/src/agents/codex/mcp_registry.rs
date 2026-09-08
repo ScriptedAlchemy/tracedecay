@@ -60,7 +60,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agents::host_bundle_v2::HostBundleComponentV1;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{CODEX_MCP_SERVER_ARGS, CODEX_MCP_SERVER_ENV, codex_config_path};
 
