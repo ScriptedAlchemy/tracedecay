@@ -43,9 +43,18 @@ jobs:
         id: decide
         run: echo "run-heavy=${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}" >> "$GITHUB_OUTPUT"
 
+  # Exercises the checked-out PR head through the CLI against an isolated
+  # daemon (scripts/ci-pr-dogfood-smoke.sh). The binary is the one `debug-cli`
+  # builds from the merge ref: the smoke only needs an executable `tracedecay`,
+  # and building a second one from the head cost a cold
+  # `cargo build -p tracedecay-cli` that never fit this job's budget (runs
+  # 34217290139 and 34231734416: kache and rust-cache both missed, the build
+  # was cancelled after 29 minutes while `debug-cli` finished the same build
+  # in 30-31 minutes and published it).
   pr-dogfood:
     name: PR checkout dogfood
-    if: github.event_name == 'pull_request'
+    needs: [scope-gate, debug-cli]
+    if: ${{ github.event_name == 'pull_request' && needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -55,30 +64,13 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - uses: actions/setup-node@v4
+      - name: Fetch the debug CLI built once for this run
+        uses: actions/download-artifact@v4
         with:
-          node-version: 22
-          cache: npm
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-dev-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Enable kache
-        id: kache
-        uses: ./.github/actions/kache
-        with:
-          lane: dev-dogfood
-          max-size: 512MiB
-
-      - name: Build checked-out TraceDecay CLI
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+          name: debug-tracedecay-cli
+          path: target/debug
+      - name: Restore the executable bit the artifact store drops
+        run: chmod +x target/debug/tracedecay
 
       - name: Test dogfood harnesses
         run: |
@@ -93,19 +85,11 @@ jobs:
           TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
           TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
 
-      - name: Save kache store
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ steps.kache.outputs.store-path }}
-          key: ${{ steps.kache.outputs.cache-key }}
-
   # One dev-profile `tracedecay` binary for every job that only exercises the
-  # built CLI against a host (Hermes, Claude Code, OpenCode). Each of those
+  # built CLI (`pr-dogfood`, Hermes, Claude Code, OpenCode). Each of those
   # jobs used to compile the whole workspace itself behind its own cache key,
-  # so a cold cache cost the run three 25-minute builds instead of one and
-  # tripped their timeouts. `pr-dogfood` keeps its own build on purpose: it
-  # tests the checked-out PR head, not the merge ref the other jobs check out.
+  # so a cold cache cost the run several 30-minute builds instead of one and
+  # tripped their timeouts.
   debug-cli:
     name: Build debug CLI
     needs: scope-gate
@@ -119,14 +103,12 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
-      # `ci-dev-*` is shared with every other dev-profile build job in this
-      # workflow (`pr-dogfood`, `dashboard`). rust-cache stores dependency
-      # artifacts only, and those are identical for the same lockfile whichever
-      # job compiles them, so one entry serves all three; the first job to
-      # finish saves it and the others see the key already present. The
-      # repository cache is capped at 10 GB and was full of per-job copies of
-      # the same dependencies, which evicted the test lanes' caches between
-      # runs and made every test run a cold build.
+      # This is the workflow's only dev-profile build, so `ci-dev-*` has one
+      # writer. rust-cache stores dependency artifacts only. The repository
+      # cache is capped at 10 GB and was full of per-job copies of the same
+      # dependencies (`pr-dogfood` and `dashboard` each built this graph too),
+      # which evicted the test lanes' caches between runs and made every test
+      # run a cold build.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
