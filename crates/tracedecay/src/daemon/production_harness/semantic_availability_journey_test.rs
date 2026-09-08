@@ -5,8 +5,9 @@
 //! The contract under test is progressive degradation, not semantic search:
 //! exact, lexical, graph, and ordinary session retrieval must never be blocked
 //! by a semantic runtime that is pending, unevaluated, or unavailable, and a
-//! strict-semantic request must report typed unavailability instead of failing
-//! the request or poisoning the surrounding lanes.
+//! strict-semantic request must be refused with a typed unavailable payload —
+//! a tool-level refusal, not a JSON-RPC failure — without poisoning the
+//! surrounding lanes.
 
 #![cfg(feature = "semantic-fastembed")]
 
@@ -15,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::journey_test_support::{git, tool_payload};
+use super::journey_test_support::{git, tool_answer, tool_payload};
 use super::semantic_activation_journey_test::{
     assert_semantic_probe_contribution, evaluate_native_profile,
     install_project_distribution_fixture, installed_selection_material, selection,
@@ -59,6 +60,16 @@ pub(super) async fn answered(
     arguments: Value,
 ) -> Value {
     let payload = called(harness, project, tool, arguments).await;
+    resolved(harness, project, tool, payload).await
+}
+
+/// The full payload behind a possibly truncated answer.
+async fn resolved(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    tool: &str,
+    payload: Value,
+) -> Value {
     if payload["truncated"] != json!(true) {
         return payload;
     }
@@ -101,11 +112,7 @@ pub(super) async fn answered(
     })
 }
 
-async fn search(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    strict: bool,
-) -> Value {
+fn search_arguments(strict: bool) -> Value {
     let mut arguments = json!({
         "query": PROBE_SYMBOL,
         "limit": 10,
@@ -114,7 +121,43 @@ async fn search(
     if strict {
         arguments["semantic_mode"] = json!("strict_semantic");
     }
-    answered(harness, project, "tracedecay_search", arguments).await
+    arguments
+}
+
+/// An ordinary (`fallback_allowed`) search: the semantic lane joins when it
+/// can and the other lanes answer regardless.
+async fn search(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
+    answered(
+        harness,
+        project,
+        "tracedecay_search",
+        search_arguments(false),
+    )
+    .await
+}
+
+/// A strict-semantic search, with whether the runtime refused it.
+///
+/// Strict mode asks for an answer only an activated semantic runtime can give.
+/// When it cannot, the tool refuses: the payload stays typed
+/// (`status: "unavailable"`, a `reason`, the semantic lane's own status) and
+/// the call is flagged `isError` — a tool-level refusal the caller can read,
+/// neither a JSON-RPC error nor an empty page passed off as success.
+async fn strict_search(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> (bool, Value) {
+    let response = harness
+        .call_tool(project, "tracedecay_search", search_arguments(true))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("tracedecay_search was blocked instead of answering: {error}")
+        });
+    let (refused, payload) = tool_answer(&response);
+    (
+        refused,
+        resolved(harness, project, "tracedecay_search", payload).await,
+    )
 }
 
 /// The tool-owned result inside a retained evidence envelope.
@@ -369,7 +412,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         "no semantic profile has been activated yet: {pending_state}"
     );
 
-    let core_before = search(&harness, &project, false).await;
+    let core_before = search(&harness, &project).await;
     assert_semantic_pending(&core_before);
     assert!(
         core_before["results"]
@@ -396,17 +439,32 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         "the canonical core query bytes must be published while semantic is pending"
     );
 
-    let strict_before = search(&harness, &project, true).await;
+    let (refused_before, strict_before) = strict_search(&harness, &project).await;
+    assert!(
+        refused_before,
+        "strict semantic must be refused before activation, not answered from other lanes: {strict_before}"
+    );
     assert_eq!(
         strict_before["status"],
         json!("unavailable"),
         "strict semantic must be typed-unavailable before activation: {strict_before}"
     );
+    assert_eq!(
+        strict_before["reason"],
+        json!("semantic_unavailable"),
+        "the refusal must name the semantic lane as its cause: {strict_before}"
+    );
     assert_ne!(strict_before["semantic"]["status"], json!("complete"));
+    assert!(
+        strict_before["results"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "a strict refusal must not serve results from the lanes it refused: {strict_before}"
+    );
 
     // A strict-semantic refusal must not poison the lanes around it: the very
     // next ordinary request has to produce the same answer as before it.
-    let core_after_strict = search(&harness, &project, false).await;
+    let core_after_strict = search(&harness, &project).await;
     assert_eq!(
         core_after_strict["results"], core_before["results"],
         "a typed strict-semantic refusal must not block or alter the other lanes"
@@ -444,7 +502,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         answers_before,
         "a live FastEmbed evaluation must not disturb the non-semantic retrieval modes"
     );
-    let core_after_evaluation = search(&harness, &project, false).await;
+    let core_after_evaluation = search(&harness, &project).await;
     assert_semantic_pending(&core_after_evaluation);
     assert_eq!(
         core_after_evaluation["query_fallback_digest"], fallback_digest_before,
@@ -459,19 +517,25 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         None,
     )
     .await;
-    let (activated, activated_state) = tokio::time::timeout(Duration::from_mins(1), async {
-        loop {
-            let strict = search(&harness, &project, true).await;
-            let state = semantic_runtime_state(&harness, &project).await;
-            if strict["semantic"]["status"] == json!("complete") && state["state"] == json!("ready")
-            {
-                return (strict, state);
+    let (refused_after, activated, activated_state) =
+        tokio::time::timeout(Duration::from_mins(1), async {
+            loop {
+                let (refused, strict) = strict_search(&harness, &project).await;
+                let state = semantic_runtime_state(&harness, &project).await;
+                if strict["semantic"]["status"] == json!("complete")
+                    && state["state"] == json!("ready")
+                {
+                    return (refused, strict, state);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("activated semantic retrieval did not begin answering");
+        })
+        .await
+        .expect("activated semantic retrieval did not begin answering");
+    assert!(
+        !refused_after,
+        "an activated strict-semantic search is an answer, not a refusal: {activated}"
+    );
     assert_eq!(activated["semantic"]["status"], json!("complete"));
     assert_semantic_probe_contribution(
         &activated,
@@ -485,7 +549,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         "activation must bind the exact evaluated vector generation"
     );
 
-    let core_after = search(&harness, &project, false).await;
+    let core_after = search(&harness, &project).await;
     assert_eq!(
         core_after["semantic"]["status"],
         json!("complete"),
