@@ -126,12 +126,33 @@ pub(crate) type CodeIndexHookNotifyFuture =
 pub(crate) type CodeIndexHookSink =
     Arc<dyn Fn(PathBuf, Vec<String>) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
+/// Who is asking for a whole-worktree reconciliation through a
+/// [`CodeIndexReconcileSink`].
+///
+/// `sync.watch_linked_worktrees` (default off) decides whether the daemon may
+/// start indexing a linked worktree *on its own*. Everything the daemon does
+/// without an operator naming the route is `Automatic` and stays behind that
+/// gate: host lifecycle hooks (`workspaceOpen`, `sessionStart`, debounced
+/// incremental syncs) and the server's own startup catch-up. Only a
+/// reconciliation the operator asked for by name — `tracedecay init` /
+/// `tracedecay sync` through `tracedecay_admin_sync` — is `Explicit` and may
+/// index a route the watcher policy keeps quiet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeIndexReconcileDemandV1 {
+    Automatic,
+    Explicit,
+}
+
 /// Non-blocking bridge for hook/admin requests that require one authoritative
 /// worktree reconciliation but do not carry exact touched paths. A successful
 /// future means the bounded daemon scheduler accepted the overflow signal; it
 /// never means indexing has completed.
-pub(crate) type CodeIndexReconcileSink =
-    Arc<dyn Fn(PathBuf) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
+pub(crate) type CodeIndexReconcileSink = Arc<
+    dyn Fn(PathBuf, CodeIndexReconcileDemandV1) -> CodeIndexHookNotifyFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Non-blocking bridge for ordinary reads to run the scheduler's cheap
 /// Git/stat freshness ladder. A successful future means the mounted scheduler

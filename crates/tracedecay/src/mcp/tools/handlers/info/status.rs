@@ -19,8 +19,13 @@ pub(crate) async fn handle_admin_sync(
             "admin sync requires the daemon code-index scheduler",
         )
     })?;
+    // The operator named this route (`tracedecay init` / `tracedecay sync`):
+    // the one demand that may index a route the watcher policy keeps quiet.
     if !hotpath::future!(
-        reconcile_sink(cg.project_root().to_path_buf()),
+        reconcile_sink(
+            cg.project_root().to_path_buf(),
+            crate::mcp::server::CodeIndexReconcileDemandV1::Explicit,
+        ),
         label = "mcp.info.admin_sync.reconcile"
     )
     .await

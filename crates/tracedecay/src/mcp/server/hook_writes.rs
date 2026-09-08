@@ -64,9 +64,11 @@ pub(crate) async fn execute_background_refresh_direct(
         });
     }
     let accepted = match request.mode {
+        // The server's own catch-up and read refreshes are the daemon acting
+        // on its own; they never widen a route past its watch policy.
         BackgroundRefreshModeV1::ForceReconcile => request
             .reconcile_sink
-            .map(|sink| sink(canonical_root))
+            .map(|sink| sink(canonical_root, super::CodeIndexReconcileDemandV1::Automatic))
             .ok_or_else(|| {
                 TraceDecayError::project_route(
                     "code_index_scheduler_unavailable",
