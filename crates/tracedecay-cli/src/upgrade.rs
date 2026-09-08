@@ -4,8 +4,9 @@
 //! verified against the release's `SHA256SUMS`, every required release member
 //! (the executable plus the runtime companions the executable resolves beside
 //! itself) is staged in an attempt-owned scratch directory, and only then is
-//! the bundle published around the running executable. Homebrew installs
-//! continue to delegate to Homebrew.
+//! the bundle published around the running executable. Installations owned by
+//! a package manager (Homebrew, Scoop) are upgraded by that manager and never
+//! written to directly; see [`UpgradeSource`].
 //! Beta and stable are separate channels — a beta build only sees beta
 //! releases and vice versa.
 
@@ -541,41 +542,47 @@ fn extract_zip(archive: impl Read + Seek, staging: &Path, members: &[ReleaseMemb
     require_complete_release(members, &staged)
 }
 
-/// Publishes a staged release around the running executable. Companions are
-/// renamed into the executable's directory first so the new entry point never
-/// appears without the runtime it resolves beside itself; the executable is
-/// replaced last. Returns the path the new binary was installed at, when
-/// known.
+/// Publishes a staged release around the running executable and returns the
+/// path the new binary was installed at, when known.
+///
+/// On Unix the running executable is resolved to its real file first: a
+/// symlinked entry point must be replaced at its target (`self_replace`
+/// resolves relative link targets from the CWD and fails with `ENOENT`), and
+/// `$ORIGIN` is that target's directory. The path is captured before the
+/// swap because on Linux `/proc/self/exe` reads `… (deleted)` afterwards.
 #[hotpath::measure(label = "cli.upgrade.publish_release")]
-fn publish_release(
-    staged: &StagedRelease,
-    method: &InstallMethod,
-    new_version: &str,
-) -> Result<Option<PathBuf>> {
+fn publish_release(staged: &StagedRelease) -> Result<Option<PathBuf>> {
     #[cfg(unix)]
     {
-        if staged.companions().next().is_some() {
-            let executable = std::env::current_exe()
-                .and_then(|exe| exe.canonicalize())
-                .map_err(io_err("cannot resolve the running executable"))?;
-            let install_dir = executable.parent().ok_or_else(|| TraceDecayError::Config {
-                message: "cannot determine the running executable's directory".into(),
-            })?;
-            publish_companions(staged, install_dir)?;
-        }
+        let executable = std::env::current_exe()
+            .and_then(|exe| exe.canonicalize())
+            .map_err(io_err("cannot resolve the running executable"))?;
+        publish_release_at(staged, &executable)?;
+        Ok(Some(executable))
     }
-    match method {
-        InstallMethod::Brew => replace_for_brew(&staged.executable(), new_version),
-        InstallMethod::Scoop => replace_for_scoop(&staged.executable(), new_version),
-        _ => replace_default(&staged.executable()),
+    #[cfg(not(unix))]
+    {
+        let exe = std::env::current_exe().ok();
+        self_replace::self_replace(staged.executable()).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "binary replacement failed: {e}\n  \
+                 The old version is still in place.\n  \
+                 To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
+            ),
+        })?;
+        Ok(exe)
     }
 }
 
-/// Publishes every staged companion into `install_dir`, each through its own
-/// exclusively created sibling and a rename, so a colliding name is replaced
-/// atomically and a currently mapped library is never written in place.
+/// Publishes a staged release with `executable` as its entry point.
+/// Companions are renamed into the executable's directory first so the new
+/// entry point never appears without the runtime it resolves beside itself;
+/// the executable is replaced last.
 #[cfg(unix)]
-fn publish_companions(staged: &StagedRelease, install_dir: &Path) -> Result<()> {
+fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<()> {
+    let install_dir = executable.parent().ok_or_else(|| TraceDecayError::Config {
+        message: "cannot determine the running executable's directory".into(),
+    })?;
     for member in staged.companions() {
         publish_member(
             &staged.path_of(member),
@@ -583,37 +590,7 @@ fn publish_companions(staged: &StagedRelease, install_dir: &Path) -> Result<()> 
             member.mode(),
         )?;
     }
-    Ok(())
-}
-
-/// Default replacement using `self_replace`. Falls back to a direct copy
-/// when the running binary is behind a symlink (avoids ENOENT caused by
-/// `self_replace` resolving relative symlink targets from CWD).
-/// Returns the path the new binary was written to, when known.
-fn replace_default(new_exe: &Path) -> Result<Option<PathBuf>> {
-    // Capture the exe path before the swap: on Linux the rename makes
-    // `/proc/self/exe` read `… (deleted)` afterwards.
-    let exe = std::env::current_exe().ok();
-
-    #[cfg(unix)]
-    {
-        let canonical = exe.as_ref().and_then(|e| e.canonicalize().ok());
-        if let (Some(exe), Some(canonical)) = (&exe, canonical)
-            && exe.as_path() != canonical.as_path()
-        {
-            install_binary(new_exe, &canonical)?;
-            return Ok(Some(canonical));
-        }
-    }
-
-    self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "binary replacement failed: {e}\n  \
-             The old version is still in place.\n  \
-             To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
-        ),
-    })?;
-    Ok(exe)
+    publish_member(&staged.executable(), executable, EXECUTABLE_MEMBER.mode())
 }
 
 /// Outcome of an upgrade attempt that completed without error.
@@ -662,17 +639,177 @@ fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
     }
 }
 
+/// A native package manager that owns a TraceDecay installation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageManager {
+    Homebrew,
+    Scoop,
+}
+
+/// Who installs a release for the running binary.
+///
+/// Installation ownership is exclusive: files under a package manager's tree
+/// are only ever changed by that manager, so a managed install delegates its
+/// upgrade to the manager and refuses operations the manager has no command
+/// for. Everything else is a direct install that TraceDecay publishes itself
+/// from the verified GitHub release bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpgradeSource {
-    Homebrew,
+    PackageManager(PackageManager),
     GitHubRelease,
 }
 
 fn upgrade_source_for(method: &InstallMethod) -> UpgradeSource {
     match method {
-        InstallMethod::Brew => UpgradeSource::Homebrew,
-        InstallMethod::Cargo | InstallMethod::Scoop | InstallMethod::Unknown => {
-            UpgradeSource::GitHubRelease
+        InstallMethod::Brew => UpgradeSource::PackageManager(PackageManager::Homebrew),
+        InstallMethod::Scoop => UpgradeSource::PackageManager(PackageManager::Scoop),
+        InstallMethod::Cargo | InstallMethod::Unknown => UpgradeSource::GitHubRelease,
+    }
+}
+
+/// One package-manager invocation, spelled the way an operator would run it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagerCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+impl ManagerCommand {
+    fn new(program: &str, args: &[&str]) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        }
+    }
+
+    /// Runs the manager with inherited stdio: delegated installation is the
+    /// operator's interactive command, and may legitimately take a while.
+    fn status(&self) -> io::Result<std::process::ExitStatus> {
+        std::process::Command::new(&self.program)
+            .args(&self.args)
+            .status()
+    }
+
+    fn output(&self) -> io::Result<std::process::Output> {
+        std::process::Command::new(&self.program)
+            .args(&self.args)
+            .output()
+    }
+}
+
+impl std::fmt::Display for ManagerCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.program)?;
+        for arg in &self.args {
+            write!(formatter, " {arg}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Scoop publishes the two channels as separate apps, mirroring the package
+/// ids the Scoop service hooks accept.
+fn scoop_package(is_beta: bool) -> &'static str {
+    if is_beta {
+        "tracedecay-beta"
+    } else {
+        "tracedecay"
+    }
+}
+
+impl PackageManager {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Homebrew => "Homebrew",
+            Self::Scoop => "Scoop",
+        }
+    }
+
+    /// The manager's own shim is a `.cmd` on Windows; Rust spawns those
+    /// through `cmd.exe` only when the extension is spelled out.
+    fn scoop_program() -> &'static str {
+        if cfg!(windows) { "scoop.cmd" } else { "scoop" }
+    }
+
+    /// Refreshes the manager's package metadata before an upgrade.
+    fn refresh_command(self) -> ManagerCommand {
+        match self {
+            Self::Homebrew => ManagerCommand::new("brew", &["update", "--quiet"]),
+            Self::Scoop => ManagerCommand::new(Self::scoop_program(), &["update"]),
+        }
+    }
+
+    /// The manager's own upgrade of the installed TraceDecay package.
+    fn upgrade_command(self, is_beta: bool) -> ManagerCommand {
+        match self {
+            Self::Homebrew => ManagerCommand::new("brew", &["upgrade", "tracedecay"]),
+            Self::Scoop => {
+                ManagerCommand::new(Self::scoop_program(), &["update", scoop_package(is_beta)])
+            }
+        }
+    }
+
+    /// Asks the manager where it installed the package.
+    fn prefix_command(self, is_beta: bool) -> ManagerCommand {
+        match self {
+            Self::Homebrew => ManagerCommand::new("brew", &["--prefix", "tracedecay"]),
+            Self::Scoop => {
+                ManagerCommand::new(Self::scoop_program(), &["prefix", scoop_package(is_beta)])
+            }
+        }
+    }
+
+    /// The binary the manager currently links: Homebrew's opt prefix
+    /// survives keg-version bumps and cleanup (unlike the keg-versioned
+    /// Cellar path the running process resolves to); Scoop's `current`
+    /// junction plays the same role.
+    fn installed_binary(self, is_beta: bool) -> std::result::Result<PathBuf, String> {
+        let command = self.prefix_command(is_beta);
+        let output = command
+            .output()
+            .map_err(|error| format!("`{command}` could not run: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("`{command}` exited with {}", output.status));
+        }
+        let prefix = String::from_utf8(output.stdout)
+            .map_err(|_| format!("`{command}` printed a non-UTF-8 path"))?;
+        let binary = match self {
+            Self::Homebrew => Path::new(prefix.trim()).join("bin").join("tracedecay"),
+            Self::Scoop => Path::new(prefix.trim()).join("tracedecay.exe"),
+        };
+        if binary.is_file() {
+            Ok(binary)
+        } else {
+            Err(format!(
+                "`{command}` named {}, which is not a file",
+                binary.display()
+            ))
+        }
+    }
+
+    /// Channel switching has no manager command: Homebrew ships one formula,
+    /// and Scoop's channels are separate apps whose transition (uninstall,
+    /// then install) changes which package owns the daemon service. Both are
+    /// the operator's call, so the request is refused before anything moves.
+    fn channel_switch_refusal(self, is_beta: bool, target_channel: &str) -> TraceDecayError {
+        let label = self.label();
+        let guidance = match self {
+            Self::Homebrew => format!(
+                "keep upgrading with `{}`, or install the {target_channel} channel outside the \
+                 Homebrew prefix from https://github.com/{GITHUB_REPO}/releases",
+                self.upgrade_command(is_beta)
+            ),
+            Self::Scoop => format!(
+                "switch with `scoop uninstall {}` followed by `scoop install {}`",
+                scoop_package(is_beta),
+                scoop_package(!is_beta),
+            ),
+        };
+        TraceDecayError::Config {
+            message: format!(
+                "this tracedecay was installed by {label}, which owns its files; TraceDecay will \
+                 not rewrite a {label}-managed installation to switch channels.\n  {guidance}"
+            ),
         }
     }
 }
@@ -692,20 +829,12 @@ fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
     }
 }
 
-fn install_upgrade_version(
-    latest: &str,
-    is_beta: bool,
-    method: &InstallMethod,
-) -> Result<Option<PathBuf>> {
+fn install_upgrade_version(latest: &str, is_beta: bool) -> Result<Option<PathBuf>> {
     let download = preflight_asset_check(latest, is_beta)?;
-    perform_upgrade(latest, &download, method)
+    perform_upgrade(&download)
 }
 
-fn run_versioned_upgrade(
-    current: &str,
-    is_beta: bool,
-    method: &InstallMethod,
-) -> Result<UpgradeOutcome> {
+fn run_versioned_upgrade(current: &str, is_beta: bool) -> Result<UpgradeOutcome> {
     eprintln!("Checking GitHub releases...");
     let latest = latest_upgrade_version(is_beta)?;
     let latest = match classify_upgrade(current, &latest) {
@@ -717,7 +846,7 @@ fn run_versioned_upgrade(
     };
 
     eprintln!("Upgrading v{current} → v{latest}...");
-    let binary = install_upgrade_version(latest, is_beta, method)?;
+    let binary = install_upgrade_version(latest, is_beta)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
     Ok(UpgradeOutcome::Installed {
@@ -754,340 +883,6 @@ fn publish_member(source: &Path, target: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
-/// Replaces the executable at `target` with `src` (mode `0755`).
-#[cfg(unix)]
-fn install_binary(src: &Path, target: &Path) -> Result<()> {
-    publish_member(src, target, EXECUTABLE_MEMBER.mode())
-}
-
-#[cfg(unix)]
-fn retarget_homebrew_symlink(
-    symlink_path: &Path,
-    old_version: &str,
-    new_version: &str,
-) -> Result<()> {
-    let old_target =
-        std::fs::read_link(symlink_path).map_err(io_err("cannot read Homebrew symlink target"))?;
-    let new_target = std::path::PathBuf::from(old_target.to_string_lossy().replacen(
-        old_version,
-        new_version,
-        1,
-    ));
-    std::fs::remove_file(symlink_path).map_err(io_err("cannot remove Homebrew symlink"))?;
-    std::os::unix::fs::symlink(&new_target, symlink_path)
-        .map_err(io_err("cannot recreate Homebrew symlink"))?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn rewrite_homebrew_install_receipt(
-    receipt: &Path,
-    old_version: &str,
-    new_version: &str,
-) -> Result<()> {
-    let text =
-        std::fs::read_to_string(receipt).map_err(io_err("cannot read INSTALL_RECEIPT.json"))?;
-    std::fs::write(receipt, text.replace(old_version, new_version))
-        .map_err(io_err("cannot rewrite INSTALL_RECEIPT.json"))?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn warn_best_effort(step: &str, error: &TraceDecayError) {
-    eprintln!("\n  \x1b[33mwarning:\x1b[0m {step}: {error}");
-}
-
-// ── Homebrew ────────────────────────────────────────────────────────────
-
-/// Replace the binary inside the Homebrew Cellar, then rename the version
-/// directory and update the symlink so that `brew` reports the new version.
-/// Returns the stable `<prefix>/bin` symlink path when one exists, so
-/// downstream consumers never pin the keg-versioned path.
-#[cfg(unix)]
-fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
-    let exe = std::env::current_exe().map_err(io_err("cannot determine current exe"))?;
-    let canonical = exe
-        .canonicalize()
-        .map_err(io_err("cannot resolve binary path"))?;
-
-    // Validate Cellar layout: <prefix>/Cellar/<formula>/<version>/bin/<binary>
-    let bin_dir = match canonical.parent() {
-        Some(p) if p.file_name().and_then(|n| n.to_str()) == Some("bin") => p,
-        _ => return replace_default(new_exe),
-    };
-    let Some(version_dir) = bin_dir.parent() else {
-        return replace_default(new_exe);
-    };
-    let Some(formula_dir) = version_dir.parent() else {
-        return replace_default(new_exe);
-    };
-    let cellar_dir = match formula_dir.parent() {
-        Some(p) if p.file_name().and_then(|n| n.to_str()) == Some("Cellar") => p,
-        _ => return replace_default(new_exe),
-    };
-    let Some(prefix) = cellar_dir.parent() else {
-        return replace_default(new_exe);
-    };
-
-    let Some(bin_name) = canonical.file_name() else {
-        return replace_default(new_exe);
-    };
-    let Some(old_version_os) = version_dir.file_name() else {
-        return replace_default(new_exe);
-    };
-    let old_version = old_version_os.to_string_lossy().to_string();
-
-    // Step 1 (critical): replace the binary atomically.
-    install_binary(new_exe, &canonical)?;
-    // The keg-versioned path is valid until the version-dir rename below;
-    // prefer the stable `<prefix>/bin` symlink when Homebrew manages one.
-    let mut installed_at = canonical.clone();
-
-    // Steps 2-4 update Cellar metadata so `brew` sees the correct version.
-    // These are best-effort — if they fail the binary itself is fine.
-    if old_version != new_version {
-        let new_version_dir = formula_dir.join(new_version);
-
-        // Step 2: rename the version directory (e.g. 4.0.3 → 4.0.4).
-        match std::fs::rename(version_dir, &new_version_dir) {
-            Ok(()) => {
-                installed_at = new_version_dir.join("bin").join(bin_name);
-
-                // Step 3: update the symlink at <prefix>/bin/<binary>.
-                let symlink_path = prefix.join("bin").join(bin_name);
-                if let Ok(meta) = std::fs::symlink_metadata(&symlink_path)
-                    && meta.file_type().is_symlink()
-                {
-                    match retarget_homebrew_symlink(&symlink_path, &old_version, new_version) {
-                        Ok(()) => installed_at = symlink_path,
-                        Err(error) => {
-                            warn_best_effort("could not update Homebrew symlink", &error);
-                        }
-                    }
-                }
-
-                // Step 4: patch INSTALL_RECEIPT.json so `brew info` is accurate.
-                let receipt = new_version_dir.join("INSTALL_RECEIPT.json");
-                if receipt.exists()
-                    && let Err(error) =
-                        rewrite_homebrew_install_receipt(&receipt, &old_version, new_version)
-                {
-                    warn_best_effort("could not rewrite Homebrew INSTALL_RECEIPT.json", &error);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "\n  \x1b[33mwarning:\x1b[0m could not rename Cellar directory: {e}\n    \
-                     brew may still report the old version"
-                );
-            }
-        }
-    }
-
-    Ok(Some(installed_at))
-}
-
-#[cfg(not(unix))]
-fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
-    replace_default(new_exe)
-}
-
-// ── Scoop ───────────────────────────────────────────────────────────────
-
-/// Replace the binary via `self_replace` (handles Windows exe locking),
-/// then update Scoop's version directory and junction so that
-/// `scoop status` reports the new version.
-#[cfg(windows)]
-fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
-    let exe = std::env::current_exe().ok();
-    self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "binary replacement failed: {e}\n  \
-             The old version is still in place.\n  \
-             To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
-        ),
-    })?;
-
-    // Best-effort: update Scoop metadata for `scoop status` compatibility.
-    update_scoop_metadata(new_version);
-
-    Ok(exe)
-}
-
-#[cfg(windows)]
-fn update_scoop_metadata(new_version: &str) {
-    use std::os::windows::process::CommandExt;
-
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(err) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not resolve current exe for Scoop metadata \
-                 update ({err}); `scoop status` may show a stale version"
-            );
-            return;
-        }
-    };
-    let canonical = exe.canonicalize().unwrap_or(exe);
-
-    let Some(version_dir) = find_scoop_version_dir(&canonical) else {
-        return;
-    };
-    let Some(app_dir) = version_dir.parent() else {
-        return;
-    };
-    let old_version = version_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    if old_version == new_version || old_version == "current" {
-        return;
-    }
-
-    let new_version_dir = app_dir.join(new_version);
-    if let Err(err) = std::fs::create_dir_all(&new_version_dir) {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m could not create Scoop version directory {} ({err}); \
-             `scoop status` may show a stale version",
-            new_version_dir.display()
-        );
-        return;
-    }
-
-    // Copy files from old version directory to new. Track failures so a
-    // partially-populated version directory never gets relinked as `current`.
-    let mut incomplete = false;
-    match std::fs::read_dir(&version_dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
-                    continue;
-                }
-                let name = entry.file_name();
-                if name.to_string_lossy().contains("__self_delete__") {
-                    continue;
-                }
-                if let Err(err) = std::fs::copy(entry.path(), new_version_dir.join(&name)) {
-                    eprintln!(
-                        "  \x1b[33mwarning:\x1b[0m could not copy {} into Scoop version \
-                         directory ({err})",
-                        entry.path().display()
-                    );
-                    incomplete = true;
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not read Scoop version directory {} ({err}); \
-                 `scoop status` may show a stale version",
-                version_dir.display()
-            );
-            incomplete = true;
-        }
-    }
-
-    // Patch manifest.json version.
-    let manifest = new_version_dir.join("manifest.json");
-    if manifest.exists() {
-        match std::fs::read_to_string(&manifest) {
-            Ok(text) => {
-                if let Err(err) = std::fs::write(&manifest, text.replace(&old_version, new_version))
-                {
-                    eprintln!(
-                        "  \x1b[33mwarning:\x1b[0m could not patch Scoop manifest {} ({err})",
-                        manifest.display()
-                    );
-                    incomplete = true;
-                }
-            }
-            Err(err) => {
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m could not read Scoop manifest {} ({err})",
-                    manifest.display()
-                );
-                incomplete = true;
-            }
-        }
-    }
-
-    if incomplete {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m Scoop version directory {} is incomplete; leaving \
-             `current` pointed at {old_version} — run `scoop reset tracedecay` after fixing",
-            new_version_dir.display()
-        );
-        return;
-    }
-
-    let current = app_dir.join("current");
-    if let Err(err) = std::fs::remove_dir(&current) {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m could not remove Scoop `current` junction {} ({err}); \
-             `scoop status` may show a stale version",
-            current.display()
-        );
-        return;
-    }
-    match std::process::Command::new("cmd")
-        .args([
-            "/c",
-            "mklink",
-            "/J",
-            &current.to_string_lossy(),
-            &new_version_dir.to_string_lossy(),
-        ])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .status()
-    {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m Scoop `current` junction relink exited with {status}; \
-                 run `scoop reset tracedecay` if `scoop status` looks stale"
-            );
-        }
-        Err(err) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not relink Scoop `current` junction ({err}); \
-                 run `scoop reset tracedecay` if `scoop status` looks stale"
-            );
-        }
-    }
-}
-
-/// Walk the canonical path to find the Scoop version directory.
-/// Layout: `<scoop>/apps/<app>/<version>/…`
-#[cfg(windows)]
-fn find_scoop_version_dir(path: &Path) -> Option<std::path::PathBuf> {
-    let mut found_apps = false;
-    let mut depth_after_apps = 0u8;
-    let mut result = std::path::PathBuf::new();
-
-    for comp in path.components() {
-        result.push(comp);
-        if found_apps {
-            depth_after_apps += 1;
-            if depth_after_apps == 2 {
-                return Some(result);
-            }
-        } else if let std::path::Component::Normal(name) = comp
-            && name.to_string_lossy().eq_ignore_ascii_case("apps")
-        {
-            found_apps = true;
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
-    replace_default(new_exe)
-}
-
-// ────────────────────────────────────────────────────────────────────────
-
 /// Downloads, extracts, and installs the binary for `version`/`is_beta`.
 /// Verifies the release asset exists on GitHub and returns the download URL.
 /// Call this early so we fail fast when CI hasn't finished building the
@@ -1119,45 +914,17 @@ fn record_previous_version() {
     }
 }
 
-/// Downloads, verifies, stages and publishes the complete release bundle.
-/// Returns the path the new binary was installed at, when known.
-fn perform_upgrade(
-    version: &str,
-    download: &ReleaseDownload,
-    method: &InstallMethod,
-) -> Result<Option<PathBuf>> {
+/// Downloads, verifies, stages and publishes the complete release bundle of a
+/// direct install. Returns the path the new binary was installed at, when
+/// known.
+fn perform_upgrade(download: &ReleaseDownload) -> Result<Option<PathBuf>> {
     let staged = download_and_stage(download, &required_members())?;
 
-    let label = match method {
-        InstallMethod::Brew => " (Homebrew Cellar)",
-        InstallMethod::Scoop => " (Scoop)",
-        _ => "",
-    };
-    eprint!("  Installing release{label}...");
-    let installed_at = publish_release(&staged, method, version)?;
+    eprint!("  Installing release...");
+    let installed_at = publish_release(&staged)?;
     eprintln!(" Done");
 
     Ok(installed_at)
-}
-
-fn brew_upgrade_command() -> (&'static str, [&'static str; 2]) {
-    ("brew", ["upgrade", "tracedecay"])
-}
-
-/// The stable Homebrew-managed binary path: the opt symlink reported by
-/// `brew --prefix tracedecay`, which survives keg-version bumps and cleanup
-/// (unlike the keg-versioned Cellar path the running process resolves to).
-fn brew_linked_binary() -> Option<PathBuf> {
-    let output = std::process::Command::new("brew")
-        .args(["--prefix", "tracedecay"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let prefix = String::from_utf8(output.stdout).ok()?;
-    let binary = Path::new(prefix.trim()).join("bin").join("tracedecay");
-    binary.exists().then_some(binary)
 }
 
 /// Extracts the version from `tracedecay --version` output
@@ -1198,61 +965,92 @@ fn installed_binary_version(path: &Path) -> Option<String> {
     parse_version_output(&output)
 }
 
-/// Whether a delegated `brew upgrade` was a no-op: the linked binary still
-/// reports the version we are already running. `None` (undetectable) is
-/// treated as a real install so the refresh chain never silently skips.
-fn brew_upgrade_was_noop(current: &str, installed_version: Option<&str>) -> bool {
-    installed_version == Some(current)
+/// Whether a delegated manager upgrade was a no-op: the binary the manager
+/// links reports exactly the build version this process is running, which
+/// is the same file unless the manager installed something. `None`
+/// (undetectable) is treated as a real install so the refresh chain never
+/// silently skips.
+fn delegated_upgrade_was_noop(
+    running_build_version: &str,
+    installed_version: Option<&str>,
+) -> bool {
+    installed_version == Some(running_build_version)
 }
 
-fn run_brew_upgrade() -> Result<UpgradeOutcome> {
-    let current = env!("CARGO_PKG_VERSION");
-    eprintln!("Updating Homebrew formula cache...");
-    let update_ok = std::process::Command::new("brew")
-        .args(["update", "--quiet"])
-        .status()
-        .is_ok_and(|s| s.success());
-    if !update_ok {
-        eprintln!("  warning: `brew update` failed — continuing with existing cache");
+/// Delegates an upgrade to the package manager that owns the installation
+/// and classifies the result by asking the binary the manager links for its
+/// version. TraceDecay writes nothing under the manager's tree: a manager
+/// failure is reported as-is and `locate_installed_binary` is never reached.
+fn run_delegated_upgrade(
+    manager: PackageManager,
+    refresh: &ManagerCommand,
+    upgrade: &ManagerCommand,
+    locate_installed_binary: impl FnOnce() -> std::result::Result<PathBuf, String>,
+) -> Result<UpgradeOutcome> {
+    let label = manager.label();
+    eprintln!("Refreshing {label} package metadata: {refresh}");
+    if !refresh.status().is_ok_and(|status| status.success()) {
+        eprintln!("  warning: `{refresh}` failed — continuing with existing metadata");
     }
 
-    let (program, args) = brew_upgrade_command();
-    eprintln!(
-        "Delegating upgrade to Homebrew: {program} {}",
-        args.join(" ")
-    );
-
-    let status = std::process::Command::new(program)
-        .args(args)
-        .status()
-        .map_err(io_err("failed to run Homebrew upgrade"))?;
-
+    eprintln!("Delegating upgrade to {label}: {upgrade}");
+    let status = upgrade.status().map_err(|error| TraceDecayError::Config {
+        message: format!("failed to run `{upgrade}`: {error}"),
+    })?;
     if !status.success() {
         return Err(TraceDecayError::Config {
-            message: format!("Homebrew upgrade failed with status: {status}"),
+            message: format!(
+                "`{upgrade}` failed with status: {status}\n  \
+                 TraceDecay made no changes to the {label}-owned installation."
+            ),
         });
     }
 
-    // `brew upgrade` exits 0 even when the formula was already current, so
-    // ask the freshly linked binary for its version to tell the outcomes
-    // apart. When undetectable, assume an install so the refresh chain
-    // keeps generated plugins in sync.
-    let binary = brew_linked_binary();
+    // The manager exits 0 whether or not it installed anything, so ask the
+    // binary it now links for its version to tell the outcomes apart.
+    let binary = match locate_installed_binary() {
+        Ok(binary) => Some(binary),
+        Err(reason) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not locate the {label}-installed binary \
+                 ({reason}); assuming a new install so the refresh chain runs"
+            );
+            None
+        }
+    };
     let installed_version = binary.as_deref().and_then(installed_binary_version);
-    if brew_upgrade_was_noop(current, installed_version.as_deref()) {
-        eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
+    if delegated_upgrade_was_noop(
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
+        installed_version.as_deref(),
+    ) {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Already up to date (v{}).",
+            env!("CARGO_PKG_VERSION")
+        );
         return Ok(UpgradeOutcome::AlreadyCurrent);
     }
 
-    record_previous_version();
     // `installed_version` may be None here (assumed install, undetectable
     // binary): daemon restore then validates the pre-upgrade version and
-    // reports a typed identity mismatch if Homebrew really did install a new
-    // daemon — truthful failure over a fabricated version.
+    // reports a typed identity mismatch if the manager really did install a
+    // new daemon — truthful failure over a fabricated version.
     Ok(UpgradeOutcome::Installed {
         binary,
         version: installed_version,
     })
+}
+
+fn run_package_manager_upgrade(manager: PackageManager, is_beta: bool) -> Result<UpgradeOutcome> {
+    let outcome = run_delegated_upgrade(
+        manager,
+        &manager.refresh_command(),
+        &manager.upgrade_command(is_beta),
+        || manager.installed_binary(is_beta),
+    )?;
+    if matches!(outcome, UpgradeOutcome::Installed { .. }) {
+        record_previous_version();
+    }
+    Ok(outcome)
 }
 
 /// Check for a newer version and perform the upgrade if one is available.
@@ -1273,8 +1071,8 @@ pub fn run_upgrade() -> Result<UpgradeOutcome> {
     eprintln!("Current version: v{current} ({channel} channel{method_suffix})");
 
     match upgrade_source_for(&method) {
-        UpgradeSource::Homebrew => run_brew_upgrade(),
-        UpgradeSource::GitHubRelease => run_versioned_upgrade(current, is_beta, &method),
+        UpgradeSource::PackageManager(manager) => run_package_manager_upgrade(manager, is_beta),
+        UpgradeSource::GitHubRelease => run_versioned_upgrade(current, is_beta),
     }
 }
 
@@ -1286,12 +1084,17 @@ pub fn show_channel() {
 }
 
 /// Switch to a different channel by downloading the latest release from it.
+/// Package-manager installs are refused before anything is fetched: the
+/// manager owns those files, and no manager command switches channels.
 #[hotpath::measure(label = "cli.channel.switch")]
 pub fn switch_channel(target_channel: &str) -> Result<String> {
+    switch_channel_for(&cloud::detect_install_method(), target_channel)
+}
+
+fn switch_channel_for(method: &InstallMethod, target_channel: &str) -> Result<String> {
     let current = env!("CARGO_PKG_VERSION");
     let current_is_beta = cloud::is_beta();
     let current_channel = if current_is_beta { "beta" } else { "stable" };
-    let method = cloud::detect_install_method();
 
     let target_is_beta = match target_channel {
         "beta" => true,
@@ -1307,6 +1110,10 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
         eprintln!("Already on the {current_channel} channel (v{current}).");
         eprintln!("Run `tracedecay upgrade` to check for updates within this channel.");
         return Ok(current.to_string());
+    }
+
+    if let UpgradeSource::PackageManager(manager) = upgrade_source_for(method) {
+        return Err(manager.channel_switch_refusal(current_is_beta, target_channel));
     }
 
     eprintln!("Switching from {current_channel} to {target_channel}...");
@@ -1326,7 +1133,7 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
 
     // Channel switches do not yet run the post-update refresh chain, so the
     // installed path is unused here.
-    let _ = perform_upgrade(&latest, &download, &method)?;
+    let _ = perform_upgrade(&download)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
     Ok(latest)
@@ -1418,14 +1225,6 @@ mod tests {
     }
 
     #[test]
-    fn brew_upgrade_command_delegates_to_homebrew() {
-        let (program, args) = brew_upgrade_command();
-
-        assert_eq!(program, "brew");
-        assert_eq!(args, ["upgrade", "tracedecay"]);
-    }
-
-    #[test]
     fn parse_version_output_extracts_trailing_version() {
         assert_eq!(
             parse_version_output("tracedecay 5.0.1\n").as_deref(),
@@ -1438,32 +1237,20 @@ mod tests {
         assert_eq!(parse_version_output(""), None);
     }
 
-    #[test]
-    fn brew_upgrade_is_a_noop_when_linked_binary_reports_running_version() {
-        // A no-op `brew upgrade` must map to `AlreadyCurrent` so it never
-        // triggers the post-upgrade refresh chain (daemon restart included).
-        assert!(brew_upgrade_was_noop("5.0.1", Some("5.0.1")));
-    }
+    // ── Installation ownership ──────────────────────────────────────────
 
     #[test]
-    fn brew_upgrade_with_new_or_unknown_version_counts_as_install() {
-        assert!(!brew_upgrade_was_noop("5.0.1", Some("5.0.2")));
-        // Undetectable → assume install so the refresh never silently skips.
-        assert!(!brew_upgrade_was_noop("5.0.1", None));
-    }
-
-    #[test]
-    fn cargo_installs_use_github_release_pipeline() {
+    fn package_managers_own_their_installations_and_direct_installs_use_github() {
         assert_eq!(
-            upgrade_source_for(&InstallMethod::Cargo),
-            UpgradeSource::GitHubRelease
+            upgrade_source_for(&InstallMethod::Brew),
+            UpgradeSource::PackageManager(PackageManager::Homebrew)
         );
-    }
-
-    #[test]
-    fn direct_installs_use_github_release_pipeline() {
         assert_eq!(
             upgrade_source_for(&InstallMethod::Scoop),
+            UpgradeSource::PackageManager(PackageManager::Scoop)
+        );
+        assert_eq!(
+            upgrade_source_for(&InstallMethod::Cargo),
             UpgradeSource::GitHubRelease
         );
         assert_eq!(
@@ -1473,11 +1260,194 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_installs_keep_the_package_manager_pipeline() {
+    fn managed_upgrades_are_the_managers_own_commands() {
         assert_eq!(
-            upgrade_source_for(&InstallMethod::Brew),
-            UpgradeSource::Homebrew
+            PackageManager::Homebrew.refresh_command().to_string(),
+            "brew update --quiet"
         );
+        assert_eq!(
+            PackageManager::Homebrew.upgrade_command(false).to_string(),
+            "brew upgrade tracedecay"
+        );
+        assert_eq!(
+            PackageManager::Homebrew.upgrade_command(true).to_string(),
+            "brew upgrade tracedecay",
+            "Homebrew ships one formula; the channel does not change the command"
+        );
+        let scoop = PackageManager::scoop_program();
+        assert_eq!(
+            PackageManager::Scoop.upgrade_command(false).to_string(),
+            format!("{scoop} update tracedecay")
+        );
+        assert_eq!(
+            PackageManager::Scoop.upgrade_command(true).to_string(),
+            format!("{scoop} update tracedecay-beta")
+        );
+        assert_eq!(
+            PackageManager::Scoop.prefix_command(true).to_string(),
+            format!("{scoop} prefix tracedecay-beta")
+        );
+    }
+
+    #[test]
+    fn a_no_op_managed_upgrade_is_the_same_build_and_anything_else_is_an_install() {
+        let running = "0.1.0-beta.37+0123456789abcdef0123456789abcdef01234567";
+
+        // A no-op must map to `AlreadyCurrent` so it never triggers the
+        // post-upgrade refresh chain (daemon restart included).
+        assert!(delegated_upgrade_was_noop(running, Some(running)));
+        // A different build of the same release is a different binary.
+        assert!(!delegated_upgrade_was_noop(
+            running,
+            Some("0.1.0-beta.37+fedcba9876543210fedcba9876543210fedcba98")
+        ));
+        assert!(!delegated_upgrade_was_noop(running, Some("0.1.0-beta.38")));
+        // Undetectable → assume install so the refresh never silently skips.
+        assert!(!delegated_upgrade_was_noop(running, None));
+    }
+
+    #[test]
+    fn package_manager_installs_refuse_channel_switches_before_fetching_anything() {
+        let other_channel = if cloud::is_beta() { "stable" } else { "beta" };
+
+        let homebrew = switch_channel_for(&InstallMethod::Brew, other_channel).unwrap_err();
+        let message = homebrew.to_string();
+        assert!(message.contains("installed by Homebrew"), "{message}");
+        assert!(message.contains("`brew upgrade tracedecay`"), "{message}");
+
+        let scoop = switch_channel_for(&InstallMethod::Scoop, other_channel).unwrap_err();
+        let message = scoop.to_string();
+        assert!(message.contains("installed by Scoop"), "{message}");
+        let (current, target) = if cloud::is_beta() {
+            ("tracedecay-beta", "tracedecay")
+        } else {
+            ("tracedecay", "tracedecay-beta")
+        };
+        assert!(
+            message.contains(&format!("uninstall {current}"))
+                && message.contains(&format!("install {target}")),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    mod delegation {
+        use std::cell::Cell;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+
+        use super::super::{ManagerCommand, PackageManager, UpgradeOutcome, run_delegated_upgrade};
+
+        fn sh(script: &str) -> ManagerCommand {
+            ManagerCommand::new("sh", &["-c", script])
+        }
+
+        /// A stand-in for the binary a manager links: prints `tracedecay
+        /// <version>` like the real `--version`.
+        fn fake_binary(dir: &std::path::Path, version: &str) -> PathBuf {
+            let path = dir.join("tracedecay");
+            fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf 'tracedecay %s\\n' '{version}'\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        #[test]
+        fn a_failed_manager_command_is_reported_and_nothing_else_is_touched() {
+            let located = Cell::new(false);
+
+            let error = run_delegated_upgrade(
+                PackageManager::Homebrew,
+                &sh("exit 0"),
+                &sh("exit 3"),
+                || {
+                    located.set(true);
+                    Ok(PathBuf::from("/nonexistent"))
+                },
+            )
+            .unwrap_err();
+
+            let message = error.to_string();
+            assert!(message.contains("`sh -c exit 3` failed"), "{message}");
+            assert!(
+                message.contains("no changes to the Homebrew-owned"),
+                "{message}"
+            );
+            assert!(
+                !located.get(),
+                "a failed manager leaves the outcome unclassified"
+            );
+        }
+
+        #[test]
+        fn a_manager_that_left_the_running_build_in_place_is_a_noop() {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = fake_binary(dir.path(), crate::product_runtime::PRODUCT_BUILD_VERSION);
+
+            let outcome = run_delegated_upgrade(
+                PackageManager::Homebrew,
+                &sh("exit 1"),
+                &sh("exit 0"),
+                || Ok(binary.clone()),
+            )
+            .unwrap();
+
+            assert!(
+                matches!(outcome, UpgradeOutcome::AlreadyCurrent),
+                "{outcome:?}"
+            );
+        }
+
+        #[test]
+        fn a_manager_that_linked_a_different_build_installed_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = fake_binary(dir.path(), "0.0.1+0123456789abcdef0123456789abcdef01234567");
+
+            let outcome =
+                run_delegated_upgrade(PackageManager::Scoop, &sh("exit 0"), &sh("exit 0"), || {
+                    Ok(binary.clone())
+                })
+                .unwrap();
+
+            let UpgradeOutcome::Installed {
+                binary: installed,
+                version,
+            } = outcome
+            else {
+                panic!("expected an install, got {outcome:?}");
+            };
+            assert_eq!(installed, Some(binary));
+            assert_eq!(
+                version.as_deref(),
+                Some("0.0.1+0123456789abcdef0123456789abcdef01234567")
+            );
+        }
+
+        #[test]
+        fn an_unlocatable_managed_binary_counts_as_an_install_with_unknown_version() {
+            let outcome = run_delegated_upgrade(
+                PackageManager::Homebrew,
+                &sh("exit 0"),
+                &sh("exit 0"),
+                || Err("`brew --prefix tracedecay` exited with 1".to_owned()),
+            )
+            .unwrap();
+
+            assert!(
+                matches!(
+                    outcome,
+                    UpgradeOutcome::Installed {
+                        binary: None,
+                        version: None,
+                    }
+                ),
+                "{outcome:?}"
+            );
+        }
     }
 
     #[test]
@@ -1586,7 +1556,7 @@ mod tests {
 
         use super::super::{
             EXECUTABLE_MEMBER, ReleaseDownload, ReleaseMember, ReleaseMemberKind, StagedRelease,
-            extract_targz, intended_member, publish_companions, publish_member, stage_release_in,
+            extract_targz, intended_member, publish_member, publish_release_at, stage_release_in,
         };
 
         const RUNTIME: ReleaseMember = ReleaseMember {
@@ -1792,8 +1762,7 @@ mod tests {
             fs::write(&executable, b"old-executable").unwrap();
             fs::write(install.path().join("libonnxruntime.so.1"), b"old-runtime").unwrap();
 
-            publish_companions(&staged, install.path()).unwrap();
-            super::super::install_binary(&staged.executable(), &executable).unwrap();
+            publish_release_at(&staged, &executable).unwrap();
 
             assert_eq!(fs::read(&executable).unwrap(), b"new-executable");
             assert_eq!(mode_of(&executable), 0o755);
@@ -1813,6 +1782,28 @@ mod tests {
                 published,
                 ["libonnxruntime.so.1", "onnxruntime-LICENSE", "tracedecay"],
                 "no staging sibling may outlive publication"
+            );
+        }
+
+        #[test]
+        fn a_companion_that_cannot_be_published_leaves_the_old_executable_in_place() {
+            let staged = stage(&complete_release(), &linux_members()).unwrap();
+            let install = tempfile::tempdir().unwrap();
+            let executable = install.path().join("tracedecay");
+            fs::write(&executable, b"old-executable").unwrap();
+            fs::create_dir(install.path().join("libonnxruntime.so.1")).unwrap();
+
+            let error = publish_release_at(&staged, &executable).unwrap_err();
+
+            assert!(
+                error.to_string().contains("cannot replace release member"),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(&executable).unwrap(),
+                b"old-executable",
+                "companions publish before the entry point, so a companion failure never \
+                 leaves a new executable beside an old runtime"
             );
         }
 
@@ -2007,381 +1998,6 @@ mod tests {
                 "{error}"
             );
             assert!(is_empty_dir(parent.path()));
-        }
-    }
-
-    // ── Regression tests for symlink upgrade bug ────────────────────────
-    //
-    // The self-replace crate resolves symlinks via `fs::read_link`, which
-    // returns the raw target (often relative for Homebrew). Subsequent
-    // operations resolve that relative path from CWD instead of the
-    // symlink's parent, causing ENOENT.
-    //
-    // Canonicalize the exe path before passing it to self_update. These
-    // tests cover every symlink layout we've seen in the wild.
-
-    #[cfg(unix)]
-    mod symlink_upgrade_regression {
-        use std::fs;
-        use std::os::unix::fs::symlink;
-        use std::path::PathBuf;
-
-        /// Homebrew-style Cellar layout: `(cellar_binary, symlink, tmp_guard)`.
-        fn homebrew_layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
-            let tmp = tempfile::tempdir().unwrap();
-            // Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
-            let cellar_bin_dir = tmp.path().join("Cellar/tracedecay/4.1.1-beta.1/bin");
-            fs::create_dir_all(&cellar_bin_dir).unwrap();
-            let real_binary = cellar_bin_dir.join("tracedecay");
-            fs::write(&real_binary, b"fake-binary").unwrap();
-
-            // bin/tracedecay -> ../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
-            let bin_dir = tmp.path().join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-            let link_path = bin_dir.join("tracedecay");
-            symlink(
-                "../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay",
-                &link_path,
-            )
-            .unwrap();
-
-            (real_binary, link_path, tmp)
-        }
-
-        #[test]
-        fn read_link_returns_relative_path_for_homebrew_symlink() {
-            let (_real, link, _tmp) = homebrew_layout();
-            let target = fs::read_link(&link).unwrap();
-            assert!(
-                target.is_relative(),
-                "Homebrew symlink target should be relative, got: {target:?}"
-            );
-            assert_eq!(
-                target,
-                PathBuf::from("../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay")
-            );
-        }
-
-        #[test]
-        fn relative_read_link_fails_from_wrong_cwd() {
-            // read_link returns a relative path, and metadata() resolves it
-            // from CWD rather than the symlink's parent.
-            let (_real, link, _tmp) = homebrew_layout();
-            let target = fs::read_link(&link).unwrap();
-
-            // From a different directory (e.g. the user's home), the relative
-            // path doesn't resolve to anything valid.
-            let other_dir = tempfile::tempdir().unwrap();
-            let wrong_path = other_dir.path().join(&target);
-            assert!(
-                wrong_path.metadata().is_err(),
-                "relative symlink target should NOT resolve from an unrelated directory"
-            );
-        }
-
-        #[test]
-        fn canonicalize_resolves_relative_symlink_to_absolute() {
-            let (real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-            let real_canonical = real.canonicalize().unwrap();
-            assert_eq!(
-                canonical, real_canonical,
-                "canonicalize should resolve symlink to the real Cellar path"
-            );
-            assert!(canonical.is_absolute());
-        }
-
-        #[test]
-        fn canonical_path_differs_from_symlink_path() {
-            // After canonicalization the path differs from the symlink path,
-            // so self_update chooses Move instead of self_replace.
-            let (_real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-            assert_ne!(
-                canonical, link,
-                "canonical path and symlink path must differ so self_update uses Move"
-            );
-        }
-
-        #[test]
-        fn canonical_path_parent_exists() {
-            // Move::to_dest needs the parent directory to exist for rename().
-            let (_real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-            assert!(
-                canonical.parent().unwrap().is_dir(),
-                "parent of canonical path must be a real directory"
-            );
-        }
-
-        #[test]
-        fn canonicalize_is_identity_for_non_symlink() {
-            // For direct installs (cargo install, manual copy), canonicalize
-            // returns the same path, so self_replace is still used — no
-            // behavior change for non-symlink installs.
-            let tmp = tempfile::tempdir().unwrap();
-            let binary = tmp.path().join("tracedecay");
-            fs::write(&binary, b"fake-binary").unwrap();
-
-            let canonical = binary.canonicalize().unwrap();
-            let original_canonical = binary.canonicalize().unwrap();
-            assert_eq!(canonical, original_canonical);
-        }
-
-        #[test]
-        fn canonicalize_resolves_absolute_symlink() {
-            // Some package managers use absolute symlinks.
-            let tmp = tempfile::tempdir().unwrap();
-            let real_dir = tmp.path().join("lib");
-            fs::create_dir_all(&real_dir).unwrap();
-            let real_binary = real_dir.join("tracedecay");
-            fs::write(&real_binary, b"fake-binary").unwrap();
-
-            let bin_dir = tmp.path().join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-            let link = bin_dir.join("tracedecay");
-            symlink(&real_binary, &link).unwrap();
-
-            let canonical = link.canonicalize().unwrap();
-            assert_eq!(canonical, real_binary.canonicalize().unwrap());
-            assert_ne!(canonical, link);
-        }
-
-        #[test]
-        fn canonicalize_resolves_chained_symlinks() {
-            // A -> B -> C: canonicalize must reach C.
-            let tmp = tempfile::tempdir().unwrap();
-            let real = tmp.path().join("real_binary");
-            fs::write(&real, b"fake-binary").unwrap();
-
-            let link_b = tmp.path().join("link_b");
-            symlink(&real, &link_b).unwrap();
-
-            let link_a = tmp.path().join("link_a");
-            symlink(&link_b, &link_a).unwrap();
-
-            let canonical = link_a.canonicalize().unwrap();
-            assert_eq!(canonical, real.canonicalize().unwrap());
-        }
-
-        #[test]
-        fn canonicalize_resolves_symlink_with_dotdot_in_real_path() {
-            // Real path contains ".." components — canonicalize normalizes them.
-            let tmp = tempfile::tempdir().unwrap();
-            let deep = tmp.path().join("a/b/c");
-            fs::create_dir_all(&deep).unwrap();
-            let real = deep.join("tracedecay");
-            fs::write(&real, b"fake-binary").unwrap();
-
-            // Construct a path with ".." that still reaches the same file
-            let dotdot_path = tmp.path().join("a/b/c/../c/tracedecay");
-            let canonical = dotdot_path.canonicalize().unwrap();
-            assert_eq!(canonical, real.canonicalize().unwrap());
-            assert!(
-                !canonical.to_string_lossy().contains(".."),
-                "canonical path should have no '..' components"
-            );
-        }
-
-        #[test]
-        fn rename_works_for_canonical_cellar_path() {
-            // Simulate what Move::to_dest does: rename a new binary over the
-            // canonical (Cellar) path. The symlink continues to work.
-            let (real, link, _tmp) = homebrew_layout();
-
-            // "New binary" in a temp location (same filesystem)
-            let new_binary = real.parent().unwrap().join(".tracedecay.__temp__");
-            fs::write(&new_binary, b"upgraded-binary").unwrap();
-
-            // Rename new binary over the real path (what Move does)
-            let canonical = link.canonicalize().unwrap();
-            fs::rename(&new_binary, &canonical).unwrap();
-
-            // Verify: reading through the symlink yields the new content
-            let content = fs::read(&link).unwrap();
-            assert_eq!(content, b"upgraded-binary");
-
-            // Verify: the canonical path also has new content
-            let content = fs::read(&canonical).unwrap();
-            assert_eq!(content, b"upgraded-binary");
-        }
-
-        #[test]
-        fn symlink_survives_rename_replacement() {
-            // After the upgrade replaces the Cellar binary, the Homebrew
-            // symlink must still point to a valid file.
-            let (_real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-
-            // Replace the binary at the canonical path
-            fs::write(&canonical, b"new-version").unwrap();
-
-            // Symlink still works
-            assert!(
-                link.exists(),
-                "symlink must still resolve after replacement"
-            );
-            assert!(
-                fs::symlink_metadata(&link)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink(),
-                "must still be a symlink"
-            );
-            assert_eq!(fs::read(&link).unwrap(), b"new-version");
-        }
-
-        #[test]
-        fn canonicalize_fails_for_dangling_symlink() {
-            // If the Cellar dir was removed (brew cleanup), canonicalize
-            // should fail and we gracefully fall back to the default.
-            let tmp = tempfile::tempdir().unwrap();
-            let bin_dir = tmp.path().join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-            let link = bin_dir.join("tracedecay");
-            symlink("../Cellar/tracedecay/old/bin/tracedecay", &link).unwrap();
-            // Target doesn't exist — dangling symlink
-            assert!(
-                link.canonicalize().is_err(),
-                "canonicalize should fail for dangling symlinks"
-            );
-        }
-
-        #[test]
-        fn our_fix_pattern_handles_all_cases() {
-            // Simulate the exact pattern used in run_upgrade/switch_channel:
-            //   if let Ok(canonical) = path.canonicalize() { ... }
-            // Verify it does the right thing for each scenario.
-
-            // Case 1: relative symlink (Homebrew) — canonical differs
-            let (_, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize();
-            assert!(canonical.is_ok());
-            assert_ne!(canonical.unwrap(), link);
-
-            // Case 2: direct file — canonical matches
-            let tmp2 = tempfile::tempdir().unwrap();
-            let direct = tmp2.path().join("tracedecay");
-            fs::write(&direct, b"binary").unwrap();
-            let canonical = direct.canonicalize().unwrap();
-            // After canonicalization of the tmpdir itself, they match
-            assert_eq!(canonical, direct.canonicalize().unwrap());
-
-            // Case 3: dangling symlink — canonical fails, we skip setting
-            // bin_install_path and let self_update use its default
-            let tmp3 = tempfile::tempdir().unwrap();
-            let dangling = tmp3.path().join("tracedecay");
-            symlink("/nonexistent/path/tracedecay", &dangling).unwrap();
-            assert!(dangling.canonicalize().is_err());
-        }
-
-        // ── install_binary tests ───────────────────────────────────────
-
-        #[test]
-        fn install_binary_replaces_target_atomically() {
-            let tmp = tempfile::tempdir().unwrap();
-            let target = tmp.path().join("tracedecay");
-            fs::write(&target, b"old-binary").unwrap();
-
-            let src = tmp.path().join("new-binary");
-            fs::write(&src, b"new-binary-content").unwrap();
-
-            super::super::install_binary(&src, &target).unwrap();
-
-            assert_eq!(fs::read(&target).unwrap(), b"new-binary-content");
-            // The staging sibling is renamed away, never left behind.
-            let mut entries: Vec<_> = fs::read_dir(tmp.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name())
-                .collect();
-            entries.sort();
-            assert_eq!(entries, ["new-binary", "tracedecay"]);
-        }
-
-        #[test]
-        fn install_binary_sets_executable_permission() {
-            use std::os::unix::fs::PermissionsExt;
-
-            let tmp = tempfile::tempdir().unwrap();
-            let target = tmp.path().join("tracedecay");
-            fs::write(&target, b"old").unwrap();
-
-            let src = tmp.path().join("new");
-            fs::write(&src, b"new").unwrap();
-
-            super::super::install_binary(&src, &target).unwrap();
-
-            let mode = fs::metadata(&target).unwrap().permissions().mode();
-            assert_eq!(mode & 0o755, 0o755, "binary should be executable");
-        }
-
-        // ── Brew upgrade flow ──────────────────────────────────────────
-
-        #[test]
-        fn brew_upgrade_renames_version_dir_and_updates_symlink() {
-            let (_real, link, _tmp) = homebrew_layout();
-
-            // Write an "upgraded" binary via the Cellar path
-            let canonical = link.canonicalize().unwrap();
-            fs::write(&canonical, b"v5.0.0-binary").unwrap();
-
-            // Simulate the Cellar directory rename (4.1.1-beta.1 → 5.0.0)
-            let bin_dir = canonical.parent().unwrap();
-            let version_dir = bin_dir.parent().unwrap();
-            let formula_dir = version_dir.parent().unwrap();
-            let cellar_dir = formula_dir.parent().unwrap();
-            let _prefix = cellar_dir.parent().unwrap();
-
-            let new_version_dir = formula_dir.join("5.0.0");
-            fs::rename(version_dir, &new_version_dir).unwrap();
-
-            // Update the symlink
-            super::super::retarget_homebrew_symlink(&link, "4.1.1-beta.1", "5.0.0").unwrap();
-
-            // Verify: symlink resolves and has the new content
-            assert!(link.exists(), "symlink must resolve after dir rename");
-            assert_eq!(fs::read(&link).unwrap(), b"v5.0.0-binary");
-
-            // Verify: new version directory exists, old one doesn't
-            assert!(new_version_dir.exists());
-            assert!(!version_dir.exists());
-
-            // Verify: brew would see "5.0.0" as the installed version
-            // (brew reads directory names under Cellar/<formula>/)
-            let versions: Vec<_> = fs::read_dir(formula_dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect();
-            assert_eq!(versions, vec!["5.0.0"]);
-        }
-
-        #[test]
-        fn brew_upgrade_updates_install_receipt() {
-            let tmp = tempfile::tempdir().unwrap();
-            let cellar = tmp.path().join("Cellar/tracedecay/4.0.3");
-            fs::create_dir_all(cellar.join("bin")).unwrap();
-            fs::write(cellar.join("bin/tracedecay"), b"binary").unwrap();
-
-            let receipt_content = r#"{
-  "source": {
-    "versions": { "stable": "4.0.3" }
-  },
-  "tabfile": "/opt/homebrew/Cellar/tracedecay/4.0.3/INSTALL_RECEIPT.json"
-}"#;
-            fs::write(cellar.join("INSTALL_RECEIPT.json"), receipt_content).unwrap();
-
-            // Simulate rename + receipt update
-            let new_dir = tmp.path().join("Cellar/tracedecay/4.0.4");
-            fs::rename(&cellar, &new_dir).unwrap();
-
-            let receipt = new_dir.join("INSTALL_RECEIPT.json");
-            super::super::rewrite_homebrew_install_receipt(&receipt, "4.0.3", "4.0.4").unwrap();
-            let updated = fs::read_to_string(&receipt).unwrap();
-
-            assert!(updated.contains("\"stable\": \"4.0.4\""));
-            assert!(updated.contains("/4.0.4/INSTALL_RECEIPT.json"));
-            assert!(!updated.contains("4.0.3"));
         }
     }
 }
