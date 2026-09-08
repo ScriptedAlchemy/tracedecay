@@ -14,6 +14,7 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
+use tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY;
 use tracedecay_mcp::JsonRpcResponse;
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -355,6 +356,29 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
         .await
         .expect_err("an unmounted worktree must fail closed");
     assert!(format!("{error}").contains("code_index_scheduler_unavailable"));
+    // Linked worktrees index only by opt-in (`sync.watch_linked_worktrees`,
+    // default off): a mounted linked route otherwise serves its typed
+    // `linked_worktree_disabled` state and never publishes. The opt-in is a
+    // project-layer setting decided at route open, so write it through the
+    // production configuration tool before the worktree route opens.
+    let receipt = tool(
+        &harness,
+        &project,
+        "tracedecay_configuration_set",
+        json!({
+            "layer": {"kind": "project", "project_id": harness.project_id(&project).await.unwrap()},
+            "key": SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            "value": {"kind": "boolean", "value": true},
+            "expected_revision": harness.configuration_revision(&project).await.unwrap(),
+            "idempotency_key": "configuration.idempotency.git-watch-linked-worktree-opt-in",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(
+        receipt["outcome"]["outcome"], "effect",
+        "linked-worktree opt-in must commit: {receipt}"
+    );
     harness.shutdown().await;
 
     let harness = ProductionProjectCompositionHarnessV1::open(
@@ -376,13 +400,31 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
         "wt_only",
     )
     .await;
-    let isolated = search(&harness, &project, "wt_only").await;
-    assert_eq!(isolated["code_generation"], main);
-    assert_eq!(isolated["coverage"]["recall"], "full");
-    for lane in ["exact", "lexical", "graph"] {
-        assert_eq!(isolated["coverage"][lane], "complete", "{isolated}");
-    }
-    assert_eq!(symbol_count(&isolated, "wt_only"), 0);
+    // The worktree commit moved the shared `refs/heads`, which is the primary
+    // route's tier-1 git signal: its code lanes are typed stale until its next
+    // reconcile re-resolves identity (a Noop for an unchanged checkout), and
+    // the first stale read requests that pass. Judge isolation on the answer
+    // the re-verified primary gives. `recall` stays `partial` here by
+    // contract: the semantic lane is disclosed unavailable without a model.
+    let mut isolated = Value::Null;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            isolated = search(&harness, &project, "wt_only").await;
+            if ["exact", "lexical", "graph"]
+                .iter()
+                .all(|lane| isolated["coverage"][lane] == "complete")
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the primary never re-verified its source after the worktree commit: {isolated}")
+    });
+    assert_eq!(isolated["code_generation"], main, "{isolated}");
+    assert_eq!(symbol_count(&isolated, "wt_only"), 0, "{isolated}");
     harness.shutdown().await;
 }
 #[tokio::test]
