@@ -159,7 +159,10 @@ const COMPOSITION_ENTRY_CEILING: usize = 4 * 1024;
 
 /// Every phase owns its temporaries and awaits at most one wide leaf at a
 /// time. Measured maxima: 21,200 B (`mount_full_server_owners`, ordinary
-/// build) and 175,424 B (the same phase under `--features hotpath`).
+/// build) and 175,424 B (the same phase under `--features hotpath`). The
+/// next-widest phases are `construct_full_server` (7,208 B) and `open_graph`
+/// (6,200 B); the semantic lifecycle registry read and the background-CPU
+/// authority handle each cost their phase well under 128 B.
 const PHASE_CEILING: usize = if cfg!(feature = "hotpath") {
     256 * 1024
 } else {
