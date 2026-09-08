@@ -545,9 +545,7 @@ impl Default for StoreAdministration {
             ),
             git_index_transaction_services: Arc::new(
                 DaemonGitIndexTransactionServiceRegistry::new(
-                    tracedecay_code_index_runtime::ApplicationCatalogProviderV1::new(
-                        crate::runtime_ports::compose_application_catalog_snapshot,
-                    ),
+                    crate::runtime_ports::compose_application_catalog_snapshot,
                 ),
             ),
             native_integration_services: Arc::new(
