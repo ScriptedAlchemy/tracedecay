@@ -990,4 +990,80 @@ mod tests {
             ));
         }
     }
+
+    /// `retire_replacement_to_vacancy` fences replay/sync through an old
+    /// lease before it reserves the graph. That lease binds a counted graph
+    /// client into the owner-retained slot, which outlives the lease itself;
+    /// reserving the retirement target must release it or graph retirement is
+    /// refused by `can_reserve_owner_attachment`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_retirement_target_releases_owner_retained_client_from_old_lease() {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "old lease graph client release",
+        )
+        .expect("daemon database scope");
+        let project_id =
+            ProjectId::new("project.old-lease-graph-client").expect("typed project identity");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let mounted = registry
+            .project_sessions(project_id.clone(), [project_root])
+            .await
+            .expect("registered project sessions");
+        drop(mounted);
+
+        let mut replacement = registry
+            .reserve_project_session_replacement(&project_id)
+            .await
+            .expect("reserve prior session owner")
+            .expect("mounted session owner");
+        let old_lease = replacement.issue_old_lease().expect("old session lease");
+        old_lease
+            .session_relation_graph_lease()
+            .expect("old lease binds the owner-retained graph client");
+        drop(old_lease);
+        let graph_target = replacement
+            .graph_retirement_target()
+            .expect("prior graph target");
+        let graph = registry
+            .graph_registry
+            .reserve_retirement_batch(vec![graph_target])
+            .expect("dropped old lease must leave no owner-retained graph client");
+        let store_target = replacement
+            .reserve_store_target()
+            .expect("reserve prior Store target");
+        let store = match registry
+            .registry
+            .reserve_retirement_batch(vec![store_target])
+        {
+            StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+            StoreRuntimeRetirementResult::Blocked(refusal) => {
+                panic!("prior Store target unexpectedly blocked: {refusal:?}")
+            }
+        };
+        drop(ProjectSessionNativeRetirementV1::new(
+            replacement,
+            graph,
+            store,
+        ));
+    }
 }

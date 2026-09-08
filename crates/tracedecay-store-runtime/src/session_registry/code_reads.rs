@@ -315,7 +315,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             return Err(error);
         }
 
-        replacement.detach_old_relation_graph()?;
         let graph_target = replacement.graph_retirement_target()?;
         let graph_reservation = match self
             .graph_registry

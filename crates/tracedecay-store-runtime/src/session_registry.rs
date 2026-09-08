@@ -1584,27 +1584,36 @@ impl ProjectSessionReplacementReservationV1 {
         Ok(database)
     }
 
-    fn detach_old_relation_graph(&self) -> Result<()> {
+    /// Exact shard identity of the retained old owner, read without minting
+    /// any Store or graph client.
+    fn old_shard_id(&self) -> Result<StoreShardIdV1> {
+        self.sessions
+            .as_ref()
+            .map(|session| session.database.registered_binding().shard_id.clone())
+            .ok_or_else(|| {
+                session_registry_error(
+                    "identify replacing project session shard",
+                    "project session replacement has no retained session owner".to_owned(),
+                )
+            })
+    }
+
+    /// Hands the exact graph owner to retirement reservation.
+    ///
+    /// The owner retains the graph client that [`Self::issue_old_lease`]
+    /// binds for replay/sync fencing beyond the lifetime of any issued
+    /// database lease. Graph retirement refuses an owner with live clients, so
+    /// that retained client is released here, before the target is reserved,
+    /// on every path that retires the old owner.
+    fn graph_retirement_target(&self) -> Result<tracedecay_graph_db::GraphDbRetirementTarget> {
         let session = self.sessions.as_ref().ok_or_else(|| {
             session_registry_error(
-                "detach replacing project relation graph",
-                "project session replacement has no retained session owner".to_owned(),
+                "reserve replacing project relation graph",
+                "project session replacement has no retained graph owner".to_owned(),
             )
         })?;
         session.database.detach_session_relation_graph();
-        Ok(())
-    }
-
-    fn graph_retirement_target(&self) -> Result<tracedecay_graph_db::GraphDbRetirementTarget> {
-        self.sessions
-            .as_ref()
-            .map(|session| session.graph.retirement_target())
-            .ok_or_else(|| {
-                session_registry_error(
-                    "reserve replacing project relation graph",
-                    "project session replacement has no retained graph owner".to_owned(),
-                )
-            })
+        Ok(session.graph.retirement_target())
     }
 
     fn reserve_store_target(
@@ -3080,9 +3089,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             .project_owners
             .reserve_session_replacement(project_id)?;
         if let Some(replacement) = &replacement {
-            let database = replacement.issue_old_lease()?;
-            let shard_id = database.binding().shard_id.clone();
-            drop(database);
+            // Read the shard identity from the retained owner. Issuing an old
+            // lease here would rebind a counted graph client into the
+            // owner-retained slot that `into_retirement` just released.
+            let shard_id = replacement.old_shard_id()?;
             self.registered_schema_convergence
                 .retire(&shard_id)
                 .await
