@@ -95,7 +95,7 @@ mod handoff;
 mod multi_root_http;
 mod registered_http;
 mod request_control;
-pub(crate) mod retained;
+pub mod retained;
 mod work;
 mod workflow;
 

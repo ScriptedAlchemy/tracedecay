@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_code_index::intake::content_digest;
-use tracedecay_contracts::{ApplicationProblem, ResultContractRef};
+use tracedecay_contracts::{ApplicationProblem, ResultContractRef, RetainedSurfaceOperation};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
@@ -1225,7 +1225,7 @@ pub(super) async fn dispatch_retained_application_tools(
 fn dispatch_retained_application_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
-    mut args: Value,
+    args: Value,
     _scope_prefix: Option<&'a str>,
     _active_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'a>,
@@ -1233,19 +1233,13 @@ fn dispatch_retained_application_tools_inner<'a>(
     // Erase the deeply nested retained-application future before it reaches
     // the measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let retained_operation = super::retained_catalog::retained_mcp_operation(tool_name, &args)
+        let retained_operation = RetainedSurfaceOperation::from_tool_name(tool_name)
             .ok_or_else(|| unknown_tool_error(tool_name))?;
-        let canonical_tool_name = format!("tracedecay_{}", retained_operation.as_str());
-        let binding = resolve_catalog_tool_binding(BindingSurface::Mcp, &canonical_tool_name)
+        let binding = resolve_catalog_tool_binding(BindingSurface::Mcp, tool_name)
             .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),
             })?
             .ok_or_else(|| unknown_tool_error(tool_name))?;
-        if tool_name == "tracedecay_session_refresh"
-            && let Some(arguments) = args.as_object_mut()
-        {
-            arguments.remove("action");
-        }
         // Normalization strips `project_selector`, so the selected project is
         // read here: a selector-bound retained route is served by the calling
         // session's own runtime, and only the selector names the project the

@@ -419,7 +419,6 @@ const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_module_api", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_qualified_name", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_lookup", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_session_refresh", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_refresh_begin", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_refresh_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_refresh_cancel", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -549,7 +548,6 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_fact_store_remove"
         | "tracedecay_fact_store_supersede"
         | "tracedecay_fact_feedback"
-        | "tracedecay_session_refresh"
         | "tracedecay_session_refresh_begin"
         | "tracedecay_session_refresh_cancel"
         | "tracedecay_run_affected_tests" => EffectClass::Administrative,
@@ -797,7 +795,6 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_store_remove"
             | "tracedecay_fact_store_supersede"
             | "tracedecay_fact_feedback"
-            | "tracedecay_session_refresh"
             | "tracedecay_session_refresh_begin"
             | "tracedecay_session_refresh_cancel"
             | "tracedecay_run_affected_tests"
@@ -1172,7 +1169,7 @@ mod tests {
         for tool_name in [
             "tracedecay_fact_store_curate",
             "tracedecay_fact_feedback",
-            "tracedecay_session_refresh",
+            "tracedecay_session_refresh_begin",
             "tracedecay_run_affected_tests",
         ] {
             let contract = catalog.contract(tool_name).unwrap();
@@ -1406,7 +1403,6 @@ mod tests {
         ("tracedecay_fact_store_supersede", BranchSensitivity::Independent),
         ("tracedecay_fact_feedback", BranchSensitivity::Independent),
         ("tracedecay_memory_status", BranchSensitivity::Independent),
-        ("tracedecay_session_refresh", BranchSensitivity::Independent),
         ("tracedecay_session_refresh_status", BranchSensitivity::Independent),
         ("tracedecay_session_refresh_cancel", BranchSensitivity::Independent),
         ("tracedecay_session_refresh_begin", BranchSensitivity::Independent),

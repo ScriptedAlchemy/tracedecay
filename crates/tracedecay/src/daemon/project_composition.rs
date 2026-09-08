@@ -1317,6 +1317,10 @@ impl ProjectOpenInputs<'_> {
         );
         let (delivery_settlement_authority, delivery_settlement_recorder) =
             project_delivery_settlement_ports(self.invocation, self.canonical_project_path).await?;
+        let profile_session_refresh = self
+            .store_administration
+            .profile_session_refresh_service(&user_session_db)
+            .await;
         let full_context = core
             .publish_route_ports(
                 crate::mcp::server::McpServerConstructionContext::daemon_owned(
@@ -1334,6 +1338,7 @@ impl ProjectOpenInputs<'_> {
                         background_cpu,
                         project_session_refresh_wake,
                         user_session_refresh_wake,
+                        profile_session_refresh,
                         session_sync_service,
                         database_owner_reconciler: Arc::clone(&core.database_owner_reconciler),
                         project_routes: self.store_administration.project_routes(),

@@ -143,6 +143,8 @@ mod tests {
 
     #[test]
     fn broad_translator_names_are_not_callable_routes() {
-        assert!(!RetainedSurfaceOperation::SessionRefresh.is_callable());
+        for name in ["session_refresh", "fact_store"] {
+            assert_eq!(RetainedSurfaceOperation::from_operation_name(name), None);
+        }
     }
 }

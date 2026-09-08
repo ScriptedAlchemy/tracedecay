@@ -16,6 +16,7 @@ use tracedecay_contracts::{
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_session_memory::session::SessionRefreshServicePort;
 use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
@@ -146,6 +147,9 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
     pub(crate) project_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
     pub(crate) user_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
+    /// Daemon-wide profile session refresh service; absent on core and direct
+    /// servers, where profile-scoped refresh answers typed unavailable.
+    pub(crate) profile_session_refresh: Option<Arc<dyn SessionRefreshServicePort>>,
     pub(crate) project_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
     /// When true (daemon-owned project servers), spawn a cancellable worker that
     /// continues bounded host-admission replay passes until idle.
@@ -220,6 +224,7 @@ pub(crate) struct McpServerDaemonAuthority {
         tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) user_session_refresh_wake:
         tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    pub(crate) profile_session_refresh: Arc<dyn SessionRefreshServicePort>,
     pub(crate) session_sync_service:
         std::sync::Weak<dyn tracedecay_contracts::session_sync::SessionSyncServicePort>,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
@@ -270,6 +275,7 @@ impl McpServerConstructionContext {
             background_cpu: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
+            profile_session_refresh: None,
             project_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: true,
@@ -347,6 +353,7 @@ impl McpServerConstructionContext {
             background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
+            profile_session_refresh,
             session_sync_service,
             database_owner_reconciler,
             project_routes,
@@ -375,6 +382,7 @@ impl McpServerConstructionContext {
             background_cpu: Some(background_cpu),
             project_session_refresh_wake: Some(project_session_refresh_wake),
             user_session_refresh_wake: Some(user_session_refresh_wake),
+            profile_session_refresh: Some(profile_session_refresh),
             project_session_refresh_serving: Some(project_session_refresh_serving),
             own_project_host_admission_replay: true,
             startup_catch_up_enabled: true,
@@ -441,6 +449,7 @@ impl McpServerConstructionContext {
             background_cpu: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
+            profile_session_refresh: None,
             project_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: false,

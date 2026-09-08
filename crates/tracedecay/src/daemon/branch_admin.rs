@@ -50,6 +50,12 @@ type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
 type HostAdmissionBrokers =
     Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;
+/// One profile session refresh service per profile session store. The service
+/// owns the opaque refresh handles it issued, so every route that reaches the
+/// same store (project MCP servers and the projectless client) must share the
+/// instance for `status`/`cancel` to resolve a `begin` handle.
+type ProfileSessionRefreshServices =
+    Arc<ProfiledTokioMutex<HashMap<PathBuf, Arc<crate::mcp::server::DaemonSessionRefreshService>>>>;
 
 /// Resolves the writer scope for one store family.
 ///
@@ -452,6 +458,7 @@ pub(super) struct StoreAdministration {
     host_admission_brokers: HostAdmissionBrokers,
     host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
+    profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
     #[cfg(unix)]
@@ -531,6 +538,10 @@ impl Default for StoreAdministration {
                 label = "daemon.branch_admin.host_admission_broker.gate"
             )),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
+            profile_session_refresh_services: Arc::new(hotpath::mutex!(
+                tokio::sync::Mutex::new(HashMap::new()),
+                label = "daemon.branch_admin.profile_session_refresh_services"
+            )),
             session_sync_service: Arc::new(
                 tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default(),
             ),
@@ -1083,6 +1094,34 @@ impl StoreAdministration {
         &self,
     ) -> &Arc<SessionTemporalRefreshSchedulerRegistry> {
         &self.session_temporal_refresh_schedulers
+    }
+
+    /// The daemon-wide refresh service for one registered profile session
+    /// store, bound to that store's temporal refresh scheduler.
+    #[hotpath::measure(
+        label = "daemon.branch_admin.profile_session_refresh_service",
+        future = true
+    )]
+    pub(super) async fn profile_session_refresh_service(
+        &self,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    ) -> Arc<crate::mcp::server::DaemonSessionRefreshService> {
+        let path = database.db_path().to_path_buf();
+        let mut services = self.profile_session_refresh_services.lock().await;
+        if let Some(service) = services.get(&path) {
+            return Arc::clone(service);
+        }
+        let wake = self
+            .session_temporal_refresh_schedulers
+            .ensure_profile(path.clone(), database.clone())
+            .await;
+        let service = Arc::new(crate::mcp::server::DaemonSessionRefreshService::new(
+            database.clone(),
+            Arc::new(wake),
+            None,
+        ));
+        services.insert(path, Arc::clone(&service));
+        service
     }
 
     pub(super) fn git_index_transaction_services(

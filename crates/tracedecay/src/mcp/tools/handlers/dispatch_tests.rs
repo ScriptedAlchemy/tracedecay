@@ -331,7 +331,11 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                         panic!("{} catalog composition failed: {error}", definition.name)
                     });
                     let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                    for operation in retained_operations_for_advertised_tool(&definition.name) {
+                    {
+                        let operation = RetainedSurfaceOperation::from_tool_name(&definition.name)
+                            .unwrap_or_else(|| {
+                                panic!("{} has no retained-surface handler entry", definition.name)
+                            });
                         let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
                         let capability = composition
                             .snapshot()
@@ -411,20 +415,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             rejected.is_err(),
             "{tool_name} must reject handler dispatch"
         );
-    }
-}
-
-fn retained_operations_for_advertised_tool(tool_name: &str) -> Vec<RetainedSurfaceOperation> {
-    match tool_name {
-        "tracedecay_session_refresh" => vec![
-            RetainedSurfaceOperation::SessionRefreshStatus,
-            RetainedSurfaceOperation::SessionRefreshCancel,
-            RetainedSurfaceOperation::SessionRefreshBegin,
-        ],
-        _ => vec![
-            RetainedSurfaceOperation::from_tool_name(tool_name)
-                .unwrap_or_else(|| panic!("{tool_name} has no retained-surface handler entry")),
-        ],
     }
 }
 

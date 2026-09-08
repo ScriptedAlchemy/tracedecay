@@ -225,7 +225,7 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
             match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
                 Some(operation) => !is_http_application_operation_exposed(operation),
                 None => RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
-                    .is_none_or(|operation| !operation.is_callable()),
+                    .is_none(),
             }
         })
         .map(|(binding, _)| binding.operation().as_str())
@@ -241,10 +241,7 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
         ApplicationSurfaceOperation::from_catalog_name(&document.operation)
             .is_some_and(|operation| http_application_full_route_path(operation) == document.path)
             || RetainedSurfaceOperation::from_operation_name(&document.operation).is_some_and(
-                |operation| {
-                    operation.is_callable()
-                        && retained_application_route_path(operation) == document.path
-                },
+                |operation| retained_application_route_path(operation) == document.path,
             )
     }));
     assert!(documents.iter().all(|document| {
