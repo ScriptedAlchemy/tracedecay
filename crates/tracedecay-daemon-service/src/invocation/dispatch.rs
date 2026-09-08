@@ -783,6 +783,9 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
+                let Some(retained_runtime) = retained_runtime else {
+                    return missing_retained_runtime_problem(publication, request_id);
+                };
                 Box::pin(execute_retained_application(
                     request_id,
                     retained_runtime,

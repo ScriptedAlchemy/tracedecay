@@ -12,7 +12,7 @@ const AUTOMATIC_RETRY_LIMIT: u32 = 3;
 const AUTOMATIC_RETRY_BASE: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MemoryGraphReconciliationTaskScheduleV1 {
+pub enum MemoryGraphReconciliationTaskScheduleV1 {
     Scheduled,
     AlreadyScheduled,
     Retiring,
@@ -96,7 +96,7 @@ pub struct ProjectMemoryReconciliationTelemetrySnapshotV1 {
 }
 
 #[derive(Default)]
-pub(crate) struct ProjectMemoryReconciliationTelemetryV1 {
+pub struct ProjectMemoryReconciliationTelemetryV1 {
     reconciliation_passes: AtomicU64,
     active_reconciliation_pass_count: AtomicU64,
     source_rows_loaded: AtomicU64,
@@ -110,7 +110,7 @@ pub struct ProjectMemoryReconciliationTelemetryObserverV1 {
     database: Weak<super::registry::DatabaseInner>,
 }
 
-pub(crate) struct ProjectMemoryReconciliationPassLeaseV1 {
+pub struct ProjectMemoryReconciliationPassLeaseV1 {
     telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
 }
 
@@ -177,12 +177,12 @@ impl ProjectMemoryReconciliationTelemetryV1 {
         })
     }
 
-    pub(crate) fn record_source_load(&self, rows: u64, bytes: u64) -> Result<(), &'static str> {
+    pub fn record_source_load(&self, rows: u64, bytes: u64) -> Result<(), &'static str> {
         increment_counter(&self.source_rows_loaded, rows, "source rows loaded")?;
         increment_counter(&self.source_bytes_loaded, bytes, "source bytes loaded")
     }
 
-    pub(crate) fn record_publication_attempt(&self) -> Result<(), &'static str> {
+    pub fn record_publication_attempt(&self) -> Result<(), &'static str> {
         increment_counter(&self.publication_attempts, 1, "publication attempts")
     }
 }

@@ -12,7 +12,7 @@ use super::map_execution_error;
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::ProjectMemoryDbHandle;
+use tracedecay_session_memory::fact_store::ProjectMemoryDbHandle;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

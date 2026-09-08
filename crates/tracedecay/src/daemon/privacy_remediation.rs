@@ -126,7 +126,7 @@ mod tests {
 
     use super::{remediation_read_control, remediation_write_control};
     use tracedecay_daemon_identity::profile_identity;
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
     fn secret() -> String {
@@ -198,10 +198,9 @@ mod tests {
             source_label,
         )
         .expect("legacy payload reference");
-        let sanitizer_version = ComponentVersion::new(
-            tracedecay_runtime_core::privacy::MEMORY_FACT_SANITIZER_VERSION_V1,
-        )
-        .expect("pinned detector revision");
+        let sanitizer_version =
+            ComponentVersion::new(tracedecay_privacy::MEMORY_FACT_SANITIZER_VERSION_V1)
+                .expect("pinned detector revision");
         let receipt = SanitizationReceiptV1::new(
             SanitizationReceiptRefV1::new(
                 legacy_receipt_id(

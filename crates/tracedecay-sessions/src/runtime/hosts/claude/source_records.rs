@@ -11,7 +11,7 @@ use crate::runtime::shared::{
     ProjectRootMatcherCache, content_storage_text_and_tools, preview_truncated,
 };
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader, SessionDraft};
-use tracedecay_runtime_core::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
+use tracedecay_privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
 
 use super::canonical_projection::map_canonical_claude_record;
 use super::record_metadata::{

@@ -55,11 +55,7 @@ use crate::ports::{
 };
 
 pub type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-
-#[cfg(feature = "hotpath")]
 pub type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-pub type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
 mod admission;
 mod backstop;

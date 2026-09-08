@@ -752,7 +752,7 @@ mod tests {
         let result = RetainedSurfaceResultV1::SessionRefreshBegin(SessionRefreshBeginResultV1 {
             outcome: RetainedOutcomeStatusV1::Started,
             scope: "project".to_owned(),
-            tool: "tracedecay_session_refresh".to_owned(),
+            tool: "tracedecay_session_refresh_begin".to_owned(),
             accepted_at: Some(2),
             handle: Some("srh_fixture".to_owned()),
             operation_id: Some("refresh.operation.fixture".to_owned()),

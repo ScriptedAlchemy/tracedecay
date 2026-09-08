@@ -426,6 +426,86 @@ def _api_migration(
     return PreparedJourney(apply, cleanup)
 
 
+def _profile_refresh_selectors(fixture: dict[str, str], call: Call, deadline: Deadline) -> dict[str, Any]:
+    """Bind a refresh to a sweep-scoped session in the disposable profile's own store.
+
+    The profile id is the daemon's durable identity, read back through the
+    registry context rather than fabricated by the harness.
+    """
+    context = call(
+        "tracedecay_admin_cli",
+        {"action": "registry_context", "project_arg": fixture["root"]},
+        deadline("tracedecay_admin_cli"),
+    )
+    profile_id = first_value(context, {"profile_id"})
+    if not isinstance(profile_id, str) or not profile_id.startswith("profile."):
+        raise JourneyError("registry context omitted the daemon's durable profile id")
+    suffix = profile_id[len("profile."):]
+    return {
+        "scope": {"kind": "profile", "profile_id": profile_id},
+        "session": {
+            "id": fixture["session_id"],
+            "store_id": f"store.profile.{suffix}",
+            "root_id": f"root.profile.{suffix}",
+        },
+        "source": {"scope": "codex"},
+        "target": {
+            "temporal_mode": {"kind": "current"},
+            "grain": "session",
+            "frontier": {"observed_through": 0, "committed_through": 0},
+        },
+        "format": "json",
+    }
+
+
+def _terminal_refresh_state(response: dict[str, Any], operation_id: str) -> str:
+    """The receipt-backed terminal state a durable cancel must return."""
+    terminal_state = first_value(response, {"state"})
+    if first_value(response, {"operation_id"}) != operation_id or terminal_state not in {
+        "cancelled",
+        "complete",
+    }:
+        raise JourneyError(
+            f"durable cancel did not return the operation's terminal receipt (state {terminal_state!r})"
+        )
+    return str(terminal_state)
+
+
+def _require_settled_refresh(
+    call: Call,
+    deadline: Deadline,
+    selectors: dict[str, Any],
+    handle: str,
+    operation_id: str,
+    terminal_state: str,
+) -> None:
+    """Prove the terminal receipt stays durable through the read-only status route."""
+    settled = call(
+        "tracedecay_session_refresh_status",
+        {"handle": handle, **selectors},
+        deadline("tracedecay_session_refresh_status"),
+    )
+    if (
+        first_value(settled, {"operation_id"}) != operation_id
+        or first_value(settled, {"state"}) != terminal_state
+    ):
+        raise JourneyError("terminal refresh receipt did not stay durable after cancellation")
+
+
+def _begun_refresh(response: dict[str, Any]) -> tuple[str, str]:
+    """The opaque handle and durable operation identity a begin must return."""
+    outcome = first_value(response, {"outcome"})
+    if outcome not in {"started", "joined"}:
+        raise JourneyError(
+            f"session refresh begin did not report started or joined (observed {outcome!r})"
+        )
+    handle = response_handle(response)
+    operation_id = first_value(response, {"operation_id"})
+    if not handle or not isinstance(operation_id, str) or not operation_id:
+        raise JourneyError("session refresh begin omitted its opaque handle or operation identity")
+    return handle, operation_id
+
+
 def prepare(
     name: str, client: Any, fixture: dict[str, str], deadline: Deadline, call: Call,
 ) -> PreparedJourney | None:
@@ -592,58 +672,33 @@ def prepare(
             {"changed_paths": [changed], "timeout_secs": 60, "max_tests": 5, "format": "json"},
             cleanup,
         )
-    if name == "tracedecay_session_refresh":
-        # Selectors bind the durable refresh to a sweep-scoped session inside
-        # the disposable profile; the daemon mints the opaque handle.
-        selectors = {
-            "scope": "profile",
-            "profile": {"id": "profile.tool-sweep"},
-            "session": {
-                "id": "session.tool-sweep-refresh",
-                "store_id": "store.tool-sweep-refresh",
-                "root_id": "root.tool-sweep-refresh",
-            },
-            "source": {"scope": "codex"},
-            "target": {
-                "temporal_mode": {"kind": "current"},
-                "grain": "session",
-                "frontier": {"observed_through": 0, "committed_through": 0},
-            },
-            "format": "json",
-        }
+    if name == "tracedecay_session_refresh_begin":
+        selectors = _profile_refresh_selectors(fixture, call, deadline)
 
         def cleanup(response: dict[str, Any]) -> str:
-            outcome = first_value(response, {"outcome"})
-            if outcome not in {"started", "joined"}:
-                raise JourneyError(
-                    f"session refresh begin did not report started or joined (observed {outcome!r})"
-                )
-            handle = response_handle(response)
-            operation_id = first_value(response, {"operation_id"})
-            if not handle or not isinstance(operation_id, str) or not operation_id:
-                raise JourneyError("session refresh begin omitted its opaque handle or operation identity")
+            handle, operation_id = _begun_refresh(response)
             cancelled = call(
-                name, {"action": "cancel", "handle": handle, **selectors}, deadline(name)
+                "tracedecay_session_refresh_cancel",
+                {"handle": handle, **selectors},
+                deadline("tracedecay_session_refresh_cancel"),
             )
-            terminal_state = first_value(cancelled, {"state"})
-            if first_value(cancelled, {"operation_id"}) != operation_id or terminal_state not in {
-                "cancelled",
-                "complete",
-            }:
-                raise JourneyError(
-                    f"durable cancel did not return the operation's terminal receipt (state {terminal_state!r})"
-                )
-            settled = call(
-                name, {"action": "status", "handle": handle, **selectors}, deadline(name)
-            )
-            if (
-                first_value(settled, {"operation_id"}) != operation_id
-                or first_value(settled, {"state"}) != terminal_state
-            ):
-                raise JourneyError("terminal refresh receipt did not stay durable after cancellation")
-            return "durable refresh start/cancel receipt verified terminal"
+            terminal_state = _terminal_refresh_state(cancelled, operation_id)
+            _require_settled_refresh(call, deadline, selectors, handle, operation_id, terminal_state)
+            return "durable refresh begin/cancel receipt verified terminal"
 
-        return PreparedJourney({"action": "start", **selectors}, cleanup)
+        return PreparedJourney(dict(selectors), cleanup)
+    if name == "tracedecay_session_refresh_cancel":
+        selectors = _profile_refresh_selectors(fixture, call, deadline)
+        handle, operation_id = _begun_refresh(
+            call("tracedecay_session_refresh_begin", dict(selectors), deadline("tracedecay_session_refresh_begin"))
+        )
+
+        def cleanup(response: dict[str, Any]) -> str:
+            terminal_state = _terminal_refresh_state(response, operation_id)
+            _require_settled_refresh(call, deadline, selectors, handle, operation_id, terminal_state)
+            return "durable refresh cancel receipt verified terminal"
+
+        return PreparedJourney({"handle": handle, **selectors}, cleanup)
     if name == "tracedecay_source_edit_rollback":
         return _journaled_rollback(fixture, call, deadline)
     return _source_edit(name, fixture, call, deadline)

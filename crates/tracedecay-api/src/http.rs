@@ -190,7 +190,6 @@ pub fn http_route_documents(
                 None => {
                     let Some(operation) =
                         RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
-                            .filter(|operation| operation.is_callable())
                     else {
                         continue;
                     };

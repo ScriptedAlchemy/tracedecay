@@ -4,8 +4,8 @@ use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{
     RetainedErrorV1, RetainedOutcomeStatusV1, RetainedSurfaceResultV1, SessionRefreshBeginResultV1,
     SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1, SessionRefreshProgressV1,
-    SessionRefreshReceiptV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
-    TemporalCoverageV1,
+    SessionRefreshReceiptV1, SessionRefreshScopeV1, SessionRefreshStatusResultV1,
+    SessionRefreshTerminalStateResultV1, TemporalCoverageV1,
 };
 
 use tracedecay_session_memory::session::{
@@ -15,6 +15,7 @@ use tracedecay_session_memory::session::{
 
 pub(super) fn status_result(
     outcome: SessionRefreshServiceOutcome,
+    scope: &SessionRefreshScopeV1,
 ) -> Result<RetainedSurfaceResultV1, RetainedSurfaceExecutionErrorV1> {
     let (outcome, progress, receipt, error) = match outcome {
         SessionRefreshServiceOutcome::Running(progress) => (
@@ -97,8 +98,8 @@ pub(super) fn status_result(
     Ok(RetainedSurfaceResultV1::SessionRefreshStatus(
         SessionRefreshStatusResultV1 {
             outcome,
-            scope: "project".to_owned(),
-            tool: "tracedecay_session_refresh".to_owned(),
+            scope: scope.as_str().to_owned(),
+            tool: "tracedecay_session_refresh_status".to_owned(),
             progress,
             receipt,
             error,
@@ -114,6 +115,7 @@ pub(super) struct EffectProjection {
 
 pub(super) fn begin_result(
     outcome: SessionRefreshServiceOutcome,
+    scope: &SessionRefreshScopeV1,
 ) -> Result<EffectProjection, RetainedSurfaceExecutionErrorV1> {
     let (outcome, operation_id, handle, accepted_at, reconciliation_required) = match outcome {
         SessionRefreshServiceOutcome::Started {
@@ -164,8 +166,8 @@ pub(super) fn begin_result(
     };
     let result = RetainedSurfaceResultV1::SessionRefreshBegin(SessionRefreshBeginResultV1 {
         outcome,
-        scope: "project".to_owned(),
-        tool: "tracedecay_session_refresh".to_owned(),
+        scope: scope.as_str().to_owned(),
+        tool: "tracedecay_session_refresh_begin".to_owned(),
         accepted_at: Some(accepted_at),
         handle: Some(handle),
         operation_id: Some(operation_id.clone()),
@@ -182,6 +184,7 @@ pub(super) fn begin_result(
 
 pub(super) fn cancel_result(
     outcome: SessionRefreshServiceOutcome,
+    scope: &SessionRefreshScopeV1,
     handle: Option<&str>,
 ) -> Result<EffectProjection, RetainedSurfaceExecutionErrorV1> {
     let (outcome, receipt, error, reconciliation_required) = match outcome {
@@ -208,8 +211,8 @@ pub(super) fn cancel_result(
     let operation_id = receipt.operation_id.clone();
     let result = RetainedSurfaceResultV1::SessionRefreshCancel(SessionRefreshCancelResultV1 {
         outcome,
-        scope: "project".to_owned(),
-        tool: "tracedecay_session_refresh".to_owned(),
+        scope: scope.as_str().to_owned(),
+        tool: "tracedecay_session_refresh_cancel".to_owned(),
         accepted_at: None,
         handle: handle.map(ToOwned::to_owned),
         operation_id: Some(operation_id.clone()),
@@ -367,13 +370,22 @@ fn session_refresh_receipt_from_view(
 mod tests {
     use super::*;
 
+    fn profile_scope() -> SessionRefreshScopeV1 {
+        SessionRefreshScopeV1::Profile {
+            profile_id: "profile.fixture".to_owned(),
+        }
+    }
+
     #[test]
     fn begin_projects_the_durable_operation_and_closed_handle() {
-        let projected = begin_result(SessionRefreshServiceOutcome::Started {
-            operation_id: "refresh.operation.fixture".to_owned(),
-            handle: "srh_fixture".to_owned(),
-            accepted_at: 42,
-        })
+        let projected = begin_result(
+            SessionRefreshServiceOutcome::Started {
+                operation_id: "refresh.operation.fixture".to_owned(),
+                handle: "srh_fixture".to_owned(),
+                accepted_at: 42,
+            },
+            &profile_scope(),
+        )
         .expect("begin projection");
 
         assert_eq!(projected.operation_id, "refresh.operation.fixture");
@@ -384,6 +396,8 @@ mod tests {
         assert_eq!(result.outcome, RetainedOutcomeStatusV1::Started);
         assert_eq!(result.handle.as_deref(), Some("srh_fixture"));
         assert_eq!(result.accepted_at, Some(42));
+        assert_eq!(result.scope, "profile");
+        assert_eq!(result.tool, "tracedecay_session_refresh_begin");
     }
 
     #[test]
@@ -394,6 +408,7 @@ mod tests {
                 handle: "srh_fixture".to_owned(),
                 accepted_at: 42,
             },
+            &profile_scope(),
         )
         .expect("begin projection");
 
@@ -405,6 +420,7 @@ mod tests {
     fn a_running_cancel_is_a_conflict_not_a_fabricated_effect() {
         let error = cancel_result(
             SessionRefreshServiceOutcome::Running(None),
+            &profile_scope(),
             Some("srh_fixture"),
         )
         .err()

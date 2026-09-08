@@ -620,7 +620,7 @@ fn retained_review_body(body: &str) -> Option<String> {
     if body.is_empty() || body.len() > MAX_GITHUB_REVIEW_BODY_BYTES_V1 {
         return None;
     }
-    let retained = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(body)?;
+    let retained = tracedecay_privacy::sanitize_provider_metadata_text(body)?;
     (!retained.is_empty() && retained.len() <= MAX_GITHUB_REVIEW_BODY_BYTES_V1).then_some(retained)
 }
 
@@ -628,7 +628,7 @@ fn retained_pull_request_title(title: &str) -> Option<String> {
     if title.is_empty() || title.len() > MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1 {
         return None;
     }
-    let retained = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(title)?;
+    let retained = tracedecay_privacy::sanitize_provider_metadata_text(title)?;
     (!retained.is_empty() && retained.len() <= MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1)
         .then_some(retained)
 }

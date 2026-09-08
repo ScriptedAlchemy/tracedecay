@@ -1847,7 +1847,7 @@ fn sessions_refresh_parses_exact_lifecycle_selectors() {
         "4",
         "--target",
         "9",
-        "--operation-id",
+        "--handle",
         "refresh.abc",
         "--json",
     ])
@@ -1897,7 +1897,7 @@ fn sessions_refresh_never_falls_back_to_the_current_directory() {
             "4",
             "--target",
             "9",
-            "--operation-id",
+            "--handle",
             "refresh.abc",
         ],
         vec![
@@ -1913,7 +1913,7 @@ fn sessions_refresh_never_falls_back_to_the_current_directory() {
             "4",
             "--target",
             "9",
-            "--operation-id",
+            "--handle",
             "refresh.abc",
         ],
     ] {

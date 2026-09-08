@@ -435,10 +435,29 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 });
             }
             ensure_mcp_dispatch_available(tool_name)?;
-            let operation = crate::mcp::tools::retained_mcp_operation(tool_name, &args)
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: format!("{tool_name} requires a supported retained action"),
+            let operation =
+                RetainedSurfaceOperation::from_tool_name(tool_name).ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: format!("{tool_name} requires a supported retained action"),
+                    }
                 })?;
+            return dispatch_profile_retained_application_tool(
+                operation, tool_name, cg, args, options,
+            )
+            .await;
+        }
+        // A profile-scoped session refresh names its owner in the canonical
+        // request; like `memory_scope=user`, that selects the profile session
+        // authority and never the active project's session store.
+        if crate::mcp::tools::session_refresh_profile_scope_requested(tool_name, &args) {
+            if args.get("storage_scope").is_some() {
+                return Err(TraceDecayError::Config {
+                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
+                });
+            }
+            ensure_mcp_dispatch_available(tool_name)?;
+            let operation = RetainedSurfaceOperation::from_tool_name(tool_name)
+                .ok_or_else(|| unknown_tool_error(tool_name))?;
             return dispatch_profile_retained_application_tool(
                 operation, tool_name, cg, args, options,
             )

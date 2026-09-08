@@ -21,9 +21,7 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_runtime_core::privacy::{
-    ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };

@@ -37,7 +37,7 @@ use crate::runtime::source::{
     TranscriptIngestError, TranscriptSource, persist_host_provider_coverage,
     run_blocking_transcript_section,
 };
-use tracedecay_runtime_core::privacy::PrivacySanitizerError;
+use tracedecay_privacy::PrivacySanitizerError;
 
 pub const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
 /// Every pass, including startup recovery, bounds its raw and parsed backlog.

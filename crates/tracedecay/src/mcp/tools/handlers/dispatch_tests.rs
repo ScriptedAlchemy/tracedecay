@@ -309,36 +309,38 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                     panic!("{} catalog composition failed: {error}", definition.name)
                 });
                 let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                for operation in retained_operations_for_advertised_tool(&definition.name) {
-                    let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-                    let capability = composition
-                        .snapshot()
-                        .resolve_binding(
-                            &profile,
-                            BindingSurface::Mcp,
-                            &operation_name,
-                            1,
-                            &BTreeSet::new(),
+                let operation = RetainedSurfaceOperation::from_tool_name(&definition.name)
+                    .unwrap_or_else(|| {
+                        panic!("{} has no retained-surface handler entry", definition.name)
+                    });
+                let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
+                let capability = composition
+                    .snapshot()
+                    .resolve_binding(
+                        &profile,
+                        BindingSurface::Mcp,
+                        &operation_name,
+                        1,
+                        &BTreeSet::new(),
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} action {} catalog binding is not callable",
+                            definition.name,
+                            operation.as_str()
                         )
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "{} action {} catalog binding is not callable",
-                                definition.name,
-                                operation.as_str()
-                            )
-                        });
-                    let expected = retained_surface_application_operation(operation).unwrap();
-                    assert_eq!(capability.capability_id(), expected.capability_id());
-                    assert_eq!(capability.use_case_id(), expected.use_case_id());
-                    assert!(
-                        composition
-                            .bind_handler(capability.use_case_id(), &())
-                            .is_some(),
-                        "{} action {} application handler is not registered",
-                        definition.name,
-                        operation.as_str()
-                    );
-                }
+                    });
+                let expected = retained_surface_application_operation(operation).unwrap();
+                assert_eq!(capability.capability_id(), expected.capability_id());
+                assert_eq!(capability.use_case_id(), expected.use_case_id());
+                assert!(
+                    composition
+                        .bind_handler(capability.use_case_id(), &())
+                        .is_some(),
+                    "{} action {} application handler is not registered",
+                    definition.name,
+                    operation.as_str()
+                );
             }
             group => {
                 assert_eq!(
@@ -381,20 +383,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             rejected.is_err(),
             "{tool_name} must reject handler dispatch"
         );
-    }
-}
-
-fn retained_operations_for_advertised_tool(tool_name: &str) -> Vec<RetainedSurfaceOperation> {
-    match tool_name {
-        "tracedecay_session_refresh" => vec![
-            RetainedSurfaceOperation::SessionRefreshStatus,
-            RetainedSurfaceOperation::SessionRefreshCancel,
-            RetainedSurfaceOperation::SessionRefreshBegin,
-        ],
-        _ => vec![
-            RetainedSurfaceOperation::from_tool_name(tool_name)
-                .unwrap_or_else(|| panic!("{tool_name} has no retained-surface handler entry")),
-        ],
     }
 }
 
@@ -1848,6 +1836,169 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
         !sessions_db.exists(),
         "read-only LCM Doctor must not open a missing profile store"
     );
+    cg.close();
+}
+
+/// The MCP root handler routes a canonical `scope.kind=profile` refresh to
+/// the profile session authority (never the active project's store): begin
+/// issues a handle bound to the profile store, status reads it back through
+/// the same daemon-wide refresh service, and an unmounted refresh service is
+/// a typed unavailable terminal rather than a project fallback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("profile-refresh-project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-profile-session-refresh",
+    )
+    .await
+    .unwrap();
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("fixture profile identity");
+    let profile_id = profile_identity.profile_id().as_str().to_owned();
+    let suffix = profile_id
+        .strip_prefix("profile.")
+        .expect("canonical profile identity prefix");
+    let store_id = format!("store.profile.{suffix}");
+    let root_id = format!("root.profile.{suffix}");
+    let session_identity = tracedecay_session_memory::context::ResolvedSessionIdentity::for_profile(
+        tracedecay_session_memory::context::ProfileId::new(profile_id.clone())
+            .expect("profile session identity"),
+        tracedecay_session_memory::context::SessionStoreId::new(store_id.clone())
+            .expect("profile store identity"),
+        tracedecay_session_memory::context::SessionRootId::new(root_id.clone())
+            .expect("profile root identity"),
+    );
+    let profile_retained_authority =
+        crate::daemon::retained_owner::profile_retained_connection_authority(
+            &profile_identity,
+            &session_identity,
+        )
+        .expect("canonical profile retained authority");
+    let profile_database = cg
+        .store_runtime_registry()
+        .profile_sessions()
+        .await
+        .expect("profile session database");
+    let schedulers =
+        tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry::default();
+    let wake = schedulers
+        .ensure_profile(
+            profile_database.db_path().to_path_buf(),
+            profile_database.clone(),
+        )
+        .await;
+    let refresh = crate::mcp::server::DaemonSessionRefreshService::new(
+        profile_database,
+        std::sync::Arc::new(wake),
+        None,
+    );
+    let selectors = json!({
+        "scope": { "kind": "profile", "profile_id": profile_id },
+        "session": {
+            "id": "session.mcp.profile-refresh",
+            "store_id": store_id,
+            "root_id": root_id
+        },
+        "source": { "scope": "codex" },
+        "target": {
+            "temporal_mode": { "kind": "current" },
+            "grain": "logical_message",
+            "frontier": { "observed_through": 0, "committed_through": 0 }
+        },
+        "format": "json"
+    });
+    let call = |tool_name: &'static str, arguments: Value, mounted: bool| {
+        let cg = &cg;
+        let profile_root = &profile_root;
+        let profile_retained_authority = &profile_retained_authority;
+        let refresh = &refresh;
+        async move {
+            let result = handle_tool_call_with_registry_options(
+                cg,
+                tool_name,
+                arguments,
+                None,
+                None,
+                ToolCallRegistryOptions {
+                    profile_root: Some(profile_root),
+                    session_authorities: SessionAuthorities::default()
+                        .with_profile_retained_authority(Some(profile_retained_authority))
+                        .with_profile_session_refresh(mounted.then_some(
+                            refresh
+                                as &dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1,
+                        )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            serde_json::from_str::<Value>(
+                result.value["content"][0]["text"]
+                    .as_str()
+                    .expect("retained text response"),
+            )
+            .expect("retained JSON envelope")
+        }
+    };
+
+    let begun = call("tracedecay_session_refresh_begin", selectors.clone(), true).await;
+    let envelope: tracedecay_contracts::ApplicationEnvelope<Value> =
+        serde_json::from_value(begun.clone()).unwrap_or_else(|error| {
+            panic!("begin must answer an application envelope: {error}\n{begun}")
+        });
+    let tracedecay_contracts::ApplicationOutcome::Effect(effect) = envelope.outcome else {
+        panic!("begin must be an effect: {begun}");
+    };
+    let begin = effect.payload.expect("begin payload");
+    assert!(
+        matches!(begin["outcome"].as_str(), Some("started" | "joined")),
+        "{begin}"
+    );
+    assert_eq!(begin["scope"], "profile");
+    assert_eq!(begin["tool"], "tracedecay_session_refresh_begin");
+    let handle = begin["handle"]
+        .as_str()
+        .expect("opaque refresh handle")
+        .to_owned();
+    assert!(handle.starts_with("srh_"), "{handle}");
+
+    let mut status_arguments = selectors.clone();
+    status_arguments["handle"] = json!(handle);
+    let observed = call("tracedecay_session_refresh_status", status_arguments, true).await;
+    let envelope: tracedecay_contracts::ApplicationEnvelope<Value> =
+        serde_json::from_value(observed.clone()).unwrap_or_else(|error| {
+            panic!("status must answer an application envelope: {error}\n{observed}")
+        });
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = envelope.outcome else {
+        panic!("status must be evidence: {observed}");
+    };
+    let status = packet.payload.expect("status payload");
+    assert!(
+        matches!(status["outcome"].as_str(), Some("running" | "complete")),
+        "{status}"
+    );
+    assert_eq!(status["scope"], "profile");
+
+    let unmounted = call("tracedecay_session_refresh_begin", selectors, false).await;
+    assert_eq!(
+        unmounted["problem"]["kind"], "unavailable",
+        "an unmounted profile refresh service must be a typed terminal, got {unmounted}"
+    );
+    assert!(
+        unmounted["problem"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("profile session refresh authority")),
+        "{unmounted}"
+    );
+    schedulers.shutdown().await;
     cg.close();
 }
 

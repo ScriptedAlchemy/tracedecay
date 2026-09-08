@@ -11,34 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-framing/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-framing/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-framing/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
 # surfaces to dependent crates' test builds only. Never gates production code.
 test-helpers = ["tracedecay-framing/test-helpers"]

@@ -5,9 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use tracedecay_application::work::workflow_topology::WorkflowTopologyError;
 use tracedecay_contracts::{RequestContext, WorkflowRunStoragePort};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
-use tracedecay_runtime_core::workflow_topology::WorkflowTopologyError;
 
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 

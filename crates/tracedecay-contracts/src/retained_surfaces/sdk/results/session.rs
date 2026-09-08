@@ -325,27 +325,6 @@ pub struct MessageSearchResultV1 {
     pub workflow_run_parent_session: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct SessionRefreshResultV1 {
-    pub action: Option<String>,
-    pub outcome: RetainedOutcomeStatusV1,
-    pub scope: Option<String>,
-    pub tool: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_at: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<RetainedErrorV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<SessionRefreshProgressV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<SessionRefreshReceiptV1>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRefreshFrontierResultV1 {

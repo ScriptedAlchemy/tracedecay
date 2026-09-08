@@ -945,7 +945,7 @@ async fn partial_backlog_and_cancellation_never_advance_observation_state() {
 async fn malformed_partial_and_oversized_frames_preserve_all_observation_state() {
     let oversized = format!(
         "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-        "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
+        "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
     );
     for (session_id, frame) in [
         (
@@ -965,7 +965,7 @@ async fn malformed_partial_and_oversized_frames_preserve_all_observation_state()
 async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() {
     let oversized = format!(
         "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-        "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
+        "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
     );
     for (session_id, suffix) in [
         (

@@ -36,7 +36,7 @@ use tracedecay_code_extraction::redundancy::{
 };
 use tracedecay_domain::SourceSpan;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
+use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 /// Extraction-attested symbol evidence consumed by redundancy scoring.
 ///
@@ -1862,9 +1862,9 @@ mod tests {
         );
         let secret = ["sk", "-test-", "1234567890abcdef"].concat();
         let raw = format!("const TOKEN: &str = \"{secret}\";\n{}", after_secret_body());
-        let sanitized = tracedecay_runtime_core::privacy::sanitize_code_source_bytes(
+        let sanitized = tracedecay_privacy::sanitize_code_source_bytes(
             raw.as_bytes(),
-            tracedecay_runtime_core::privacy::CodeSourceShapeV1::CodeOrProse,
+            tracedecay_privacy::CodeSourceShapeV1::CodeOrProse,
         )
         .expect("code-source sanitizer");
         let (sanitized_bytes, _) = sanitized.into_parts();

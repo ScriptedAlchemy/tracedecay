@@ -4,40 +4,27 @@ use std::sync::Arc;
 use crate::chunks::CodeIndexImportEvidenceV1;
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::CodeIndexPublishedGenerationV1;
-use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-    CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, FileOccurrenceId,
+    SanitizedCodeFileV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationManifest,
     GraphGenerationRelation, GraphLabel, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphWatermark,
+    GraphPropertyName, GraphRelationId, GraphRelationKind, GraphWatermark,
 };
 
 use super::schema::{
     FILE_IMPORT_EDGE_KIND, FILE_LABEL, FILE_RECORD_PROPERTY, IMPORT_LABEL, IMPORT_RECORD_PROPERTY,
-    file_entity_id, file_import_relation_id_with, import_entity_id, serialize, stable_identity,
+    file_entity_id, file_import_relation_id_with, import_entity_id, record_property, serialize,
+    stable_identity,
 };
 use super::{
-    CHUNK_LABEL, CHUNK_RECORD_PROPERTY, CHUNK_SYMBOL_EDGE_KIND, CodeGraphProjectionError,
-    CodeGraphSymbolBindingV1, EDGE_LABEL, EDGE_RECORD_PROPERTY, FILE_SYMBOL_EDGE_KIND,
-    SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, build_code_graph_manifest_inputs_checked,
-    compare_edges, current_generation_entity, symbol_entity, symbol_entity_id, validate_edge,
+    CodeGraphProjectionError, CodeGraphSymbolBindingV1, EDGE_LABEL, EDGE_RECORD_PROPERTY,
+    FILE_SYMBOL_EDGE_KIND, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND,
+    build_code_graph_manifest_inputs_checked, compare_edges, current_generation_entity,
+    symbol_entity, symbol_entity_id, validate_edge,
 };
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct ChunkRecordV1 {
-    id: CodeSearchChunkId,
-    anchor: CodeSearchChunkAnchorV1,
-    content_digest: ContentDigest,
-    language_descriptor_revision: LanguageDescriptorRevision,
-    chunker_revision: ChunkerRevision,
-    sanitizer_revision: SanitizerRevision,
-    sensitivity: SensitivityDecision,
-}
 
 #[hotpath::measure(label = "code_index.graph.build_manifest")]
 pub fn build_published_code_graph_manifest_checked(
@@ -238,12 +225,16 @@ pub(super) fn build_projection(
                 occurrences,
             ))
         })?;
+    // Chunks bind symbols to files and spans above; they are not graph rows.
+    // No reader addresses a chunk through the graph — traversal alternates
+    // symbol and edge-evidence entities, and a symbol's binding already
+    // names its chunk — so projecting one entity plus one relation per chunk
+    // only multiplied every graph artifact by the chunk count.
     hotpath::measure_block!("code_index.graph.emit", {
         let mut entities = Vec::with_capacity(
             files
                 .len()
                 .saturating_add(imports.len())
-                .saturating_add(chunks.len())
                 .saturating_add(occurrences.len())
                 .saturating_add(retained_edges.len())
                 .saturating_add(1),
@@ -252,7 +243,7 @@ pub(super) fn build_projection(
             retained_edges
                 .len()
                 .saturating_mul(2)
-                .saturating_add(bindings.len().saturating_mul(2))
+                .saturating_add(bindings.len())
                 .saturating_add(imports.len()),
         );
 
@@ -287,17 +278,6 @@ pub(super) fn build_projection(
         let mut symbol_ids = BTreeMap::<SymbolOccurrenceId, GraphEntityId>::new();
         for occurrence in &occurrences {
             symbol_ids.insert(occurrence.clone(), symbol_entity_id(occurrence)?);
-        }
-        for chunk in chunks {
-            check()?;
-            let identity = chunk_entity_id(&chunk.id)?;
-            if let Some(occurrence) = &chunk.anchor.symbol_occurrence_id {
-                let symbol_id = require_symbol_id(&symbol_ids, occurrence)?;
-                relations.push(chunk_symbol_relation(
-                    projection, &identity, chunk, occurrence, symbol_id,
-                )?);
-            }
-            entities.push(chunk_entity(identity, chunk)?);
         }
         for occurrence in occurrences {
             let identity = require_symbol_id(&symbol_ids, &occurrence)?.clone();
@@ -381,7 +361,7 @@ fn edge_artifacts(
         BTreeSet::from([GraphLabel::new(EDGE_LABEL)?]),
         BTreeMap::from([(
             GraphPropertyName::new(EDGE_RECORD_PROPERTY)?,
-            GraphProperty::Bytes(payload),
+            record_property(payload)?,
         )]),
     )?;
     let from = require_symbol_id(symbol_ids, &edge.from_occurrence)?;
@@ -414,7 +394,7 @@ fn file_entity(
         BTreeSet::from([GraphLabel::new(FILE_LABEL)?]),
         BTreeMap::from([(
             GraphPropertyName::new(FILE_RECORD_PROPERTY)?,
-            GraphProperty::Bytes(serialize(file)?),
+            record_property(serialize(file)?)?,
         )]),
     )
     .map_err(Into::into)
@@ -429,31 +409,7 @@ fn import_entity(
         BTreeSet::from([GraphLabel::new(IMPORT_LABEL)?]),
         BTreeMap::from([(
             GraphPropertyName::new(IMPORT_RECORD_PROPERTY)?,
-            GraphProperty::Bytes(serialize(import)?),
-        )]),
-    )
-    .map_err(Into::into)
-}
-
-fn chunk_entity(
-    identity: GraphEntityId,
-    chunk: &CodeSearchChunkV1,
-) -> Result<GraphEntity, CodeGraphProjectionError> {
-    let record = ChunkRecordV1 {
-        id: chunk.id.clone(),
-        anchor: chunk.anchor.clone(),
-        content_digest: chunk.content_digest.clone(),
-        language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-        chunker_revision: chunk.chunker_revision.clone(),
-        sanitizer_revision: chunk.sanitizer_revision.clone(),
-        sensitivity: chunk.sensitivity.clone(),
-    };
-    GraphEntity::new(
-        identity,
-        BTreeSet::from([GraphLabel::new(CHUNK_LABEL)?]),
-        BTreeMap::from([(
-            GraphPropertyName::new(CHUNK_RECORD_PROPERTY)?,
-            GraphProperty::Bytes(serialize(&record)?),
+            record_property(serialize(import)?)?,
         )]),
     )
     .map_err(Into::into)
@@ -493,30 +449,6 @@ fn file_import_relation(
         BTreeMap::new(),
     )
     .map_err(Into::into)
-}
-
-fn chunk_symbol_relation(
-    projection: &GraphProjectionIdentity,
-    chunk_id: &GraphEntityId,
-    chunk: &CodeSearchChunkV1,
-    occurrence: &SymbolOccurrenceId,
-    symbol_id: &GraphEntityId,
-) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
-    GraphGenerationRelation::new(
-        GraphRelationId::new(stable_identity(
-            "chunk-symbol",
-            &format!("{}\0{}", chunk.id.as_str(), occurrence.as_str()),
-        ))?,
-        GraphEntityRef::new(projection.clone(), chunk_id.clone()),
-        GraphEntityRef::new(projection.clone(), symbol_id.clone()),
-        GraphRelationKind::new(CHUNK_SYMBOL_EDGE_KIND)?,
-        BTreeMap::new(),
-    )
-    .map_err(Into::into)
-}
-
-fn chunk_entity_id(chunk: &CodeSearchChunkId) -> Result<GraphEntityId, CodeGraphProjectionError> {
-    GraphEntityId::new(stable_identity("chunk", chunk.as_str())).map_err(Into::into)
 }
 
 pub(super) fn validate_symbol_metadata(

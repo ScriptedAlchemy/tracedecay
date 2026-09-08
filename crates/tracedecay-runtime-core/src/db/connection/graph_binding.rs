@@ -11,7 +11,7 @@ use tracedecay_graph_db::GraphWatermark;
 /// reject updates and deletes) and its `AUTOINCREMENT` key is never reused,
 /// and every committed mutation that can change the projected source records
 /// at least one lineage event in the same transaction (the invariant
-/// `store::memory::graph::source_unchanged_since` already relies on). Two
+/// `tracedecay_session_memory::fact_store::graph::source_unchanged_since` already relies on). Two
 /// snapshots observing the same maximum sequence therefore saw an identical
 /// projected source, so a watermark computed under one snapshot remains valid
 /// for any later snapshot that still observes the same stamp.
@@ -130,10 +130,7 @@ impl Database {
     /// Returns the memoized projected-source watermark when it was computed
     /// under the exact `lineage_stamp` the caller currently observes.
     #[must_use]
-    pub(crate) fn memory_graph_source_watermark_at(
-        &self,
-        lineage_stamp: i64,
-    ) -> Option<GraphWatermark> {
+    pub fn memory_graph_source_watermark_at(&self, lineage_stamp: i64) -> Option<GraphWatermark> {
         self.inner
             .memory_graph_source_watermark
             .lock()
@@ -145,7 +142,7 @@ impl Database {
 
     /// Records the projected-source watermark computed under `lineage_stamp`.
     /// The stamp and the hashed source must come from the same read snapshot.
-    pub(crate) fn record_memory_graph_source_watermark(
+    pub fn record_memory_graph_source_watermark(
         &self,
         lineage_stamp: i64,
         watermark: GraphWatermark,

@@ -598,9 +598,7 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                     // documentation addresses them (`http_route_documents`): the
                     // callable retained operation's canonical route. A catalog
                     // HTTP binding naming neither family is an absence.
-                    None => match RetainedSurfaceOperation::from_operation_name(operation)
-                        .filter(|retained| retained.is_callable())
-                    {
+                    None => match RetainedSurfaceOperation::from_operation_name(operation) {
                         Some(retained) => http_route_is_mounted(
                             &agent,
                             &fixture,

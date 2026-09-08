@@ -348,7 +348,8 @@ impl McpServer {
                 .with_lcm_authorities(
                     self.project_lcm_authority.as_deref(),
                     self.user_lcm_authority.as_deref(),
-                ),
+                )
+                .with_profile_session_refresh(self.profile_session_refresh_service.as_deref()),
             },
         );
         if let Some(read_flight) = read_flight {

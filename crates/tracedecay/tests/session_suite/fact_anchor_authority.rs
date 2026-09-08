@@ -31,7 +31,7 @@ use tracedecay_runtime_core::db::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 #[cfg(feature = "test-transport")]
 use tracedecay_store::FactStoreError;
 use tracedecay_store::{

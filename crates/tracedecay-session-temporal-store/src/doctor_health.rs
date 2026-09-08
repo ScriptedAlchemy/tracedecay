@@ -43,15 +43,11 @@ struct CachedSessionTemporalHealth {
     report: SessionTemporalHealthReport,
 }
 
-#[cfg(feature = "hotpath")]
+// Both aliases resolve to the plain std/tokio mutex until the binary selects
+// the profiler backend; naming them through `hotpath` keeps the type in step
+// with what the unconditional `hotpath::mutex!` wrappers below return.
 type SessionDoctorCacheLock<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type SessionDoctorCacheLock<T> = Mutex<T>;
-
-#[cfg(feature = "hotpath")]
 type SessionDoctorLaneLock<T> = hotpath::wrap::tokio::sync::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type SessionDoctorLaneLock<T> = tokio::sync::Mutex<T>;
 
 type SessionTemporalHealthCacheCell =
     Arc<SessionDoctorLaneLock<Option<CachedSessionTemporalHealth>>>;

@@ -1214,7 +1214,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
     );
     assert_eq!(
         routed["session_id"],
-        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(
+        tracedecay_privacy::protect_sensitive_structural_id(
             event["route"]["session_id"].as_str().expect("raw session")
         )
         .unwrap()
@@ -1379,8 +1379,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     )
     .await;
     let raw = ["AKIA", "SYNTHETIC", "CANARY", "4"].concat();
-    let protected =
-        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
+    let protected = tracedecay_privacy::protect_sensitive_structural_id(&raw).unwrap();
     let session = SessionRecord {
         provider: "hermes".to_string(),
         session_id: protected.clone(),

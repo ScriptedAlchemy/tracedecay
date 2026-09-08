@@ -463,7 +463,7 @@ async fn payload_digest_backfill_chunk(
     Ok(chunk)
 }
 
-/// Byte-for-byte the digest `store::memory::crud::content_digest` derives for
+/// Byte-for-byte the digest `tracedecay_session_memory::fact_store::crud::content_digest` derives for
 /// a payload's `content`: `sha256:` plus lowercase hex.
 fn payload_content_digest(content: &str) -> String {
     use sha2::Digest as _;

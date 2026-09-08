@@ -1995,7 +1995,9 @@ fn generated_skill_mirrors_session_context_retrieval_contract() {
         "needs_synthesis",
         "tracedecay_sessions_for",
         "tracedecay_workflows",
-        "tracedecay_session_refresh",
+        "tracedecay_session_refresh_begin",
+        "tracedecay_session_refresh_status",
+        "tracedecay_session_refresh_cancel",
     ];
     // Argument defaults and worked guidance belong to the Hermes manual only;
     // the repository skill defers them to the registered tool schemas.

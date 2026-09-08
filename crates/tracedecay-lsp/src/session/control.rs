@@ -493,8 +493,8 @@ impl LspSessionControl {
 
 /// RAII backstop for the in-flight gauge: a session actor dropped without an
 /// `exit`/`expire` transition (panic, abort, daemon teardown) still returns
-/// its admitted-but-unsettled requests, so the gauge cannot leak.
-#[cfg(feature = "hotpath")]
+/// its admitted-but-unsettled requests, so the gauge cannot leak. The gauge is
+/// a compile-time no-op until the binary selects the profiler backend.
 impl Drop for LspSessionControl {
     fn drop(&mut self) {
         self.release_pending_gauge();

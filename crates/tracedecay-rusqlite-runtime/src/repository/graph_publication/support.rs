@@ -31,7 +31,7 @@ const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
 /// Maximum owner sequences bound into one `IN (...)` dependency lookup.
 ///
 /// This is **not** `REFERENCED_ANCHOR_BATCH` from
-/// `tracedecay-runtime-core/src/store/memory/crud/commit.rs` (500): that
+/// `tracedecay-session-memory/src/fact_store/crud/commit.rs` (500): that
 /// constant bounds *parameters* per query, which is not the binding
 /// constraint here. The binding constraint is the exact-SQL transport's
 /// `MAX_QUERY_ROWS` cap (10,000 result rows; see

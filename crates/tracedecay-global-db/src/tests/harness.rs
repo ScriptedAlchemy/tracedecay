@@ -1124,13 +1124,12 @@ impl HostAdmissionTestRuntimeV1 {
 fn lcm_render_fixture_sanitization_metadata(
     content: &str,
 ) -> tracedecay_domain::errors::Result<String> {
-    let sanitization = tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(content)
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "seed canonical lcm render sanitization receipt".to_owned(),
-                message: format!("payload sanitizer rejected fixture content: {error:?}"),
-            },
-        )?;
+    let sanitization = tracedecay_privacy::sanitize_lcm_payload_text(content).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Database {
+            operation: "seed canonical lcm render sanitization receipt".to_owned(),
+            message: format!("payload sanitizer rejected fixture content: {error:?}"),
+        }
+    })?;
     let receipt = serde_json::to_value(sanitization.receipt()).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Database {
             operation: "seed canonical lcm render sanitization receipt".to_owned(),

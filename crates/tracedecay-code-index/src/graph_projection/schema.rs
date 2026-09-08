@@ -67,6 +67,18 @@ pub(super) fn serialize(value: &impl Serialize) -> Result<Vec<u8>, CodeGraphProj
     serde_json::to_vec(value).map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
 }
 
+/// A record's serialized JSON as the entity property that carries it.
+///
+/// The record is stored as a string, not as bytes: the sealed compact store
+/// keeps byte payloads in its string dictionary as marked hex, which doubles
+/// every record on disk, while the JSON text is already valid UTF-8 and is
+/// stored as-is. Readers accept both forms.
+pub(super) fn record_property(payload: Vec<u8>) -> Result<GraphProperty, CodeGraphProjectionError> {
+    String::from_utf8(payload)
+        .map(GraphProperty::String)
+        .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
+}
+
 pub(super) fn deserialize_property<T>(
     entity: &GraphEntity,
     name: &str,
@@ -80,10 +92,17 @@ where
         .ok_or_else(|| {
             CodeGraphProjectionError::Corrupt(format!("code graph entity is missing {name}"))
         })?;
-    let GraphProperty::Bytes(bytes) = property else {
-        return Err(CodeGraphProjectionError::Corrupt(format!(
-            "code graph entity {name} has the wrong type"
-        )));
+    let bytes = match property {
+        GraphProperty::String(text) => text.as_bytes(),
+        GraphProperty::Bytes(bytes) => bytes.as_slice(),
+        GraphProperty::Bool(_)
+        | GraphProperty::I64(_)
+        | GraphProperty::F64(_)
+        | GraphProperty::Vector(_) => {
+            return Err(CodeGraphProjectionError::Corrupt(format!(
+                "code graph entity {name} has the wrong type"
+            )));
+        }
     };
     serde_json::from_slice(bytes)
         .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))

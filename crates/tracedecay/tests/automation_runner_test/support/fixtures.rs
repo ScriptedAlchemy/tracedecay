@@ -287,7 +287,7 @@ pub(crate) struct SeededDuplicateFacts {
 }
 
 pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFacts {
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
 
     let owner = project_memory_owner(cg);
@@ -363,7 +363,7 @@ pub(crate) async fn fact_exists(
     read_control: &tracedecay_store::FactReadControl,
 ) -> bool {
     use tracedecay_domain::FactId;
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
     use tracedecay_store::{ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
 

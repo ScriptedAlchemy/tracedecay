@@ -26,7 +26,7 @@ use tracedecay_domain::{
     ScopeResolutionId, SensitivityV1, ShardDispositionV1, ShardId, UtcMicros, VectorWatermark,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
     FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactReadControl, FactStore,

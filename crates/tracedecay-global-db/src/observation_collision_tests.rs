@@ -2924,12 +2924,11 @@ impl ProductionJsonlAdmission {
         tracedecay_sessions::observation::ObservationApplication<crate::GlobalDbObservationStore>,
         tracedecay_sessions::admission::HostAdmissionOutcome,
     > {
-        let sanitizer = tracedecay_runtime_core::privacy::RecordSanitizerV1::observation_v1()
-            .map_err(|_| {
-                tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
-                    "sanitizer_unavailable",
-                )
-            })?;
+        let sanitizer = tracedecay_privacy::RecordSanitizerV1::observation_v1().map_err(|_| {
+            tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
+                "sanitizer_unavailable",
+            )
+        })?;
         Ok(
             tracedecay_sessions::observation::ObservationApplication::new(
                 self.store.clone(),

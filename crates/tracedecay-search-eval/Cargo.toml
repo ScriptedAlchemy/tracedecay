@@ -31,57 +31,14 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 
 [features]
 # The controlled-workload parity test resolves this feature in a separate
-# Cargo invocation from its feature-off run. Keep it narrower than the full
-# evaluator `hotpath` feature so the test proves capture/private-fs durability
-# without rebuilding unrelated evaluator dependencies.
-controlled-workload-hotpath = [
-    "tracedecay-capture/hotpath",
-    "tracedecay-private-fs/hotpath",
-]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "hotpath/tokio",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-capture/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-daemon-identity/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-query/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-sessions/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-capture/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-daemon-identity/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-query/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-capture/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-daemon-identity/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-query/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-]
+# Cargo invocation from its feature-off run: it selects only the profiler
+# backend so the example's unconditional macros light up in that build.
+controlled-workload-hotpath = ["hotpath/hotpath"]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath", "hotpath/tokio"]
 # Language tiers forwarded to the code-index owner the evaluator mounts. Off by
 # default so a composing binary keeps its own tier selection authoritative; the
 # checked-in evaluator corpus is Rust, so the crate's own tests enable `lite`

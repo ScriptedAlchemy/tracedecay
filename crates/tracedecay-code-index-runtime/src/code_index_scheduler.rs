@@ -113,7 +113,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     durable_generation_index_digest, retain_bounded_generation_index,
     try_acquire_code_generation_store_lock, withdraw_verified_text_artifact_under_lock,
 };
-use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 
 /// Std mutex wrapped for Hotpath lock-contention accounting. Condvar-paired
 /// mutexes (the generation-decode barrier and the text-projection slot)

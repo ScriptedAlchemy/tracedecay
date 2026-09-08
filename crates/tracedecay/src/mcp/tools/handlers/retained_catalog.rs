@@ -126,21 +126,22 @@ fn retained_mcp_binding_from_cache(
         .map_err(retained_catalog_error)
 }
 
-pub(crate) fn retained_mcp_operation(
-    tool_name: &str,
-    arguments: &Value,
-) -> Option<RetainedSurfaceOperation> {
-    match tool_name {
-        "tracedecay_session_refresh" => match arguments.get("action").and_then(Value::as_str) {
-            Some("status") => Some(RetainedSurfaceOperation::SessionRefreshStatus),
-            Some("start" | "join" | "resume" | "begin") => {
-                Some(RetainedSurfaceOperation::SessionRefreshBegin)
-            }
-            Some("cancel") => Some(RetainedSurfaceOperation::SessionRefreshCancel),
-            _ => None,
-        },
-        _ => RetainedSurfaceOperation::from_tool_name(tool_name),
-    }
+/// Whether a session refresh call selects the profile-owned session store. The
+/// canonical request carries the scope, so MCP routes on it directly instead
+/// of a transport-only selector.
+pub(crate) fn session_refresh_profile_scope_requested(tool_name: &str, arguments: &Value) -> bool {
+    matches!(
+        RetainedSurfaceOperation::from_tool_name(tool_name),
+        Some(
+            RetainedSurfaceOperation::SessionRefreshBegin
+                | RetainedSurfaceOperation::SessionRefreshStatus
+                | RetainedSurfaceOperation::SessionRefreshCancel
+        )
+    ) && arguments
+        .get("scope")
+        .and_then(|scope| scope.get("kind"))
+        .and_then(Value::as_str)
+        == Some("profile")
 }
 
 #[hotpath::measure(future = true, label = "mcp.dispatch.profile_retained_application")]
@@ -168,6 +169,7 @@ pub(super) async fn dispatch_profile_retained_application_tool(
         cg.store_runtime_registry().as_ref(),
         authority,
         options.session_authorities.profile_lcm,
+        options.session_authorities.profile_session_refresh,
         options.application_request_id,
         options.application_deadline,
         options.application_cancellation,
@@ -184,18 +186,16 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     runtime_registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
     authority: &crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
     lcm_authority: Option<&dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+    session_refresh: Option<&dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1>,
     protocol_request_id: Option<tracedecay_contracts::RequestId>,
     protocol_deadline: Option<tracedecay_contracts::Deadline>,
     protocol_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     project_root: Option<&std::path::Path>,
 ) -> Result<ToolResult> {
-    if let Some(arguments) = args.as_object_mut() {
-        if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
-            arguments.remove("storage_scope");
-        }
-        if tool_name == "tracedecay_session_refresh" {
-            arguments.remove("action");
-        }
+    if let Some(arguments) = args.as_object_mut()
+        && (tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
+    {
+        arguments.remove("storage_scope");
     }
     let normalized =
         separate_application_tool_request(args).map_err(|error| TraceDecayError::Config {
@@ -239,6 +239,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
                 session_identity: authority.session_identity().clone(),
                 configuration_digest: authority.configuration_digest().clone(),
                 lcm_authority,
+                session_refresh,
             },
             authority,
             typed_request,

@@ -9,9 +9,7 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProviderId,
     RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::{
-    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};

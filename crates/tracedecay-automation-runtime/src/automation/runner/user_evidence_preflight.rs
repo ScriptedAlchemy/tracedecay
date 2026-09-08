@@ -9,7 +9,7 @@ use crate::ports::project_runtime::ProfileRuntime;
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplication;
 
 use super::AutomationTaskIo;

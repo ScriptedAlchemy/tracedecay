@@ -10,7 +10,7 @@ use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomat
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::{MemoryApplication, MemoryApplicationError};
 
 use super::json_result;

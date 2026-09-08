@@ -1143,7 +1143,7 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
             };
             observed_ids.lock().unwrap().push(id);
             let native_record_id = ObservationId::new(id).unwrap();
-            let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
                 bytes,
                 range,
                 ObservationOrderingDomainV1::FileBytes,
@@ -1168,7 +1168,7 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
                         ),
                     )
                     .map_err(|_| {
-                        tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
                     })
                 },
             )
@@ -1258,7 +1258,7 @@ async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_rea
                 "record.legacy-content-hash-terminal"
             })
             .unwrap();
-            let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
                 bytes,
                 range,
                 ObservationOrderingDomainV1::FileBytes,
@@ -1283,7 +1283,7 @@ async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_rea
                         ),
                     )
                     .map_err(|_| {
-                        tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
                     })
                 },
             )

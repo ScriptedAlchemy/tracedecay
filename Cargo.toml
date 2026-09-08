@@ -31,6 +31,7 @@ members = [
     "crates/tracedecay-maintenance",
     "crates/tracedecay-mcp",
     "crates/tracedecay-policy",
+    "crates/tracedecay-privacy",
     "crates/tracedecay-private-fs",
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
@@ -68,6 +69,9 @@ version = "0.1.0-beta.37"
 # the macros must always resolve, and with no profiling feature selected the
 # crate pulls only `hotpath-macros` and expands every macro to a no-op, so the
 # explicit feature-off comparison build carries no measurable profiler weight.
+# Backend selection (`hotpath/hotpath`, `-alloc`, `-cpu`, `-mcp`) lives on the
+# roots (`tracedecay-cli`, `tracedecay`); cargo unifies the one proc-macro
+# build across the graph, so no member needs a feature just to be measured.
 hotpath = { version = "0.24", default-features = false, features = ["threads"] }
 grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
 grafeo-common = { version = "=0.5.42", default-features = false }

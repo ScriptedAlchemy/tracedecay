@@ -295,6 +295,9 @@ pub struct McpServer {
     user_session_refresh_wake:
         Option<Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
+    /// Daemon-wide profile session refresh service shared with the projectless
+    /// route, so a handle begun on either connection resolves on the other.
+    profile_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     /// Exact registered session-store coordinates retained with the project
     /// refresh authority. V2 refresh requests must match these values; caller
     /// selectors never rename the mounted store in receipts or digest inputs.
@@ -812,6 +815,7 @@ impl McpServer {
             background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
+            profile_session_refresh,
             project_session_refresh_serving,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
@@ -1068,6 +1072,7 @@ impl McpServer {
             project_session_refresh_wake,
             user_session_refresh_wake,
             project_session_refresh_service,
+            profile_session_refresh_service: profile_session_refresh,
             project_session_store_id,
             project_session_root_id,
             session_sync_service,

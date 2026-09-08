@@ -253,6 +253,167 @@ async fn storage_status_admits_an_owner_registered_under_a_windows_verbatim_root
     );
 }
 
+fn memory_status_request(request_id: &str) -> DaemonInvocationRequest {
+    DaemonInvocationRequest::retained_application(
+        request_id,
+        tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1::MemoryStatus(
+            tracedecay_contracts::retained_surfaces::MemoryStatusRequestV1 {
+                memory_scope: None,
+                project_selector: None,
+            },
+        ),
+        UtcMicros(1),
+        Deadline::new(UtcMicros(30_000_000)).expect("deadline"),
+        CancellationContext::active(format!("cancel.{request_id}")).expect("cancellation"),
+    )
+}
+
+/// Admits `project_root` the way core-route activation does: a project
+/// runtime exists, so requests pass the front door, but the retained runtime
+/// that the full server's owner phase registers is not there yet.
+async fn admit_project_without_retained_runtime(
+    service: &DaemonInvocationService,
+    project_root: &Path,
+    name: &str,
+) -> crate::project_runtime::ProjectRuntimePublicationAttemptV1 {
+    DaemonLspOwnerRegistrar::new(service)
+        .register_factory_for_project(
+            project_root.to_path_buf(),
+            UserProfileId::new(format!("profile.test.{name}")).expect("test LSP profile"),
+            ProjectId::new(format!("project.test.{name}")).expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
+        .await
+        .expect("register project runtime without a retained owner");
+    service
+        .project_runtimes
+        .begin_publication(project_root)
+        .expect("begin owner publication")
+}
+
+/// The retained runtime registers in the full server's owner phase, after the
+/// core route is already admitted. A retained request that lands in that
+/// window must read as the owner still mounting — retryable — never as a scope
+/// with no retained runtime.
+#[tokio::test]
+async fn retained_request_stays_retryable_while_owners_are_warming() {
+    let service = DaemonInvocationService::default();
+    let project_root = PathBuf::from("/projects/retained-warming");
+    let _publication =
+        admit_project_without_retained_runtime(&service, &project_root, "retained-warming").await;
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+    let problem = application_problem_from(
+        service
+            .invoke(
+                &registry,
+                Some(&project_root),
+                None,
+                None,
+                None,
+                memory_status_request("request.retained.warming"),
+            )
+            .await,
+    );
+
+    assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+    assert_eq!(problem.terminality(), ProblemTerminality::PreAdmission);
+    assert_eq!(problem.retry(), RetryDirective::AfterDelay);
+    let diagnostic = problem
+        .diagnostic()
+        .expect("a mounting retained owner carries a diagnostic");
+    assert_eq!(diagnostic.code, "application.surface.unavailable");
+    assert!(
+        !diagnostic
+            .message
+            .contains("no retained runtime is registered"),
+        "a warming route must not claim its scope has no retained runtime: {}",
+        diagnostic.message
+    );
+}
+
+#[tokio::test]
+async fn retained_request_is_terminal_after_publication_failure() {
+    let service = DaemonInvocationService::default();
+    let project_root = PathBuf::from("/projects/retained-failed");
+    let publication =
+        admit_project_without_retained_runtime(&service, &project_root, "retained-failed").await;
+    assert!(
+        service
+            .project_runtimes
+            .mark_publication_failed(&publication)
+    );
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+    let problem = application_problem_from(
+        service
+            .invoke(
+                &registry,
+                Some(&project_root),
+                None,
+                None,
+                None,
+                memory_status_request("request.retained.failed"),
+            )
+            .await,
+    );
+
+    assert_eq!(problem.kind(), ApplicationProblemKind::ExecutionFailed);
+    assert_eq!(problem.retry(), RetryDirective::Never);
+    assert_eq!(
+        problem
+            .diagnostic()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some("application.runtime.owner_failed")
+    );
+}
+
+/// A published route that mounted no retained runtime (a read-only project
+/// database mounts none) is the one case where "no retained runtime is
+/// registered for this scope" is the truthful answer.
+#[tokio::test]
+async fn retained_request_on_a_published_route_without_a_retained_owner_is_unavailable() {
+    let service = DaemonInvocationService::default();
+    let project_root = PathBuf::from("/projects/retained-unmounted");
+    let publication =
+        admit_project_without_retained_runtime(&service, &project_root, "retained-unmounted").await;
+    assert!(
+        service
+            .project_runtimes
+            .mark_publication_ready(&publication)
+    );
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+    let problem = application_problem_from(
+        service
+            .invoke(
+                &registry,
+                Some(&project_root),
+                None,
+                None,
+                None,
+                memory_status_request("request.retained.unmounted"),
+            )
+            .await,
+    );
+
+    assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+    let diagnostic = problem
+        .diagnostic()
+        .expect("an unmounted retained owner carries a diagnostic");
+    assert_eq!(
+        diagnostic.code,
+        "application.retained.authority-unavailable"
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("no retained runtime is registered for this scope"),
+        "a settled route without a retained owner must say so: {}",
+        diagnostic.message
+    );
+}
+
 fn retained_scope(project: &str) -> ResolvedScope {
     ResolvedScope::new(
         ProjectId::new(project).expect("retained project"),

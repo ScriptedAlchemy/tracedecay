@@ -257,14 +257,14 @@ impl HookProjectRouteCache {
             .as_deref()
             .filter(|identity| !identity.is_empty())
             .and_then(|identity| {
-                tracedecay_runtime_core::privacy::protect_sensitive_structural_id(identity).ok()
+                tracedecay_privacy::protect_sensitive_structural_id(identity).ok()
             });
         let thread_id = metadata
             .thread_id
             .as_deref()
             .filter(|identity| !identity.is_empty())
             .and_then(|identity| {
-                tracedecay_runtime_core::privacy::protect_sensitive_structural_id(identity).ok()
+                tracedecay_privacy::protect_sensitive_structural_id(identity).ok()
             });
         if let Some(session_id) = session_id.as_deref() {
             self.insert_session_workspace_route(session_id.to_owned(), route.clone());
@@ -505,8 +505,8 @@ pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), (
             let Some(raw) = map.get(*key).and_then(Value::as_str) else {
                 continue;
             };
-            let protected = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(raw)
-                .map_err(|_| ())?;
+            let protected =
+                tracedecay_privacy::protect_sensitive_structural_id(raw).map_err(|_| ())?;
             map.insert((*key).to_string(), Value::String(protected));
         }
         Ok(())
@@ -529,7 +529,7 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         if value.is_empty() {
             return None;
         }
-        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value).ok()
+        tracedecay_privacy::protect_sensitive_structural_id(value).ok()
     }
 
     [Some(arguments), arguments.get("_meta")]

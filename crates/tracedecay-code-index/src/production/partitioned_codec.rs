@@ -42,7 +42,10 @@ use std::io::{Read, Seek, Write as IoWrite};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{FileOccurrenceId, ManifestDigest, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CodeChunkProjectionReceiptV1, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
+    ManifestDigest, ProjectionOperationV1, ProjectionOutcomeV1, SymbolOccurrenceId,
+};
 
 use super::canonical_json::{
     CanonicalArrayOrderV1, CanonicalPolicyV1, canonicalize_json_into, visit_json_strings,
@@ -50,13 +53,20 @@ use super::canonical_json::{
 };
 use super::lexical_page_source::{SealedLexicalFilesV1, checkpoint};
 use super::sealed_codec::{
-    PersistedFileGenerationArtifactsRefV1, PersistedFileGenerationArtifactsV1,
-    SEALED_GENERATION_FORMAT_REVISION_V1, StreamingPersistedPublishedGenerationV1,
-    StreamingRestoredFilesV1, assemble_published_generation, restore_file_pages,
+    PersistedFileGenerationArtifactsRefV2, PersistedFileGenerationArtifactsV1,
+    PersistedFileGenerationArtifactsV2, SEALED_GENERATION_FORMAT_REVISION_V1,
+    StreamingPersistedPublishedGenerationV1, StreamingRestoredFilesV1,
+    assemble_published_generation, restore_file_pages,
 };
 use super::*;
 
+/// Revision 1 persisted the file record as its in-memory serialization;
+/// revision 2 persists the row form described on
+/// [`PersistedFileGenerationArtifactsRefV2`]. Both decode, so a generation
+/// may reuse revision-1 segments from its parent beside revision-2 segments
+/// of its own.
 const FILE_SEGMENT_FORMAT_REVISION_V1: u32 = 1;
+const FILE_SEGMENT_FORMAT_REVISION_V2: u32 = 2;
 const GENERATION_ID_MARKER: &str = "$tracedecay:g";
 const FILE_OCCURRENCE_ID_MARKER: &str = "$tracedecay:f";
 const SYMBOL_OCCURRENCE_ID_MARKER_PREFIX: &str = "$tracedecay:s:";
@@ -81,11 +91,30 @@ struct PartitionedEvidencePageDescriptorV1 {
     page_size_bytes: u64,
 }
 
+/// How the evidence segment's typed JSON stream is shaped.
+///
+/// The publication receipt is the bulk of the evidence: one row per chunk,
+/// and every row repeats the batch's projection key, request digest, and
+/// generation watermarks and restates the request's own chunk digests.
+/// `CompactReceipts` persists only what the request cannot reproduce — the
+/// projector's decision per chunk — and the reader rebuilds the full
+/// receipt, whose publication digest then has to recompute exactly as it
+/// did when the batch was sealed. Manifests written before the tag existed
+/// carry the full receipt rows and decode as `Typed`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum PartitionedEvidenceEncodingV1 {
+    #[default]
+    Typed,
+    CompactReceipts,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct PartitionedGenerationEvidenceDescriptorV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
     pages: Vec<PartitionedEvidencePageDescriptorV1>,
+    encoding: PartitionedEvidenceEncodingV1,
     #[serde(skip)]
     legacy_unpaged: bool,
 }
@@ -97,6 +126,8 @@ struct PartitionedGenerationEvidenceDescriptorWireV1 {
     segment_size_bytes: u64,
     #[serde(default, deserialize_with = "deserialize_present_vec")]
     pages: Option<Vec<PartitionedEvidencePageDescriptorV1>>,
+    #[serde(default)]
+    encoding: PartitionedEvidenceEncodingV1,
 }
 
 fn deserialize_present_vec<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
@@ -118,6 +149,7 @@ impl<'de> Deserialize<'de> for PartitionedGenerationEvidenceDescriptorV1 {
             segment_digest: wire.segment_digest,
             segment_size_bytes: wire.segment_size_bytes,
             pages: wire.pages.unwrap_or_default(),
+            encoding: wire.encoding,
             legacy_unpaged,
         })
     }
@@ -280,11 +312,156 @@ struct PartitionedGenerationEvidenceV1 {
     projection_receipt: ProjectionBatchReceiptV1,
 }
 
+/// The [`PartitionedEvidenceEncodingV1::CompactReceipts`] stream: the same
+/// lineage and request, with the receipt reduced to its batch header and one
+/// decision row per chunk.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartitionedCompactGenerationEvidenceV1 {
+    lineage: Vec<SymbolLineageCandidateV1>,
+    projection_request: ProjectionBatchRequestV1,
+    projection_receipt: PartitionedCompactBatchReceiptV1,
+}
+
 #[derive(Serialize)]
-struct PartitionedGenerationEvidenceRefV1<'a> {
+struct PartitionedCompactGenerationEvidenceRefV1<'a> {
     lineage: &'a [SymbolLineageCandidateV1],
     projection_request: &'a ProjectionBatchRequestV1,
-    projection_receipt: &'a ProjectionBatchReceiptV1,
+    projection_receipt: PartitionedCompactBatchReceiptRefV1<'a>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartitionedCompactBatchReceiptV1 {
+    target_projection_key: ProjectionKeyV1,
+    request_digest: ManifestDigest,
+    source_generation: CodeGenerationId,
+    source_manifest_digest: ManifestDigest,
+    receipts: Vec<PartitionedCompactChunkReceiptV1>,
+    reused_count: u64,
+    publication_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct PartitionedCompactBatchReceiptRefV1<'a> {
+    target_projection_key: &'a ProjectionKeyV1,
+    request_digest: &'a ManifestDigest,
+    source_generation: &'a CodeGenerationId,
+    source_manifest_digest: &'a ManifestDigest,
+    receipts: Vec<PartitionedCompactChunkReceiptRefV1<'a>>,
+    reused_count: u64,
+    publication_digest: &'a ManifestDigest,
+}
+
+/// The projector's decision for one chunk. The batch header supplies the
+/// projection key, request digest, and generation watermarks; the request's
+/// change row for `chunk_id` supplies the prior and current chunk digests.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartitionedCompactChunkReceiptV1 {
+    chunk_id: CodeSearchChunkId,
+    operation: ProjectionOperationV1,
+    outcome: ProjectionOutcomeV1,
+    #[serde(default)]
+    output_digest: Option<ContentDigest>,
+}
+
+#[derive(Serialize)]
+struct PartitionedCompactChunkReceiptRefV1<'a> {
+    chunk_id: &'a CodeSearchChunkId,
+    operation: ProjectionOperationV1,
+    outcome: &'a ProjectionOutcomeV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_digest: Option<&'a ContentDigest>,
+}
+
+impl<'a> PartitionedCompactGenerationEvidenceRefV1<'a> {
+    fn new(generation: &'a CodeIndexPublishedGenerationV1) -> Self {
+        let receipt = generation.projection.receipt();
+        Self {
+            lineage: &generation.lineage,
+            projection_request: generation.projection.request(),
+            projection_receipt: PartitionedCompactBatchReceiptRefV1 {
+                target_projection_key: &receipt.target_projection_key,
+                request_digest: &receipt.request_digest,
+                source_generation: &receipt.source_generation,
+                source_manifest_digest: &receipt.source_manifest_digest,
+                receipts: receipt
+                    .receipts
+                    .iter()
+                    .map(|receipt| PartitionedCompactChunkReceiptRefV1 {
+                        chunk_id: &receipt.chunk_id,
+                        operation: receipt.operation,
+                        outcome: &receipt.outcome,
+                        output_digest: receipt.output_digest.as_ref(),
+                    })
+                    .collect(),
+                reused_count: receipt.reused_count,
+                publication_digest: &receipt.publication_digest,
+            },
+        }
+    }
+}
+
+impl PartitionedCompactGenerationEvidenceV1 {
+    /// Rebuild the full receipt rows from the request. Every field restored
+    /// here is one the receipt verifier requires to equal the request, so the
+    /// batch's publication digest recomputes over the same bytes it sealed;
+    /// a decision row naming a chunk the request does not carry is a
+    /// contract failure, not a receipt the verifier gets to judge.
+    fn expand(self) -> Result<PartitionedGenerationEvidenceV1, CodeIndexProductionErrorV1> {
+        let request = self.projection_request;
+        let compact = self.projection_receipt;
+        let changes = &request.changes;
+        let change_digests = changes
+            .added_or_changed
+            .iter()
+            .chain(&changes.deleted)
+            .chain(&changes.reused)
+            .map(|change| {
+                (
+                    &change.chunk_id,
+                    (&change.prior_digest, &change.current_digest),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut receipts = Vec::with_capacity(compact.receipts.len());
+        for receipt in compact.receipts {
+            let (prior_chunk_digest, current_chunk_digest) =
+                change_digests.get(&receipt.chunk_id).ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed generation receipt names a chunk outside its projection request"
+                            .to_owned(),
+                    )
+                })?;
+            receipts.push(CodeChunkProjectionReceiptV1 {
+                projection_key: compact.target_projection_key.clone(),
+                request_digest: compact.request_digest.clone(),
+                prior_generation: changes.from_generation.clone(),
+                source_generation: compact.source_generation.clone(),
+                source_manifest_digest: compact.source_manifest_digest.clone(),
+                chunk_id: receipt.chunk_id,
+                prior_chunk_digest: (*prior_chunk_digest).clone(),
+                current_chunk_digest: (*current_chunk_digest).clone(),
+                operation: receipt.operation,
+                outcome: receipt.outcome,
+                output_digest: receipt.output_digest,
+            });
+        }
+        Ok(PartitionedGenerationEvidenceV1 {
+            lineage: self.lineage,
+            projection_request: request,
+            projection_receipt: ProjectionBatchReceiptV1 {
+                target_projection_key: compact.target_projection_key,
+                request_digest: compact.request_digest,
+                source_generation: compact.source_generation,
+                source_manifest_digest: compact.source_manifest_digest,
+                receipts,
+                reused_count: compact.reused_count,
+                publication_digest: compact.publication_digest,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -567,6 +744,7 @@ where
             segment_digest,
             segment_size_bytes: self.segment_size_bytes,
             pages: std::mem::take(&mut self.descriptors),
+            encoding: PartitionedEvidenceEncodingV1::CompactReceipts,
             legacy_unpaged: false,
         })
     }
@@ -848,11 +1026,11 @@ impl PartitionedSegmentEncoderV1 {
         self.payload.clear();
         serde_json::to_writer(
             &mut self.payload,
-            &PersistedFileGenerationArtifactsRefV1 {
-                authority: &file.authority,
-                extraction: &file.extraction,
-                artifacts: &file.artifacts,
-            },
+            &PersistedFileGenerationArtifactsRefV2::new(
+                &file.authority,
+                &file.extraction,
+                &file.artifacts,
+            ),
         )
         .map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
@@ -860,6 +1038,7 @@ impl PartitionedSegmentEncoderV1 {
             ))
         })?;
         self.encode_serialized_file_segment(
+            FILE_SEGMENT_FORMAT_REVISION_V2,
             generation_id.as_str(),
             file.extraction.file_occurrence_id.clone(),
             file.artifacts
@@ -875,6 +1054,7 @@ impl PartitionedSegmentEncoderV1 {
     /// production never carries a second encoder.
     fn encode_serialized_file_segment<'s>(
         &mut self,
+        format_revision: u32,
         generation_id: &str,
         file_occurrence_id: FileOccurrenceId,
         stable_symbols: impl Iterator<Item = (&'s str, &'s str)>,
@@ -937,13 +1117,11 @@ impl PartitionedSegmentEncoderV1 {
         };
         segment.clear();
         segment.extend_from_slice(b"{\"format_revision\":");
-        serde_json::to_writer(&mut *segment, &FILE_SEGMENT_FORMAT_REVISION_V1).map_err(
-            |error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed file segment serialization failed: {error}"
-                ))
-            },
-        )?;
+        serde_json::to_writer(&mut *segment, &format_revision).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed file segment serialization failed: {error}"
+            ))
+        })?;
         segment.extend_from_slice(b",\"file\":");
         canonicalize_json_into(payload, &mut policy, segment)?;
         segment.push(b'}');
@@ -978,11 +1156,7 @@ impl PartitionedSegmentEncoderV1 {
         let mut writer = PartitionedEvidencePageWriterV1::new(&mut publish);
         let encoded = serde_json::to_writer(
             &mut writer,
-            &PartitionedGenerationEvidenceRefV1 {
-                lineage: &generation.lineage,
-                projection_request: generation.projection.request(),
-                projection_receipt: generation.projection.receipt(),
-            },
+            &PartitionedCompactGenerationEvidenceRefV1::new(generation),
         );
         if let Some(error) = writer.take_publish_error() {
             return Err(error);
@@ -1040,7 +1214,10 @@ fn decode_file_segment(
             "sealed file segment decoding failed: {error}"
         ))
     })?;
-    if segment.format_revision != FILE_SEGMENT_FORMAT_REVISION_V1 {
+    if !matches!(
+        segment.format_revision,
+        FILE_SEGMENT_FORMAT_REVISION_V1 | FILE_SEGMENT_FORMAT_REVISION_V2
+    ) {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed file segment format revision is incompatible".to_owned(),
         ));
@@ -1052,12 +1229,19 @@ fn decode_file_segment(
     };
     restored.clear();
     canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, restored)?;
+    let payload_decoding_failed = |error: serde_json::Error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed file segment payload decoding failed: {error}"
+        ))
+    };
     let mut file: PersistedFileGenerationArtifactsV1 =
-        serde_json::from_slice(restored).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed file segment payload decoding failed: {error}"
-            ))
-        })?;
+        if segment.format_revision == FILE_SEGMENT_FORMAT_REVISION_V1 {
+            serde_json::from_slice(restored).map_err(payload_decoding_failed)?
+        } else {
+            serde_json::from_slice::<PersistedFileGenerationArtifactsV2>(restored)
+                .map_err(payload_decoding_failed)?
+                .expand()?
+        };
     file.artifacts
         .symbols
         .sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
@@ -1928,17 +2112,55 @@ fn decode_generation_evidence(
     let mut reader = PartitionedEvidencePageReaderV1::new(descriptor, &mut read_segment);
     // A pre-paging segment carries identity markers; restore them while the
     // stream is read rather than materializing the segment and a DOM.
+    let decoding_failure = |error: serde_json::Error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation evidence payload decoding failed: {error}"
+        ))
+    };
+    // Paging and receipt shape are orthogonal: the pre-paging segment is read
+    // through the identity-restoring transcoder, and either segment form then
+    // decodes as the shape its descriptor names.
     let (decoded, restore_failure) = if descriptor.legacy_unpaged {
-        legacy_identity::deserialize_restored(
-            &mut reader,
-            legacy_identity::LegacyIdentityIndexV1 {
-                generation_id: generation_id.as_str(),
-                file_segments,
-                files,
-            },
-        )
+        let index = legacy_identity::LegacyIdentityIndexV1 {
+            generation_id: generation_id.as_str(),
+            file_segments,
+            files,
+        };
+        match descriptor.encoding {
+            PartitionedEvidenceEncodingV1::Typed => {
+                let (decoded, restore_failure) = legacy_identity::deserialize_restored::<
+                    PartitionedGenerationEvidenceV1,
+                    _,
+                >(&mut reader, index);
+                (decoded.map_err(decoding_failure), restore_failure)
+            }
+            PartitionedEvidenceEncodingV1::CompactReceipts => {
+                let (decoded, restore_failure) = legacy_identity::deserialize_restored::<
+                    PartitionedCompactGenerationEvidenceV1,
+                    _,
+                >(&mut reader, index);
+                (
+                    decoded
+                        .map_err(decoding_failure)
+                        .and_then(PartitionedCompactGenerationEvidenceV1::expand),
+                    restore_failure,
+                )
+            }
+        }
     } else {
-        (serde_json::from_reader(&mut reader), None)
+        match descriptor.encoding {
+            PartitionedEvidenceEncodingV1::Typed => (
+                serde_json::from_reader::<_, PartitionedGenerationEvidenceV1>(&mut reader)
+                    .map_err(decoding_failure),
+                None,
+            ),
+            PartitionedEvidenceEncodingV1::CompactReceipts => (
+                serde_json::from_reader::<_, PartitionedCompactGenerationEvidenceV1>(&mut reader)
+                    .map_err(decoding_failure)
+                    .and_then(PartitionedCompactGenerationEvidenceV1::expand),
+                None,
+            ),
+        }
     };
     if let Some(error) = reader.take_read_error() {
         return Err(error);
@@ -1946,11 +2168,7 @@ fn decode_generation_evidence(
     if let Some(error) = restore_failure {
         return Err(error);
     }
-    let evidence = decoded.map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation evidence payload decoding failed: {error}"
-        ))
-    })?;
+    let evidence = decoded?;
     reader.finish()?;
     Ok(evidence)
 }
@@ -3125,6 +3343,7 @@ mod tests {
         serde_json::to_writer(&mut encoder.payload, &payload).expect("streamed payload");
         let descriptor = encoder
             .encode_serialized_file_segment(
+                FILE_SEGMENT_FORMAT_REVISION_V1,
                 FIXTURE_GENERATION,
                 FileOccurrenceId::new(FIXTURE_FILE).expect("fixture file identity"),
                 stable
@@ -3539,6 +3758,169 @@ mod tests {
         assert!(
             peak_retained_owned_bytes * 8 < published_bytes,
             "retained encoding memory must not scale with the full {published_bytes}-byte stream"
+        );
+    }
+
+    /// The historical writer's revision-1 file segments (byte-array exact
+    /// terms with persisted canonical bytes, per-chunk revisions, explicit
+    /// parent ids, and the document's chunk roster) must still decode, and
+    /// re-encoding that file as a revision-2 row segment must restore the
+    /// identical file record from a strictly smaller segment.
+    #[test]
+    fn revision_one_file_segments_decode_and_round_trip_through_revision_two() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/partitioned_pre_paging");
+        let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
+        let generation = parse_partitioned_manifest(&manifest)
+            .expect("historical manifest parses")
+            .expect("revision seven manifest");
+        let mut decoded_segments = 0;
+        for descriptor in &generation.file_segments {
+            let name = descriptor
+                .segment_digest
+                .as_str()
+                .strip_prefix("sha256:")
+                .expect("sha256 segment digest");
+            let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
+                .expect("historical segment bytes");
+            let probe: PartitionedFormatProbeV1 =
+                serde_json::from_slice(&bytes).expect("segment format probe");
+            assert_eq!(probe.format_revision, FILE_SEGMENT_FORMAT_REVISION_V1);
+            assert!(
+                bytes
+                    .windows(b"\"canonical_bytes\":[".len())
+                    .any(|window| { window == b"\"canonical_bytes\":[".as_slice() }),
+                "the historical segment must carry byte-array exact terms"
+            );
+            let mut restored = Vec::new();
+            let revision_one = decode_file_segment(
+                descriptor,
+                &generation.manifest.generation_id,
+                &bytes,
+                &mut restored,
+            )
+            .expect("revision-1 segment decodes");
+            let chunk_count = revision_one.artifacts.chunks.chunks.len();
+            assert!(chunk_count > 0, "the fixture file must carry chunks");
+            assert!(
+                revision_one
+                    .artifacts
+                    .chunks
+                    .chunks
+                    .iter()
+                    .any(|chunk| !chunk.exact_terms.is_empty()),
+                "the fixture file must carry exact terms"
+            );
+
+            let mut encoder = PartitionedSegmentEncoderV1::default();
+            encoder.payload.clear();
+            serde_json::to_writer(
+                &mut encoder.payload,
+                &PersistedFileGenerationArtifactsRefV2::new(
+                    &revision_one.authority,
+                    &revision_one.extraction,
+                    &revision_one.artifacts,
+                ),
+            )
+            .expect("revision-2 payload serializes");
+            let reencoded = encoder
+                .encode_serialized_file_segment(
+                    FILE_SEGMENT_FORMAT_REVISION_V2,
+                    generation.manifest.generation_id.as_str(),
+                    descriptor.file_occurrence_id.clone(),
+                    revision_one
+                        .artifacts
+                        .symbols
+                        .iter()
+                        .map(|symbol| (symbol.identity.as_str(), symbol.occurrence.as_str())),
+                    descriptor.file_key,
+                )
+                .expect("revision-2 segment encodes");
+            assert!(
+                reencoded.segment_size_bytes < descriptor.segment_size_bytes,
+                "revision 2 must be smaller than revision 1 ({} >= {})",
+                reencoded.segment_size_bytes,
+                descriptor.segment_size_bytes
+            );
+            let revision_two = decode_file_segment(
+                &reencoded,
+                &generation.manifest.generation_id,
+                encoder.segment_bytes(),
+                &mut restored,
+            )
+            .expect("revision-2 segment decodes");
+            assert_eq!(
+                serde_json::to_value(&revision_two).expect("revision-2 record"),
+                serde_json::to_value(&revision_one).expect("revision-1 record"),
+                "both revisions must restore the same file record"
+            );
+            decoded_segments += 1;
+        }
+        assert!(decoded_segments > 0);
+    }
+
+    /// A revision-2 row that omits a per-file constant needs the file default
+    /// to carry it; a segment with neither is refused as a contract failure
+    /// rather than filled in.
+    #[test]
+    fn revision_two_rows_without_defaults_are_refused() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/partitioned_pre_paging");
+        let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
+        let generation = parse_partitioned_manifest(&manifest)
+            .expect("historical manifest parses")
+            .expect("revision seven manifest");
+        let descriptor = &generation.file_segments[0];
+        let name = descriptor
+            .segment_digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .expect("sha256 segment digest");
+        let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
+            .expect("historical segment bytes");
+        let mut restored = Vec::new();
+        let file = decode_file_segment(
+            descriptor,
+            &generation.manifest.generation_id,
+            &bytes,
+            &mut restored,
+        )
+        .expect("revision-1 segment decodes");
+        let mut payload = serde_json::to_value(PersistedFileGenerationArtifactsRefV2::new(
+            &file.authority,
+            &file.extraction,
+            &file.artifacts,
+        ))
+        .expect("revision-2 payload value");
+        payload["artifacts"]["chunks"]
+            .as_object_mut()
+            .expect("chunk table")
+            .remove("chunk_defaults")
+            .expect("the row form hoists file defaults");
+        let mut encoder = PartitionedSegmentEncoderV1::default();
+        serde_json::to_writer(&mut encoder.payload, &payload).expect("payload serializes");
+        let reencoded = encoder
+            .encode_serialized_file_segment(
+                FILE_SEGMENT_FORMAT_REVISION_V2,
+                generation.manifest.generation_id.as_str(),
+                descriptor.file_occurrence_id.clone(),
+                file.artifacts
+                    .symbols
+                    .iter()
+                    .map(|symbol| (symbol.identity.as_str(), symbol.occurrence.as_str())),
+                descriptor.file_key,
+            )
+            .expect("segment encodes");
+        let error = decode_file_segment(
+            &reencoded,
+            &generation.manifest.generation_id,
+            encoder.segment_bytes(),
+            &mut restored,
+        )
+        .expect_err("a row without its file default must be refused");
+        assert!(
+            error.to_string().contains("without a file default"),
+            "unexpected error: {error}"
         );
     }
 }

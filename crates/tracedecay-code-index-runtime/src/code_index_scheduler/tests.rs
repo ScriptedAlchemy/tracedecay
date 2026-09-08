@@ -1420,7 +1420,7 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
     let reopened = super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),
         fixture.path(),
-        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
             .expect("sanitizer revision"),
     )
     .expect("reopen publication store");
@@ -1445,7 +1445,7 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
     let corrupted = super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),
         fixture.path(),
-        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
             .expect("sanitizer revision"),
     )
     .expect("reopen corrupted publication store");
@@ -1482,7 +1482,7 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
     let _reopened = super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),
         fixture.path(),
-        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
             .expect("sanitizer revision"),
     )
     .expect("restart publication store");
@@ -1564,7 +1564,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let mut publication = super::DaemonCodeIndexPublicationStoreV1::new(
         failed_store.path(),
         fixture.path(),
-        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
             .expect("sanitizer revision"),
     )
     .expect("open failed publication store");
@@ -1665,7 +1665,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let _reopened = super::DaemonCodeIndexPublicationStoreV1::new(
         failed_store.path(),
         fixture.path(),
-        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
             .expect("sanitizer revision"),
     )
     .expect("reopen after committed-pack crash");
@@ -2787,7 +2787,7 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
 
     assert_eq!(
         snapshot.sanitizer_revision.as_str(),
-        tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1
+        tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1
     );
     assert!(
         snapshot
@@ -10581,7 +10581,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
     let mut reopened = super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),
         fixture.path(),
-        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
             .expect("sanitizer revision"),
     )
     .expect("reopen publication store");

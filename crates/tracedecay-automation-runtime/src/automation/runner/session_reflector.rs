@@ -25,8 +25,8 @@ use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplication;
 
 use super::curation::{evaluate_session_curation, unpersisted_rejected_parts};

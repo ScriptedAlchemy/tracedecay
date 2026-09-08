@@ -31,7 +31,7 @@ use tracedecay_store::{
 
 use super::{config_error, lifecycle::AutomationRunControl};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::privacy::sanitize_provider_metadata_text;
+use tracedecay_privacy::sanitize_provider_metadata_text;
 use tracedecay_session_memory::memory::{
     MemoryApplication, automatic_fact_add_command, memory_application_error,
 };

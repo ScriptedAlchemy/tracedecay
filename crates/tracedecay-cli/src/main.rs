@@ -1,9 +1,5 @@
 #![allow(clippy::too_many_arguments, clippy::collapsible_if)]
 // binary crate: match lib allow policy for CLI dispatch
-// Required for the hotpath feature: layout computation for the boxed
-// `_inner` async body chain reachable from `run()` overflows the default
-// query depth ("query depth increased by 130").
-#![recursion_limit = "256"]
 #[cfg(any(feature = "hotpath", test))]
 use clap::ArgMatches;
 use clap::{CommandFactory, FromArgMatches};

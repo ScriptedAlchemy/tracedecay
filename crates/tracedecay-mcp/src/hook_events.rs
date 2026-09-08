@@ -201,7 +201,7 @@ const DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
 
 /// Lookup identifiers needed outside receipt-state equality (session and
 /// watermark) stay bounded. Session ids are run through
-/// [`tracedecay_runtime_core::privacy::protect_sensitive_structural_id`] so credential-shaped
+/// [`tracedecay_privacy::protect_sensitive_structural_id`] so credential-shaped
 /// values become stable digests while public ids remain byte-for-byte.
 /// Equality-only thread/tool/turn identifiers are hashed before persistence.
 const DURABLE_MAX_IDENTIFIER_BYTES: usize = 256;
@@ -269,8 +269,7 @@ fn durable_bound_required_str(value: &str, max_bytes: usize) -> Result<String, (
 }
 
 fn protect_optional_hook_structural_id(value: Option<&str>) -> Result<Option<String>, ()> {
-    tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(value)
-        .map_err(|_| ())
+    tracedecay_privacy::protect_optional_sensitive_structural_id(value).map_err(|_| ())
 }
 
 fn protect_hook_route_structural_ids(
@@ -1496,8 +1495,7 @@ mod tests {
     #[test]
     fn hook_boundary_protects_credential_ids_once_across_durable_receipt_joins() {
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "6"].concat();
-        let protected =
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let protected = tracedecay_privacy::protect_sensitive_structural_id(&raw).unwrap();
         // The sender-side wire shape the Hermes plugin emits; production only
         // deserializes these events.
         let params = serde_json::to_value(tracedecay_hooks::core_events::DaemonHookEvent {
@@ -1543,7 +1541,7 @@ mod tests {
             assert_eq!(actual, Some(protected.as_str()));
         }
         assert_eq!(
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&protected).unwrap(),
+            tracedecay_privacy::protect_sensitive_structural_id(&protected).unwrap(),
             protected
         );
     }

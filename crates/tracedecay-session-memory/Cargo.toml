@@ -9,61 +9,23 @@ description = "Session retrieval, project memory, provider usage, and runtime te
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-automation/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-lcm/hotpath",
-    "tracedecay-query/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-session-temporal-store/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-temporal-query/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-automation/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-lcm/hotpath-alloc",
-    "tracedecay-query/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-automation/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-lcm/hotpath-cpu",
-    "tracedecay-query/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
+# feature only selects the on-mode hotpath test/bench targets of this crate.
+hotpath = ["hotpath/hotpath"]
 default = []
+# Forwarded from the root package: compiles the fact-commit acceptance barrier
+# in `fact_store::commit_barrier` alongside the kernel's in-process transport
+# doubles.
+test-transport = ["tracedecay-runtime-core/test-transport"]
 
 [dependencies]
+amari-holographic = "0.23.0"
 fs2 = "0.4"
 hex = "0.4"
+regex = "1.12.3"
 hotpath.workspace = true
+memmap2 = "0.9"
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -73,11 +35,14 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "1"
+tracing = "0.1"
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }

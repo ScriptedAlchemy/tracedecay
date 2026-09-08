@@ -6,8 +6,9 @@ use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceOperation, RetainedSurfaceRequestV1, SessionRefreshActionRequestV1,
     SessionRefreshActionV1, SessionRefreshFrontierV1, SessionRefreshGrainV1,
-    SessionRefreshProjectV1, SessionRefreshRequestV1, SessionRefreshSessionV1,
-    SessionRefreshSourceV1, SessionRefreshTargetV1, SessionRefreshTemporalModeV1,
+    SessionRefreshProjectV1, SessionRefreshRequestV1, SessionRefreshScopeV1,
+    SessionRefreshSessionV1, SessionRefreshSourceV1, SessionRefreshTargetV1,
+    SessionRefreshTemporalModeV1,
 };
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemKind, CancellationContext, CancellationSignal,
@@ -28,7 +29,9 @@ use tracedecay_store::{
 
 use super::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 use crate::daemon::StoreOwnerKey;
-use crate::daemon::retained_owner::session_refresh::admitted_session_refresh_command;
+use crate::daemon::retained_owner::session_refresh::{
+    MountedSessionRefreshAuthorityV1, admitted_session_refresh_command,
+};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -143,6 +146,20 @@ impl RetiredRefreshFixture {
         }
     }
 
+    fn mounted_authority<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> MountedSessionRefreshAuthorityV1<'a> {
+        MountedSessionRefreshAuthorityV1 {
+            profile_id: &self.profile_id,
+            session_store_id: &self.session_store_id,
+            session_root_id: &self.session_root_id,
+            configuration_digest: &self.configuration_digest,
+            policy_digest: &context.grant().digest,
+            refresh: self.refresh.as_ref(),
+        }
+    }
+
     fn request(
         &self,
         action: SessionRefreshActionV1,
@@ -152,12 +169,14 @@ impl RetiredRefreshFixture {
         SessionRefreshRequestV1::with_action(
             action,
             SessionRefreshActionRequestV1 {
-                project: SessionRefreshProjectV1 {
-                    id: self.project_id.as_str().to_owned(),
-                    profile_id: self.profile_id.as_str().to_owned(),
-                    repository_id: self.repository_id.as_str().to_owned(),
-                    worktree_id: self.worktree_id.as_str().to_owned(),
-                    branch_id: BRANCH_ID.to_owned(),
+                scope: SessionRefreshScopeV1::Project {
+                    project: SessionRefreshProjectV1 {
+                        id: self.project_id.as_str().to_owned(),
+                        profile_id: self.profile_id.as_str().to_owned(),
+                        repository_id: self.repository_id.as_str().to_owned(),
+                        worktree_id: self.worktree_id.as_str().to_owned(),
+                        branch_id: BRANCH_ID.to_owned(),
+                    },
                 },
                 session: SessionRefreshSessionV1 {
                     id: session_id.as_str().to_owned(),
@@ -201,7 +220,9 @@ fn application_context(
     request: &SessionRefreshRequestV1,
     request_id: &str,
 ) -> (RequestContext, CancellationSignal) {
-    let route = &request.request.project;
+    let SessionRefreshScopeV1::Project { project: route } = &request.request.scope else {
+        panic!("effect fixtures are project-scoped");
+    };
     let scope = tracedecay_contracts::ResolvedScope::new(
         ProjectId::new(route.id.clone()).expect("scope project"),
         RepositoryId::new(route.repository_id.clone()).expect("scope repository"),
@@ -395,10 +416,7 @@ async fn retained_begin_and_join_report_partial_effect_and_restart_recovers_same
             &request,
             &direct_context,
             &direct_signal,
-            &fixture.profile_id,
-            &fixture.session_store_id,
-            &fixture.session_root_id,
-            &fixture.configuration_digest,
+            &fixture.mounted_authority(&direct_context),
         )
         .expect("admitted joined command");
         assert!(matches!(
@@ -429,10 +447,7 @@ async fn retained_cancel_reports_partial_effect_with_canonical_cancelled_receipt
         &begin,
         &begin_context,
         &begin_signal,
-        &fixture.profile_id,
-        &fixture.session_store_id,
-        &fixture.session_root_id,
-        &fixture.configuration_digest,
+        &fixture.mounted_authority(&begin_context),
     )
     .expect("admitted begin command");
     let (operation_id, handle) = match fixture.refresh.execute(begin_command).await {

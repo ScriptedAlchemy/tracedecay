@@ -54,7 +54,7 @@ use tracedecay::application_surface::{
 };
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_contracts::{CancellationSignal, Deadline};
+use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
     DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
 };
@@ -503,7 +503,7 @@ impl DaemonToolDispatch {
         // Profile-authority tools (Hermes user LCM/memory) must never invent a
         // project from cwd. Hermes intentionally runs those calls with cwd=/ so
         // Hermes home is never mistaken for a TraceDecay project.
-        if requests_profile_authority(tool_args) {
+        if requests_profile_authority(tool_name, tool_args) {
             return Self {
                 project_path: None,
                 allow_init: false,
@@ -556,14 +556,28 @@ impl DaemonToolDispatch {
     }
 }
 
-fn requests_profile_authority(tool_args: &Value) -> bool {
+/// Profile-authority calls: user-scope LCM/message search (`storage_scope`),
+/// user-scope memory (`memory_scope`), and a session refresh whose canonical
+/// `scope` names the profile-owned session store.
+fn requests_profile_authority(tool_name: &str, tool_args: &Value) -> bool {
     matches!(
         tool_args.get("storage_scope").and_then(Value::as_str),
         Some("user")
     ) || matches!(
         tool_args.get("memory_scope").and_then(Value::as_str),
         Some("user")
-    )
+    ) || (matches!(
+        RetainedSurfaceOperation::from_tool_name(tool_name),
+        Some(
+            RetainedSurfaceOperation::SessionRefreshBegin
+                | RetainedSurfaceOperation::SessionRefreshStatus
+                | RetainedSurfaceOperation::SessionRefreshCancel
+        )
+    ) && tool_args
+        .get("scope")
+        .and_then(|scope| scope.get("kind"))
+        .and_then(Value::as_str)
+        == Some("profile"))
 }
 
 fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {

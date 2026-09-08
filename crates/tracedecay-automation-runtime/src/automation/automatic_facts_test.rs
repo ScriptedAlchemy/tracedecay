@@ -10,7 +10,7 @@ use super::super::lifecycle::AutomationRunControl;
 use super::*;
 use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_session_memory::memory::{
     MemoryApplicationError, MemoryMutationError, ProjectMemoryFactAddRequest,

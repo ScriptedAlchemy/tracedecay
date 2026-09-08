@@ -251,15 +251,64 @@ pub enum ExactTechnicalTermKindV1 {
 
 /// One whole exact technical term extracted as evidence. Extraction
 /// evidence only; protected lexical policy is applied separately.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+///
+/// Wire form: the source bytes travel as `original_text` when they are UTF-8
+/// (every parser-emitted term is a slice of sanitized text, so this is the
+/// production case) and as an `original_bytes` array otherwise. The canonical
+/// bytes are a pure function of `kind` and the original bytes, so they are
+/// derived on read rather than persisted. Readers accept the earlier shape
+/// (`original_bytes` array plus `canonical_bytes` array) unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactTechnicalTermV1 {
     kind: ExactTechnicalTermKindV1,
     original_bytes: Vec<u8>,
     canonical_bytes: Vec<u8>,
     span: SourceSpan,
-    #[serde(skip_serializing_if = "Option::is_none")]
     symbol_occurrence_id: Option<SymbolOccurrenceId>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExactTechnicalTermWireRefV1<'a> {
+    kind: ExactTechnicalTermKindV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_bytes: Option<&'a [u8]>,
+    span: SourceSpan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_occurrence_id: Option<&'a SymbolOccurrenceId>,
+}
+
+impl Serialize for ExactTechnicalTermV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let original_text = std::str::from_utf8(&self.original_bytes).ok();
+        ExactTechnicalTermWireRefV1 {
+            kind: self.kind,
+            original_text,
+            original_bytes: original_text
+                .is_none()
+                .then_some(self.original_bytes.as_slice()),
+            span: self.span,
+            symbol_occurrence_id: self.symbol_occurrence_id.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl ExactTechnicalTermV1 {
+    fn canonical_bytes_for(kind: ExactTechnicalTermKindV1, original_bytes: &[u8]) -> Vec<u8> {
+        match kind {
+            ExactTechnicalTermKindV1::CliFlag
+            | ExactTechnicalTermKindV1::ConfigurationKey
+            | ExactTechnicalTermKindV1::ToolName
+            | ExactTechnicalTermKindV1::CommitIdentifier => original_bytes.to_ascii_lowercase(),
+            _ => original_bytes.to_vec(),
+        }
+    }
 }
 
 impl ExactTechnicalTermV1 {
@@ -329,13 +378,7 @@ impl ExactTechnicalTermV1 {
         span: SourceSpan,
         symbol_occurrence_id: Option<SymbolOccurrenceId>,
     ) -> Result<Self, DomainError> {
-        let canonical_bytes = match kind {
-            ExactTechnicalTermKindV1::CliFlag
-            | ExactTechnicalTermKindV1::ConfigurationKey
-            | ExactTechnicalTermKindV1::ToolName
-            | ExactTechnicalTermKindV1::CommitIdentifier => original_bytes.to_ascii_lowercase(),
-            _ => original_bytes.clone(),
-        };
+        let canonical_bytes = Self::canonical_bytes_for(kind, &original_bytes);
         let term = Self {
             kind,
             original_bytes,
@@ -429,16 +472,7 @@ impl ExactTechnicalTermV1 {
             }
             kind => validate_self_authenticating_technical_term(kind, &self.original_bytes)?,
         }
-        let expected_canonical = match self.kind {
-            ExactTechnicalTermKindV1::CliFlag
-            | ExactTechnicalTermKindV1::ConfigurationKey
-            | ExactTechnicalTermKindV1::ToolName
-            | ExactTechnicalTermKindV1::CommitIdentifier => {
-                self.original_bytes.to_ascii_lowercase()
-            }
-            _ => self.original_bytes.clone(),
-        };
-        if self.canonical_bytes != expected_canonical {
+        if self.canonical_bytes != Self::canonical_bytes_for(self.kind, &self.original_bytes) {
             return Err(DomainError::NonCanonical {
                 field: "exact technical term canonical bytes",
             });
@@ -506,18 +540,42 @@ impl<'de> Deserialize<'de> for ExactTechnicalTermV1 {
         #[serde(deny_unknown_fields)]
         struct Wire {
             kind: ExactTechnicalTermKindV1,
-            original_bytes: Vec<u8>,
-            canonical_bytes: Vec<u8>,
+            #[serde(default)]
+            original_text: Option<String>,
+            #[serde(default)]
+            original_bytes: Option<Vec<u8>>,
+            /// Retained only for terms persisted before the canonical bytes
+            /// became derived; when present it must still recompute.
+            #[serde(default)]
+            canonical_bytes: Option<Vec<u8>>,
             span: SourceSpan,
             #[serde(default)]
             symbol_occurrence_id: Option<SymbolOccurrenceId>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
+        let original_bytes = match (wire.original_text, wire.original_bytes) {
+            (Some(text), None) => text.into_bytes(),
+            (None, Some(bytes)) => bytes,
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "exact technical term must carry exactly one of original_text or original_bytes",
+                ));
+            }
+        };
+        let canonical_bytes = Self::canonical_bytes_for(wire.kind, &original_bytes);
+        if wire
+            .canonical_bytes
+            .is_some_and(|persisted| persisted != canonical_bytes)
+        {
+            return Err(serde::de::Error::custom(DomainError::NonCanonical {
+                field: "exact technical term canonical bytes",
+            }));
+        }
         let term = Self {
             kind: wire.kind,
-            original_bytes: wire.original_bytes,
-            canonical_bytes: wire.canonical_bytes,
+            original_bytes,
+            canonical_bytes,
             span: wire.span,
             symbol_occurrence_id: wire.symbol_occurrence_id,
         };

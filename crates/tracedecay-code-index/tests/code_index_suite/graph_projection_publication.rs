@@ -129,10 +129,12 @@ fn projected_import(entity: &GraphEntity) -> CodeIndexImportEvidenceV1 {
         .find(|(name, _)| name.as_str() == IMPORT_RECORD_PROPERTY)
         .map(|(_, value)| value)
         .expect("CodeImport carries its exact parser-backed record");
-    let GraphProperty::Bytes(bytes) = property else {
-        panic!("CodeImport record must use the canonical byte property");
+    // Records travel as JSON text: the sealed compact store keeps byte
+    // payloads as marked hex in its dictionary, which would double them.
+    let GraphProperty::String(record) = property else {
+        panic!("CodeImport record must use the JSON string property");
     };
-    serde_json::from_slice(bytes).expect("CodeImport record decodes")
+    serde_json::from_str(record).expect("CodeImport record decodes")
 }
 
 fn verified_store(

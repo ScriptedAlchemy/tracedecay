@@ -36,11 +36,7 @@ use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 const GIT_POLICY_REVISION: u64 = 2;
 
 type ProfiledStdRwLock<T> = hotpath::rw_locks::RwLock<T>;
-
-#[cfg(feature = "hotpath")]
 type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
 #[derive(Clone, Debug)]
 pub struct DaemonGitAuthorityStateV1 {
