@@ -916,9 +916,11 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     // does mid-journey (production journey cc-5583) and the exact vector pin
     // set becomes unknown. The offline protection set names only the serving
     // generation, so planning against it collected this live vector source.
-    // The pass must now report the degradation and retain every source.
+    // The vector provider is still mounted, so the unknown census is the
+    // fail-closed refusal (the offline degradation names an absent provider);
+    // either way the pass must report it and retain every source.
     observations.record_semantic_vector_retention_failure(&canonical_root);
-    let offline_inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
+    let reset_inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
         graph.as_ref(),
         schedulers,
         &observations,
@@ -926,14 +928,14 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     .await;
     assert!(
         matches!(
-            offline_inventory,
-            crate::daemon::store_maintenance::VectorRetentionInventoryV1::Offline { .. }
+            reset_inventory,
+            crate::daemon::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
         ),
-        "an unreadable inventory resolves to the typed offline degradation"
+        "an unreadable inventory under a mounted vector provider is a fail-closed refusal"
     );
     assert_eq!(
-        offline_inventory.degraded_reason().as_deref(),
-        Some("vector_inventory_offline:vector_census_incomplete"),
+        reset_inventory.degraded_reason().as_deref(),
+        Some("vector_census_incomplete"),
         "the CI-facing retention_degraded event still reports pass=code_generations"
     );
     assert_eq!(
