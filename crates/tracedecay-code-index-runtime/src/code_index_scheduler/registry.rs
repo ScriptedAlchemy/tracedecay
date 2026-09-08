@@ -5144,10 +5144,11 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
-    /// Run the bounded Git/stat freshness ladder for an ordinary read without
-    /// manufacturing an overflow. Only a proven source change posts a query
-    /// admission wake; a matching stat signature refreshes the scheduler's
-    /// cadence watermark and returns without traversal.
+    /// Run the bounded Git/stat/content freshness ladder for an ordinary read
+    /// without manufacturing an overflow. Only a proven source change posts a
+    /// query admission wake; a source witness that still matches (stat
+    /// signature, then sealed file digests) refreshes the scheduler's cadence
+    /// watermark and returns without extraction.
     pub async fn probe_freshness(&self, project_root: &Path) -> bool {
         self.diagnostics_change_generation(project_root)
             .await
@@ -5158,7 +5159,8 @@ impl CodeIndexSchedulerRegistryV1 {
     ///
     /// The generation is exactly as fresh as the index used by search: hook
     /// hints and Git metadata changes are observed immediately, while other
-    /// out-of-band edits are observed by the 30-second stat-signature ladder.
+    /// out-of-band edits are observed by the 30-second source-witness ladder
+    /// (stat signature, then sealed file digests).
     /// Until that ladder runs, callers intentionally receive the preceding
     /// generation and must not derive a parallel workspace fingerprint.
     pub async fn diagnostics_change_generation(&self, project_root: &Path) -> Option<u64> {
@@ -6254,7 +6256,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Resolve graph-independent exact/lexical serving through the same cheap
     /// freshness ladder as complete-generation queries. The immutable text
     /// owner remains servable while a real edit is reconciled in the retained
-    /// background worker; a quiet repository only refreshes its stat witness
+    /// background worker; a quiet repository only refreshes its source witness
     /// clock and posts no wake.
     pub async fn latest_text_fresh_for_scope(
         &self,

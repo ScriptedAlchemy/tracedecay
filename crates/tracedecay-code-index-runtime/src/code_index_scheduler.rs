@@ -6344,12 +6344,15 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Activate a retained sealed generation only after its durable freshness
-    /// frontier proves that the exact worktree state it describes is unchanged.
+    /// frontier proves that the exact worktree state it describes is unchanged:
+    /// Git metadata and the stat signature as the negative cache, then the
+    /// generation's sealed file digests against the bytes on disk as the proof.
     ///
     /// This is deliberately background-only: sealed decode, gix status/index
-    /// classification, and the source stat sweep are all repository-sized.
-    /// Missing, corrupt, or mismatched frontier evidence simply declines the
-    /// fast path so the same retained owner performs authoritative reconcile.
+    /// classification, the source stat sweep, and the digest comparison are
+    /// all repository-sized. Missing, corrupt, or mismatched frontier evidence
+    /// simply declines the fast path so the same retained owner performs
+    /// authoritative reconcile.
     fn activate_retained_generation_from_frontier(
         &mut self,
     ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
