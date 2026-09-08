@@ -36,6 +36,7 @@ pub(crate) use profile::{
     execute_profile_retained_application, profile_retained_connection_authority,
     profile_session_retrieval_serving_identity,
 };
+pub(crate) use session_refresh::RetainedSessionRefreshPortV1;
 
 /// Exact authorities used by independently mounted project retained families.
 /// A missing session or LCM authority cannot prevent memory from registering.

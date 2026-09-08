@@ -225,12 +225,14 @@ async fn invoke_operation(
 
 /// Decode one retained operation body into its typed request.
 ///
-/// The returned error carries the exact serde diagnostic (unknown field,
-/// unknown enum variant with the admitted values, wrong type) so every
-/// dispatch surface can hand the caller a corrective message instead of a
-/// blank "invalid request".
+/// HTTP decodes the route body directly; MCP and the `tracedecay tool` CLI
+/// decode the transport-normalized arguments through the same function, so
+/// every surface lands on one canonical request. The returned error carries
+/// the exact serde diagnostic (unknown field, unknown enum variant with the
+/// admitted values, wrong type) so every dispatch surface can hand the caller
+/// a corrective message instead of a blank "invalid request".
 #[hotpath::measure(label = "application_surface.retained.decode")]
-pub(crate) fn decode_request(
+pub fn decode_request(
     operation: RetainedSurfaceOperation,
     body: serde_json::Value,
 ) -> Result<RetainedSurfaceRequestV1, serde_json::Error> {
@@ -303,9 +305,6 @@ pub(crate) fn decode_request(
         RetainedSurfaceOperation::LcmExpandQuery => {
             decode!(LcmExpandQueryRequestV1, LcmExpandQuery)
         }
-        RetainedSurfaceOperation::SessionRefresh => Err(serde::de::Error::custom(
-            "session_refresh is dispatched through its action-specific operations",
-        )),
     }
 }
 

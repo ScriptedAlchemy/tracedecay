@@ -29,7 +29,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::SessionRefreshBegin,
         summary: "Begin a session refresh",
-        description: "Begin or resume the exact daemon-owned session refresh.",
+        description: "Begin or resume the exact daemon-owned session refresh for one project- or profile-owned session.",
         example: "Begin this session refresh",
         effect: EffectClass::Administrative,
         scope: SESSION_SCOPE,

@@ -79,11 +79,13 @@ user intent. It returns the opaque handle used by
 `tracedecay_session_refresh_status` and `tracedecay_session_refresh_cancel`.
 The CLI equivalents are `tracedecay sessions refresh begin`, `status`, and
 `cancel`, using the same selectors and returned handle. Preserve the scope the
-read returned: for an authorized profile-root read, use the compatibility
-`tracedecay_session_refresh` lifecycle (`action`: `start` / `join` / `resume` /
-`begin`, then `status` or `cancel`) with the same profile selectors, because the
-split tools require project identity and must not redirect a profile refresh
-through whichever project happens to be active.
+read returned in the request's `scope` selector: a project-root read refreshes
+with `scope.kind=project` and the exact registered project route, an
+authorized profile-root read (`storage_scope=user`) refreshes with
+`scope.kind=profile` and its `profile_id`, served by the profile session
+authority. Never redirect a profile refresh through whichever project happens
+to be active, and pass the same `scope`, `session`, `source`, and `target`
+selectors to `status` and `cancel` as to `begin`.
 Leave host context-window
 preflight, compression, and boundaries to the Hermes context engine rather
 than triggering them during recall.

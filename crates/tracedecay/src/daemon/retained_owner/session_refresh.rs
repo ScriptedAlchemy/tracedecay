@@ -1,14 +1,16 @@
-//! Daemon-owned admission boundary for retained session refresh status.
+//! Daemon-owned admission boundary for retained session refresh operations.
 //!
 //! The mounted service is shared with MCP, while this adapter independently
-//! binds the retained request to the canonical session application context.
+//! binds the retained request to the canonical session application context of
+//! the project- or profile-owned session store that serves it.
 
 use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceExecutionErrorV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
-    SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshTemporalModeV1,
+    SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshScopeV1,
+    SessionRefreshTemporalModeV1,
 };
 use tracedecay_contracts::{
     CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
@@ -36,25 +38,29 @@ const REQUEST_MAX_WORK_UNITS: u64 = 10_000;
 const SESSION_REFRESH_LIFECYCLE_CAPABILITY: &[u8] =
     b"application.retained.session-refresh-lifecycle.v1";
 
+/// The exact mounted owner a refresh request must name before it is admitted.
+///
+/// `policy_digest` is the stable admission authority the opaque handle is
+/// bound to: the project-open capability grant for a project owner, and the
+/// connection configuration digest for a profile owner, whose per-request
+/// grants would otherwise rebind every `status`/`cancel` to a fresh join key.
+pub(super) struct MountedSessionRefreshAuthorityV1<'a> {
+    pub(super) profile_id: &'a UserProfileId,
+    pub(super) session_store_id: &'a SessionStoreId,
+    pub(super) session_root_id: &'a SessionRootId,
+    pub(super) configuration_digest: &'a ManifestDigest,
+    pub(super) policy_digest: &'a ManifestDigest,
+    pub(super) refresh: &'a dyn RetainedSessionRefreshPortV1,
+}
+
 #[hotpath::measure(label = "daemon.retained.session.refresh_admit")]
-pub(crate) fn admitted_session_refresh_command(
+pub(super) fn admitted_session_refresh_command(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
     cancellation_signal: &CancellationSignal,
-    mounted_profile_id: &UserProfileId,
-    mounted_session_store_id: &SessionStoreId,
-    mounted_session_root_id: &SessionRootId,
-    mounted_configuration_digest: &ManifestDigest,
+    mounted: &MountedSessionRefreshAuthorityV1<'_>,
 ) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
-    let admitted = session_refresh_command(
-        request,
-        context,
-        cancellation_signal,
-        mounted_profile_id,
-        mounted_session_store_id,
-        mounted_session_root_id,
-        mounted_configuration_digest,
-    );
+    let admitted = session_refresh_command(request, context, cancellation_signal, mounted);
     // Refused admissions are recorded so trigger volume that never reaches
     // refresh execution stays visible in profiles.
     match &admitted {
@@ -73,19 +79,16 @@ fn session_refresh_command(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
     cancellation_signal: &CancellationSignal,
-    mounted_profile_id: &UserProfileId,
-    mounted_session_store_id: &SessionStoreId,
-    mounted_session_root_id: &SessionRootId,
-    mounted_configuration_digest: &ManifestDigest,
+    mounted: &MountedSessionRefreshAuthorityV1<'_>,
 ) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
     if cancellation_signal.context().token_id != context.cancellation().token_id {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
-    if request.request.project.profile_id != mounted_profile_id.as_str() {
+    if request.request.scope.profile_id() != mounted.profile_id.as_str() {
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
-    if request.request.session.store_id != mounted_session_store_id.as_str()
-        || request.request.session.root_id != mounted_session_root_id.as_str()
+    if request.request.session.store_id != mounted.session_store_id.as_str()
+        || request.request.session.root_id != mounted.session_root_id.as_str()
     {
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
@@ -96,6 +99,9 @@ fn session_refresh_command(
     let selectors = &request.request;
     let action = admitted_action(request.action, selectors.handle.as_deref())?;
 
+    // A profile-owned identity resolves to the synthetic profile-session scope,
+    // so this equality is what binds a profile refresh to the profile
+    // authority's own admitted context rather than to any project.
     let identity = admitted_identity(selectors)?;
     let resolved_scope = identity
         .session_request_scope()
@@ -112,11 +118,11 @@ fn session_refresh_command(
     ));
     let policy_digest = PolicyDigest::new(admitted_digest(
         b"tracedecay.retained.session-refresh.policy.v1\0",
-        context.grant().digest.as_str().as_bytes(),
+        mounted.policy_digest.as_str().as_bytes(),
     ));
     let configuration_digest = ConfigurationDigest::new(admitted_digest(
         b"tracedecay.retained.session-refresh.configuration.v1\0",
-        mounted_configuration_digest.as_str().as_bytes(),
+        mounted.configuration_digest.as_str().as_bytes(),
     ));
     let cancellation = CancellationToken::for_application_request(context.request_id().as_str());
     if context.cancellation().is_cancelled() {
@@ -197,11 +203,16 @@ fn admitted_action(
     }
 }
 
+/// Project-scoped requests must name the exact mounted project route. A
+/// profile-scoped request names no project; its binding to the admitted
+/// profile-session scope is checked through the resolved identity instead.
 fn request_matches_mounted_project_scope(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
 ) -> bool {
-    let project = &request.request.project;
+    let SessionRefreshScopeV1::Project { project } = &request.request.scope else {
+        return true;
+    };
     let scope = context.scope();
     let branch_matches = scope
         .reference
@@ -217,27 +228,32 @@ fn request_matches_mounted_project_scope(
 fn admitted_identity(
     request: &SessionRefreshActionRequestV1,
 ) -> Result<ResolvedSessionIdentity, RetainedSurfaceExecutionErrorV1> {
-    let profile_id = ProfileId::new(request.project.profile_id.clone())
+    let profile_id = ProfileId::new(request.scope.profile_id().to_owned())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
     let store_id = SessionStoreId::new(request.session.store_id.clone())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
     let root_id = SessionRootId::new(request.session.root_id.clone())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
-    Ok(ResolvedSessionIdentity::for_project(
-        profile_id,
-        ProjectId::new(request.project.id.clone())
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-        store_id,
-        root_id,
-        ResolvedGitRoute::new(
-            RepositoryId::new(request.project.repository_id.clone())
+    match &request.scope {
+        SessionRefreshScopeV1::Profile { .. } => Ok(ResolvedSessionIdentity::for_profile(
+            profile_id, store_id, root_id,
+        )),
+        SessionRefreshScopeV1::Project { project } => Ok(ResolvedSessionIdentity::for_project(
+            profile_id,
+            ProjectId::new(project.id.clone())
                 .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            WorktreeId::new(request.project.worktree_id.clone())
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            BranchId::new(request.project.branch_id.clone())
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-        ),
-    ))
+            store_id,
+            root_id,
+            ResolvedGitRoute::new(
+                RepositoryId::new(project.repository_id.clone())
+                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+                WorktreeId::new(project.worktree_id.clone())
+                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+                BranchId::new(project.branch_id.clone())
+                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+            ),
+        )),
+    }
 }
 
 fn admitted_target(

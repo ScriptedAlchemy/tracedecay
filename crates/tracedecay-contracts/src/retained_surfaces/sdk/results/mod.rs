@@ -58,11 +58,11 @@ pub use session::{
     SessionCoverageReasonV1, SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1,
     SessionRecordV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
     SessionRefreshFrontierResultV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
-    SessionRefreshResultV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
-    SessionSourceCoverageV1, SessionsForResultV1, TemporalCoverageV1, TemporalExplanationV1,
-    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalWatermarksV1,
-    ValidCoverageIntervalV1, WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1,
-    WorkflowRunV1, WorkflowStatusV1, WorkflowsResultV1,
+    SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1, SessionSourceCoverageV1,
+    SessionsForResultV1, TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1,
+    TemporalMetadataV1, TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1,
+    WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1,
+    WorkflowsResultV1,
 };
 
 use schemars::JsonSchema;

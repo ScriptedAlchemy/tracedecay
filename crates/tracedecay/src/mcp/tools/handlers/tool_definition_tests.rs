@@ -303,7 +303,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_fact_feedback",
         "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_worktree_cleanup_remove",
-        "tracedecay_session_refresh",
         "tracedecay_session_refresh_begin",
         "tracedecay_session_refresh_cancel",
         "tracedecay_configuration_set",

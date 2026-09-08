@@ -1189,18 +1189,12 @@ pub(crate) struct SessionsSearchArgs {
 
 #[derive(Subcommand)]
 pub enum SessionsRefreshAction {
-    /// Start or join the durable refresh and return an opaque handle
-    Start(SessionRefreshBeginArgs),
-    /// Report read-only progress or a terminal receipt using a refresh handle
-    Status(SessionRefreshOperationArgs),
-    /// Join or start the durable refresh and return an opaque handle
-    Join(SessionRefreshBeginArgs),
-    /// Resume, join, or start the durable refresh and return an opaque handle
-    Resume(SessionRefreshBeginArgs),
-    /// Durably cancel using a handle from start, join, resume, or begin
-    Cancel(SessionRefreshOperationArgs),
-    /// Compatibility spelling for start; returns an opaque handle
+    /// Begin or join the durable refresh and return an opaque handle
     Begin(SessionRefreshBeginArgs),
+    /// Report read-only progress or a terminal receipt using the handle from begin
+    Status(SessionRefreshOperationArgs),
+    /// Durably cancel using the handle from begin; success is receipt-backed
+    Cancel(SessionRefreshOperationArgs),
 }
 
 #[derive(Args)]
@@ -1219,7 +1213,7 @@ pub(crate) struct SessionRefreshSelectors {
         required_unless_present_any = ["project_id", "profile_id"]
     )]
     pub(crate) project_path: Option<String>,
-    /// Typed profile id that owns a profile-scoped refresh operation
+    /// Typed `profile.<id>` identity whose user-scope session store owns a profile-scoped refresh
     #[arg(
         long,
         conflicts_with_all = ["project_id", "project_path"],
@@ -1253,8 +1247,8 @@ pub(crate) struct SessionRefreshBeginArgs {
 pub(crate) struct SessionRefreshOperationArgs {
     #[command(flatten)]
     pub(crate) selectors: SessionRefreshSelectors,
-    /// Opaque daemon-local handle returned by start, join, resume, or begin; --operation-id is deprecated
-    #[arg(long, visible_alias = "operation-id")]
+    /// Opaque daemon-local handle returned by begin
+    #[arg(long)]
     pub(crate) handle: String,
     /// Output the typed refresh outcome as JSON
     #[arg(long)]

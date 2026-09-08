@@ -260,7 +260,7 @@ async fn projectless_tools_call_response_with_connection(
             )),
             _ => {
                 if let Some(operation) =
-                    crate::mcp::tools::retained_mcp_operation(tool_name, &arguments)
+                    tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
                 {
                     boxed_projectless_phase(projectless_profile_retained_response(
                         id,
@@ -484,16 +484,26 @@ async fn projectless_profile_retained_response(
 ) -> tracedecay_mcp::JsonRpcResponse {
     let is_lcm =
         tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search";
-    let requested_scope = if is_lcm {
+    let is_session_refresh = matches!(
+        operation,
+        tracedecay_contracts::RetainedSurfaceOperation::SessionRefreshBegin
+            | tracedecay_contracts::RetainedSurfaceOperation::SessionRefreshStatus
+            | tracedecay_contracts::RetainedSurfaceOperation::SessionRefreshCancel
+    );
+    let user_scope_requested = if is_session_refresh {
+        crate::mcp::tools::session_refresh_profile_scope_requested(tool_name, &arguments)
+    } else if is_lcm {
         arguments
             .get("storage_scope")
             .and_then(serde_json::Value::as_str)
+            == Some("user")
     } else {
         arguments
             .get("memory_scope")
             .and_then(serde_json::Value::as_str)
+            == Some("user")
     };
-    if requested_scope != Some("user") {
+    if !user_scope_requested {
         return JsonRpcResponse::error(
             id,
             ErrorCode::InvalidParams,
@@ -517,6 +527,28 @@ async fn projectless_profile_retained_response(
                 return tool_error_response(id, tool_name, &error);
             }
         };
+    // The profile refresh service is daemon-wide so a handle begun here also
+    // resolves through a project-connected MCP server, and vice versa.
+    let session_refresh = if is_session_refresh {
+        let database = match boxed_projectless_phase(
+            store_administration.registered_profile_session_database(),
+        )
+        .await
+        {
+            Ok(database) => database,
+            Err(error) => {
+                return tool_error_response(id, tool_name, &error);
+            }
+        };
+        Some(
+            boxed_projectless_phase(
+                store_administration.profile_session_refresh_service(&database),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let result = boxed_projectless_phase(crate::mcp::tools::execute_profile_retained_mcp_tool(
         operation,
         tool_name,
@@ -524,6 +556,9 @@ async fn projectless_profile_retained_response(
         runtime_registry.as_ref(),
         &connection.profile_authority,
         None,
+        session_refresh.as_deref().map(|service| {
+            service as &dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1
+        }),
         None,
         None,
         None,
@@ -562,11 +597,12 @@ pub(super) fn projectless_user_session_request(request: Option<&JsonRpcRequest>)
     let Ok((tool_name, arguments)) = projectless_tool_call(request.params.as_ref()) else {
         return false;
     };
-    (tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
+    ((tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
         && arguments
             .get("storage_scope")
             .and_then(serde_json::Value::as_str)
-            == Some("user")
+            == Some("user"))
+        || crate::mcp::tools::session_refresh_profile_scope_requested(tool_name, &arguments)
 }
 
 #[cfg(all(test, unix))]

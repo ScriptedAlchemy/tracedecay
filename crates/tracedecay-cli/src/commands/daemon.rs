@@ -34,14 +34,45 @@ pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
     tool_name: &str,
     reply: Value,
 ) -> tracedecay_domain::errors::Result<T> {
-    let decode_error = |context: &str, error: serde_json::Error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned {context}: {error}"),
+    let payload = match retained_tool_outcome(tool_name, reply)? {
+        ApplicationOutcome::Evidence(packet) => packet.payload,
+        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("daemon tool {tool_name} returned a non-evidence outcome"),
+            });
         }
     };
+    decode_retained_payload(tool_name, "evidence", payload)
+}
+
+/// Typed payload of a retained effect terminal (`begin`/`cancel`-class
+/// operations), or the typed refusal. Evidence and preview outcomes are not
+/// effects and surface as envelope drift naming the tool.
+#[hotpath::measure(label = "cli.daemon.retained_effect_payload")]
+pub(crate) fn retained_effect_payload<T: DeserializeOwned>(
+    tool_name: &str,
+    reply: Value,
+) -> tracedecay_domain::errors::Result<T> {
+    let payload = match retained_tool_outcome(tool_name, reply)? {
+        ApplicationOutcome::Effect(effect) => effect.payload,
+        ApplicationOutcome::Evidence(_) | ApplicationOutcome::Preview(_) => {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("daemon tool {tool_name} returned a non-effect outcome"),
+            });
+        }
+    };
+    decode_retained_payload(tool_name, "effect", payload)
+}
+
+fn retained_tool_outcome(
+    tool_name: &str,
+    reply: Value,
+) -> tracedecay_domain::errors::Result<ApplicationOutcome<Value>> {
     if reply.get("problem").is_some() {
-        let envelope: ApplicationProblemEnvelope = serde_json::from_value(reply)
-            .map_err(|error| decode_error("an undecodable problem envelope", error))?;
+        let envelope: ApplicationProblemEnvelope =
+            serde_json::from_value(reply).map_err(|error| {
+                retained_decode_error(tool_name, "an undecodable problem envelope", error)
+            })?;
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "daemon tool {tool_name} refused: {}: {}",
@@ -49,23 +80,32 @@ pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
             ),
         });
     }
-    let envelope: ApplicationEnvelope<Value> = serde_json::from_value(reply)
-        .map_err(|error| decode_error("an undecodable application envelope", error))?;
-    let packet = match envelope.outcome {
-        ApplicationOutcome::Evidence(packet) => packet,
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("daemon tool {tool_name} returned a non-evidence outcome"),
-            });
-        }
-    };
-    let payload =
-        packet
-            .payload
-            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("daemon tool {tool_name} omitted its evidence payload"),
-            })?;
-    serde_json::from_value(payload).map_err(|error| decode_error("an undecodable payload", error))
+    let envelope: ApplicationEnvelope<Value> = serde_json::from_value(reply).map_err(|error| {
+        retained_decode_error(tool_name, "an undecodable application envelope", error)
+    })?;
+    Ok(envelope.outcome)
+}
+
+fn decode_retained_payload<T: DeserializeOwned>(
+    tool_name: &str,
+    outcome_class: &str,
+    payload: Option<Value>,
+) -> tracedecay_domain::errors::Result<T> {
+    let payload = payload.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("daemon tool {tool_name} omitted its {outcome_class} payload"),
+    })?;
+    serde_json::from_value(payload)
+        .map_err(|error| retained_decode_error(tool_name, "an undecodable payload", error))
+}
+
+fn retained_decode_error(
+    tool_name: &str,
+    context: &str,
+    error: serde_json::Error,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("daemon tool {tool_name} returned {context}: {error}"),
+    }
 }
 
 /// One-shot daemon tool call using the shared `TRACEDECAY_TOOL_DEADLINE_MS`

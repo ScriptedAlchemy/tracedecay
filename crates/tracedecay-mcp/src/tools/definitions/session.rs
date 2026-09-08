@@ -3,216 +3,11 @@ use serde_json::{Value, json};
 use super::{def, def_rw, git_scope, project_selector_object};
 use crate::ToolDefinition;
 
-pub(super) fn def_session_refresh() -> ToolDefinition {
-    def_rw(
-        "tracedecay_session_refresh",
-        "Session Refresh",
-        "Start, join, resume, inspect, or cancel one daemon-owned durable session-temporal refresh. start, join, resume, and the compatibility action begin all invoke the same idempotent durable begin-or-join operation and return an opaque handle; the typed started or joined outcome reports what occurred. status is read-only and returns progress or a terminal receipt using a handle returned by start, join, resume, or begin. cancel is the only action that requests durable cancellation, and success is receipt-backed. Request abort or deadline outcomes never imply durable cancellation. Every call is bound to explicit profile, session, source, target, and project-or-profile scope selectors. The handler delegates only to the injected daemon service; unavailable authority fails closed without opening stores or ingesting transcripts.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["start", "status", "join", "resume", "cancel", "begin"],
-                    "description": "Operation to perform. start, join, resume, and begin all idempotently begin or join the exact durable target, return a typed started or joined outcome, and provide an opaque handle. begin is retained for compatibility. status is read-only and returns progress or the terminal receipt. cancel requests durable cancellation and succeeds only with a terminal receipt."
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["project", "profile"],
-                    "description": "Authoritative session-store scope. project requires project; profile forbids it."
-                },
-                "project": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Authoritative typed project id."
-                        },
-                        "repository_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Resolved repository identity bound to the project session root."
-                        },
-                        "worktree_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Resolved worktree identity bound to the project session root."
-                        },
-                        "branch_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Resolved branch identity bound to the project session root."
-                        }
-                    },
-                    "required": ["id", "repository_id", "worktree_id", "branch_id"]
-                },
-                "profile": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Authoritative typed profile id."
-                        }
-                    },
-                    "required": ["id"]
-                },
-                "session": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Canonical session id to refresh."
-                        },
-                        "store_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Resolved authoritative session-store id."
-                        },
-                        "root_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Resolved authoritative session-root id."
-                        }
-                    },
-                    "required": ["id", "store_id", "root_id"]
-                },
-                "source": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "scope": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Canonical provider/source scope admitted for this refresh."
-                        }
-                    },
-                    "required": ["scope"]
-                },
-                "target": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "temporal_mode": {
-                            "description": "Typed temporal interpretation for the refreshed projection.",
-                            "oneOf": [
-                                {
-                                    "type": "object",
-                                    "additionalProperties": false,
-                                    "properties": { "kind": { "const": "current" } },
-                                    "required": ["kind"]
-                                },
-                                {
-                                    "type": "object",
-                                    "additionalProperties": false,
-                                    "properties": {
-                                        "kind": { "const": "as_of" },
-                                        "cutoff": { "type": "integer" }
-                                    },
-                                    "required": ["kind", "cutoff"]
-                                },
-                                {
-                                    "type": "object",
-                                    "additionalProperties": false,
-                                    "properties": { "kind": { "const": "evolution" } },
-                                    "required": ["kind"]
-                                },
-                                {
-                                    "type": "object",
-                                    "additionalProperties": false,
-                                    "properties": { "kind": { "const": "forensic" } },
-                                    "required": ["kind"]
-                                }
-                            ]
-                        },
-                        "grain": {
-                            "type": "string",
-                            "enum": [
-                                "occurrence",
-                                "logical_message",
-                                "turn",
-                                "session",
-                                "thread",
-                                "agent",
-                                "summary"
-                            ],
-                            "description": "Typed retrieval grain produced by the refresh."
-                        },
-                        "frontier": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                                "observed_through": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "description": "Frozen source frontier to refresh through."
-                                },
-                                "committed_through": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "description": "Already committed source frontier; cannot exceed observed_through."
-                                }
-                            },
-                            "required": ["observed_through", "committed_through"]
-                        }
-                    },
-                    "required": ["temporal_mode", "grain", "frontier"]
-                },
-                "handle": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Opaque daemon-local handle returned by successful start, join, resume, or begin. Required for read-only status and durable cancel; forbidden for start, join, resume, and begin."
-                },
-                "format": {
-                    "type": "string",
-                    "enum": ["markdown", "json"],
-                    "description": "Optional output format. Defaults to markdown."
-                }
-            },
-            "required": ["action", "scope", "profile", "session", "source", "target"],
-            "allOf": [
-                {
-                    "if": {
-                        "properties": { "scope": { "const": "project" } },
-                        "required": ["scope"]
-                    },
-                    "then": { "required": ["project"] }
-                },
-                {
-                    "if": {
-                        "properties": { "scope": { "const": "profile" } },
-                        "required": ["scope"]
-                    },
-                    "then": { "not": { "required": ["project"] } }
-                },
-                {
-                    "if": {
-                        "properties": {
-                            "action": {
-                                "enum": ["start", "join", "resume", "begin"]
-                            }
-                        },
-                        "required": ["action"]
-                    },
-                    "then": { "not": { "required": ["handle"] } },
-                    "else": { "required": ["handle"] }
-                }
-            ]
-        }),
-    )
-}
-
 pub(super) fn def_session_refresh_begin(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_session_refresh_begin",
         "Session Refresh Begin",
-        "Begin or join one exact daemon-owned durable session-temporal refresh. The operation is idempotent: repeating it joins the running refresh instead of starting a second one, and the typed started or joined outcome reports what occurred. Returns an opaque handle for tracedecay_session_refresh_status and tracedecay_session_refresh_cancel. Every call is bound to explicit session, source, target, and project scope selectors; unavailable authority fails closed without opening stores or ingesting transcripts.",
+        "Begin or join one exact daemon-owned durable session-temporal refresh. The operation is idempotent: repeating it joins the running refresh instead of starting a second one, and the typed started or joined outcome reports what occurred. Returns an opaque handle for tracedecay_session_refresh_status and tracedecay_session_refresh_cancel. Every call is bound to explicit session, source, target, and scope selectors: scope.kind=project names the exact registered project route that owns the session store, scope.kind=profile names the profile whose user-scope store owns it and is served by the profile session authority, never redirected through the active project. Unavailable authority fails closed without opening stores or ingesting transcripts.",
         input_schema,
     )
 }
@@ -221,7 +16,7 @@ pub(super) fn def_session_refresh_status(input_schema: Value) -> ToolDefinition 
     def(
         "tracedecay_session_refresh_status",
         "Session Refresh Status",
-        "Inspect one exact daemon-owned durable session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin. Read-only: returns progress or the terminal receipt and never begins, resumes, or cancels a refresh.",
+        "Inspect one exact daemon-owned durable session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin, with the same scope, session, source, and target selectors. Read-only: returns progress or the terminal receipt and never begins, resumes, or cancels a refresh.",
         input_schema,
     )
 }
@@ -230,7 +25,7 @@ pub(super) fn def_session_refresh_cancel(input_schema: Value) -> ToolDefinition 
     def_rw(
         "tracedecay_session_refresh_cancel",
         "Session Refresh Cancel",
-        "Request durable cancellation of one exact daemon-owned session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin. Success is receipt-backed; request abort or deadline outcomes never imply durable cancellation.",
+        "Request durable cancellation of one exact daemon-owned session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin, with the same scope, session, source, and target selectors. Success is receipt-backed; request abort or deadline outcomes never imply durable cancellation.",
         input_schema,
     )
 }
@@ -271,7 +66,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 "catch_up": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Deprecated compatibility flag. Omitted/false allows stored data. Explicit true is a freshness precondition only: the read executes when fresh, while stale or partial coverage returns refresh_required and a typed tracedecay_session_refresh next action. This tool never performs catch-up, refresh, or ingest."
+                    "description": "Deprecated compatibility flag. Omitted/false allows stored data. Explicit true is a freshness precondition only: the read executes when fresh, while stale or partial coverage returns refresh_required and a typed tracedecay_session_refresh_begin next action. This tool never performs catch-up, refresh, or ingest."
                 },
                 "cursor": {
                     "type": "string",

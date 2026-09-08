@@ -55,8 +55,6 @@ pub enum RetainedSurfaceOperation {
     FactStoreList,
     FactFeedback,
     MemoryStatus,
-    /// Legacy broad MCP translator; never a current catalog capability.
-    SessionRefresh,
     SessionRefreshStatus,
     SessionRefreshCancel,
     SessionRefreshBegin,
@@ -103,8 +101,7 @@ impl RetainedSdkOperationContractV1 {
 }
 
 impl RetainedSurfaceOperation {
-    /// Canonical catalog operations. The broad `session_refresh` translator is
-    /// intentionally not a catalog operation.
+    /// Canonical catalog operations.
     pub const ALL: [Self; 27] = [
         Self::FactStoreCurate,
         Self::FactStoreAdd,
@@ -144,11 +141,6 @@ impl RetainedSurfaceOperation {
     /// adapter. SDK clients invoke the operation-selected routes.
     pub const SDK_EXECUTABLE: [Self; 27] = Self::ALL;
 
-    #[hotpath::skip]
-    pub const fn is_callable(self) -> bool {
-        !matches!(self, Self::SessionRefresh)
-    }
-
     /// Additional SDK controls that cannot live in the bounds-only operation body.
     #[hotpath::skip]
     pub const fn sdk_operation_contract(self) -> RetainedSdkOperationContractV1 {
@@ -178,7 +170,6 @@ impl RetainedSurfaceOperation {
             Self::FactStoreList => "fact_store_list",
             Self::FactFeedback => "fact_feedback",
             Self::MemoryStatus => "memory_status",
-            Self::SessionRefresh => "session_refresh",
             Self::SessionRefreshStatus => "session_refresh_status",
             Self::SessionRefreshCancel => "session_refresh_cancel",
             Self::SessionRefreshBegin => "session_refresh_begin",
@@ -197,9 +188,6 @@ impl RetainedSurfaceOperation {
 
     /// Parse an exact catalog/HTTP operation segment without a tool prefix.
     pub fn from_operation_name(name: &str) -> Option<Self> {
-        if name == "session_refresh" {
-            return Some(Self::SessionRefresh);
-        }
         surface_specs()
             .into_iter()
             .find(|spec| !spec.surfaces.is_empty() && spec.operation.as_str() == name)
@@ -233,9 +221,9 @@ fn surface_specs() -> Vec<&'static RetainedSurfaceSpec> {
 }
 
 /// Every callable retained operation reaches the same typed application owner
-/// from HTTP, MCP, and the dynamic `tracedecay tool` CLI. Broad fact-store and
-/// session-refresh tools translate their action to one of these exact bindings
-/// before dispatch; the catalog does not fabricate separate public tools.
+/// from HTTP, MCP, and the dynamic `tracedecay tool` CLI. The broad fact-store
+/// tool translates its action to one of these exact bindings before dispatch;
+/// the catalog does not fabricate separate public tools.
 pub(super) const CURRENT_SURFACES: &[BindingSurface] = &[
     BindingSurface::Http,
     BindingSurface::Cli,
@@ -835,23 +823,24 @@ mod tests {
             RetainedSurfaceOperation::ALL
         );
         assert_eq!(
-            surface_specs()
-                .into_iter()
-                .map(|spec| spec.operation)
-                .filter(|operation| operation.is_callable())
-                .collect::<Vec<_>>(),
-            RetainedSurfaceOperation::CALLABLE
+            RetainedSurfaceOperation::CALLABLE,
+            RetainedSurfaceOperation::ALL
         );
     }
 
     #[test]
-    fn duplicate_session_refresh_aliases_are_not_v2_operations() {
+    fn combined_session_refresh_and_its_aliases_are_not_v2_operations() {
         for name in [
+            "session_refresh",
             "session_refresh_start",
             "session_refresh_join",
             "session_refresh_resume",
         ] {
             assert_eq!(RetainedSurfaceOperation::from_operation_name(name), None);
+            assert_eq!(
+                RetainedSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")),
+                None
+            );
         }
     }
 

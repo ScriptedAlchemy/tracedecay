@@ -28,12 +28,12 @@ commits; workflow recovery reads `wf_*` session runs through
 
 Recall does not ingest or refresh. A `refresh_required` result needs authorized
 lifecycle intent before `tracedecay_session_refresh_begin`. Preserve returned
-project/profile scope and opaque handles through
-`tracedecay_session_refresh_status` or `tracedecay_session_refresh_cancel`; only
-receipt-backed success proves durable cancellation. A profile-root read uses
-the compatibility `tracedecay_session_refresh` lifecycle with the same
-selectors. Never route a profile refresh through an arbitrary active project or
-reconstruct its authority from chat text.
+project/profile scope in the request's `scope` selector (`scope.kind=project`
+with the registered project route, or `scope.kind=profile` with its
+`profile_id`) and opaque handles through `tracedecay_session_refresh_status` or
+`tracedecay_session_refresh_cancel`; only receipt-backed success proves durable
+cancellation. Never route a profile refresh through an arbitrary active project
+or reconstruct its authority from chat text.
 
 Compression admission and session boundaries are authenticated daemon-owned
 host operations, not agent-generated summaries or callable recall operations.

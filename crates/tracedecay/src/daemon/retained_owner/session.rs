@@ -8,9 +8,10 @@ use tracedecay_contracts::retained_surfaces::{
     RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
     SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
-    SessionRefreshRequestV1, SessionSourceCoverageV1 as WireSourceCoverageV1, SessionsForRequestV1,
-    TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1,
-    TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowsRequestV1,
+    SessionRefreshRequestV1, SessionRefreshScopeV1,
+    SessionSourceCoverageV1 as WireSourceCoverageV1, SessionsForRequestV1, TemporalCoverageV1,
+    TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1,
+    TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowsRequestV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -40,7 +41,10 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 use super::receipts::{evidence_outcome, session_refresh_effect_outcome};
-use super::session_refresh::{RetainedSessionRefreshPortV1, admitted_session_refresh_command};
+use super::session_refresh::{
+    MountedSessionRefreshAuthorityV1, RetainedSessionRefreshPortV1,
+    admitted_session_refresh_command,
+};
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
@@ -77,9 +81,14 @@ pub(super) struct DirectRetainedSessionPortV1 {
     authorities: ProjectRetainedSessionAuthoritiesV1,
 }
 
+/// Profile (user-scope) session authority. `refresh` is the daemon-wide
+/// profile refresh service; when it is not mounted, refresh operations answer
+/// a typed unavailable terminal instead of opening a store.
 pub(super) struct DirectProfileRetainedSessionPortV1<'a> {
     registry: &'a DaemonSessionRuntimeRegistryV1,
     identity: ResolvedSessionIdentity,
+    configuration_digest: ManifestDigest,
+    refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
 }
 
 impl<'a> DirectProfileRetainedSessionPortV1<'a> {
@@ -87,8 +96,56 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
     pub(super) const fn profile(
         registry: &'a DaemonSessionRuntimeRegistryV1,
         identity: ResolvedSessionIdentity,
+        configuration_digest: ManifestDigest,
+        refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
     ) -> Self {
-        Self { registry, identity }
+        Self {
+            registry,
+            identity,
+            configuration_digest,
+            refresh,
+        }
+    }
+
+    #[hotpath::measure(label = "daemon.store_runtime.session.profile_refresh")]
+    async fn execute_session_refresh(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &SessionRefreshRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let selector = &request.request;
+        let SessionRefreshScopeV1::Profile { profile_id } = &selector.scope else {
+            return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+        };
+        if profile_id != self.identity.profile_id().as_str()
+            || selector.session.store_id != self.identity.store_id().as_str()
+            || selector.session.root_id != self.identity.root_id().as_str()
+        {
+            return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+        }
+        let refresh = self.refresh.ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the profile session refresh authority is not mounted for this connection",
+            )
+        })?;
+        let profile_id = UserProfileId::new(profile_id.as_str())
+            .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        // The profile connection admits every request under a fresh grant, so
+        // the connection configuration digest is the stable policy identity a
+        // begin handle must keep across status and cancel.
+        execute_admitted_session_refresh(
+            context,
+            request,
+            MountedSessionRefreshAuthorityV1 {
+                profile_id: &profile_id,
+                session_store_id: self.identity.store_id(),
+                session_root_id: self.identity.root_id(),
+                configuration_digest: &self.configuration_digest,
+                policy_digest: &self.configuration_digest,
+                refresh,
+            },
+        )
+        .await
     }
 
     #[hotpath::measure(label = "daemon.store_runtime.session.message_search")]
@@ -173,61 +230,19 @@ impl DirectRetainedSessionPortV1 {
         request: &SessionRefreshRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         ensure_session_refresh_identity(context, request, &self.authorities)?;
-        let operation = request.operation();
-        let command = admitted_session_refresh_command(
-            request,
-            context.request_context,
-            context.cancellation_signal,
-            &self.authorities.profile_id,
-            &self.authorities.session_store_id,
-            &self.authorities.session_root_id,
-            &self.authorities.configuration_digest,
-        )?;
-        if operation == RetainedSurfaceOperation::SessionRefreshStatus {
-            let handled = self
-                .bounded(context, async {
-                    Ok::<_, TraceDecayError>(
-                        hotpath::future!(
-                            self.authorities.refresh.execute(command),
-                            label = "daemon.store_runtime.session.refresh.status"
-                        )
-                        .await,
-                    )
-                })
-                .await?;
-            return evidence_outcome(context, operation, refresh::status_result(handled)?);
-        }
-
-        // Once an administrative refresh crosses its effect boundary it must
-        // settle to a durable receipt. A transport cancellation may win before
-        // this CAS; after it wins, cancellation cannot drop the in-flight DB
-        // transaction and misreport an unknown effect as a pre-admission error.
-        if !context.cancellation_signal.try_begin_commit() {
-            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_contracts::CancellationStage::BeforeEffect,
-            ));
-        }
-        let handled = hotpath::future!(
-            self.authorities.refresh.execute(command),
-            label = "daemon.store_runtime.session.refresh.execute"
-        )
-        .await;
-        let projected = match operation {
-            RetainedSurfaceOperation::SessionRefreshBegin => refresh::begin_result(handled)?,
-            RetainedSurfaceOperation::SessionRefreshCancel => {
-                refresh::cancel_result(handled, request.request.handle.as_deref())?
-            }
-            _ => return Err(RetainedSurfaceExecutionErrorV1::Unsupported),
-        };
-        session_refresh_effect_outcome(
+        execute_admitted_session_refresh(
             context,
-            operation,
-            &self.authorities.configuration_digest,
             request,
-            &projected.operation_id,
-            projected.result,
-            projected.reconciliation_required,
+            MountedSessionRefreshAuthorityV1 {
+                profile_id: &self.authorities.profile_id,
+                session_store_id: &self.authorities.session_store_id,
+                session_root_id: &self.authorities.session_root_id,
+                configuration_digest: &self.authorities.configuration_digest,
+                policy_digest: &context.request_context.grant().digest,
+                refresh: self.authorities.refresh.as_ref(),
+            },
         )
+        .await
     }
 
     #[hotpath::measure(label = "daemon.store_runtime.session.sessions_for")]
@@ -309,6 +324,65 @@ impl DirectRetainedSessionPortV1 {
     }
 }
 
+/// Shared refresh execution for both session owners once the request has been
+/// matched to the exact mounted identity.
+async fn execute_admitted_session_refresh(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    request: &SessionRefreshRequestV1,
+    mounted: MountedSessionRefreshAuthorityV1<'_>,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    let operation = request.operation();
+    let scope = &request.request.scope;
+    let command = admitted_session_refresh_command(
+        request,
+        context.request_context,
+        context.cancellation_signal,
+        &mounted,
+    )?;
+    if operation == RetainedSurfaceOperation::SessionRefreshStatus {
+        let execute = hotpath::future!(
+            mounted.refresh.execute(command),
+            label = "daemon.store_runtime.session.refresh.status"
+        );
+        let handled = tokio::select! {
+            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
+            result = super::bounded_execution(context, async { Ok::<_, TraceDecayError>(execute.await) }) => result,
+        }?;
+        return evidence_outcome(context, operation, refresh::status_result(handled, scope)?);
+    }
+
+    // Once an administrative refresh crosses its effect boundary it must
+    // settle to a durable receipt. A transport cancellation may win before
+    // this CAS; after it wins, cancellation cannot drop the in-flight DB
+    // transaction and misreport an unknown effect as a pre-admission error.
+    if !context.cancellation_signal.try_begin_commit() {
+        return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_contracts::CancellationStage::BeforeEffect,
+        ));
+    }
+    let handled = hotpath::future!(
+        mounted.refresh.execute(command),
+        label = "daemon.store_runtime.session.refresh.execute"
+    )
+    .await;
+    let projected = match operation {
+        RetainedSurfaceOperation::SessionRefreshBegin => refresh::begin_result(handled, scope)?,
+        RetainedSurfaceOperation::SessionRefreshCancel => {
+            refresh::cancel_result(handled, scope, request.request.handle.as_deref())?
+        }
+        _ => return Err(RetainedSurfaceExecutionErrorV1::Unsupported),
+    };
+    session_refresh_effect_outcome(
+        context,
+        operation,
+        mounted.configuration_digest,
+        request,
+        &projected.operation_id,
+        projected.result,
+        projected.reconciliation_required,
+    )
+}
+
 impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1 {
     fn execute_session<'a>(
         &'a self,
@@ -345,8 +419,10 @@ impl RetainedSessionExecutionPortV1 for DirectProfileRetainedSessionPortV1<'_> {
                 RetainedSessionRequestV1::MessageSearch(request) => {
                     self.execute_message_search(&context, request).await
                 }
-                RetainedSessionRequestV1::SessionRefresh(_)
-                | RetainedSessionRequestV1::SessionsFor(_)
+                RetainedSessionRequestV1::SessionRefresh(request) => {
+                    self.execute_session_refresh(&context, request).await
+                }
+                RetainedSessionRequestV1::SessionsFor(_)
                 | RetainedSessionRequestV1::Workflows(_) => {
                     Err(RetainedSurfaceExecutionErrorV1::Unsupported)
                 }
@@ -747,16 +823,21 @@ fn ensure_session_refresh_identity(
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
     ensure_mounted_project_context(context, authorities)?;
     let selector = &request.request;
+    // A profile-owned refresh is served by the profile session authority; the
+    // project owner never redirects it through its own store.
+    let SessionRefreshScopeV1::Project { project } = &selector.scope else {
+        return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+    };
     let scope = context.request_context.scope();
     let branch_matches = scope
         .reference
         .as_ref()
         .and_then(|reference| reference.as_str().strip_prefix("refs/heads/"))
-        .is_some_and(|branch| branch == selector.project.branch_id);
-    (selector.project.id == authorities.project_id.as_str()
-        && selector.project.profile_id == authorities.profile_id.as_str()
-        && selector.project.repository_id == scope.repository_id.as_str()
-        && selector.project.worktree_id == scope.worktree_id.as_str()
+        .is_some_and(|branch| branch == project.branch_id);
+    (project.id == authorities.project_id.as_str()
+        && project.profile_id == authorities.profile_id.as_str()
+        && project.repository_id == scope.repository_id.as_str()
+        && project.worktree_id == scope.worktree_id.as_str()
         && branch_matches
         && selector.session.store_id == authorities.session_store_id.as_str()
         && selector.session.root_id == authorities.session_root_id.as_str())
