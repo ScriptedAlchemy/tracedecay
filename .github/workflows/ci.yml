@@ -228,6 +228,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+  # macOS compiles and runs the suite in one job. Linux builds once in
+  # `linux-build` and runs from a nextest archive across `linux-test-shard`,
+  # the shape the Windows lane already uses.
   test:
     name: Test ${{ matrix.name }}
     needs: scope-gate
@@ -238,8 +241,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            runner: '"ubuntu-latest"'
           - name: macOS
             runner: '"macos-14"'
 
@@ -372,9 +373,116 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # This parity test must execute separate feature-off/on binaries. Copy
+      # each result immediately so the second Cargo resolution cannot replace
+      # the first executable in target/perf/examples. Under the workspace
+      # selection the feature-off build is a cache hit and the feature-on
+      # build recompiles only the crates whose features change.
+      - name: Build controlled-workload hotpath parity executables
+        shell: bash
+        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile perf --workspace --features tracedecay/test-helpers
+
+      - name: Verify controlled-workload hotpath parity
+        run: |
+          cargo test-ci --locked --run-ignored only \
+            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
+            --no-tests=fail
+
+      - name: Save kache store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.kache.outputs.store-path }}
+          key: ${{ steps.kache.outputs.cache-key }}
+
+  # Compiles the Linux suite once and publishes it as a nextest archive for
+  # the `linux-test-shard` jobs. The archive is the first thing uploaded after
+  # the build: a shard job can only start once this job has completed, so
+  # every step after the upload delays the shards by its own duration. The
+  # steps kept here are the ones that need this job's compiled `target/`
+  # tree; a second job could only reproduce that tree by compiling it again.
+  linux-build:
+    name: Build Linux tests
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      # Full history, as on the shards: the tests this job runs after the
+      # archive (dashboard integration, hotpath parity) get the checkout the
+      # shards do; the shard job documents the fixture-commit reason.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Same toolchain step as the shards (rust-analyzer included) so the
+      # tests this job runs after the archive see the environment the shards
+      # do.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # Same lineage as the single Linux test job this replaces. rust-cache
+      # carries the dependency graph, keyed by toolchain and lockfile; the
+      # workspace crates compile fresh every run. No kache compiler store:
+      # the perf-profile test graph is far larger than any store the 10 GB
+      # repository cache can hold, so a store only ever kept the tail of the
+      # build.
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test-full-Linux
+          cache-on-failure: true
+
+      # Selection, features and cargo profile match `cargo test-ci`
+      # (.cargo/config.toml) and the archive below; the macOS lane documents
+      # why every invocation in a test lane must share this exact resolution.
+      - name: Build workspace binaries and tests for the test lane
+        id: build-test-graph
+        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
+
+      # The example is not a test executable, so nextest does not archive it
+      # on its own; `archive.include` in .config/nextest.toml carries it (and
+      # the search-eval binaries the acceptance tests execute) to the shards.
+      - name: Build host-CLI test fixture
+        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
+
+      # Same selection as `cargo test-ci`; nextest has no archive alias, so
+      # the arguments are spelled out here as in the Windows lane. Everything
+      # this command compiles is a cache hit from the build above.
+      - name: Build nextest archive
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --cargo-profile perf --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst"
+
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-nextest-archive
+          path: ${{ runner.temp }}/nextest-archive.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
       # `dashboard_api_test` declares `required-features = ["test-transport"]`,
-      # which `cargo test-ci` does not enable, so the hosted selection above
-      # never builds or runs it. It used to be the `dashboard` job's own
+      # which `cargo test-ci` does not enable, so the archive above never
+      # builds or runs it. It used to be the `dashboard` job's own
       # dev-profile `nextest run` in a 512 MiB kache lane: with the repository
       # cache at its 10 GB cap every restore missed and the cold build took
       # 22-26 minutes against a 25-minute budget (runs 34217290139 and
@@ -384,16 +492,15 @@ jobs:
       # (every crate below them already carries the feature through this
       # package's dev-dependencies), so `--test dashboard_api_test` recompiles
       # those four libraries plus their dependents and links one test binary —
-      # about 13 minutes on this runner for the same chain in the dev-cli
-      # build (run 34231734416). One OS carries it, like the feature-gate
-      # check below: the transport seam does not vary by host and macOS is
-      # the lane closest to its budget. This verdict stays independent of the
-      # suite's, as it was in its own job, so it runs after a red `Run tests`
+      # 11.6 minutes on this runner (run 34265243847). One OS carries it: the
+      # transport seam does not vary by host and macOS is the lane closest to
+      # its budget. It runs after the archive is published so it cannot
+      # displace the suite's own artifacts, and after a failed archive upload
       # but not after a build that failed to compile the graph it extends.
       # `--no-tests=fail` so a dropped feature cannot select zero tests and
       # report green.
       - name: Run dashboard integration tests
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.build-test-graph.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build-test-graph.outcome == 'success' }}
         run: cargo test-ci --locked --features tracedecay/test-transport --test dashboard_api_test --no-tests=fail
 
       # This parity test must execute separate feature-off/on binaries. Copy
@@ -432,17 +539,139 @@ jobs:
       # speed (run 34138693824: 62 min vs 33 min for the same binaries build)
       # and is the lane closest to its budget.
       - name: Check feature-gated surfaces compile
-        if: runner.os == 'Linux'
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
 
-      - name: Save kache store
-        if: always()
-        uses: actions/cache/save@v4
+  # Four shards: the suite's serial test time was 160 min for 15,485 tests in
+  # run 34231734416 (junit report), 21.7 min of wall time under the `ci`
+  # profile's 8 threads. Replaying that report's durations through the same
+  # 8-thread schedule per shard gives 11.9 min for the slowest of 2 shards,
+  # 7.2 min for 4 and 5.0 min for 8: the floor is the five ~125 s
+  # `daemon::tests::scheduler_config` tests and the serialized `cli-subprocess`
+  # group, not the shard count, so doubling past four buys ~2 min against a
+  # fixed ~4-5 min of setup, download and extraction per shard.
+  linux-test-shard:
+    name: Test Linux shard ${{ matrix.partition }}/4
+    needs: linux-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    steps:
+      # Full history: the search-quality workload fixture pins a
+      # `source_repository_commit`, and `validate_source_bindings` resolves that
+      # object out of this checkout to prove the checked-in corpus really is the
+      # product source at that commit. A depth-1 checkout carries only the tip,
+      # so every candidate_output/report test fails with "resolve fixture source
+      # commit: An object with id ... could not be found".
+      - uses: actions/checkout@v7
         with:
-          path: ${{ steps.kache.outputs.store-path }}
-          key: ${{ steps.kache.outputs.cache-key }}
+          fetch-depth: 0
+
+      # `rust-analyzer` is a test dependency of this lane, not a convenience.
+      # `runtime_surface_acceptance::production_lsp_negotiates_and_projects_\
+      # canonical_context` asserts that a routed analyzer negotiates the
+      # standard methods the client declared, and the upstream `initialize`
+      # response is the only authority for those. Without the component the
+      # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
+      # routes the language and only the spawn fails — the test would then
+      # measure a missing component instead of the negotiation contract. This
+      # action exports `RUSTUP_TOOLCHAIN`, so the component has to be installed
+      # here rather than through `rust-toolchain.toml`, which it overrides.
+      # The toolchain also serves the architecture tests that exec `cargo
+      # metadata` at runtime.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-nextest-archive
+          path: ${{ runner.temp }}
+
+      # The archive keeps the build's selection, features and cargo profile,
+      # so only the run policy is spelled out: the `ci` nextest profile
+      # (`cargo test-ci`'s fail-fast off, one retry that still fails flaky
+      # results, 8 threads, slow-timeout termination) and `--no-tests=fail`
+      # so an empty partition cannot report green. `--extract-to` must be the
+      # workspace so target/ lands at the same absolute path as on the build
+      # job: integration tests bake env!("CARGO_BIN_EXE_tracedecay") into
+      # the binaries at compile time, and the fixture helpers resolve the
+      # search-eval binaries and the host-CLI fixture beside their own
+      # executable. nextest applies `.cargo/config.toml`'s `[env]` from this
+      # checkout, so the test profile and global-DB isolation hold here too.
+      - name: Run Linux tests
+        run: >-
+          cargo nextest run --profile ci
+          --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst"
+          --extract-to "$GITHUB_WORKSPACE"
+          --workspace-remap "$GITHUB_WORKSPACE"
+          --partition slice:${{ matrix.partition }}/4
+          --no-tests=fail
+
+      - name: Upload Linux shard nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-Linux-shard-${{ matrix.partition }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # The one `Test Linux` verdict, as when a single job carried the suite: the
+  # build's own tests (dashboard integration, hotpath parity, feature-gate
+  # compile) and every shard must pass. It also folds the shard reports back
+  # into the `nextest-junit-Linux` artifact the single job published.
+  linux-test:
+    name: Test Linux
+    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: [linux-build, linux-test-shard, scope-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Each shard's junit.xml keeps its name under its shard's directory;
+      # the shard artifacts themselves expire after a day.
+      - name: Merge the shard reports into the Linux nextest report
+        if: ${{ needs.linux-test-shard.result != 'skipped' }}
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: nextest-junit-Linux
+          pattern: nextest-junit-Linux-shard-*
+          separate-directories: true
+          retention-days: 7
+
+      - name: Check Linux build and shards
+        if: ${{ !cancelled() }}
+        run: |
+          if [ "${{ needs.linux-build.result }}" != "success" ]; then
+            echo "Linux build result: ${{ needs.linux-build.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.linux-test-shard.result }}" != "success" ]; then
+            echo "Linux shard result: ${{ needs.linux-test-shard.result }}"
+            exit 1
+          fi
+          echo "Linux build and all shards passed."
 
   windows-build:
     name: Build Windows tests
