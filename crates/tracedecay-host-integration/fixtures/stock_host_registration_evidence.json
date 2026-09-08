@@ -1,0 +1,564 @@
+[
+  {
+    "host": "claude_code",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/.lsp.json",
+        "route": "claude_configured_language_lsp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/hooks/hooks-claude.json",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/.mcp.json",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "cursor_desktop",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/cursor-native-extension/package.json",
+        "route": "cursor_native_diagnostics",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/hooks/hooks-cursor.json",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/mcp-cursor.json",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "cursor_cloud",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "host_registration_unsupported",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "https://cursor.com/changelog",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "host_registration_unsupported",
+          "state": "degraded"
+        }
+      },
+      {
+        "evidence_ref": "https://cursor.com/en-US/cloud",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "host_registration_unsupported",
+          "state": "degraded"
+        }
+      }
+    ]
+  },
+  {
+    "host": "codex",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-agent-hosts/src/agents/codex.rs",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/.mcp.json",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "hermes",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "src/agents/hermes/templates.rs",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "src/agents/hermes/profile_config.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "kiro",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "tests/fixtures/host_events/kiro/baseline.json",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "native_fixture_limited",
+          "state": "degraded"
+        }
+      },
+      {
+        "evidence_ref": "src/agents/kiro.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "cline_family",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "cline_family_hook_evidence_absent_v1",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      }
+    ]
+  },
+  {
+    "host": "cline",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "native_fixture_limited",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "https://docs.cline.bot/mcp/mcp-overview",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "roo_code",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo/",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "kilo",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "https://kilo.ai/docs/automate/mcp/using-in-kilo-code",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "kimi_code",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/.kimi-plugin/plugin.json",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/.kimi-plugin/plugin.json",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "open_code",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "src/agents/opencode.rs",
+        "route": "open_code_custom_lsp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "plugin/opencode/tracedecay.ts",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "src/agents/opencode.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "gemini",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "gemini_native_hook_fixture_absent_v1",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "src/agents/gemini/extension.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "copilot",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "copilot_host_hook_surface_absent_v1",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "host_api_absent",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "src/agents/copilot.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "devin",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "https://docs.devin.ai/work-with-devin/mcp",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "https://docs.devin.ai/cli/extensibility/mcp/configuration",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "zed",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "https://zed.dev/docs/ai/mcp",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-agent-hosts/src/agents/zed.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "antigravity",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "https://antigravity.google/docs/mcp",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-agent-hosts/src/agents/antigravity.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  },
+  {
+    "host": "vibe",
+    "routes": [
+      {
+        "evidence_ref": "src/tool_command.rs",
+        "route": "cli",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      },
+      {
+        "evidence_ref": "https://docs.mistral.ai/vibe/code/cli/mcp-servers",
+        "route": "hook",
+        "starts_analyzer": false,
+        "state": {
+          "reason": "checked_in_evidence_missing",
+          "state": "unavailable"
+        }
+      },
+      {
+        "evidence_ref": "crates/tracedecay-agent-hosts/src/agents/vibe.rs",
+        "route": "mcp",
+        "starts_analyzer": false,
+        "state": {
+          "state": "supported"
+        }
+      }
+    ]
+  }
+]

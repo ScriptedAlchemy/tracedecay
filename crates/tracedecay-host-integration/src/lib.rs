@@ -88,140 +88,157 @@ pub struct HostRegistrationEvidenceV1 {
     pub starts_analyzer: bool,
 }
 
-/// Registration routes and their evidence for one stock host, used by
-/// packaging and conformance consumers. This table carries route metadata
-/// only; each row's state is projected from the canonical capability matrix,
-/// so changing a host's capability state is one edit in `tracedecay-domain`.
-/// Evidence references are stable repository or host-contract identifiers,
-/// never inferred compatibility claims.
-pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistrationEvidenceV1> {
-    use HostRegistrationRouteV1::{
-        ClaudeConfiguredLanguageLsp, Cli, CursorNativeDiagnostics, Hook, Mcp, OpenCodeCustomLsp,
-    };
+/// One row of [`HOST_REGISTRATIONS`]: a stock host's registration route and
+/// the evidence behind it. It carries no state on purpose — state is
+/// projected from the canonical capability matrix when the row is read, so
+/// the table can never disagree with `tracedecay-domain`.
+#[derive(Clone, Copy, Debug)]
+struct HostRegistrationDescriptor {
+    host: HostKindV1,
+    route: HostRegistrationRouteV1,
+    evidence_ref: &'static str,
+    starts_analyzer: bool,
+}
 
-    let capabilities = stock_host_capabilities(host);
-    // Every stock route is a projection bridge over the daemon; none of them
-    // spawns a language analyzer.
-    let route =
-        |route: HostRegistrationRouteV1, evidence_ref: &'static str| HostRegistrationEvidenceV1 {
-            route,
-            state: capabilities[route.capability().row_index()].state,
-            evidence_ref,
+/// Row literals for [`HOST_REGISTRATIONS`]. Every stock route is a projection
+/// bridge over the daemon; none of them spawns a language analyzer, so
+/// `starts_analyzer` is fixed here rather than repeated on every row.
+macro_rules! host_registrations {
+    ($($host:ident { $($route:ident => $evidence_ref:literal),+ $(,)? })+) => {
+        &[$($(HostRegistrationDescriptor {
+            host: HostKindV1::$host,
+            route: HostRegistrationRouteV1::$route,
+            evidence_ref: $evidence_ref,
             starts_analyzer: false,
-        };
-    let mut evidence = vec![route(Cli, "src/tool_command.rs")];
-    match host {
-        HostKindV1::ClaudeCode => evidence.extend([
-            route(ClaudeConfiguredLanguageLsp, "plugin/.lsp.json"),
-            route(Hook, "plugin/hooks/hooks-claude.json"),
-            route(Mcp, "plugin/.mcp.json"),
-        ]),
-        HostKindV1::CursorDesktop => evidence.extend([
-            route(
-                CursorNativeDiagnostics,
-                "plugin/cursor-native-extension/package.json",
-            ),
-            route(Hook, "plugin/hooks/hooks-cursor.json"),
-            route(Mcp, "plugin/mcp-cursor.json"),
-        ]),
-        HostKindV1::CursorCloud => evidence.extend([
-            route(Hook, "https://cursor.com/changelog"),
-            route(Mcp, "https://cursor.com/en-US/cloud"),
-        ]),
-        HostKindV1::Codex => evidence.extend([
-            route(Hook, "crates/tracedecay-agent-hosts/src/agents/codex.rs"),
-            route(Mcp, "plugin/.mcp.json"),
-        ]),
-        HostKindV1::Devin => evidence.extend([
-            route(Hook, "https://docs.devin.ai/work-with-devin/mcp"),
-            route(
-                Mcp,
-                "https://docs.devin.ai/cli/extensibility/mcp/configuration",
-            ),
-        ]),
-        HostKindV1::Zed => evidence.extend([
-            route(Hook, "https://zed.dev/docs/ai/mcp"),
-            route(Mcp, "crates/tracedecay-agent-hosts/src/agents/zed.rs"),
-        ]),
-        HostKindV1::Antigravity => evidence.extend([
-            route(Hook, "https://antigravity.google/docs/mcp"),
-            route(
-                Mcp,
-                "crates/tracedecay-agent-hosts/src/agents/antigravity.rs",
-            ),
-        ]),
-        HostKindV1::Vibe => evidence.extend([
-            route(Hook, "https://docs.mistral.ai/vibe/code/cli/mcp-servers"),
-            route(Mcp, "crates/tracedecay-agent-hosts/src/agents/vibe.rs"),
-        ]),
-        HostKindV1::Hermes => evidence.extend([
-            route(Hook, "src/agents/hermes/templates.rs"),
-            route(Mcp, "src/agents/hermes/profile_config.rs"),
-        ]),
-        HostKindV1::Kiro => evidence.extend([
-            route(Hook, "tests/fixtures/host_events/kiro/baseline.json"),
-            route(Mcp, "src/agents/kiro.rs"),
-        ]),
-        HostKindV1::ClineFamily => evidence.extend([
-            route(Hook, "cline_family_hook_evidence_absent_v1"),
-            route(
-                Mcp,
-                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-            ),
-        ]),
-        HostKindV1::Cline => evidence.extend([
-            route(
-                Hook,
-                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-            ),
-            route(Mcp, "https://docs.cline.bot/mcp/mcp-overview"),
-        ]),
-        HostKindV1::RooCode => evidence.extend([
-            route(
-                Hook,
-                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-            ),
-            route(
-                Mcp,
-                "https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo/",
-            ),
-        ]),
-        HostKindV1::Kilo => evidence.extend([
-            route(
-                Hook,
-                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-            ),
-            route(Mcp, "https://kilo.ai/docs/automate/mcp/using-in-kilo-code"),
-        ]),
-        HostKindV1::KimiCode => evidence.extend([
-            route(Hook, "plugin/.kimi-plugin/plugin.json"),
-            route(Mcp, "plugin/.kimi-plugin/plugin.json"),
-        ]),
-        HostKindV1::OpenCode => evidence.extend([
-            route(OpenCodeCustomLsp, "src/agents/opencode.rs"),
-            route(Hook, "plugin/opencode/tracedecay.ts"),
-            route(Mcp, "src/agents/opencode.rs"),
-        ]),
-        // The tracedecay Gemini extension declares exactly one registration
-        // route — its own `mcpServers.tracedecay` entry, adopted by
-        // `gemini extensions install`. The extension format admits hooks, but
-        // no checked-in native Gemini event fixture exists and the staged
-        // manifest declares no hook, so the hook row names the absent fixture.
-        HostKindV1::Gemini => evidence.extend([
-            route(Hook, "gemini_native_hook_fixture_absent_v1"),
-            route(Mcp, "src/agents/gemini/extension.rs"),
-        ]),
-        // Copilot's adopted lifecycle carries exactly one registration route:
-        // the `mcpServers.tracedecay` entry that `copilot mcp add` writes into
-        // the host-owned `~/.copilot/mcp-config.json`. There is no Copilot hook
-        // surface to gather a fixture for, so the hook row names the absent
-        // surface — see the capability row in `tracedecay-domain`.
-        HostKindV1::Copilot => evidence.extend([
-            route(Hook, "copilot_host_hook_surface_absent_v1"),
-            route(Mcp, "src/agents/copilot.rs"),
-        ]),
+        }),+),+]
+    };
+}
+
+/// Every stock host's registration routes, CLI first. Evidence references are
+/// stable repository or host-contract identifiers, never inferred
+/// compatibility claims. Row order within a host is the order consumers see.
+const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_registrations! {
+    ClaudeCode {
+        Cli => "src/tool_command.rs",
+        ClaudeConfiguredLanguageLsp => "plugin/.lsp.json",
+        Hook => "plugin/hooks/hooks-claude.json",
+        Mcp => "plugin/.mcp.json",
     }
-    evidence
+    CursorDesktop {
+        Cli => "src/tool_command.rs",
+        CursorNativeDiagnostics => "plugin/cursor-native-extension/package.json",
+        Hook => "plugin/hooks/hooks-cursor.json",
+        Mcp => "plugin/mcp-cursor.json",
+    }
+    CursorCloud {
+        Cli => "src/tool_command.rs",
+        Hook => "https://cursor.com/changelog",
+        Mcp => "https://cursor.com/en-US/cloud",
+    }
+    Codex {
+        Cli => "src/tool_command.rs",
+        Hook => "crates/tracedecay-agent-hosts/src/agents/codex.rs",
+        Mcp => "plugin/.mcp.json",
+    }
+    Devin {
+        Cli => "src/tool_command.rs",
+        Hook => "https://docs.devin.ai/work-with-devin/mcp",
+        Mcp => "https://docs.devin.ai/cli/extensibility/mcp/configuration",
+    }
+    Zed {
+        Cli => "src/tool_command.rs",
+        Hook => "https://zed.dev/docs/ai/mcp",
+        Mcp => "crates/tracedecay-agent-hosts/src/agents/zed.rs",
+    }
+    Antigravity {
+        Cli => "src/tool_command.rs",
+        Hook => "https://antigravity.google/docs/mcp",
+        Mcp => "crates/tracedecay-agent-hosts/src/agents/antigravity.rs",
+    }
+    Vibe {
+        Cli => "src/tool_command.rs",
+        Hook => "https://docs.mistral.ai/vibe/code/cli/mcp-servers",
+        Mcp => "crates/tracedecay-agent-hosts/src/agents/vibe.rs",
+    }
+    Hermes {
+        Cli => "src/tool_command.rs",
+        Hook => "src/agents/hermes/templates.rs",
+        Mcp => "src/agents/hermes/profile_config.rs",
+    }
+    Kiro {
+        Cli => "src/tool_command.rs",
+        Hook => "tests/fixtures/host_events/kiro/baseline.json",
+        Mcp => "src/agents/kiro.rs",
+    }
+    ClineFamily {
+        Cli => "src/tool_command.rs",
+        Hook => "cline_family_hook_evidence_absent_v1",
+        Mcp => "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+    }
+    Cline {
+        Cli => "src/tool_command.rs",
+        Hook => "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+        Mcp => "https://docs.cline.bot/mcp/mcp-overview",
+    }
+    RooCode {
+        Cli => "src/tool_command.rs",
+        Hook => "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+        Mcp => "https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo/",
+    }
+    Kilo {
+        Cli => "src/tool_command.rs",
+        Hook => "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+        Mcp => "https://kilo.ai/docs/automate/mcp/using-in-kilo-code",
+    }
+    KimiCode {
+        Cli => "src/tool_command.rs",
+        Hook => "plugin/.kimi-plugin/plugin.json",
+        Mcp => "plugin/.kimi-plugin/plugin.json",
+    }
+    OpenCode {
+        Cli => "src/tool_command.rs",
+        OpenCodeCustomLsp => "src/agents/opencode.rs",
+        Hook => "plugin/opencode/tracedecay.ts",
+        Mcp => "src/agents/opencode.rs",
+    }
+    // The tracedecay Gemini extension declares exactly one registration
+    // route — its own `mcpServers.tracedecay` entry, adopted by
+    // `gemini extensions install`. The extension format admits hooks, but
+    // no checked-in native Gemini event fixture exists and the staged
+    // manifest declares no hook, so the hook row names the absent fixture.
+    Gemini {
+        Cli => "src/tool_command.rs",
+        Hook => "gemini_native_hook_fixture_absent_v1",
+        Mcp => "src/agents/gemini/extension.rs",
+    }
+    // Copilot's adopted lifecycle carries exactly one registration route:
+    // the `mcpServers.tracedecay` entry that `copilot mcp add` writes into
+    // the host-owned `~/.copilot/mcp-config.json`. There is no Copilot hook
+    // surface to gather a fixture for, so the hook row names the absent
+    // surface — see the capability row in `tracedecay-domain`.
+    Copilot {
+        Cli => "src/tool_command.rs",
+        Hook => "copilot_host_hook_surface_absent_v1",
+        Mcp => "src/agents/copilot.rs",
+    }
+};
+
+/// Registration routes and their evidence for one stock host, used by
+/// packaging and conformance consumers: the host's `HOST_REGISTRATIONS` rows
+/// with each row's state projected from the canonical capability matrix, so
+/// changing a host's capability state is one edit in `tracedecay-domain`.
+pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistrationEvidenceV1> {
+    let capabilities = stock_host_capabilities(host);
+    HOST_REGISTRATIONS
+        .iter()
+        .filter(|row| row.host == host)
+        .map(|row| HostRegistrationEvidenceV1 {
+            route: row.route,
+            state: capabilities[row.route.capability().row_index()].state,
+            evidence_ref: row.evidence_ref,
+            starts_analyzer: row.starts_analyzer,
+        })
+        .collect()
 }
 
 /// Bytes for one checked-in native host fixture. Root composition supplies the
@@ -1163,35 +1180,48 @@ mod tests {
         }
     }
 
-    /// Every stock host lists its CLI route plus at least one daemon route,
-    /// each route once, each with a non-empty evidence reference. A
-    /// host-specific route (Claude/OpenCode LSP, Cursor native diagnostics)
-    /// is only ever listed on a host whose canonical capability is Supported:
-    /// it is a narrower registration of that capability, not a claim beyond it.
+    /// Every `HostKindV1` variant owns table rows: a CLI route first plus at
+    /// least one daemon route, each route once, each with a non-empty evidence
+    /// reference. A host-specific route (Claude/OpenCode LSP, Cursor native
+    /// diagnostics) is only ever listed on a host whose canonical capability
+    /// is Supported: it is a narrower registration of that capability, not a
+    /// claim beyond it.
     #[test]
-    fn registration_evidence_is_complete_for_every_stock_host() {
+    fn registration_table_covers_every_stock_host() {
         for host in HostKindV1::ALL {
-            let evidence = stock_host_registration_evidence(host);
-            assert!(
-                evidence.len() >= 2,
-                "{host:?} lists a CLI and a daemon route"
-            );
-            assert_eq!(evidence[0].route, HostRegistrationRouteV1::Cli, "{host:?}");
-            let mut routes = evidence
+            let rows = HOST_REGISTRATIONS
                 .iter()
-                .map(|record| record.route)
+                .filter(|row| row.host == host)
                 .collect::<Vec<_>>();
-            routes.dedup();
-            assert_eq!(routes.len(), evidence.len(), "{host:?} repeats a route");
-            for record in &evidence {
+            assert!(rows.len() >= 2, "{host:?} lists a CLI and a daemon route");
+            assert_eq!(rows[0].route, HostRegistrationRouteV1::Cli, "{host:?}");
+
+            let evidence = stock_host_registration_evidence(host);
+            assert_eq!(evidence.len(), rows.len(), "{host:?}");
+            let capabilities = stock_host_capabilities(host);
+            for (index, (row, record)) in rows.iter().zip(&evidence).enumerate() {
                 assert!(
-                    !record.evidence_ref.is_empty(),
-                    "{host:?} {:?}",
-                    record.route
+                    !rows[..index]
+                        .iter()
+                        .any(|earlier| earlier.route == row.route),
+                    "{host:?} repeats {:?}",
+                    row.route
                 );
-                assert!(!record.starts_analyzer, "{host:?} {:?}", record.route);
+                assert!(!row.evidence_ref.is_empty(), "{host:?} {:?}", row.route);
+                assert!(!row.starts_analyzer, "{host:?} {:?}", row.route);
+                assert_eq!(
+                    (record.route, record.evidence_ref, record.starts_analyzer),
+                    (row.route, row.evidence_ref, row.starts_analyzer),
+                    "{host:?}"
+                );
+                assert_eq!(
+                    record.state,
+                    capabilities[row.route.capability().row_index()].state,
+                    "{host:?} {:?} state is the canonical capability state",
+                    row.route
+                );
                 if !matches!(
-                    record.route,
+                    row.route,
                     HostRegistrationRouteV1::Hook
                         | HostRegistrationRouteV1::Mcp
                         | HostRegistrationRouteV1::Cli
@@ -1200,11 +1230,32 @@ mod tests {
                         record.state,
                         HostCapabilityStateV1::Supported,
                         "{host:?} lists host-specific route {:?} without support",
-                        record.route
+                        row.route
                     );
                 }
             }
         }
+    }
+
+    /// The descriptor table is a representation change only: every host's
+    /// projected rows equal, field for field, the rows the per-host `match`
+    /// produced before it (captured in the checked-in fixture).
+    #[test]
+    fn registration_evidence_matches_the_checked_in_rows() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/stock_host_registration_evidence.json"
+        ))
+        .unwrap();
+        let actual = HostKindV1::ALL
+            .iter()
+            .map(|&host| {
+                serde_json::json!({
+                    "host": host,
+                    "routes": stock_host_registration_evidence(host),
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(serde_json::Value::Array(actual), expected);
     }
 
     #[test]
