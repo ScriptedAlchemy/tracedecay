@@ -470,6 +470,22 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             .is_some_and(|marker| marker.project_id == stale_project_id),
         "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"
     );
+    // Every whole-worktree demand the daemon raised for the linked route on
+    // its own — both full servers' startup catch-up and the `workspaceOpen`
+    // hook above — is automatic and stays behind the watch opt-in, so the
+    // route never mounts a scheduler, let alone publishes a generation. The
+    // refusal asserted earlier is therefore a property of the route, not of
+    // whether the follow-up read raced an index the daemon should never have
+    // started.
+    assert!(
+        engine
+            .invocation
+            .code_index_schedulers
+            .scheduler_handle(&linked)
+            .await
+            .is_none(),
+        "a linked worktree without the watch opt-in must never mount a code-index scheduler"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("linked-worktree shutdown must remain bounded");

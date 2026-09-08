@@ -15935,6 +15935,91 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     );
 }
 
+/// A query freshness probe against a restored owner that no pass has verified
+/// yet must report "not current" — the restart's first pass is still the
+/// remedy — without minting an observed source change: no overflow hint and no
+/// cancellation epoch, because nothing was observed to move. The fabricated
+/// overflow made the graph-on restart's own verifying pass skip the
+/// sealed-digest witness a quiet tree satisfies and fall into the full sealed
+/// replay (`sealed_decode_count` 1) that the revision-7 verified-head recovery
+/// exists to avoid. Proven movement still posts the observed change.
+#[test]
+fn unverified_restart_probe_requests_a_pass_without_fabricating_an_observed_change() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+    }
+
+    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let metadata = reopened
+        .servable_retained_text_generation()
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let epoch_before = reopened.epoch.load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        reopened.request_fresh_for_query_background(),
+        "an owner nothing has verified yet is not current"
+    );
+    assert_eq!(
+        reopened.pending_hint_count(),
+        Some(0),
+        "an unverified probe observed no source change and must not post an overflow hint"
+    );
+    assert_eq!(
+        reopened.epoch.load(std::sync::atomic::Ordering::Acquire),
+        epoch_before,
+        "an unverified probe must not mint a cancellation epoch"
+    );
+
+    let outcome = reopened
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("graph-on retained reconcile")
+        .expect("a quiet tree must be proven by the sealed-digest witness, not replayed");
+    assert!(
+        matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_)),
+        "the unchanged restart must reconcile as a Noop: {outcome:?}"
+    );
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "the witness path must not decode the sealed generation"
+    );
+    assert!(
+        !reopened.request_fresh_for_query_background(),
+        "the verified owner is current"
+    );
+
+    // Proven movement is still an observed source change.
+    let index_path = fixture.path().join(".git/index");
+    let index_mtime = std::fs::metadata(&index_path)
+        .expect("git index metadata")
+        .modified()
+        .expect("git index mtime");
+    filetime::set_file_mtime(
+        &index_path,
+        filetime::FileTime::from_system_time(index_mtime + Duration::from_secs(2)),
+    )
+    .expect("advance only the git index mtime");
+    assert!(
+        reopened.request_fresh_for_query_background(),
+        "moved git metadata must request a reconcile"
+    );
+    assert_eq!(
+        reopened.pending_hint_count(),
+        None,
+        "proven movement posts the overflow hint"
+    );
+    assert_ne!(
+        reopened.epoch.load(std::sync::atomic::Ordering::Acquire),
+        epoch_before,
+        "proven movement mints the observed-change epoch"
+    );
+}
+
 #[test]
 fn graph_off_change_after_capture_refuses_stale_publication() {
     let fixture = GitFixture::new(&[(

@@ -1765,9 +1765,9 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("revision 13 must open");
+    .expect("the current revision must open");
 
-    for revision in [9i64, 14] {
+    for revision in [9i64, 15] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -1845,6 +1845,7 @@ fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
         CodeLexicalArtifactWriterRevisionV1::V11,
         CodeLexicalArtifactWriterRevisionV1::V12,
         CodeLexicalArtifactWriterRevisionV1::V13,
+        CodeLexicalArtifactWriterRevisionV1::V14,
     ] {
         let path = directory.path().join(format!("common-{revision:?}.sqlite"));
         let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
@@ -1877,7 +1878,7 @@ fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
 }
 
 #[test]
-fn writer_revision_toggle_preserves_v11_v12_v13_lexical_results() {
+fn writer_revision_toggle_preserves_v11_through_v14_lexical_results() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let v11_path = directory.path().join("writer-v11.sqlite");
@@ -2016,6 +2017,68 @@ fn writer_revision_toggle_preserves_v11_v12_v13_lexical_results() {
         .read_lexical_postings(&request)
         .expect("read v13 lexical postings");
     assert_eq!(v13_result, v11_result);
+
+    let v14_path = directory.path().join("writer-v14.sqlite");
+    let mut v14_builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+        &v14_path,
+        v13_reader.metadata().clone(),
+        CodeLexicalArtifactWriterRevisionV1::V14,
+    )
+    .expect("create revision 14 artifact");
+    for page in &pages {
+        v14_builder
+            .append_page(page, &control)
+            .expect("append v14 page");
+    }
+    let v14 = finish_staged_artifact(&mut v14_builder, &source_receipt, &control);
+    let connection = rusqlite::Connection::open(&v14_path).expect("inspect v14 artifact");
+    let revision: i64 = connection
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read v14 revision");
+    assert_eq!(revision, 14);
+    // Revision 14 rows reference interned strings; the per-page staging
+    // table is dropped once the sealed dictionary is derived.
+    let (interned, staging_tables): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM row_dictionary), \
+             (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'row_dictionary_pages')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("inspect v14 dictionary");
+    assert!(interned > 0, "v14 must intern a row dictionary");
+    assert_eq!(
+        staging_tables, 0,
+        "v14 must drop its staging table at finalization"
+    );
+    let v13_row_bytes: i64 = rusqlite::Connection::open(&v13_path)
+        .expect("reopen v13 for row bytes")
+        .query_row("SELECT SUM(length(row)) FROM rows", [], |row| row.get(0))
+        .expect("v13 row bytes");
+    let v14_row_bytes: i64 = connection
+        .query_row("SELECT SUM(length(row)) FROM rows", [], |row| row.get(0))
+        .expect("v14 row bytes");
+    assert!(
+        v14_row_bytes * 2 < v13_row_bytes,
+        "v14 row payloads ({v14_row_bytes} B) must be under half of v13 ({v13_row_bytes} B)"
+    );
+    drop(connection);
+    let v14_reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &v14_path,
+        &v14,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen revision 14 artifact");
+    request.generation = v14.generation().clone();
+    let v14_result = v14_reader
+        .read_lexical_postings(&request)
+        .expect("read v14 lexical postings");
+    assert_eq!(v14_result, v11_result);
 }
 
 /// Historical revision-10 artifact sealed by the pre-interning writer
@@ -2071,10 +2134,10 @@ fn reader_serves_historical_v10_writer_artifact() {
 }
 
 #[test]
-fn sealed_v13_artifact_uses_compact_postings_and_reports_dbstat() {
+fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("v13-plans.sqlite");
+    let artifact_path = directory.path().join("current-plans.sqlite");
     let control = ArtifactControl { cancelled: false };
     let started = Instant::now();
     let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
@@ -2095,7 +2158,7 @@ fn sealed_v13_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 13);
+    assert_eq!(format_revision, 14);
     let uncompressed_ngram_rows: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM ngram_postings WHERE substr(documents, 1, 4) = x'54444e31' OR length(documents) > cardinality + 4",
@@ -2105,7 +2168,7 @@ fn sealed_v13_artifact_uses_compact_postings_and_reports_dbstat() {
         .expect("count non-delta ngram rows");
     assert_eq!(
         uncompressed_ngram_rows, 0,
-        "revision 13 ngram shards must use canonical delta varints"
+        "current ngram shards must use canonical delta varints"
     );
     let exact_columns = connection
         .prepare(
@@ -2166,21 +2229,37 @@ fn sealed_v13_artifact_uses_compact_postings_and_reports_dbstat() {
         .expect("count dropped indexes");
     assert_eq!(
         missing_dropped, 0,
-        "revision 13 must not keep redundant indexes"
+        "the current revision must not keep redundant indexes"
     );
-    let compact_rows: i64 = connection
+    let binary_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM rows WHERE substr(row, 1, 7) = x'54444c52313100'",
+            "SELECT COUNT(*) FROM rows WHERE substr(row, 1, 7) = x'54444c52313400'",
             [],
             |row| row.get(0),
         )
-        .expect("count compact rows");
+        .expect("count binary rows");
     let total_rows: i64 = connection
         .query_row("SELECT COUNT(*) FROM rows", [], |row| row.get(0))
         .expect("count rows");
     assert_eq!(
-        compact_rows, total_rows,
-        "every v13 row carries the compact tag"
+        binary_rows, total_rows,
+        "every revision-14 row carries the binary tag"
+    );
+    let (interned_strings, staging_tables): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM row_dictionary), \
+             (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'row_dictionary_pages')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("inspect row string dictionary");
+    assert!(
+        interned_strings > 0,
+        "rows must reference an interned dictionary"
+    );
+    assert_eq!(
+        staging_tables, 0,
+        "the staging dictionary is dropped at finalization"
     );
     {
         let dbstat = connection.prepare(
@@ -2204,14 +2283,18 @@ fn sealed_v13_artifact_uses_compact_postings_and_reports_dbstat() {
                 sizes.contains_key("exact_vocabulary"),
                 "dbstat must account the exact-term collision authority: {sizes:?}"
             );
+            assert!(
+                sizes.contains_key("row_dictionary") && !sizes.contains_key("row_dictionary_pages"),
+                "dbstat must account the sealed row dictionary and no staging table: {sizes:?}"
+            );
             eprintln!(
-                "lexical v13 dbstat file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} sizes={sizes:?}",
+                "lexical v14 dbstat file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} sizes={sizes:?}",
                 verified.page_count(),
                 verified.artifact_digest().as_str(),
             );
         } else {
             eprintln!(
-                "lexical v13 size file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} (dbstat unavailable)",
+                "lexical v14 size file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} (dbstat unavailable)",
                 verified.page_count(),
                 verified.artifact_digest().as_str(),
             );
