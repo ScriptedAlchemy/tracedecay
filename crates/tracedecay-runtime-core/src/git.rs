@@ -390,7 +390,7 @@ async fn run_bounded_command(
     let deadline = tokio::time::Instant::from_std(bounds.deadline);
     let process_outcome = tokio::select! {
         status = child.wait() => status.map_err(GitCommandError::Wait),
-        () = wait_for_cancellation(cancellation) => Err(GitCommandError::Cancelled),
+        () = wait_for_cancellation(cancellation.clone()) => Err(GitCommandError::Cancelled),
         () = tokio::time::sleep_until(deadline) => Err(GitCommandError::DeadlineExceeded),
         exceeded = limit_receiver.recv() => {
             let (stream, bound) = exceeded.unwrap_or((
@@ -407,9 +407,22 @@ async fn run_bounded_command(
     if let Some(writer) = input_writer {
         let _ = writer.await;
     }
-    let stdout = join_reader(stdout_reader, "stdout").await?;
-    let stderr = join_reader(stderr_reader, "stderr").await?;
     let status = process_outcome?;
+    // Draining stays under the same deadline and cancellation as the process:
+    // a descendant that inherited the child's stdout keeps the pipe open after
+    // the child itself has exited, and waiting for that EOF unbounded would
+    // outlive the caller's deadline. The reader tasks are dropped with this
+    // runtime, which closes our pipe ends.
+    let drained = async {
+        let stdout = join_reader(stdout_reader, "stdout").await?;
+        let stderr = join_reader(stderr_reader, "stderr").await?;
+        Ok::<_, GitCommandError>((stdout, stderr))
+    };
+    let (stdout, stderr) = tokio::select! {
+        drained = drained => drained?,
+        () = wait_for_cancellation(cancellation) => return Err(GitCommandError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => return Err(GitCommandError::DeadlineExceeded),
+    };
     if stdout.exceeded {
         return Err(GitCommandError::OutputLimitExceeded {
             stream: "stdout",
