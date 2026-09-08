@@ -66,17 +66,37 @@ pub(super) async fn answered(
         .as_str()
         .unwrap_or_else(|| panic!("{tool} truncated its answer without a handle: {payload}"))
         .to_owned();
-    let retrieved = called(
-        harness,
-        project,
-        "tracedecay_retrieve",
-        json!({"handle": handle, "format": "json"}),
-    )
-    .await;
-    let content = retrieved["content"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{tool} response handle carried no content: {retrieved}"));
-    serde_json::from_str(content).unwrap_or_else(|error| {
+    // `tracedecay_retrieve` pages the stored response through
+    // `offset` / `next_offset` / `has_more`; reassemble it exactly as an
+    // agent does before parsing.
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    loop {
+        let retrieved = called(
+            harness,
+            project,
+            "tracedecay_retrieve",
+            json!({"handle": handle, "format": "json", "offset": offset}),
+        )
+        .await;
+        content.push_str(
+            retrieved["content"].as_str().unwrap_or_else(|| {
+                panic!("{tool} response handle carried no content: {retrieved}")
+            }),
+        );
+        if retrieved["has_more"] != json!(true) {
+            break;
+        }
+        let next_offset = retrieved["next_offset"].as_u64().unwrap_or_else(|| {
+            panic!("{tool} retrieval reported more pages without a next offset: {retrieved}")
+        });
+        assert!(
+            next_offset > offset,
+            "{tool} retrieval did not advance past offset {offset}: {retrieved}"
+        );
+        offset = next_offset;
+    }
+    serde_json::from_str(&content).unwrap_or_else(|error| {
         panic!("{tool} response handle content is not JSON: {error}; content={content}")
     })
 }

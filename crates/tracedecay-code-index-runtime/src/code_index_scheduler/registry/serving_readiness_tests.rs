@@ -157,13 +157,14 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         let mut scheduler = scheduler.lock().expect("scheduler lock");
         scheduler.notify_path(project.join("src/lib.rs"));
         assert!(
-            scheduler.freshness_probe_requires_reconcile(),
-            "a true source hint invalidates admission even inside the fresh clock window"
+            !scheduler.request_fresh_for_query_background(),
+            "the hint's own pending pass is the remedy; the query ladder must not \
+             escalate it into an observed-change rescan"
         );
     }
     assert!(
         registry.latest_complete_ready(&project).await.is_none(),
-        "a seated generation must not inherit the invalidated source proof"
+        "a true source hint invalidates the seated proof even inside the fresh clock window"
     );
     assert!(!changes.has_changed().expect("live serving subscription"));
     drop(admission);
