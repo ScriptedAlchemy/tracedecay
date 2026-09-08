@@ -20,9 +20,11 @@ pub use delete_recovery::{
 pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 #[cfg(test)]
 pub use delete_recovery::{reconcile_committed_payload_drain, remove_committed_payload_file_with};
-pub use filesystem_authority::VerifiedPayloadAuthority;
 use filesystem_authority::{
     PayloadFileWrite, prepare_payload_dir, read_verified_payload_text, write_private_file,
+};
+pub use filesystem_authority::{
+    PayloadStreamError, VerifiedPayloadAuthority, VerifiedPayloadStream,
 };
 pub use filesystem_authority::{ensure_contained, existing_payload_dir, existing_payload_dir_opt};
 pub use rollback::PayloadFileRollback;
@@ -343,6 +345,40 @@ pub fn read_verified_payload_content_with_checkpoint(
     .ok_or(LcmError::PayloadMissing)?;
     checkpoint()?;
     Ok(content)
+}
+
+/// Opens the payload behind `payload_ref` and proves its content hash, byte
+/// count, and character count through one handle by reading it once through
+/// `window`, without materializing the payload. The returned stream re-reads
+/// that same proven handle in window-sized pieces; see
+/// [`VerifiedPayloadStream::emit`]. `checkpoint` runs before every read so the
+/// consumer's cancellation, deadline, or budget interrupts the proof between
+/// windows and comes back as [`PayloadStreamError::Consumer`].
+pub fn open_verified_payload_stream<E>(
+    storage_root: &Path,
+    payload_ref: &str,
+    content_hash: &str,
+    byte_count: usize,
+    char_count: usize,
+    window: &mut [u8],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<VerifiedPayloadStream, PayloadStreamError<E>> {
+    checkpoint().map_err(PayloadStreamError::Consumer)?;
+    validate_payload_ref(payload_ref)?;
+    let dir = existing_payload_dir(storage_root)?;
+    let path = dir.join(payload_ref);
+    ensure_contained(&dir, &path)?;
+    let byte_count = u64::try_from(byte_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let char_count = u64::try_from(char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    VerifiedPayloadStream::open(
+        &path,
+        content_hash,
+        byte_count,
+        char_count,
+        window,
+        checkpoint,
+    )?
+    .ok_or(PayloadStreamError::Payload(LcmError::PayloadMissing))
 }
 
 async fn validate_expand_payload_owner(

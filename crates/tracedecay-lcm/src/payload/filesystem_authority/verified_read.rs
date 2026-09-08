@@ -166,19 +166,43 @@ fn scan_utf8_content(
     checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
 ) -> Result<(String, u64), LcmError> {
     checkpoint()?;
-    let mut hasher = sha2::Sha256::new();
-    let mut char_count = 0_u64;
-    let mut utf8 = Utf8State::default();
+    let mut scanner = ContentScanner::default();
     for chunk in content.chunks(64 * 1024) {
         checkpoint()?;
-        hasher.update(chunk);
-        char_count = char_count
-            .checked_add(utf8.validate(chunk)?)
-            .ok_or(LcmError::PayloadIntegrityMismatch)?;
+        scanner.update(chunk)?;
     }
-    utf8.finish()?;
     checkpoint()?;
-    Ok((encode_lowercase_hex(&hasher.finalize()), char_count))
+    scanner.finish()
+}
+
+/// Incremental content proof: SHA-256 plus UTF-8 validity and scalar count
+/// over bytes fed in any window sizes, so a payload can be proven without
+/// holding more than one window at a time.
+#[derive(Default)]
+pub(super) struct ContentScanner {
+    hasher: sha2::Sha256,
+    utf8: Utf8State,
+    char_count: u64,
+}
+
+impl ContentScanner {
+    pub(super) fn update(&mut self, chunk: &[u8]) -> Result<(), LcmError> {
+        self.hasher.update(chunk);
+        self.char_count = self
+            .char_count
+            .checked_add(self.utf8.validate(chunk)?)
+            .ok_or(LcmError::PayloadIntegrityMismatch)?;
+        Ok(())
+    }
+
+    /// Lowercase hex SHA-256 and UTF-8 scalar count of everything fed so far.
+    pub(super) fn finish(self) -> Result<(String, u64), LcmError> {
+        self.utf8.finish()?;
+        Ok((
+            encode_lowercase_hex(&self.hasher.finalize()),
+            self.char_count,
+        ))
+    }
 }
 
 #[derive(Default)]
