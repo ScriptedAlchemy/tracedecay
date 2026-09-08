@@ -4,12 +4,12 @@ use tracedecay_sdk::operations::{
 };
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
-    application, domain, operation, remote, work, workflow,
+    contracts, domain, operation, remote, work, workflow,
 };
 
 #[test]
 fn canonical_contracts_are_available_without_sdk_copies() {
-    fn accepts_application_envelope<T>(_: Option<application::ApplicationEnvelope<T>>) {}
+    fn accepts_application_envelope<T>(_: Option<contracts::ApplicationEnvelope<T>>) {}
     fn accepts_api_envelope<T>(_: Option<api::HttpJsonEnvelope<T>>) {}
     fn accepts_domain_identity(_: Option<domain::RepositoryId>) {}
     fn accepts_operation_metadata(_: Option<operation::CapabilityManifestV1>) {}
@@ -24,19 +24,19 @@ fn canonical_contracts_are_available_without_sdk_copies() {
     accepts_remote_response::<serde_json::Value>(None);
 
     let _: operation::ReceiptContract = operation::ReceiptContract::Operation;
-    let _: Option<application::ApplicationOperation> = None;
+    let _: Option<contracts::ApplicationOperation> = None;
 }
 
 #[test]
 fn cancellation_types_are_the_canonical_application_types() {
     let signal = CancellationSignal::active("cancel.sdk.facade").expect("cancellation signal");
-    let canonical_signal: application::CancellationSignal = signal.clone();
+    let canonical_signal: contracts::CancellationSignal = signal.clone();
     let _: CancellationSignal = canonical_signal;
 
     assert!(signal.cancel(domain::UtcMicros(41)));
     let context: CancellationContext = signal.context();
     let token: CancellationTokenId = context.token_id.clone();
-    let _: application::CancellationTokenId = token;
+    let _: contracts::CancellationTokenId = token;
     assert!(matches!(
         context.state,
         CancellationState::Cancelled {
@@ -142,13 +142,13 @@ fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
 
 #[test]
 fn configuration_family_is_http_mounted_and_not_generated_as_unavailable() {
-    let registry = application::sdk_executable_binding_registry().expect("canonical SDK registry");
+    let registry = contracts::sdk_executable_binding_registry().expect("canonical SDK registry");
     let unavailable = UNAVAILABLE_OPERATIONS
         .iter()
         .map(|operation| operation.operation_id)
         .collect::<std::collections::BTreeSet<_>>();
 
-    for operation in application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for operation in contracts::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
         let operation_id = format!("operation.application.{operation}");
         let binding = registry
             .get(&operation::OperationId::new(operation_id.clone()).expect("operation ID"))
@@ -169,7 +169,7 @@ fn configuration_family_is_http_mounted_and_not_generated_as_unavailable() {
 
 #[test]
 fn generated_unavailable_operations_match_the_canonical_sdk_registry() {
-    let registry = application::sdk_executable_binding_registry().expect("canonical SDK registry");
+    let registry = contracts::sdk_executable_binding_registry().expect("canonical SDK registry");
     let expected = registry
         .iter()
         .filter_map(|availability| match availability {
@@ -205,15 +205,15 @@ fn generated_unavailable_operations_match_the_canonical_sdk_registry() {
 
 #[test]
 fn canonical_problem_envelope_serializes_verbatim() {
-    let envelope = application::ApplicationProblemEnvelope::new(
-        application::ResultContractRef::new(
+    let envelope = contracts::ApplicationProblemEnvelope::new(
+        contracts::ResultContractRef::new(
             operation::SchemaId::new("schema.sdk.problem").expect("schema id"),
             1,
         )
         .expect("result contract"),
-        application::RequestId::new("request.sdk.problem").expect("request id"),
-        application::ApplicationProblem::unavailable(
-            application::SafeDiagnostic::new(
+        contracts::RequestId::new("request.sdk.problem").expect("request id"),
+        contracts::ApplicationProblem::unavailable(
+            contracts::SafeDiagnostic::new(
                 "sdk.test_unavailable",
                 "The requested operation is unavailable",
             )
@@ -238,11 +238,11 @@ fn canonical_problem_envelope_serializes_verbatim() {
 
 #[test]
 fn canonical_operation_receipt_round_trips() {
-    let receipt = application::OperationReceipt::completed(
+    let receipt = contracts::OperationReceipt::completed(
         domain::UtcMicros(10),
         domain::UtcMicros(20),
-        application::Deadline::new(domain::UtcMicros(30)).expect("deadline"),
-        application::OperationBudgetUsage {
+        contracts::Deadline::new(domain::UtcMicros(30)).expect("deadline"),
+        contracts::OperationBudgetUsage {
             units_consumed: 2,
             bytes_consumed: 64,
             elapsed_micros: 10,
@@ -267,17 +267,17 @@ fn canonical_operation_receipt_round_trips() {
         })
     );
 
-    let decoded: application::OperationReceipt =
+    let decoded: contracts::OperationReceipt =
         serde_json::from_value(value).expect("deserialize receipt");
     assert_eq!(decoded, receipt);
 
     let canonical: tracedecay_contracts::OperationReceipt = decoded;
-    let _: application::OperationReceipt = canonical;
+    let _: contracts::OperationReceipt = canonical;
 }
 
 #[test]
 fn application_git_status_descriptor_matches_the_mounted_http_binding() {
-    let registry = application::sdk_executable_binding_registry().expect("SDK registry");
+    let registry = contracts::sdk_executable_binding_registry().expect("SDK registry");
     let binding = registry
         .get(&operation::OperationId::new(ApplicationGitStatus::OPERATION_ID).unwrap())
         .and_then(|availability| availability.binding())

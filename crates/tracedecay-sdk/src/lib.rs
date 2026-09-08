@@ -12,7 +12,7 @@ mod semantic;
 /// Canonical HTTP/SSE presentation contracts.
 pub use tracedecay_api as api;
 /// Canonical transport-neutral use-case contracts, ports, and results.
-pub use tracedecay_contracts as application;
+pub use tracedecay_contracts as contracts;
 /// Canonical transport-neutral remote authority, protocol, and outcome contracts.
 pub use tracedecay_contracts::remote;
 /// Canonical cancellation observations, identity, and process-local signal.

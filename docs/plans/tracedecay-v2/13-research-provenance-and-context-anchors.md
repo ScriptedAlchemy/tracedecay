@@ -34,7 +34,7 @@ contract, dispositions and safe tombstones, and the atomic evidence-assembly sto
 implemented across `crates/tracedecay-domain/src/research/`,
 `crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`,
 `crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`,
-`crates/tracedecay-application/src/evidence_assembly.rs`, and `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs`.
+and `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs`.
 Per-section verdicts follow.
 
 **Status split (2026-07-26, closed 2026-07-29).** The core above is delivered
@@ -597,9 +597,9 @@ projection)` keeps the two receipt roles distinct; `RetrievalAnchorTargetV3` add
 three exact targets and the `derive_exact_*` functions mint `retrieval.v3.sha256:` IDs
 (`crates/tracedecay-store/src/evidence_assembly.rs`,
 `crates/tracedecay-domain/src/research/anchor.rs`). An application-layer mirror
-(`SourceOccurrenceRecord`/`CanonicalSourceOccurrenceSet`/`EvidenceSpanRecord`) lives in
-`crates/tracedecay-application/src/evidence_assembly.rs`. The plan's `PublishEvidenceAssembly::execute` is
-realized as the store trait method `EvidenceAssemblyStore::publish_or_replay`.
+no longer exists; `EvidenceSourceOccurrenceRecordV1`,
+`CanonicalSourceOccurrenceSetRecordV1`, `EvidenceSpanRecordV1`, and
+`EvidenceAssemblyWriteV1` are owned by `crates/tracedecay-store/src/evidence_assembly.rs`.
 
 ## Retriever-contribution evidence
 

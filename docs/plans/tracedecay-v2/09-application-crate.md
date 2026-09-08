@@ -25,14 +25,14 @@ application context remains application/surface work, not a frontend
 
 (Update 2026-08-07: converged. The legacy root model no longer competes:
 `src/application/context.rs` does not exist, relocated into the usecases crate
-by `refactor(usecases): move src/application into tracedecay-application`
+by `refactor(usecases): move src/application into tracedecay-usecases`
 (8946d412f5) and since reshaped into the session-identity type that *maps into*
 the application scope rather than carrying a rival context. Exactly one
 `RequestContext` is defined repo-wide — the scope-carrying one at
 `crates/tracedecay-contracts/src/context.rs:429`, whose
 `scope: ResolvedScope` is a required field. Scope resolution is
 fail-closed on profile identity:
-`crates/tracedecay-application/src/context/mod.rs:182` (`application_scope`)
+`crates/tracedecay-session-memory/src/context/mod.rs:182` (`application_scope`)
 returns `ApplicationScopeError::ProfileIdentityWithoutProject` rather than
 fabricating project/repository/worktree fields from a path or the CWD, and
 `:217` (`session_request_scope`) resolves profile-owned session requests only
