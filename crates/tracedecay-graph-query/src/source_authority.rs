@@ -19,7 +19,7 @@ use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_runtime_core::db::Database;
 
 use super::CodeGraphReadError;
-use crate::SourceReadRuntimePort;
+use crate::SourceReadContext;
 
 /// Inputs handed to the source authority when one admitted graph query binds
 /// its exact project source. The context is the admitted context returned by
@@ -32,7 +32,7 @@ pub struct CodeGraphSourceBindRequest<'a> {
 
 pub type CodeGraphSourceBindFuture<'a> = Pin<
     Box<
-        dyn Future<Output = std::result::Result<Arc<dyn SourceReadRuntimePort>, CodeGraphReadError>>
+        dyn Future<Output = std::result::Result<SourceReadContext, CodeGraphReadError>>
             + Send
             + 'a,
     >,
@@ -77,15 +77,15 @@ impl AdmittedSourceAuthority {
     /// runtime surface is consulted.
     pub(crate) fn capture(
         context: &RequestContext,
-        runtime: &dyn SourceReadRuntimePort,
+        source: SourceReadContext,
     ) -> Result<Self> {
-        if runtime.project_id() != context.scope().project_id.as_str() {
+        if source.project_id() != context.scope().project_id.as_str() {
             return Err(graph_source_scope_mismatch());
         }
         Ok(Self {
-            project_root: runtime.project_root().to_path_buf(),
-            db: runtime.db().clone(),
-            read_only: runtime.is_read_only(),
+            project_root: source.project_root,
+            db: source.db,
+            read_only: source.read_only,
             project_id: context.scope().project_id.clone(),
         })
     }

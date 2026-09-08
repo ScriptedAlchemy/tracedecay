@@ -513,7 +513,7 @@ impl ComposedCoreServer {
                 crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
                     Arc::clone(&code_index.graph_read_admission_port),
                     Arc::clone(&code_index.graph_projection_read_port),
-                    Some(Arc::clone(cg) as Arc<dyn tracedecay_graph_query::SourceReadRuntimePort>),
+                    cg.source_read_context(),
                 ),
             )
             .with_code_index_search_authority(code_index.search_authority.clone())
