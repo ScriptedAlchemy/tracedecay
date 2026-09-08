@@ -230,7 +230,7 @@ fn immutable_cursor_ledger_disagreements_are_permanent_and_bounded() {
 #[test]
 fn transcript_privacy_and_non_durable_failures_are_bounded_and_permanent() {
     let privacy = source::TranscriptIngestError::Privacy(
-        tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,
+        tracedecay_privacy::PrivacySanitizerError::InvalidPolicy,
     );
     let privacy = classify_transcript_ingest_failure("claude", "hook", &privacy);
     assert_eq!(privacy.reason_code, "transcript_privacy_rejected");

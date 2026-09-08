@@ -33,10 +33,10 @@ use tracedecay_domain::{
     ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2, UtcMicros,
 };
+use tracedecay_privacy::sanitize_provider_metadata_text;
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::publish_fact_feedback_finding_tx;
-use tracedecay_runtime_core::privacy::sanitize_provider_metadata_text;
 use tracedecay_store::{
     FactCommitOutcome, FactLineageCursor, FactLineageQuery, FactReadControl, FactStoreError,
     FactStoreResult, FactWriteBatch, ProjectMemoryAutomaticFactApplyDispositionV1,

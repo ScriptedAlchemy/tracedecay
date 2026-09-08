@@ -34,11 +34,11 @@ use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
     try_stream_new_jsonl_raw_strict_with_resume,
 };
-use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
     prepare_observation_record_v1,
 };
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
 };

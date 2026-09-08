@@ -198,10 +198,9 @@ mod tests {
             source_label,
         )
         .expect("legacy payload reference");
-        let sanitizer_version = ComponentVersion::new(
-            tracedecay_runtime_core::privacy::MEMORY_FACT_SANITIZER_VERSION_V1,
-        )
-        .expect("pinned detector revision");
+        let sanitizer_version =
+            ComponentVersion::new(tracedecay_privacy::MEMORY_FACT_SANITIZER_VERSION_V1)
+                .expect("pinned detector revision");
         let receipt = SanitizationReceiptV1::new(
             SanitizationReceiptRefV1::new(
                 legacy_receipt_id(

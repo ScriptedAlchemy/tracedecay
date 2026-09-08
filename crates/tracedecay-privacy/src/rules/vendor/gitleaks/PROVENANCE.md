@@ -2,7 +2,7 @@
 
 TraceDecay's secret detector no longer carries a hand-curated list of provider
 token shapes. The provider catalogue below is vendored from the gitleaks
-project and read by `crates/tracedecay-runtime-core/src/privacy/rules.rs`.
+project and read by `crates/tracedecay-privacy/src/rules.rs`.
 
 ## Source
 
@@ -85,7 +85,7 @@ ruleset bump changes what leaves the process, so it wants a human and a diff.
 1. Fetch the two files afresh, overwriting in place:
 
    ```sh
-   cd crates/tracedecay-runtime-core/src/privacy/rules/vendor/gitleaks
+   cd crates/tracedecay-privacy/src/rules/vendor/gitleaks
    curl -fsSL -o gitleaks.toml \
      https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml
    curl -fsSL -o LICENSE \
@@ -110,8 +110,8 @@ ruleset bump changes what leaves the process, so it wants a human and a diff.
    typed `CredentialRuleSetError::Regex` naming the rule id.
 
    ```sh
-   cargo test -p tracedecay-runtime-core --lib privacy
-   cargo test -p tracedecay-runtime-core --lib memory::hygiene
+   cargo test -p tracedecay-privacy --lib
+   cargo test -p tracedecay-session-memory --lib memory::hygiene
    ```
 
 6. Commit the data refresh on its own, separately from any engine change.

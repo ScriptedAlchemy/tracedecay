@@ -2090,9 +2090,7 @@ mod authority_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tracedecay_domain::{Confidence, FactCategoryV1, ProvenanceId};
-    use tracedecay_runtime_core::privacy::{
-        MemoryFactSanitizationV1, sanitize_memory_fact_payload,
-    };
+    use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
     use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_store::{
         FactWriteControl, ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,

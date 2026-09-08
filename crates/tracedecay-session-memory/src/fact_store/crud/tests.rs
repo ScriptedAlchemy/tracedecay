@@ -7,9 +7,9 @@ use tracedecay_domain::{
     Confidence, DomainError, FactCategoryV1, FactEventId, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, LocatorDigest, ProvenanceId, UtcMicros,
 };
+use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_store::{
     FactReadControl, FactStore, FactStoreError, FactWriteBatch, ProjectMemoryFactAddCommandV1,
     ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,

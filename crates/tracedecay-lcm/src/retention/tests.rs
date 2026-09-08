@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crate::{LcmSourceRef, dag, schema};
 use tracedecay_domain::HydrationStateV1;
+use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, IntoParams, QueryExecutor, TestConnection, params,
 };
-use tracedecay_runtime_core::privacy::sanitize_lcm_payload_text;
 
 use super::*;
 

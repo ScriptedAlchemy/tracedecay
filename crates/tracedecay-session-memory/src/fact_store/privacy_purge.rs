@@ -1,11 +1,11 @@
 //! Canonical at-rest purge authority for superseded assertion payloads.
 
 use tracedecay_domain::{FactAssertionId, FactAssertionV1, FactId, FactOwnerV1, FactPayloadV1};
-use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::engine::params;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1, sanitize_memory_fact_payload,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_PRIVACY_PURGE_PAYLOADS,
     ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,

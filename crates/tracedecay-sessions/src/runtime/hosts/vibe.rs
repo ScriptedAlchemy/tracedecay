@@ -43,9 +43,7 @@ use crate::runtime::source::{
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     path_byte_len, run_blocking_transcript_section, stream_new_jsonl,
 };
-use tracedecay_runtime_core::privacy::{
-    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 
 const PROVIDER: &str = "vibe";
 const MAX_SCAN_DEPTH: u8 = 4;

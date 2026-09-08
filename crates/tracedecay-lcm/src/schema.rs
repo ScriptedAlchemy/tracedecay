@@ -611,8 +611,8 @@ pub async fn load_raw_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_privacy::sanitize_lcm_payload_text;
     use tracedecay_runtime_core::db::engine::TestConnection;
-    use tracedecay_runtime_core::privacy::sanitize_lcm_payload_text;
 
     async fn lcm_reader_test_connection() -> Result<(tempfile::TempDir, TestConnection), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;

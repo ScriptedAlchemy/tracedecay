@@ -20,11 +20,11 @@ use tracedecay_domain::{
     FactOwnerV1, FactPayloadV1, PayloadAccessState, ProvenanceId, RetentionClass,
     SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros,
 };
-use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::engine::params;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, verify_memory_fact_sanitization,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactLineageQuery, FactReadControl, FactStoreError,
     FactStoreResult, FactWriteBatch, ProjectMemoryFactContentDigestQueryV1,

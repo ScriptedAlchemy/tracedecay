@@ -50,32 +50,27 @@ struct HostReceiptState {
 }
 
 fn protect_route_structural_ids(mut route: HookRouteMetadata) -> Result<HookRouteMetadata> {
-    route.session_id = tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
-        route.session_id.as_deref(),
-    )
-    .map_err(|_| config_error("invalid host receipt route identity"))?;
-    route.thread_id = tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
-        route.thread_id.as_deref(),
-    )
-    .map_err(|_| config_error("invalid host receipt route identity"))?;
+    route.session_id =
+        tracedecay_privacy::protect_optional_sensitive_structural_id(route.session_id.as_deref())
+            .map_err(|_| config_error("invalid host receipt route identity"))?;
+    route.thread_id =
+        tracedecay_privacy::protect_optional_sensitive_structural_id(route.thread_id.as_deref())
+            .map_err(|_| config_error("invalid host receipt route identity"))?;
     Ok(route)
 }
 
 fn protect_receipt_structural_ids(mut receipt: HookTerminalReceipt) -> Result<HookTerminalReceipt> {
-    receipt.tool_call_id =
-        tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
-            receipt.tool_call_id.as_deref(),
-        )
-        .map_err(|_| config_error("invalid host receipt identity"))?;
-    receipt.turn_id = tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
-        receipt.turn_id.as_deref(),
+    receipt.tool_call_id = tracedecay_privacy::protect_optional_sensitive_structural_id(
+        receipt.tool_call_id.as_deref(),
     )
     .map_err(|_| config_error("invalid host receipt identity"))?;
-    receipt.transcript_watermark =
-        tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(
-            receipt.transcript_watermark.as_deref(),
-        )
-        .map_err(|_| config_error("invalid host receipt identity"))?;
+    receipt.turn_id =
+        tracedecay_privacy::protect_optional_sensitive_structural_id(receipt.turn_id.as_deref())
+            .map_err(|_| config_error("invalid host receipt identity"))?;
+    receipt.transcript_watermark = tracedecay_privacy::protect_optional_sensitive_structural_id(
+        receipt.transcript_watermark.as_deref(),
+    )
+    .map_err(|_| config_error("invalid host receipt identity"))?;
     Ok(receipt)
 }
 
@@ -187,9 +182,8 @@ pub async fn mark_turn_ingested(
 ) -> Result<()> {
     let root = dashboard_root.to_path_buf();
     let route = route.map(protect_route_structural_ids).transpose()?;
-    let watermark =
-        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(transcript_watermark)
-            .map_err(|_| config_error("invalid host receipt watermark"))?;
+    let watermark = tracedecay_privacy::protect_sensitive_structural_id(transcript_watermark)
+        .map_err(|_| config_error("invalid host receipt watermark"))?;
     tokio::task::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
@@ -324,8 +318,7 @@ mod tests {
     async fn credential_canary_receipt_join_survives_state_reopen() {
         let tmp = tempfile::tempdir().unwrap();
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "5"].concat();
-        let protected =
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let protected = tracedecay_privacy::protect_sensitive_structural_id(&raw).unwrap();
         let route = Some(pending_route(&raw));
         let mut terminal = receipt(&raw);
         terminal.turn_id = Some(raw.clone());

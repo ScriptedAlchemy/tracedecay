@@ -11,7 +11,7 @@
 //! executes a scanner binary or touches the network.
 
 use tracedecay_domain::Confidence;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1, sanitize_memory_fact_payload,
 };
 use tracedecay_store::{

@@ -55,7 +55,7 @@ use serde_json::{Map, Value};
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 
 mod observation;
 pub use observation::KiroSnapshotObservationRecord;

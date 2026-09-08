@@ -51,7 +51,7 @@ use tracedecay_domain::{
     ClineTranscriptStream, ObservationScopeV1, ObservationSourceGenerationV1, ProviderId, SessionId,
 };
 #[cfg(test)]
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 
 mod observation;
 pub use observation::ClineLikeSnapshotObservationRecord;

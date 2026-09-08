@@ -197,7 +197,7 @@ pub enum TranscriptIngestError {
     #[error("transcript changed generation while scanning {path}")]
     ScanGenerationChanged { path: PathBuf },
     #[error(transparent)]
-    Privacy(#[from] tracedecay_runtime_core::privacy::PrivacySanitizerError),
+    Privacy(#[from] tracedecay_privacy::PrivacySanitizerError),
     #[error(transparent)]
     Domain(#[from] tracedecay_domain::DomainError),
     #[error(transparent)]
@@ -803,11 +803,9 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
 
 fn protect_parsed_transcript_structural_ids(
     parsed: &mut ParsedTranscript,
-) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
-    fn protect(
-        value: &mut String,
-    ) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
-        *value = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value)?;
+) -> Result<(), tracedecay_privacy::PrivacySanitizerError> {
+    fn protect(value: &mut String) -> Result<(), tracedecay_privacy::PrivacySanitizerError> {
+        *value = tracedecay_privacy::protect_sensitive_structural_id(value)?;
         Ok(())
     }
 

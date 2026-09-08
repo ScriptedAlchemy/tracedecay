@@ -574,7 +574,7 @@ pub(crate) mod test_support {
     use std::sync::{Arc, Mutex};
 
     use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationIdV1};
-    use tracedecay_runtime_core::privacy::RecordSanitizerV1;
+    use tracedecay_privacy::RecordSanitizerV1;
     use tracedecay_store::observation::{
         ObservationPersistOutcome, ObservationStoreError, ObservationStoreResult,
     };

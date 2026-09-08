@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use tracedecay_runtime_core::privacy::detector_kernel::{
+use tracedecay_privacy::detector_kernel::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
     compile_credential_patterns, looks_high_entropy_token,
 };

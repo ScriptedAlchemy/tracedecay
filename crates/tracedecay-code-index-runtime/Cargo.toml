@@ -27,6 +27,7 @@ hotpath = [
     "tracedecay-graph-db/hotpath",
     "tracedecay-policy/hotpath",
     "tracedecay-private-fs/hotpath",
+    "tracedecay-privacy/hotpath",
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-search-eval/hotpath",
@@ -51,6 +52,7 @@ hotpath-alloc = [
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-policy/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-privacy/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
@@ -75,6 +77,7 @@ hotpath-cpu = [
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-policy/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-privacy/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
@@ -146,6 +149,7 @@ tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }

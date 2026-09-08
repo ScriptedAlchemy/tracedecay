@@ -1,8 +1,17 @@
 //! Mandatory privacy boundary for V2 observation capture.
 //!
-//! Provider adapters hand complete records to this module before any durable
+//! Provider adapters hand complete records to this crate before any durable
 //! or externally visible sink. Only [`ObservationSanitizationOutcomeV1::Durable`]
 //! carries payload bytes.
+//!
+//! This crate is the single owner of credential detection, record and payload
+//! sanitization, and protected structural identifiers. It sits directly above
+//! `tracedecay-domain` and `tracedecay-capture` so every store, session, and
+//! host layer can sanitize through it without a dependency on the runtime
+//! kernel.
+
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
 
 mod assessment;
 mod detect;

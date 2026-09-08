@@ -16,7 +16,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::observation::{CaptureObservationRequest, ObservationCancellation};
 use crate::runtime::shared::path_belongs_to_project;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     parse_normalized_observation_record_v1,
 };

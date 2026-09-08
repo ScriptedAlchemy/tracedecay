@@ -16,7 +16,7 @@ use tracedecay_code_index::production::{
 };
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1, canonical_sha256};
-use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
+use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 use super::{
     CapturedSnapshotV1, CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1,

@@ -96,7 +96,7 @@ where
 {
     let provider = record.provider();
     let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         record.payload(),
         range,
         ObservationOrderingDomainV1::SnapshotOrder,

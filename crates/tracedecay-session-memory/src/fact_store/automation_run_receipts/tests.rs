@@ -21,8 +21,8 @@ use crate::fact_store::automatic_facts::{
     project_memory_record_automatic_fact_operation_tx,
     project_memory_record_automatic_fact_receipt_tx,
 };
+use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 
 use super::*;
 

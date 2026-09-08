@@ -26,9 +26,9 @@ use crate::fact_store::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, row_optional_string, row_string,
 };
 use crate::fact_store::{DatabaseFactStore, FactWriteControl};
+use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 
 use super::apply::{apply_project_memory_fact_curation_tx, curation_receipt_from_value};
 

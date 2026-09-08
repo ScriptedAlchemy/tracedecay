@@ -38,9 +38,7 @@ use crate::runtime::source::{
     JsonlResumeState, MAX_JSONL_RECORD_BYTES, TranscriptIngestError, TranscriptIngestResult,
     try_stream_new_jsonl_raw_strict_with_resume,
 };
-use tracedecay_runtime_core::privacy::{
-    ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
 #[cfg(test)]

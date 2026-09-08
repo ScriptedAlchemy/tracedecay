@@ -19,9 +19,9 @@ use tracedecay_store::{
 
 use crate::fact_store::primitives::{OwnerKey, row_string};
 use crate::fact_store::{DatabaseFactStore, FactWriteControl};
+use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 
 struct Fixture {
     database: Database,

@@ -13,7 +13,7 @@ use crate::runtime::source::{
     JsonlFrameDeferral, ParsedTranscript, SessionDraft, TranscriptIngestError,
     TranscriptIngestResult,
 };
-use tracedecay_runtime_core::privacy::{ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1};
+use tracedecay_privacy::{ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1};
 
 use super::cursor::claude_cursor_key;
 use super::frames::{

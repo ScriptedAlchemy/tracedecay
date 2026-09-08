@@ -37,11 +37,11 @@ use tracedecay_store::{
 use crate::fact_store::automatic_facts::project_memory_record_automatic_fact_receipt_tx;
 use crate::fact_store::crud::{initial_batch, sanitize_payload};
 use crate::fact_store::{DatabaseFactStore, ProjectMemoryGraphReconciliationScheduleV1};
+use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, MemoryGraphReconciliationCancelErrorV1,
     ProjectMemoryReconciliationTelemetryObserverV1, TestDatabaseRuntimeMode,
 };
-use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 struct RecordingGraphRuntime {

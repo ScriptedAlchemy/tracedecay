@@ -21,7 +21,7 @@ use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
 use crate::runtime::source::TranscriptIngestError;
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 
 use super::PROVIDER;
 
