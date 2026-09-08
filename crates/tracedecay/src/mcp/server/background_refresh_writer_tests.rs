@@ -16,7 +16,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
     let probed = Arc::new(AtomicUsize::new(0));
     let reconcile_sink: super::CodeIndexReconcileSink = {
         let forced = Arc::clone(&forced);
-        Arc::new(move |_root| {
+        Arc::new(move |_root, _demand| {
             let forced = Arc::clone(&forced);
             Box::pin(async move {
                 forced.fetch_add(1, Ordering::AcqRel);

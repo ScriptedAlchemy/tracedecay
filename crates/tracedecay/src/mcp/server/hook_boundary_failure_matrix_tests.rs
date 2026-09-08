@@ -53,11 +53,11 @@ async fn server_without_broker(
 }
 
 fn failing_reconcile_sink() -> CodeIndexReconcileSink {
-    Arc::new(|_request: PathBuf| Box::pin(async { false }))
+    Arc::new(|_request: PathBuf, _demand| Box::pin(async { false }))
 }
 
 fn counting_success_reconcile_sink(attempts: Arc<Mutex<usize>>) -> CodeIndexReconcileSink {
-    Arc::new(move |_request: PathBuf| {
+    Arc::new(move |_request: PathBuf, _demand| {
         let attempts = Arc::clone(&attempts);
         Box::pin(async move {
             *attempts.lock().unwrap() += 1;
@@ -199,7 +199,7 @@ async fn matrix_daemon_unavailable_without_broker_skips_reconcile_and_frontier()
     let attempted = Arc::new(Mutex::new(false));
     let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request: PathBuf| {
+        Arc::new(move |_request: PathBuf, _demand| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() = true;
@@ -240,7 +240,7 @@ async fn matrix_backpressure_overflow_rejects_before_reconcile_without_pending_g
     let attempted = Arc::new(Mutex::new(0usize));
     let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request: PathBuf| {
+        Arc::new(move |_request: PathBuf, _demand| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() += 1;

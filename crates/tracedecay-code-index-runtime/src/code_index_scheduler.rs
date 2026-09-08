@@ -5679,6 +5679,22 @@ impl SourceFreshnessFenceV1 {
     }
 }
 
+/// What the cheap Git/stat freshness ladder concluded about the retained
+/// owner's source. `Unverified` and `Moved` both require a reconcile, but only
+/// `Moved` is evidence: an owner no pass has verified yet has not been observed
+/// to change, so nothing may be minted from it as an observed source change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreshnessProbeVerdictV1 {
+    /// The last reconcile's proof still describes the live worktree.
+    Current,
+    /// No reconcile has verified this owner against source truth yet; the
+    /// worker's pending pass is the remedy.
+    Unverified,
+    /// Git metadata or the sealed-digest witness proves the worktree moved
+    /// since the last reconcile.
+    Moved,
+}
+
 pub struct CodeIndexWorktreeSchedulerV1 {
     project_id: ProjectId,
     project_root: PathBuf,
@@ -7869,6 +7885,45 @@ impl CodeIndexWorktreeSchedulerV1 {
         gix::open(&self.project_root).is_ok()
     }
 
+    /// Run the cheap Git/stat ladder — unverified restore, tier-1 git
+    /// metadata, tier-2 bounded staleness with the source witness — without
+    /// posting a worker wake.
+    ///
+    /// The ladder judges movement from source truth only: Git metadata and the
+    /// stat witness. It deliberately does not compare the cancellation epoch
+    /// against the last reconciled epoch — every epoch advance is paired with
+    /// its own worker wake (a hook hint, an overflow, an observed change), so
+    /// that pending pass is already the remedy. Treating a hint-advanced epoch
+    /// as movement here made a concurrent query escalate the targeted hint
+    /// pass into an overflow rescan and relabel the arrival as its own.
+    fn freshness_probe_verdict(&mut self) -> FreshnessProbeVerdictV1 {
+        let freshness = self.freshness_fence.snapshot();
+        if !freshness.verified_against_source {
+            return FreshnessProbeVerdictV1::Unverified;
+        }
+        if identity::GitMetadataFingerprintV1::capture(&self.project_root)
+            .differs_from(&freshness.git_metadata)
+        {
+            return FreshnessProbeVerdictV1::Moved;
+        }
+        if freshness.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+            return FreshnessProbeVerdictV1::Current;
+        }
+        if self.source_witness_matches_worktree(&freshness) {
+            self.freshness_fence.refresh_monotonic_clock(true);
+            return FreshnessProbeVerdictV1::Current;
+        }
+        FreshnessProbeVerdictV1::Moved
+    }
+
+    /// Decide whether the cheap Git/stat ladder requires an authoritative
+    /// reconcile, without posting a worker wake. Callers that own a separate
+    /// cadence authority use this split form so they can record the arrival
+    /// before making the worker runnable.
+    pub fn freshness_probe_requires_reconcile(&mut self) -> bool {
+        self.freshness_probe_verdict() != FreshnessProbeVerdictV1::Current
+    }
+
     /// [`Self::ensure_fresh_for_query`] with the O(store) rebuild moved off the
     /// request path.
     ///
@@ -7886,44 +7941,28 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// must answer `false` and wake nothing: the ladder suppressing work is the
     /// common case, and waking the worker on every read would turn each query
     /// into a rebuild trigger — exactly the coupling this change removes.
-    /// Decide whether the cheap Git/stat ladder requires an authoritative
-    /// reconcile, without posting a worker wake. Callers that own a separate
-    /// cadence authority use this split form so they can record the arrival
-    /// before making the worker runnable.
     ///
-    /// The ladder judges movement from source truth only: Git metadata and the
-    /// stat witness. It deliberately does not compare the cancellation epoch
-    /// against the last reconciled epoch — every epoch advance is paired with
-    /// its own worker wake (a hook hint, an overflow, an observed change), so
-    /// that pending pass is already the remedy. Treating a hint-advanced epoch
-    /// as movement here made a concurrent query escalate the targeted hint
-    /// pass into an overflow rescan and relabel the arrival as its own.
-    pub fn freshness_probe_requires_reconcile(&mut self) -> bool {
-        let freshness = self.freshness_fence.snapshot();
-        if !freshness.verified_against_source
-            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
-                .differs_from(&freshness.git_metadata)
-        {
-            return true;
-        }
-        if freshness.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
-            return false;
-        }
-        if self.source_witness_matches_worktree(&freshness) {
-            self.freshness_fence.refresh_monotonic_clock(true);
-            return false;
-        }
-        true
-    }
-
+    /// Only proven movement is recorded as an observed source change. An owner
+    /// nothing has verified yet — a fresh mount or restart whose first pass is
+    /// still pending — answers "not current" so the caller posts its plain
+    /// query-admission wake, but nothing was observed to move, so no overflow
+    /// hint, observed-change marker, or cancellation epoch is minted for it.
+    /// Fabricating that overflow made the restart's own verifying pass skip
+    /// the sealed-digest witness a quiet tree would have satisfied and fall
+    /// into the full sealed-generation replay the revision-7 verified-head
+    /// recovery exists to avoid.
     pub fn request_fresh_for_query_background(&mut self) -> bool {
-        if !self.freshness_probe_requires_reconcile() {
-            return false;
+        match self.freshness_probe_verdict() {
+            FreshnessProbeVerdictV1::Current => false,
+            FreshnessProbeVerdictV1::Unverified => true,
+            FreshnessProbeVerdictV1::Moved => {
+                // The ladder proved this worktree moved, so this is the wake
+                // that may advance the canonical change generation and
+                // supersede index work.
+                self.request_background_reconcile_for_observed_change();
+                true
+            }
         }
-        // The ladder proved this worktree moved, so this is the wake that may
-        // advance the canonical change generation and supersede index work.
-        self.request_background_reconcile_for_observed_change();
-        true
     }
 
     /// The exact identity this scheduler is currently bound to.

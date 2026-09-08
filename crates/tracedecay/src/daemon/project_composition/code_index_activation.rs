@@ -373,30 +373,41 @@ pub(super) fn code_index_hook_sink(
 /// worktree must be reconciled asks the activation owner for that pass instead
 /// of enumerating paths.
 ///
-/// This is the *explicit demand* channel — `tracedecay init` / `tracedecay
-/// sync` through `tracedecay_admin_sync`, and the hook effects that have
-/// concluded a full reconcile is required. It is therefore not subject to
-/// `CodeIndexAutomaticAdmissionV1`, which answers only "may the daemon start
-/// indexing this route on its own?" and is derived from
-/// `sync.watch_linked_worktrees` — a filesystem-watcher policy. Watch-driven
-/// hints keep that gate: they arrive through [`code_index_hook_sink`] and
-/// [`code_index_freshness_probe_sink`], which still call the automatic
-/// entry points.
+/// The caller names who is asking. `CodeIndexAutomaticAdmissionV1` answers
+/// only "may the daemon start indexing this route on its own?" — it is
+/// derived from `sync.watch_linked_worktrees`, a watcher policy — so every
+/// demand the daemon raises by itself (host lifecycle hooks, the server's
+/// startup catch-up, and the path hints that arrive through
+/// [`code_index_hook_sink`] and [`code_index_freshness_probe_sink`]) is
+/// `Automatic` and keeps that gate. Only `Explicit` demand — `tracedecay
+/// init` / `tracedecay sync` through `tracedecay_admin_sync` — skips the
+/// automatic-admission question for a route the operator named. Routing the
+/// daemon's own demands as explicit indexed every un-opted-in linked worktree
+/// moments after it opened and made the published
+/// `code_index=linked_worktree_disabled` state a lie.
 pub(super) fn code_index_reconcile_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexReconcileSink {
-    let sink: crate::mcp::server::CodeIndexReconcileSink = Arc::new(move |root: PathBuf| {
-        let schedulers = schedulers.clone();
-        let activation = Arc::clone(&activation);
-        Box::pin(async move {
-            if schedulers.notify_hook_overflow(&root).await {
-                true
-            } else {
-                activation.notify_explicit_reconciliation(&root).await
-            }
-        })
-    });
+    let sink: crate::mcp::server::CodeIndexReconcileSink = Arc::new(
+        move |root: PathBuf, demand: crate::mcp::server::CodeIndexReconcileDemandV1| {
+            let schedulers = schedulers.clone();
+            let activation = Arc::clone(&activation);
+            Box::pin(async move {
+                if schedulers.notify_hook_overflow(&root).await {
+                    return true;
+                }
+                match demand {
+                    crate::mcp::server::CodeIndexReconcileDemandV1::Automatic => {
+                        activation.notify_hook_overflow(&root).await
+                    }
+                    crate::mcp::server::CodeIndexReconcileDemandV1::Explicit => {
+                        activation.notify_explicit_reconciliation(&root).await
+                    }
+                }
+            })
+        },
+    );
     sink
 }
 
@@ -493,7 +504,11 @@ mod tests {
         let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
 
         assert!(
-            sink(root.clone()).await,
+            sink(
+                root.clone(),
+                crate::mcp::server::CodeIndexReconcileDemandV1::Explicit
+            )
+            .await,
             "a pre-mount reconcile request must be accepted, not dropped"
         );
 
@@ -561,8 +576,34 @@ mod tests {
 
         let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
         let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
+        // The daemon's own whole-worktree demands — a `workspaceOpen` /
+        // `sessionStart` hook effect, the server's startup catch-up — are
+        // automatic and must honour the same watch policy as a path hint:
+        // otherwise every un-opted-in linked worktree is indexed the moment
+        // its full server opens, and the typed `linked_worktree_disabled`
+        // admission the daemon publishes for it is false.
         assert!(
-            sink(root.clone()).await,
+            !sink(
+                root.clone(),
+                crate::mcp::server::CodeIndexReconcileDemandV1::Automatic
+            )
+            .await,
+            "an automatic whole-worktree demand must honour the linked-worktree watch policy"
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mount_attempts.load(Ordering::SeqCst),
+            0,
+            "a refused automatic demand must not start the demand-driven mount"
+        );
+        assert!(
+            sink(
+                root.clone(),
+                crate::mcp::server::CodeIndexReconcileDemandV1::Explicit
+            )
+            .await,
             "explicit reconcile demand must be accepted on a linked worktree"
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
