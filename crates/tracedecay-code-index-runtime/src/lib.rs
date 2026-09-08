@@ -77,8 +77,7 @@ pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
 pub use code_index_scheduler::identity::resolved_scope_for_project;
 pub use ports::{
     AdmissionParkLeaseV1, ApplicationCatalogSnapshotErrorV1, CONNECTION_ADMISSION,
-    GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1, PreparedQueryActivationViewV1,
-    park_admission,
+    GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1, PreparedQueryActivationViewV1, park_admission,
 };
 pub use semantic_evaluation_shutdown::{
     SemanticEvaluationShutdownJoinV1, SemanticEvaluationShutdownReceiptV1,

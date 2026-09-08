@@ -37,9 +37,8 @@ const GIT_POLICY_REVISION: u64 = 2;
 
 type ProfiledStdRwLock<T> = hotpath::rw_locks::RwLock<T>;
 type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
-type ApplicationCatalogComposer = Arc<
-    dyn Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> + Send + Sync,
->;
+type ApplicationCatalogComposer =
+    Arc<dyn Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct DaemonGitAuthorityStateV1 {
