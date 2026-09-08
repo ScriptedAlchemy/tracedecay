@@ -10,9 +10,9 @@ use rusqlite::Connection;
 use serde_json::Value;
 use serde_json::json;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use tracedecay::daemon::{DaemonHandshake, call_tool};
+use tracedecay::daemon::call_tool;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use tracedecay_daemon_protocol::DaemonClientIdentity;
+use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,

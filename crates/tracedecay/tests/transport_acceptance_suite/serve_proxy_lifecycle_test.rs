@@ -1,7 +1,8 @@
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tracedecay::daemon::{DaemonHandshake, proxy_transport_to_daemon};
+use tracedecay::daemon::proxy_transport_to_daemon;
+use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_mcp::transport::ChannelTransport;
 
 fn test_handshake(profile_root: &std::path::Path) -> DaemonHandshake {

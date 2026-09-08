@@ -4,7 +4,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay::daemon::{DaemonHandshake, call_default_tool};
+use tracedecay::daemon::call_default_tool;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 fn initialize_project(home: &Path, project: &Path, marker: &str) {
     std::fs::create_dir_all(project.join("src")).expect("project source directory");

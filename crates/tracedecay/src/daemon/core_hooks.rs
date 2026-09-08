@@ -13,9 +13,9 @@ use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEven
 #[cfg(unix)]
 use tracedecay_daemon_identity::connection_for_socket_path;
 use tracedecay_daemon_identity::{DaemonConnection, current_daemon_connection};
-
 #[cfg(unix)]
-use super::SOCKET_ENV;
+use tracedecay_daemon_protocol::SOCKET_ENV;
+
 use super::{BrokerStream, JsonRpcRequest, write_daemon_preamble};
 
 pub(crate) const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);

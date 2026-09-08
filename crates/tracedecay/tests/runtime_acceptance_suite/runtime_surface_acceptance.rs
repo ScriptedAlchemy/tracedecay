@@ -20,7 +20,7 @@ use tracedecay::application_surface::{
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay::daemon::{DaemonHandshake, call_default_tool};
+use tracedecay::daemon::call_default_tool;
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
 use tracedecay_application::feedback::{
@@ -37,7 +37,8 @@ use tracedecay_application::{
     OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_daemon_protocol::{
-    DaemonInvocationClient, DaemonLspSessionClient, FramePoll, FrameSend, RequestedOutputFormat,
+    DaemonHandshake, DaemonInvocationClient, DaemonLspSessionClient, FramePoll, FrameSend,
+    RequestedOutputFormat,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,

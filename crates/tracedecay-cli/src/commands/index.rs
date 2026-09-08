@@ -324,9 +324,9 @@ mod init_bootstrap_tests {
 
     impl SocketEnvGuard {
         fn set(value: &Path) -> Self {
-            let previous = std::env::var_os(tracedecay::daemon::SOCKET_ENV);
+            let previous = std::env::var_os(tracedecay_daemon_protocol::SOCKET_ENV);
             unsafe {
-                std::env::set_var(tracedecay::daemon::SOCKET_ENV, value);
+                std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, value);
             }
             Self { previous }
         }
@@ -337,9 +337,9 @@ mod init_bootstrap_tests {
             unsafe {
                 match self.previous.take() {
                     Some(previous) => {
-                        std::env::set_var(tracedecay::daemon::SOCKET_ENV, previous);
+                        std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, previous);
                     }
-                    None => std::env::remove_var(tracedecay::daemon::SOCKET_ENV),
+                    None => std::env::remove_var(tracedecay_daemon_protocol::SOCKET_ENV),
                 }
             }
         }

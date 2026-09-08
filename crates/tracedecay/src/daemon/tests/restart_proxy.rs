@@ -314,7 +314,7 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_CONNECT_DOWN, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_CONNECT_DOWN, true)),
         "missing socket after grace must be typed daemon_connect_down, got: {message}"
     );
     assert!(
@@ -344,7 +344,7 @@ async fn client_deadline_run_reports_typed_stalled() {
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, true)),
         "read-deadline abort must be typed daemon_response_stalled, got: {err}"
     );
 }
@@ -371,7 +371,7 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
     let local_bound = std::time::Duration::from_millis(80);
     let request_deadline = tokio::time::Instant::now()
         .checked_add(local_bound)
-        .and_then(|bound| bound.checked_sub(super::super::DAEMON_TOOL_RESPONSE_GRACE))
+        .and_then(|bound| bound.checked_sub(tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE))
         .expect("monotonic clock must outlive the response grace");
 
     let err = tokio::time::timeout(
@@ -392,7 +392,7 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, true)),
         "connected stall must be typed daemon_response_stalled, got: {message}"
     );
     assert!(

@@ -52,10 +52,12 @@ use tracedecay::application_surface::{
     normalize_application_tool_args, observe_surface_argument_rejection,
     parse_application_surface_request,
 };
-use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
+use tracedecay::daemon::call_default_tool_awaiting_project_open;
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{CancellationSignal, Deadline};
-use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
+};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{
@@ -111,13 +113,13 @@ fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
             "{} exceeds the supported monotonic deadline range",
-            tracedecay::daemon::TOOL_REQUEST_DEADLINE_ENV
+            TOOL_REQUEST_DEADLINE_ENV
         ),
     }
 }
 
 fn tool_command_deadline() -> Result<Duration> {
-    tracedecay::daemon::tool_request_deadline()
+    tool_request_deadline()
 }
 
 fn tool_timeout_error(tool_name: &str) -> TraceDecayError {

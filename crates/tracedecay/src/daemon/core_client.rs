@@ -18,11 +18,7 @@ use tracedecay_framing::{
 };
 
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
-pub use tracedecay_daemon_protocol::{
-    DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
-    DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE, MAX_TOOL_REQUEST_DEADLINE,
-    TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
-};
+use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, tool_request_deadline};
 
 #[cfg(unix)]
 use super::unavailable_error;
