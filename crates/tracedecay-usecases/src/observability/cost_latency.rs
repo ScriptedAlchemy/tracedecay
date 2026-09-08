@@ -19,12 +19,10 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 
-use super::{
-    EVENT_LIMIT, MeasurementDescriptor, MeasurementProvenance, MeasurementSpec, coverage,
-    measurement,
-};
+use super::{MeasurementDescriptor, MeasurementProvenance, MeasurementSpec, coverage, measurement};
 use crate::observability::RegisteredObservabilityPortV1;
 use tracedecay_application::{ObservabilityQueryPort, ObservabilityQueryV1};
+use tracedecay_session_memory::observability_store::EVENT_LIMIT;
 use tracedecay_session_memory::provider_usage::{
     ProviderUsageAggregateV1, ProviderUsageCoverageV1, ProviderUsageDeltaV1,
 };

@@ -5,14 +5,15 @@ use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
 };
 use tracedecay_global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
+use tracedecay_session_memory::observability_store::{EVENT_LIMIT, OBSERVABILITY_PROVIDER};
 
 use super::read_model::{
     project_plan26_read_models, project_rejected_arguments, unavailable_plan26_read_models,
     unavailable_rejected_arguments,
 };
 use super::{
-    ANALYTICS_DESCRIPTOR, EVENT_LIMIT, MeasurementDescriptor, MeasurementProvenance,
-    MeasurementSpec, OBSERVABILITY_PROVIDER, coverage, horizon, measurement,
+    ANALYTICS_DESCRIPTOR, MeasurementDescriptor, MeasurementProvenance, MeasurementSpec, coverage,
+    horizon, measurement,
 };
 
 pub fn observatory_unavailable_read_model(

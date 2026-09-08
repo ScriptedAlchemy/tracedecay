@@ -4,12 +4,9 @@
 //! `tracedecay-mcp`, `tracedecay-cli`) compile without the advisory,
 //! semantic-runtime, and code-index surfaces that crate carries.
 //!
-//! `tracedecay-usecases` depends on this crate and re-exports every module
-//! here at its old path; that seam is the cutover point for re-pointing the
-//! remaining consumers in a later slice. This crate must never depend on
-//! `tracedecay-usecases`, `tracedecay-semantic`, `tracedecay-code-index`,
-//! `tracedecay-search-eval`, or `tracedecay-lsp` — that boundary is the
-//! point of the extraction.
+//! This crate must never depend on `tracedecay-usecases`,
+//! `tracedecay-semantic`, `tracedecay-code-index`, `tracedecay-search-eval`,
+//! or `tracedecay-lsp` — that boundary is the point of the extraction.
 
 pub mod anchor_resolution;
 pub mod context;

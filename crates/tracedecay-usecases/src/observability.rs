@@ -105,12 +105,6 @@ use crate::feedback::observations::{
 };
 use tracedecay_application::feedback::observations::FeedbackCoverageV1;
 
-// The registered-store adapter owns these limits; they moved with it to
-// `tracedecay-session-memory` (re-export seam for the staying read paths).
-pub(crate) use tracedecay_session_memory::observability_store::{
-    EVENT_LIMIT, OBSERVABILITY_PROVIDER,
-};
-
 const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
 pub(super) const COST_DESCRIPTOR: &str = "provider-costs.v1";
 const FEEDBACK_DESCRIPTOR: &str = "feedback-system-quality.v1";
