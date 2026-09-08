@@ -9,11 +9,6 @@
 //! Canonical application tools are projected from their executable registry
 //! and have no handwritten rows here. `group` is `None` only for retained
 //! tools whose predicate remains their dispatch authority.
-//!
-//! A tool may hold both a surface predicate and a row here when the classifier
-//! deliberately declines the surface for it. `tracedecay_diagnostics` is the
-//! one such tool: when no daemon invocation executor is attached the classifier
-//! defers it to the in-process analysis owner.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -297,7 +292,6 @@ const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_unsafe_patterns", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_constructors", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_field_sites", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_diagnostics", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_admin_branch_add", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_affected", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_diff_context", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -1152,15 +1146,19 @@ mod tests {
             &[CancellationPoint::EffectInFlight]
         );
         let diagnostics = catalog.contract("tracedecay_diagnostics").unwrap();
-        assert!(matches!(
-            diagnostics.cancellation(),
-            CancellationContract::NotCancellable
-        ));
+        assert_eq!(
+            diagnostics.cancellation().points(),
+            &[
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ]
+        );
         assert!(
-            !diagnostics
+            diagnostics
                 .terminal_states()
                 .contains(&McpTerminalState::Cancelled),
-            "terminal states follow the resolved contract, not the broad dispatch predicate"
+            "the MCP binding must preserve the descriptor's cooperative cancellation contract"
         );
     }
 

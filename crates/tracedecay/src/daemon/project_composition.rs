@@ -22,7 +22,6 @@ mod session_database_admission;
 use code_index_activation::{
     CodeIndexActivationMountInputs, code_index_activation_hint_sink, code_index_activation_mount,
     code_index_freshness_probe_sink, code_index_hook_sink, code_index_reconcile_sink,
-    diagnostics_change_generation_resolver,
 };
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 use runtime::bind_verified_project_graph_runtime;
@@ -445,7 +444,6 @@ struct ProjectRoutePorts {
     code_index_hook_sink: crate::mcp::server::CodeIndexHookSink,
     code_index_reconcile_sink: crate::mcp::server::CodeIndexReconcileSink,
     code_index_freshness_probe_sink: crate::mcp::server::CodeIndexFreshnessProbeSink,
-    diagnostics_change_generation: crate::mcp::server::DiagnosticsChangeGenerationResolver,
     application_invocation_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     retained_server_resolver: crate::mcp::server::RetainedProjectServerResolver,
     automation_scheduler_reconciler:
@@ -501,7 +499,6 @@ impl ComposedCoreServer {
             .with_code_index_freshness_probe_sink(Arc::clone(
                 &ports.code_index_freshness_probe_sink,
             ))
-            .with_diagnostics_change_generation(Arc::clone(&ports.diagnostics_change_generation))
             .with_code_index_publication_identity(Arc::clone(&code_index.publication_identity))
             .with_code_index_search_executor(Arc::clone(&code_index.search_executor))
             .with_code_index_branch_diff_executor(Arc::clone(&code_index.branch_diff_executor))
@@ -842,8 +839,6 @@ impl ProjectOpenInputs<'_> {
         );
         let code_index_freshness_probe_sink =
             code_index_freshness_probe_sink(self.invocation.code_index_schedulers.clone());
-        let diagnostics_change_generation =
-            diagnostics_change_generation_resolver(self.invocation.code_index_schedulers.clone());
         // The daemon mounts the same broker the MCP server and the directly
         // served dashboard open: persisted analyzer settings (with a recorded
         // degradation for an unreadable file) plus the home-level OpenCode
@@ -893,7 +888,6 @@ impl ProjectOpenInputs<'_> {
                 code_index_hook_sink,
                 code_index_reconcile_sink,
                 code_index_freshness_probe_sink,
-                diagnostics_change_generation,
                 application_invocation_executor,
                 retained_server_resolver: retained_project_server_resolver(
                     self.store_administration.clone(),

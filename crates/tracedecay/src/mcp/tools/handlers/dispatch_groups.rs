@@ -26,8 +26,8 @@ use super::support::{effective_path, generic_tool_result, unique_file_paths};
 use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
-    admin_cli, admin_project, analysis, application_surface, automation_runs, dashboard,
-    dispatch_controls, edit, git, graph, hook_runtime, info, skills, workflow,
+    admin_cli, admin_project, application_surface, automation_runs, dashboard, dispatch_controls,
+    edit, git, graph, hook_runtime, info, skills, workflow,
 };
 
 mod health_dispatch;
@@ -885,26 +885,17 @@ fn dispatch_application_surface_tools_inner<'a>(
     })
 }
 
-/// Dispatch static-analysis report tools (`tracedecay_dead_code`,
-/// `tracedecay_complexity`, `tracedecay_diagnostics`, ...).
+/// Dispatch static-analysis report tools such as `tracedecay_dead_code` and
+/// `tracedecay_complexity`.
 #[hotpath::measure(future = true, label = "mcp.dispatch.analysis")]
 pub(super) async fn dispatch_analysis_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
-    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    dispatch_analysis_tools_inner(
-        tool_name,
-        cg,
-        args,
-        scope_prefix,
-        active_project_session_db,
-        options,
-    )
-    .await
+    dispatch_analysis_tools_inner(tool_name, cg, args, scope_prefix, options).await
 }
 
 fn dispatch_analysis_tools_inner<'a>(
@@ -912,7 +903,6 @@ fn dispatch_analysis_tools_inner<'a>(
     cg: &'a TraceDecay,
     args: Value,
     scope_prefix: Option<&'a str>,
-    active_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     // Erase the deeply nested match-arm futures before they reach the
@@ -1002,30 +992,6 @@ fn dispatch_analysis_tools_inner<'a>(
             "tracedecay_field_sites" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
                 portable_analysis::handle_field_sites(&graph, args, scope_prefix).await
-            }
-            "tracedecay_diagnostics" => {
-                let graph = admitted_graph_query(cg, &options, "diagnostics_read").await?;
-                let separated =
-                    crate::application_surface::adapt_application_tool_request(tool_name, args)
-                        .map_err(|error| TraceDecayError::Config {
-                            message: error.to_string(),
-                        })?;
-                let request = serde_json::from_value(separated.request).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!("invalid diagnostics request: {error}"),
-                    }
-                })?;
-                analysis::handle_diagnostics(
-                    cg,
-                    &graph,
-                    request,
-                    separated.requested_format,
-                    options.diagnostics_cache,
-                    options.diagnostics_change_generation.as_ref(),
-                    options.diagnostics_lsp.as_deref(),
-                    active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                )
-                .await
             }
             _ => Err(unknown_tool_error(tool_name)),
         }
