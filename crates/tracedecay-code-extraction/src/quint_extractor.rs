@@ -194,7 +194,11 @@ impl QuintExtractor {
                 // Parse failed; record the error and skip extraction rather
                 // than emitting bogus structure.
                 let start = Instant::now();
-                let mut state = Self::initialize_state(file_path, source);
+                let mut state = Self::initialize_state(
+                    file_path,
+                    source,
+                    crate::common::unparsed_file_end_line(source),
+                );
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
@@ -215,7 +219,11 @@ impl QuintExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
-        let mut state = Self::initialize_state(file_path, source);
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
 
         let mut walker = TokenWalker::default();
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
@@ -230,7 +238,11 @@ impl QuintExtractor {
         )
     }
 
-    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -240,7 +252,7 @@ impl QuintExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,

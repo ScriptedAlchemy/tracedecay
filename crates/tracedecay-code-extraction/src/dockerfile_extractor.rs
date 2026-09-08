@@ -123,7 +123,7 @@ impl DockerfileExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,

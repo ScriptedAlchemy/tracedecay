@@ -59,7 +59,9 @@ lang-dockerfile = ["large-grammars"]
 lang-glsl = ["large-grammars"]
 lang-wgsl = []
 lang-hlsl = ["dep:tree-sitter-hlsl"]
-lang-metal = ["large-grammars"]
+# Metal is a C++ superset parsed by the C++ grammar; the medium bundle already
+# ships that grammar, so the adapter never needs the large bundle.
+lang-metal = ["medium-grammars"]
 lang-markdown = ["dep:tree-sitter-md"]
 lang-r = ["large-grammars"]
 lang-sql = ["large-grammars"]

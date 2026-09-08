@@ -62,7 +62,11 @@ impl LeanExtractor {
             Ok(tree) => tree,
             Err(_msg) => {
                 return Self::build_result(
-                    Self::initialize_state(file_path, source),
+                    Self::initialize_state(
+                        file_path,
+                        source,
+                        crate::common::unparsed_file_end_line(source),
+                    ),
                     Instant::now(),
                 );
             }
@@ -83,7 +87,11 @@ impl LeanExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
-        let mut state = Self::initialize_state(file_path, source);
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit(&mut state, child);
@@ -96,7 +104,11 @@ impl LeanExtractor {
         )
     }
 
-    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -106,7 +118,7 @@ impl LeanExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
