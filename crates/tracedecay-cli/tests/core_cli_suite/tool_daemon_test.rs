@@ -632,7 +632,13 @@ fn enroll_native_capture_project(
     families: &[HookEventFamily],
 ) -> PathBuf {
     pin_fixture_repository_identity(project, project_id).unwrap();
-    let data_root = home.join(".tracedecay/projects").join(project_id);
+    // An enrolled project always belongs to an installed profile: the prompt
+    // callbacks stay quiet without a profile identity, so the fixture installs
+    // it through the canonical authority before the project store exists.
+    let profile_root = home.join(".tracedecay");
+    tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("install fixture profile identity");
+    let data_root = profile_root.join("projects").join(project_id);
     std::fs::create_dir_all(&data_root).unwrap();
     let now = capture_test_now();
     HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(hook_configuration_path(
