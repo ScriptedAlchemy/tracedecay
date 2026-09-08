@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::*;
 
@@ -11,190 +12,6 @@ async fn spawned_loop_is_cancellable_and_joinable() {
         tokio::time::timeout(Duration::from_secs(1), task.shutdown())
             .await
             .is_ok()
-    );
-}
-
-#[test]
-fn pr_git_commands_enforce_deadline_cancellation_and_output_limits() {
-    let root = tempfile::tempdir().unwrap();
-    let expired = PrCommandControl {
-        command_timeout: Duration::ZERO,
-        ..PrCommandControl::default()
-    };
-    assert!(matches!(
-        run_git_with_control(root.path(), &["--version"], &expired),
-        Err(tracedecay_runtime_core::git::GitCommandError::DeadlineExceeded)
-    ));
-
-    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-    cancellation.cancel();
-    let cancelled = PrCommandControl {
-        cancellation: Some(cancellation),
-        ..PrCommandControl::default()
-    };
-    assert!(matches!(
-        run_git_with_control(root.path(), &["--version"], &cancelled),
-        Err(tracedecay_runtime_core::git::GitCommandError::Cancelled)
-    ));
-
-    let limited = PrCommandControl {
-        max_stdout_bytes: 1,
-        ..PrCommandControl::default()
-    };
-    assert!(matches!(
-        run_git_with_control(root.path(), &["--version"], &limited),
-        Err(
-            tracedecay_runtime_core::git::GitCommandError::OutputLimitExceeded {
-                stream: "stdout",
-                bound: 1
-            }
-        )
-    ));
-}
-
-// ---- Pure discovery parsers -------------------------------------------------
-
-#[test]
-fn gh_pr_list_splits_open_same_repo_from_forks() {
-    let json = r#"[
-        {"number": 1, "headRefName": "feature-a", "headRefOid": "sha-a", "state": "OPEN", "isCrossRepository": false},
-        {"number": 2, "headRefName": "fork-branch", "headRefOid": "sha-fork", "state": "OPEN", "isCrossRepository": true},
-        {"number": 3, "headRefName": "closed-branch", "headRefOid": "sha-closed", "state": "CLOSED", "isCrossRepository": false},
-        {"number": 4, "headRefName": "feature-b", "headRefOid": "sha-b", "state": "OPEN", "isCrossRepository": false}
-    ]"#;
-    let discovery = parse_gh_pr_list(json, 200).unwrap();
-    assert!(
-        !discovery.partial,
-        "four PRs under a 200 limit are complete"
-    );
-    assert_eq!(
-        discovery.open,
-        vec![
-            DiscoveredPr {
-                number: 1,
-                head_branch: "feature-a".to_string(),
-                head_sha: "sha-a".to_string(),
-            },
-            DiscoveredPr {
-                number: 4,
-                head_branch: "feature-b".to_string(),
-                head_sha: "sha-b".to_string(),
-            },
-        ]
-    );
-    assert_eq!(discovery.skipped_forks, vec![2]);
-}
-
-#[test]
-fn ls_remote_heads_indexes_branch_shas() {
-    let output = "\
-deadbeef00000000000000000000000000000001\trefs/heads/main
-deadbeef00000000000000000000000000000002\trefs/heads/feature-1
-cafebabe00000000000000000000000000000003\trefs/tags/v1
-";
-    let map = parse_ls_remote_heads(output);
-    assert_eq!(map.len(), 2);
-    assert_eq!(
-        map.get("deadbeef00000000000000000000000000000002").unwrap(),
-        "feature-1"
-    );
-    assert!(!map.contains_key("cafebabe00000000000000000000000000000003"));
-}
-
-#[test]
-fn ls_remote_pull_heads_parses_numbers_and_ignores_merge_refs() {
-    let output = "\
-deadbeef00000000000000000000000000000002\trefs/pull/1/head
-feed000000000000000000000000000000000009\trefs/pull/1/merge
-beadfeed00000000000000000000000000000007\trefs/pull/42/head
-";
-    let heads = parse_ls_remote_pull_heads(output);
-    assert_eq!(
-        heads,
-        vec![
-            (1, "deadbeef00000000000000000000000000000002".to_string()),
-            (42, "beadfeed00000000000000000000000000000007".to_string()),
-        ]
-    );
-}
-
-#[test]
-fn map_pull_heads_matches_same_repo_and_skips_forks() {
-    let pull_heads = vec![
-        (1, "sha_feature".to_string()),
-        (2, "sha_fork_only".to_string()),
-    ];
-    let mut head_shas = HashMap::new();
-    head_shas.insert("sha_feature".to_string(), "feature-1".to_string());
-    head_shas.insert("sha_main".to_string(), "main".to_string());
-
-    let discovery = map_pull_heads_to_branches(&pull_heads, &head_shas);
-    assert_eq!(
-        discovery.open,
-        vec![DiscoveredPr {
-            number: 1,
-            head_branch: "feature-1".to_string(),
-            head_sha: "sha_feature".to_string(),
-        }]
-    );
-    assert_eq!(discovery.skipped_forks, vec![2]);
-}
-
-#[test]
-fn gh_pr_list_flags_partial_when_result_reaches_limit() {
-    let json = r#"[
-        {"number": 1, "headRefName": "a", "headRefOid": "s1", "state": "OPEN", "isCrossRepository": false},
-        {"number": 2, "headRefName": "b", "headRefOid": "s2", "state": "OPEN", "isCrossRepository": false}
-    ]"#;
-    // Two results at a limit of two: the listing was truncated → partial.
-    let truncated = parse_gh_pr_list(json, 2).unwrap();
-    assert!(
-        truncated.partial,
-        "count == limit must be treated as possibly truncated"
-    );
-    // Same results under a higher limit are complete.
-    let complete = parse_gh_pr_list(json, 5).unwrap();
-    assert!(!complete.partial);
-}
-
-// ---- State persistence ------------------------------------------------------
-
-#[test]
-fn state_round_trips_and_defaults_when_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(load_state(dir.path()).managed.is_empty());
-
-    let mut state = PrAutotrackState::default();
-    state.managed.insert(
-        "tracedecay/autotrack/pr/7".to_string(),
-        ManagedPr {
-            pr: 7,
-            head_branch: "feature-7".to_string(),
-            head_sha: "sha-7".to_string(),
-            worktree: dir.path().join("pr-worktrees/pr-7"),
-            tracking_ref: "refs/tracedecay/pr/7".to_string(),
-        },
-    );
-    save_state(dir.path(), &state).unwrap();
-
-    let reloaded = load_state(dir.path());
-    assert_eq!(reloaded.managed.len(), 1);
-    assert_eq!(reloaded.managed["tracedecay/autotrack/pr/7"].pr, 7);
-
-    let summary = managed_summary(dir.path());
-    assert_eq!(summary.len(), 1);
-    assert_eq!(summary[0].branch, "tracedecay/autotrack/pr/7");
-    assert_eq!(summary[0].head_branch, "feature-7");
-
-    std::fs::write(
-        state_path(dir.path()),
-        r#"{"managed":{"pr/8":{"pr":8,"head_branch":"legacy","worktree":"pr-worktrees/pr-8","tracking_ref":"refs/tracedecay/pr/8"}}}"#,
-    )
-    .unwrap();
-    assert_eq!(
-        load_state(dir.path()).managed["pr/8"].head_sha,
-        "",
-        "legacy state without a head SHA must migrate as needing refresh"
     );
 }
 
@@ -1131,10 +948,7 @@ fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() 
         "the sealed ref retry begins after the linked worktree is absent"
     );
 
-    let unavailable = PrCommandControl {
-        command_timeout: Duration::ZERO,
-        ..PrCommandControl::default()
-    };
+    let unavailable = PrCommandControl::with_timeout(Duration::ZERO);
     let error = cleanup_owned_worktree(
         repo.path(),
         &artifacts.worktree,
@@ -1256,10 +1070,7 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
         let owner = tokio::spawn(async move {
             let lifecycle = try_acquire_manual_branch_lifecycle(&owner_data_root, &owner_branch)
                 .expect("activation owner acquires the exact lifecycle");
-            let control = PrCommandControl {
-                command_timeout: Duration::from_millis(300),
-                ..PrCommandControl::default()
-            };
+            let control = PrCommandControl::with_timeout(Duration::from_millis(300));
             let outcome = activate_manual_branch_with_administration(
                 &owner_repo,
                 &owner_data_root,

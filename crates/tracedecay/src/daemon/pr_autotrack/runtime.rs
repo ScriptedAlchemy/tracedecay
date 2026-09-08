@@ -173,10 +173,7 @@ async fn poll_project(
         return;
     };
     let data_root = graph.store_layout().data_root.clone();
-    let command_control = PrCommandControl {
-        cancellation: Some(cancellation.clone()),
-        ..PrCommandControl::default()
-    };
+    let command_control = PrCommandControl::with_cancellation(cancellation.clone());
     let repo_for_discovery = repo_root.clone();
     let discovery_control = command_control.clone();
     let discovery = match tokio::task::spawn_blocking(move || {
@@ -248,10 +245,7 @@ async fn teardown_disabled_project_with_administration(
     if load_state(&data_root).managed.is_empty() {
         return;
     }
-    let command_control = PrCommandControl {
-        cancellation: Some(cancellation.clone()),
-        ..PrCommandControl::default()
-    };
+    let command_control = PrCommandControl::with_cancellation(cancellation.clone());
     let report = reconcile_project_with_administration(
         repo_root,
         &data_root,

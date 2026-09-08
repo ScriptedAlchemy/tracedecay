@@ -936,7 +936,7 @@ impl tracedecay_dashboard_api::DashboardPrAutoTrackReadPort for DaemonPrAutoTrac
         &self,
         store_root: &Path,
     ) -> Vec<tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1> {
-        crate::daemon::pr_autotrack::managed_summary(store_root)
+        tracedecay_application::pr_tracking::managed_summary(store_root)
             .into_iter()
             .map(
                 |entry| tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1 {

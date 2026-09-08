@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::common::fixture::{GitFixture, RegisteredProject, TestProfile, git_run};
 use tracedecay::daemon::pr_autotrack;
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_application::pr_tracking;
 
 struct PrProject {
     repo: GitFixture,
@@ -58,13 +59,13 @@ impl PrProject {
         git_run(&self.origin, args);
     }
 
-    fn discover(&self) -> pr_autotrack::PrDiscovery {
-        pr_autotrack::discover_open_prs(self.root()).expect("PR discovery succeeds")
+    fn discover(&self) -> pr_tracking::PrDiscovery {
+        pr_tracking::discover_open_prs(self.root()).expect("PR discovery succeeds")
     }
 
     async fn reconcile(
         &self,
-        discovery: &pr_autotrack::PrDiscovery,
+        discovery: &pr_tracking::PrDiscovery,
         cap: usize,
     ) -> pr_autotrack::ReconcileReport {
         pr_autotrack::reconcile_project(
@@ -145,7 +146,7 @@ async fn reconciliation_without_scheduler_fails_before_git_or_state_mutation() {
             .1
             .starts_with("code_index_scheduler_unavailable:")
     );
-    assert!(pr_autotrack::managed_summary(fixture.data_root()).is_empty());
+    assert!(pr_tracking::managed_summary(fixture.data_root()).is_empty());
     assert!(!fixture.data_root().join("pr-worktrees").exists());
     assert!(
         !fixture
@@ -192,7 +193,7 @@ async fn failed_discovery_is_not_reported_as_an_empty_success() {
     let fixture = PrProject::enrolled_with_origin().await;
     fixture.git(&["remote", "set-url", "origin", "/definitely/not/a/repo.git"]);
 
-    let result = pr_autotrack::discover_open_prs(fixture.root());
+    let result = pr_tracking::discover_open_prs(fixture.root());
 
     assert!(
         result.is_err(),

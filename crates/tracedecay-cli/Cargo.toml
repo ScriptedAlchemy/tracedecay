@@ -167,6 +167,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec"] }
 tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false }
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
@@ -217,9 +218,6 @@ tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", feat
 tracedecay-semantic-contracts.workspace = true
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
-# Dev-only: `tests/work_route_exposure_conformance.rs` still asserts against
-# the usecases `operation_stream` authority; production code is off usecases.
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 ureq = { version = "3", features = ["json"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
