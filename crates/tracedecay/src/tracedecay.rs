@@ -14,6 +14,7 @@ use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 #[cfg(test)]
 mod concrete_runtime_tests;
@@ -36,7 +37,7 @@ pub(crate) use lifecycle::git_remote_url;
 pub struct TraceDecay {
     db: Database,
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    pub(crate) store_runtime_registry: crate::project_store_runtime::ProjectStoreRuntimeHandle,
+    pub(crate) store_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
@@ -95,10 +96,8 @@ impl TraceDecay {
         &self.configuration_runtime
     }
 
-    pub(crate) fn project_store_runtime(
-        &self,
-    ) -> &dyn tracedecay_application::tracedecay::ProjectStoreRuntimeV1 {
-        self.store_runtime_registry.port()
+    pub(crate) fn project_store_runtime(&self) -> &DaemonSessionRuntimeRegistryV1 {
+        self.store_runtime_registry.as_ref()
     }
 
     pub(crate) fn profile_database(&self) -> &tracedecay_global_db::RegisteredGlobalDbLeaseV1 {

@@ -256,7 +256,7 @@ pub(super) async fn fixture_graph(
     let runtime_registry = crate::project_store_runtime::open_project_store_runtime(identity)
         .await
         .unwrap();
-    let profile_database = runtime_registry.port().profile_database().await.unwrap();
+    let profile_database = runtime_registry.profile_database().await.unwrap();
     let store_layout = TraceDecay::resolve_first_touch_configuration_layout(
         project_root,
         &open_options,
@@ -278,7 +278,6 @@ pub(super) async fn fixture_graph(
     )
     .unwrap();
     let configuration_database = runtime_registry
-        .port()
         .project_sessions(
             project_id,
             vec![

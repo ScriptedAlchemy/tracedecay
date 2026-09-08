@@ -11,10 +11,9 @@ use crate::config::{
     open_runtime_configuration_for_registered_database,
     open_runtime_configuration_for_registered_database_read_only,
 };
-use crate::project_store_runtime::{ProjectStoreRuntimeHandle, join_standalone_session_registry};
+use crate::project_store_runtime::join_standalone_session_registry;
 #[cfg(any(test, feature = "test-transport"))]
 use tokio::sync::Mutex as AsyncMutex;
-use tracedecay_application::tracedecay::ProjectStoreRuntimeV1;
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -25,6 +24,7 @@ use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
@@ -145,7 +145,7 @@ impl TraceDecay {
 
     #[hotpath::measure(label = "lifecycle.mount_project_graph", future = true)]
     pub(super) async fn mount_project_graph(
-        runtime: &dyn ProjectStoreRuntimeV1,
+        runtime: &DaemonSessionRuntimeRegistryV1,
         project_root: &Path,
         store_layout: &StoreLayout,
         operation: &'static str,
@@ -237,7 +237,7 @@ impl TraceDecay {
         }
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry = join_standalone_session_registry(identity).await?;
-        let profile_database = runtime_registry.port().profile_database().await?;
+        let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_first_touch_configuration_layout(
             project_root,
             &open_options,
@@ -255,7 +255,6 @@ impl TraceDecay {
             project_id.as_str(),
         )?;
         let configuration_database = runtime_registry
-            .port()
             .project_sessions(project_id, vec![project_root.to_path_buf()])
             .await?;
         Self::init_with_registered_configuration(
@@ -308,16 +307,15 @@ impl TraceDecay {
         store_layout: StoreLayout,
         configuration_database: RegisteredGlobalDbLeaseV1,
         profile_database: RegisteredGlobalDbLeaseV1,
-        runtime_registry: impl Into<ProjectStoreRuntimeHandle>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        let runtime_registry = runtime_registry.into();
         // Computed once and reused below (for `active_branch`) instead of
         // calling `branch::current_branch` twice for the same project root.
         let active_branch = branch::current_branch(project_root);
         let (serving_branch, fallback_warning) =
             Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
         let db = Self::mount_project_graph(
-            runtime_registry.port(),
+            runtime_registry.as_ref(),
             project_root,
             &store_layout,
             "init",
@@ -511,7 +509,7 @@ impl TraceDecay {
         }
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry = join_standalone_session_registry(identity).await?;
-        let profile_database = runtime_registry.port().profile_database().await?;
+        let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(
             project_root,
             &open_options,
@@ -527,7 +525,6 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .port()
             .project_sessions(project_id, enrollment_roots)
             .await?;
         Self::open_with_registered_configuration(
@@ -548,9 +545,8 @@ impl TraceDecay {
         store_layout: StoreLayout,
         configuration_database: RegisteredGlobalDbLeaseV1,
         profile_database: RegisteredGlobalDbLeaseV1,
-        runtime_registry: impl Into<ProjectStoreRuntimeHandle>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        let runtime_registry = runtime_registry.into();
         let active_branch = branch::current_branch(project_root);
         let db_path = store_layout.graph_db_path.clone();
         let (serving_branch, fallback_warning) =
@@ -569,7 +565,7 @@ impl TraceDecay {
         // open never repairs, rebuilds, or indexes the graph inline; retained
         // code-index activation is owned by the daemon after publication.
         let db = Self::mount_project_graph(
-            runtime_registry.port(),
+            runtime_registry.as_ref(),
             project_root,
             &store_layout,
             "open project store",
@@ -724,7 +720,7 @@ impl TraceDecay {
         }
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry = join_standalone_session_registry(identity).await?;
-        let profile_database = runtime_registry.port().profile_database().await?;
+        let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(
             project_root,
             &open_options,
@@ -740,7 +736,6 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .port()
             .project_sessions(project_id, enrollment_roots)
             .await?;
         Self::open_read_only_with_registered_configuration(
@@ -761,9 +756,8 @@ impl TraceDecay {
         store_layout: StoreLayout,
         configuration_database: RegisteredGlobalDbLeaseV1,
         profile_database: RegisteredGlobalDbLeaseV1,
-        runtime_registry: impl Into<ProjectStoreRuntimeHandle>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        let runtime_registry = runtime_registry.into();
         let active_branch = branch::current_branch(project_root);
         let db_path = store_layout.graph_db_path.clone();
         let (serving_branch, fallback_warning) =
@@ -779,7 +773,7 @@ impl TraceDecay {
         }
 
         let db = Self::mount_project_graph(
-            runtime_registry.port(),
+            runtime_registry.as_ref(),
             project_root,
             &store_layout,
             "open project store read-only",

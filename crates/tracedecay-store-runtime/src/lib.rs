@@ -1,12 +1,11 @@
 //! The canonical TraceDecay store runtime.
 //!
 //! This crate is the single owner of store, shard, and session lifecycle for
-//! a daemon: the session registry that implements
-//! [`tracedecay_application::tracedecay::ProjectStoreRuntimeV1`] (project-store
-//! attachment, retirement, schema convergence, maintenance, graph runtime
-//! binding, and shutdown), the store locator resolver it opens shards through,
-//! the Remote Brain credential authority it mounts, and the remote-replay
-//! transaction worker. The composition root (`tracedecay`) wires these against
+//! a daemon: the concrete session registry owns project-store attachment,
+//! retirement, schema convergence, maintenance, graph runtime binding, and
+//! shutdown; the store locator resolver opens shards; the Remote Brain
+//! credential authority mounts nodes; and the remote-replay transaction worker
+//! applies replay. The composition root (`tracedecay`) wires these against
 //! daemon engine state; this crate never depends on the root aggregate.
 //!
 //! Database kernels sit below it and hold no lifecycle policy of their own:
@@ -16,10 +15,10 @@
 //! `tracedecay-global-db` the registered schema, and `tracedecay-graph-db`
 //! the graph store.
 //!
-//! The `tracedecay-application` dependency is only for that store-runtime port
-//! and for implementing [`tracedecay_code_index_runtime::CodeGraphSeatLeaseV1`]
-//! / verified semantic-vector adapters, whose signatures already name
-//! usecases semantic-runtime types. Observation cancellation comes from
+//! The `tracedecay-application` dependency remains for implementing
+//! [`tracedecay_code_index_runtime::CodeGraphSeatLeaseV1`] and verified
+//! semantic-vector adapters whose signatures name application runtime types.
+//! Observation cancellation comes from
 //! `tracedecay_sessions::observation`.
 //!
 //! `RemoteRecoveryProjectLifecycleV1` stays in the root crate: it holds
