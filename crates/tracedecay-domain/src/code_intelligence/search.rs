@@ -372,6 +372,19 @@ impl ExactTechnicalTermV1 {
         Self::from_parts(kind, original_bytes, span, None)
     }
 
+    /// Rebuild a term from the parts an admitted projection persisted. This
+    /// is the binary-storage counterpart of the wire deserializer: the same
+    /// shape validation runs, and the canonical bytes are re-derived rather
+    /// than trusted.
+    pub fn from_persisted_parts(
+        kind: ExactTechnicalTermKindV1,
+        original_bytes: Vec<u8>,
+        span: SourceSpan,
+        symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    ) -> Result<Self, DomainError> {
+        Self::from_parts(kind, original_bytes, span, symbol_occurrence_id)
+    }
+
     fn from_parts(
         kind: ExactTechnicalTermKindV1,
         original_bytes: Vec<u8>,
