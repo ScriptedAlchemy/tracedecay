@@ -1,5 +1,5 @@
 use std::cmp::{Ordering as CmpOrdering, Reverse};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rayon::prelude::*;
 use rusqlite::functions::FunctionFlags;
-use rusqlite::types::ValueRef;
+use rusqlite::types::{ToSqlOutput, Value, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -75,6 +75,14 @@ const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
 const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 8 * std::mem::size_of::<usize>();
 const EXACT_INSERT_CONTROL_INTERVAL: usize = TERM_INSERT_CONTROL_INTERVAL;
 const EXACT_INSERT_SORT_RUN_ROWS: usize = TERM_INSERT_SORT_RUN_ROWS;
+/// Rows per multi-row `INSERT ... VALUES (...), (...)` statement in the
+/// append phase. The per-row cost of the base-table inserts is statement
+/// overhead plus the per-row builder-gate trigger, not I/O: on the
+/// `term_postings` shape at production pragmas (120k sorted rows in one
+/// transaction) one row per statement costs 1.47 µs/row and 32 rows per
+/// statement 0.86 µs/row, the trigger still firing for every row. Five
+/// columns × 32 rows stays under SQLite's 999-parameter floor.
+const INSERT_ROWS_PER_STATEMENT: usize = 32;
 // This gate serializes mutation within the private-profile/stable-handle
 // authority. It denies ordinary second-connection DML, but is not a
 // cryptographic defense against malicious same-UID code that deliberately
@@ -2425,21 +2433,28 @@ fn prepare_term_insert_plan<'a>(
             "bounded lexical term insert plan allocation failed: {error}"
         ))
     })?;
+    // One digest per distinct term rather than per posting: the fixture's
+    // batches carry ~15 postings per distinct term.
+    let mut term_ids: HashMap<&str, i64> = HashMap::new();
     for page in pages {
         checkpoint(control)?;
         for document in &page.documents {
             checkpoint(control)?;
             for posting in &document.term_postings {
+                let term_id = *term_ids
+                    .entry(posting.term.as_str())
+                    .or_insert_with(|| stable_term_id(&posting.term));
                 entries.push(PreparedTermInsertRefV1::new(
                     layout,
                     document.document_id,
-                    stable_term_id(&posting.term),
+                    term_id,
                     field_code_from_encoded(&posting.field)?,
                     posting,
                 ));
             }
         }
     }
+    drop(term_ids);
     for run in entries.chunks_mut(TERM_INSERT_SORT_RUN_ROWS) {
         checkpoint(control)?;
         run.sort_unstable_by_key(PreparedTermInsertRefV1::key);
@@ -3129,6 +3144,111 @@ fn validate_prepared_page_batch(
     Ok(())
 }
 
+/// Buffers rows for one base table and flushes them as multi-row `INSERT`
+/// statements: full statements of [`INSERT_ROWS_PER_STATEMENT`] rows while
+/// rows keep arriving, one shorter statement for the remainder at `finish`.
+/// Row order is preserved, so the clustered-key insert plans still append
+/// at the tail of their trees.
+struct MultiRowInsertV1<'transaction, 'row> {
+    transaction: &'transaction Transaction<'transaction>,
+    table_columns: &'static str,
+    columns: usize,
+    full_statement: rusqlite::CachedStatement<'transaction>,
+    buffer: Vec<ToSqlOutput<'row>>,
+    map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
+}
+
+impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
+    fn new(
+        transaction: &'transaction Transaction<'transaction>,
+        table_columns: &'static str,
+        columns: usize,
+        map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let full_statement = transaction
+            .prepare_cached(&multi_row_insert_sql(
+                table_columns,
+                columns,
+                INSERT_ROWS_PER_STATEMENT,
+            ))
+            .map_err(map_error)?;
+        Ok(Self {
+            transaction,
+            table_columns,
+            columns,
+            full_statement,
+            buffer: Vec::with_capacity(columns * INSERT_ROWS_PER_STATEMENT),
+            map_error,
+        })
+    }
+
+    fn push(
+        &mut self,
+        values: impl IntoIterator<Item = ToSqlOutput<'row>>,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        let before = self.buffer.len();
+        self.buffer.extend(values);
+        if self.buffer.len() != before + self.columns {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact multi-row insert received the wrong column count".to_owned(),
+            ));
+        }
+        if self.buffer.len() == self.columns * INSERT_ROWS_PER_STATEMENT {
+            self.full_statement
+                .execute(rusqlite::params_from_iter(self.buffer.iter()))
+                .map_err(self.map_error)?;
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), CodeLexicalArtifactErrorV1> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let rows = self.buffer.len() / self.columns;
+        let mut tail = self
+            .transaction
+            .prepare_cached(&multi_row_insert_sql(
+                self.table_columns,
+                self.columns,
+                rows,
+            ))
+            .map_err(self.map_error)?;
+        tail.execute(rusqlite::params_from_iter(self.buffer.iter()))
+            .map_err(self.map_error)?;
+        self.buffer.clear();
+        Ok(())
+    }
+}
+
+fn multi_row_insert_sql(table_columns: &str, columns: usize, rows: usize) -> String {
+    let tuple = format!(
+        "({})",
+        std::iter::repeat_n("?", columns)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    format!(
+        "INSERT INTO {table_columns} VALUES {}",
+        std::iter::repeat_n(tuple.as_str(), rows)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn sql_integer<'row>(value: i64) -> ToSqlOutput<'row> {
+    ToSqlOutput::Owned(Value::Integer(value))
+}
+
+fn sql_text(value: &str) -> ToSqlOutput<'_> {
+    ToSqlOutput::Borrowed(ValueRef::Text(value.as_bytes()))
+}
+
+fn sql_blob(value: &[u8]) -> ToSqlOutput<'_> {
+    ToSqlOutput::Borrowed(ValueRef::Blob(value))
+}
+
 fn append_prepared_imports(
     transaction: &Transaction<'_>,
     page: &PreparedCodeLexicalArtifactPageV1,
@@ -3173,11 +3293,12 @@ fn append_prepared_postings(
             intern_exact_terms(transaction, pages, control)
         )?;
     }
-    let mut term_statement = transaction
-        .prepare_cached(
-            "INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
-        )
-        .map_err(sqlite_error)?;
+    let mut term_insert = MultiRowInsertV1::new(
+        transaction,
+        "term_postings(term_id, field, document_id, frequency)",
+        4,
+        sqlite_error,
+    )?;
     // Plain INSERT, not `INSERT OR IGNORE`: `exact_postings` is
     // `PRIMARY KEY(field, term, document_id) WITHOUT ROWID`. Every prepared
     // document's `exact_postings` is deduplicated into a `BTreeSet<(field,
@@ -3193,24 +3314,22 @@ fn append_prepared_postings(
     // unique, both within the batch and against every already-committed
     // row, so `OR IGNORE` could only mask a real corruption bug. A plain
     // INSERT lets that surface as a constraint failure instead of vanishing.
-    let exact_insert_sql = match layout {
+    let exact_table_columns = match layout {
         LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13
-        | LexicalArtifactLayoutV1::V14 => {
-            "INSERT INTO exact_postings(term_id, field, document_id) VALUES (?1, ?2, ?3)"
-        }
+        | LexicalArtifactLayoutV1::V14 => "exact_postings(term_id, field, document_id)",
         LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
-            "INSERT INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)"
+            "exact_postings(field, term, document_id)"
         }
     };
-    let mut exact_statement = transaction
-        .prepare_cached(exact_insert_sql)
-        .map_err(sqlite_error)?;
-    let mut ngram_statement = transaction
-        .prepare_cached(
-            "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .map_err(sqlite_error)?;
+    let mut exact_insert =
+        MultiRowInsertV1::new(transaction, exact_table_columns, 3, sqlite_error)?;
+    let mut ngram_insert = MultiRowInsertV1::new(
+        transaction,
+        "ngram_postings(page_ordinal, kind, ngram, documents, cardinality)",
+        5,
+        sqlite_error,
+    )?;
     let expected_term_rows = term_insert_plan.entries.len();
     let mut inserted_term_rows = 0usize;
     hotpath::measure_block!("query.artifact.batch.postings.term_rows", {
@@ -3219,24 +3338,22 @@ fn append_prepared_postings(
                 checkpoint(control)?;
             }
             let (term_id, field, document_id) = entry.columns(layout);
-            if term_ids.get(entry.posting.term.as_str()) != Some(&term_id) {
+            if !term_ids.contains(&term_id) {
                 return Err(CodeLexicalArtifactErrorV1::Contract(
                     "lexical artifact term intern omitted a planned posting".to_owned(),
                 ));
             }
-            term_statement
-                .execute(params![
-                    term_id,
-                    field,
-                    document_id,
-                    entry.posting.frequency
-                ])
-                .map_err(sqlite_error)?;
+            term_insert.push([
+                sql_integer(term_id),
+                sql_integer(field),
+                sql_integer(document_id),
+                sql_integer(entry.posting.frequency),
+            ])?;
             inserted_term_rows = inserted_term_rows
                 .checked_add(1)
                 .ok_or_else(batch_ledger_overflow)?;
         }
-        Ok::<(), CodeLexicalArtifactErrorV1>(())
+        term_insert.finish()
     })?;
     if inserted_term_rows != expected_term_rows {
         return Err(CodeLexicalArtifactErrorV1::Contract(
@@ -3252,23 +3369,27 @@ fn append_prepared_postings(
             }
             match entry.layout {
                 LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
-                    exact_statement
-                        .execute(params![entry.field, entry.term, entry.document_id])
-                        .map_err(sqlite_error)?;
+                    exact_insert.push([
+                        sql_text(entry.field),
+                        sql_blob(entry.term),
+                        sql_integer(entry.document_id),
+                    ])?;
                 }
                 LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14 => {
-                    exact_statement
-                        .execute(params![entry.term_id, entry.field_code, entry.document_id])
-                        .map_err(sqlite_error)?;
+                    exact_insert.push([
+                        sql_integer(entry.term_id),
+                        sql_integer(entry.field_code),
+                        sql_integer(entry.document_id),
+                    ])?;
                 }
             }
             inserted_exact_rows = inserted_exact_rows
                 .checked_add(1)
                 .ok_or_else(batch_ledger_overflow)?;
         }
-        Ok::<(), CodeLexicalArtifactErrorV1>(())
+        exact_insert.finish()
     })?;
     if inserted_exact_rows != expected_exact_rows {
         return Err(CodeLexicalArtifactErrorV1::Contract(
@@ -3277,20 +3398,19 @@ fn append_prepared_postings(
     }
     hotpath::measure_block!("query.artifact.batch.postings.ngram_rows", {
         for page in pages {
+            let page_ordinal = i64::try_from(page.page_ordinal).map_err(contract_number)?;
             for shard in &page.ngram_shards {
                 checkpoint(control)?;
-                ngram_statement
-                    .execute(params![
-                        i64::try_from(page.page_ordinal).map_err(contract_number)?,
-                        shard.kind,
-                        shard.ngram,
-                        shard.documents.as_slice(),
-                        i64::try_from(shard.cardinality).map_err(contract_number)?,
-                    ])
-                    .map_err(sqlite_error)?;
+                ngram_insert.push([
+                    sql_integer(page_ordinal),
+                    sql_integer(shard.kind),
+                    sql_integer(shard.ngram),
+                    sql_blob(shard.documents.as_slice()),
+                    sql_integer(i64::try_from(shard.cardinality).map_err(contract_number)?),
+                ])?;
             }
         }
-        Ok::<(), CodeLexicalArtifactErrorV1>(())
+        ngram_insert.finish()
     })
 }
 
@@ -3300,46 +3420,47 @@ fn append_prepared_rows(
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut row_statement = transaction
-        .prepare_cached("INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, ?2, ?3)")
-        .map_err(sqlite_error)?;
-    let integrity_sql = if layout.stores_document_integrity_bytes() {
-        "INSERT INTO document_integrity(document_id, digest) VALUES (?1, ?2)"
+    let mut row_insert = MultiRowInsertV1::new(
+        transaction,
+        "rows(document_id, chunk_id, row)",
+        3,
+        |error| CodeLexicalArtifactErrorV1::Contract(error.to_string()),
+    )?;
+    let (integrity_columns, integrity_width) = if layout.stores_document_integrity_bytes() {
+        ("document_integrity(document_id, digest)", 2)
     } else {
-        "INSERT INTO document_integrity(document_id, chunk_id, digest) VALUES (?1, ?2, ?3)"
+        ("document_integrity(document_id, chunk_id, digest)", 3)
     };
-    let mut integrity_statement = transaction
-        .prepare_cached(integrity_sql)
-        .map_err(sqlite_error)?;
+    let mut integrity_insert = MultiRowInsertV1::new(
+        transaction,
+        integrity_columns,
+        integrity_width,
+        sqlite_error,
+    )?;
     for page in pages {
         for document in &page.documents {
             checkpoint(control)?;
-            row_statement
-                .execute(params![
-                    document.document_id,
-                    document.chunk_id.as_str(),
-                    document.row.as_slice()
-                ])
-                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+            row_insert.push([
+                sql_integer(document.document_id),
+                sql_text(&document.chunk_id),
+                sql_blob(&document.row),
+            ])?;
             if layout.stores_document_integrity_bytes() {
-                integrity_statement
-                    .execute(params![
-                        document.document_id,
-                        document.integrity_digest_bytes.as_slice()
-                    ])
-                    .map_err(sqlite_error)?;
+                integrity_insert.push([
+                    sql_integer(document.document_id),
+                    sql_blob(&document.integrity_digest_bytes),
+                ])?;
             } else {
-                integrity_statement
-                    .execute(params![
-                        document.document_id,
-                        document.chunk_id.as_str(),
-                        document.integrity_digest.as_str()
-                    ])
-                    .map_err(sqlite_error)?;
+                integrity_insert.push([
+                    sql_integer(document.document_id),
+                    sql_text(&document.chunk_id),
+                    sql_text(document.integrity_digest.as_str()),
+                ])?;
             }
         }
     }
-    Ok(())
+    row_insert.finish()?;
+    integrity_insert.finish()
 }
 
 fn insert_prepared_source_page(

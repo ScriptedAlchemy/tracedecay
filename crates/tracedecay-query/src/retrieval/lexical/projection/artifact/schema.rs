@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -453,11 +453,14 @@ pub(super) fn intern_exact_terms(
     Ok(())
 }
 
+/// Intern the batch's distinct terms and return the ids now present in
+/// `vocabulary`, so the posting writer can confirm every planned posting's
+/// term was interned with one integer probe per row.
 pub(super) fn intern_terms(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<BTreeMap<String, i64>, CodeLexicalArtifactErrorV1> {
+) -> Result<HashSet<i64>, CodeLexicalArtifactErrorV1> {
     let mut terms = BTreeSet::new();
     for page in pages {
         for document in &page.documents {
@@ -466,7 +469,7 @@ pub(super) fn intern_terms(
             }
         }
     }
-    let mut assigned = BTreeMap::new();
+    let mut assigned = HashSet::with_capacity(terms.len());
     let mut insert = transaction
         .prepare(
             "INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES (?1, ?2, 0) ON CONFLICT(term) DO NOTHING",
@@ -480,7 +483,7 @@ pub(super) fn intern_terms(
                 "lexical artifact term identifier collided or vocabulary insert failed: {error}"
             ))
         })?;
-        assigned.insert(term.to_owned(), term_id);
+        assigned.insert(term_id);
     }
     Ok(assigned)
 }
