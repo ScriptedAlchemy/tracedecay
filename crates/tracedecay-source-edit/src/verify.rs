@@ -3,7 +3,8 @@ use tracedecay_application::{
 };
 
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
+
+use super::port::SourceEditRuntime;
 
 #[hotpath::measure(label = "usecases.edit.verify.file", future = true)]
 async fn run_edit_verification(

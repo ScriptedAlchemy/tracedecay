@@ -3,6 +3,14 @@
 //! (device/inode) between the preview read and the atomic publish, and
 //! performs the crash-safe temp-file-then-rename publication every edit
 //! primitive shares.
+//!
+//! This is the one boundary that decides which bytes a preview, an apply, a
+//! state digest, or a crash-recovery rollback may observe. Every path
+//! component below the project root is opened with `open_dir_nofollow`, so
+//! neither an intermediate directory nor the final component can redirect the
+//! read through a symlink. Canonicalizing the parent is not enough on its own:
+//! it leaves the final component free to be a symlink pointing anywhere on the
+//! filesystem.
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -14,15 +22,15 @@ use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use same_file::Handle;
-
-pub(super) use tracedecay_runtime_core::path_safety::normalize_source_edit_relative_path;
-use tracedecay_runtime_core::path_safety::{source_edit_path_error, source_edit_unsafe_path};
+use tracedecay_runtime_core::path_safety::{
+    normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
+};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 static SOURCE_EDIT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
-pub(in crate::tracedecay) struct SourceEditFileAuthority {
+pub struct SourceEditFileAuthority {
     root: Dir,
     parent: Dir,
     parent_relative: PathBuf,
@@ -31,7 +39,7 @@ pub(in crate::tracedecay) struct SourceEditFileAuthority {
 
 impl SourceEditFileAuthority {
     #[hotpath::measure(label = "edits.file_authority.open")]
-    pub(in crate::tracedecay) fn open(project_root: &Path, relative: &Path) -> Result<Self> {
+    pub fn open(project_root: &Path, relative: &Path) -> Result<Self> {
         let relative = normalize_source_edit_relative_path(relative)?;
         let root = Dir::open_ambient_dir(project_root, ambient_authority())
             .map_err(|error| source_edit_path_error("open authorized source edit root", error))?;
@@ -60,7 +68,7 @@ impl SourceEditFileAuthority {
         })
     }
 
-    pub(super) fn open_optional(&self) -> Result<Option<cap_std::fs::File>> {
+    fn open_optional(&self) -> Result<Option<cap_std::fs::File>> {
         match self.parent.symlink_metadata(&self.name) {
             Ok(metadata) if metadata.file_type().is_file() => {}
             Ok(_) => return Err(source_edit_unsafe_path()),
@@ -93,7 +101,10 @@ impl SourceEditFileAuthority {
         Ok(Some(input))
     }
 
-    pub(super) fn read_optional_with_identity(&self) -> Result<(Option<Vec<u8>>, Option<Handle>)> {
+    /// Reads the candidate and re-checks its identity afterwards, so bytes
+    /// observed here always belong to the file that is still bound to the
+    /// descriptor-scoped parent.
+    fn read_optional_with_identity(&self) -> Result<(Option<Vec<u8>>, Option<Handle>)> {
         let Some(mut input) = self.open_optional()? else {
             return Ok((None, None));
         };
@@ -119,11 +130,11 @@ impl SourceEditFileAuthority {
         Ok((Some(bytes), Some(identity)))
     }
 
-    pub(super) fn read_optional(&self) -> Result<Option<Vec<u8>>> {
+    fn read_optional(&self) -> Result<Option<Vec<u8>>> {
         self.read_optional_with_identity().map(|(bytes, _)| bytes)
     }
 
-    pub(super) fn read_to_string(&self, label: &str) -> Result<(String, Handle)> {
+    pub fn read_to_string(&self, label: &str) -> Result<(String, Handle)> {
         let (bytes, identity) = self.read_optional_with_identity()?;
         let bytes = bytes.ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to read {label}: file was not found"),
@@ -137,7 +148,7 @@ impl SourceEditFileAuthority {
         Ok((source, identity))
     }
 
-    pub(super) fn current_identity(&self) -> Result<Option<Handle>> {
+    pub(crate) fn current_identity(&self) -> Result<Option<Handle>> {
         self.open_optional()?
             .map(|file| {
                 Handle::from_file(file.into_std()).map_err(|error| {
@@ -185,7 +196,7 @@ impl SourceEditFileAuthority {
     }
 
     #[hotpath::measure(label = "edits.file_authority.publish")]
-    pub(super) fn publish(
+    pub fn publish(
         &self,
         relative_path: &str,
         expected: Option<&str>,
@@ -292,7 +303,7 @@ impl SourceEditFileAuthority {
     }
 
     #[hotpath::measure(label = "edits.file_authority.remove")]
-    pub(super) fn remove(
+    pub(crate) fn remove(
         &self,
         relative_path: &str,
         expected: &str,
@@ -320,14 +331,17 @@ impl SourceEditFileAuthority {
         sync_source_edit_directory(&self.parent)
     }
 
-    pub(super) fn metadata(&self) -> Result<cap_std::fs::Metadata> {
+    pub fn metadata(&self) -> Result<cap_std::fs::Metadata> {
         self.parent
             .symlink_metadata(&self.name)
             .map_err(|error| source_edit_path_error("inspect source edit candidate", error))
     }
 }
 
-pub(super) fn read_source_edit_candidate(
+/// Reads one candidate's current bytes (`None` when it does not exist yet)
+/// through the descriptor-scoped authority.
+#[hotpath::measure(label = "usecases.edit.read")]
+pub(crate) fn read_source_edit_candidate(
     project_root: &Path,
     relative: &Path,
 ) -> Result<Option<Vec<u8>>> {
@@ -355,21 +369,96 @@ fn sync_source_edit_directory(directory: &Dir) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::Path;
 
     use tempfile::tempdir;
 
-    use super::SourceEditFileAuthority;
+    use super::{SourceEditFileAuthority, read_source_edit_candidate};
+
+    #[test]
+    fn reads_a_regular_candidate_beneath_the_worktree() {
+        let project = tempdir().unwrap();
+        fs::create_dir(project.path().join("src")).unwrap();
+        fs::write(project.path().join("src/lib.rs"), b"inside").unwrap();
+
+        assert_eq!(
+            read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).unwrap(),
+            Some(b"inside".to_vec())
+        );
+    }
+
+    /// Absence is not a refusal: a candidate that does not exist yet is a
+    /// normal state for a plan that creates files.
+    #[test]
+    fn reports_an_absent_candidate_without_error() {
+        let project = tempdir().unwrap();
+        fs::create_dir(project.path().join("src")).unwrap();
+
+        assert_eq!(
+            read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).unwrap(),
+            None
+        );
+    }
+
+    /// A canonicalized parent is not enough: the final component itself must
+    /// never be followed, or a symlink planted inside the worktree hands the
+    /// reader arbitrary bytes from outside it.
     #[cfg(unix)]
-    use super::read_source_edit_candidate;
+    #[test]
+    fn refuses_a_symlinked_final_component() {
+        let project = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("secret.rs");
+        fs::write(&secret, b"outside").unwrap();
+        fs::create_dir(project.path().join("src")).unwrap();
+        symlink(&secret, project.path().join("src/lib.rs")).unwrap();
+
+        assert!(read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).is_err());
+        assert_eq!(fs::read(&secret).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symlinked_parent_component() {
+        let project = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("lib.rs"), b"outside").unwrap();
+        symlink(outside.path(), project.path().join("src")).unwrap();
+
+        assert!(read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).is_err());
+        assert!(SourceEditFileAuthority::open(project.path(), Path::new("src/lib.rs")).is_err());
+        assert_eq!(fs::read(outside.path().join("lib.rs")).unwrap(), b"outside");
+    }
+
+    /// A directory or other non-regular file must never be read as candidate
+    /// content, even when it sits at a legitimate path inside the worktree.
+    #[test]
+    fn refuses_a_non_regular_candidate() {
+        let project = tempdir().unwrap();
+        fs::create_dir_all(project.path().join("src/lib.rs")).unwrap();
+
+        assert!(read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).is_err());
+    }
+
+    #[test]
+    fn refuses_paths_that_escape_the_worktree() {
+        let project = tempdir().unwrap();
+
+        assert!(read_source_edit_candidate(project.path(), Path::new("../escape.rs")).is_err());
+        assert!(read_source_edit_candidate(project.path(), Path::new("")).is_err());
+        assert!(SourceEditFileAuthority::open(project.path(), Path::new("../escape.rs")).is_err());
+    }
 
     #[test]
     fn atomic_publication_rejects_same_content_inode_swap() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("lib.rs");
         let replacement = directory.path().join("replacement.rs");
-        std::fs::write(&path, "previewed\n").unwrap();
-        std::fs::write(&replacement, "previewed\n").unwrap();
+        fs::write(&path, "previewed\n").unwrap();
+        fs::write(&replacement, "previewed\n").unwrap();
         let file = SourceEditFileAuthority::open(directory.path(), Path::new("lib.rs")).unwrap();
         let (_, identity) = file.read_to_string("lib.rs").unwrap();
 
@@ -379,11 +468,11 @@ mod tests {
                 Some("previewed\n"),
                 Some(&identity),
                 "intended\n",
-                || std::fs::rename(&replacement, &path).unwrap(),
+                || fs::rename(&replacement, &path).unwrap(),
             )
             .is_err()
         );
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "previewed\n");
+        assert_eq!(fs::read_to_string(path).unwrap(), "previewed\n");
     }
 
     /// A live authority holds the candidate's parent directory open. On Unix
@@ -398,8 +487,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let source = directory.path().join("src");
         let moved = directory.path().join("moved");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::write(source.join("lib.rs"), "previewed\n").unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("lib.rs"), "previewed\n").unwrap();
         let file =
             SourceEditFileAuthority::open(directory.path(), Path::new("src/lib.rs")).unwrap();
         let (_, identity) = file.read_to_string("src/lib.rs").unwrap();
@@ -411,19 +500,19 @@ mod tests {
                 Some(&identity),
                 "intended\n",
                 || {
-                    std::fs::rename(&source, &moved).unwrap();
-                    std::fs::create_dir(&source).unwrap();
-                    std::fs::write(source.join("lib.rs"), "replacement\n").unwrap();
+                    fs::rename(&source, &moved).unwrap();
+                    fs::create_dir(&source).unwrap();
+                    fs::write(source.join("lib.rs"), "replacement\n").unwrap();
                 },
             )
             .is_err()
         );
         assert_eq!(
-            std::fs::read_to_string(moved.join("lib.rs")).unwrap(),
+            fs::read_to_string(moved.join("lib.rs")).unwrap(),
             "previewed\n"
         );
         assert_eq!(
-            std::fs::read_to_string(source.join("lib.rs")).unwrap(),
+            fs::read_to_string(source.join("lib.rs")).unwrap(),
             "replacement\n"
         );
     }
@@ -434,8 +523,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let source = directory.path().join("src");
         let moved = directory.path().join("moved");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::write(source.join("lib.rs"), "previewed\n").unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("lib.rs"), "previewed\n").unwrap();
         let file =
             SourceEditFileAuthority::open(directory.path(), Path::new("src/lib.rs")).unwrap();
         let (_, identity) = file.read_to_string("src/lib.rs").unwrap();
@@ -446,7 +535,7 @@ mod tests {
             Some("previewed\n"),
             Some(&identity),
             "intended\n",
-            || swap = Some(std::fs::rename(&source, &moved)),
+            || swap = Some(fs::rename(&source, &moved)),
         )
         .expect("publication into the still-bound parent succeeds");
         let swap = swap.expect("the swap hook ran before the compare");
@@ -459,26 +548,9 @@ mod tests {
             "a denied swap must not leave a moved directory behind"
         );
         assert_eq!(
-            std::fs::read_to_string(source.join("lib.rs")).unwrap(),
+            fs::read_to_string(source.join("lib.rs")).unwrap(),
             "intended\n",
             "publication is confined to the parent the authority opened"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn descriptor_read_rejects_symlinked_parent() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempdir().unwrap();
-        let outside = tempdir().unwrap();
-        std::fs::write(outside.path().join("lib.rs"), "outside\n").unwrap();
-        symlink(outside.path(), directory.path().join("src")).unwrap();
-
-        assert!(read_source_edit_candidate(directory.path(), Path::new("src/lib.rs")).is_err());
-        assert_eq!(
-            std::fs::read_to_string(outside.path().join("lib.rs")).unwrap(),
-            "outside\n"
         );
     }
 }

@@ -9,9 +9,9 @@ use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
     map_code_graph_read_runtime_error,
 };
-use tracedecay_usecases::tracedecay::{SourceEditGraphReadV1, SourceEditRuntime};
 
 use super::outcome::SourceEditOutcome;
+use super::port::{SourceEditGraphReadV1, SourceEditRuntime};
 
 pub(super) struct SourceEditGraphReadAuthorityV1<'a> {
     pub(super) port: &'a dyn CodeGraphProjectionReadPort,
@@ -202,9 +202,9 @@ mod tests {
         CodeGraphProjectionReadPort, CodeGraphReadFreshnessV1, CodeGraphReadFuture,
         CodeGraphReadRequest, VerifiedCodeGraphRead,
     };
-    use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
     use super::{SourceEditGraphReadAuthorityV1, admitted_graph};
+    use crate::port::SourceEditGraphReadV1;
     use crate::test_support::fixture_request;
 
     struct FixtureGraphPort {

@@ -10,9 +10,9 @@ use std::path::Path;
 
 use tracedecay_application::source_edit::AstGrepResult;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_source_edit::SourceEditFileAuthority;
 
 use super::super::TraceDecay;
-use super::file_authority::SourceEditFileAuthority;
 use super::preview::edit_success_message;
 
 impl TraceDecay {
