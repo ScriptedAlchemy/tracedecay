@@ -155,6 +155,51 @@ pub fn separate_application_tool_request(
     })
 }
 
+/// Adapts shipped public MCP/CLI argument shapes into canonical application
+/// requests after separating transport metadata.
+pub fn adapt_application_tool_request(
+    tool_name: &str,
+    args: Value,
+) -> Result<ApplicationToolRequest, ApplicationSurfaceAdapterError> {
+    let mut separated = separate_application_tool_request(args)?;
+    if tool_name == "tracedecay_diagnostics" {
+        separated.request = adapt_shipped_diagnostics_request(&separated.request)?;
+    }
+    Ok(separated)
+}
+
+/// Adapts the flat `tracedecay_diagnostics` arguments shipped on the public
+/// MCP/CLI protocol into the canonical diagnostics-read request. This adapter
+/// is retained because that external shape shipped, not for a branch-local
+/// compatibility phase.
+fn adapt_shipped_diagnostics_request(
+    args: &Value,
+) -> Result<Value, ApplicationSurfaceAdapterError> {
+    let scope = match args
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("workspace")
+    {
+        "workspace" => serde_json::json!("workspace"),
+        "package" => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        "file" => serde_json::json!({
+            "file": args
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+        }),
+        _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    Ok(serde_json::json!({
+        "scope": scope,
+        "maximum_diagnostics": args
+            .get("maximum_diagnostics")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(1000)),
+        "cursor": args.get("cursor").cloned().unwrap_or(Value::Null),
+    }))
+}
+
 pub type FeedbackSurfaceRequest = tracedecay_contracts::feedback::FeedbackHandleRequestV1;
 
 #[derive(Debug, Serialize, Deserialize)]

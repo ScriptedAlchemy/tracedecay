@@ -49,8 +49,8 @@ use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
-    observe_surface_argument_rejection, parse_application_surface_request,
-    separate_application_tool_request,
+    adapt_application_tool_request, observe_surface_argument_rejection,
+    parse_application_surface_request,
 };
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -185,7 +185,7 @@ fn run_inner(
                 .checked_add(tool_command_deadline()?)
                 .ok_or_else(tool_deadline_range_error)?;
             let (request, requested_format) =
-                cli_surface_invocation(tool_args, raw_json).map_err(|error| {
+                cli_surface_invocation(&canonical, tool_args, raw_json).map_err(|error| {
                     TraceDecayError::Config {
                         message: error.to_string(),
                     }
@@ -256,7 +256,7 @@ fn run_inner(
             .ok_or_else(tool_deadline_range_error)?;
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
             let (request, requested_format) =
-                cli_surface_invocation(tool_args, raw_json).map_err(|error| {
+                cli_surface_invocation(&def.name, tool_args, raw_json).map_err(|error| {
                     TraceDecayError::Config {
                         message: error.to_string(),
                     }
@@ -304,9 +304,11 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
     let (request, requested_format) =
-        cli_surface_invocation(tool_args, raw_json).map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
+        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json).map_err(
+            |error| TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )?;
     dispatch_cli_application_surface(operation, request, project, requested_format, deadline).await
 }
 
@@ -314,10 +316,11 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
 /// the requested output format, through the same adapter every other transport
 /// uses. `--json` and `format: "json"` are the same request for JSON output.
 fn cli_surface_invocation(
+    tool_name: &str,
     tool_args: Value,
     raw_json: bool,
 ) -> std::result::Result<(Value, RequestedOutputFormat), ApplicationSurfaceAdapterError> {
-    let normalized = separate_application_tool_request(tool_args)?;
+    let normalized = adapt_application_tool_request(tool_name, tool_args)?;
     let requested_format = if raw_json {
         RequestedOutputFormat::Json
     } else {

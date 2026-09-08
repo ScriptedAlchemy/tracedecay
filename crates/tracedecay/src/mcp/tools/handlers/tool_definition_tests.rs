@@ -58,7 +58,7 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
 }
 
 #[test]
-fn diagnostics_public_name_projects_one_canonical_request_schema() {
+fn diagnostics_public_name_preserves_one_shipped_flat_request_schema() {
     let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");
     let operation_id = OperationId::new("operation.application.diagnostics_read")
@@ -83,17 +83,23 @@ fn diagnostics_public_name_projects_one_canonical_request_schema() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "diagnostics must have one public tool name and request shape"
+        "diagnostics must have one public tool name"
     );
     assert_eq!(diagnostics[0].name, "tracedecay_diagnostics");
     let mut projected = diagnostics[0].input_schema.clone();
-    projected["properties"]
+    let properties = projected["properties"]
         .as_object_mut()
-        .expect("diagnostics request properties")
-        .remove("format");
+        .expect("diagnostics request properties");
+    assert!(properties.remove("format").is_some());
     assert_eq!(
+        properties["scope"]["enum"],
+        json!(["workspace", "file"]),
+        "the public diagnostics tool must preserve its shipped flat scope"
+    );
+    assert_eq!(properties["path"]["type"], "string");
+    assert_ne!(
         &projected, canonical,
-        "the public diagnostics tool must parse the canonical diagnostics-read request directly"
+        "only the MCP/CLI edge keeps the shipped flat request; the executable remains canonical"
     );
 }
 

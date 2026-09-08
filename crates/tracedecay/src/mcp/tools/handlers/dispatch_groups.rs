@@ -863,7 +863,7 @@ fn dispatch_application_surface_tools_inner<'a>(
             return Err(unknown_tool_error(tool_name));
         };
         let normalized_args =
-            match crate::application_surface::separate_application_tool_request(args) {
+            match crate::application_surface::adapt_application_tool_request(tool_name, args) {
                 Ok(args) => args,
                 Err(error) => {
                     return Err(TraceDecayError::Config {
@@ -1005,10 +1005,11 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_diagnostics" => {
                 let graph = admitted_graph_query(cg, &options, "diagnostics_read").await?;
-                let separated = crate::application_surface::separate_application_tool_request(args)
-                    .map_err(|error| TraceDecayError::Config {
-                        message: error.to_string(),
-                    })?;
+                let separated =
+                    crate::application_surface::adapt_application_tool_request(tool_name, args)
+                        .map_err(|error| TraceDecayError::Config {
+                            message: error.to_string(),
+                        })?;
                 let request = serde_json::from_value(separated.request).map_err(|error| {
                     TraceDecayError::Config {
                         message: format!("invalid diagnostics request: {error}"),

@@ -31,12 +31,12 @@ use super::{
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
     HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
-    application_http_context, application_negotiated_features,
+    adapt_application_tool_request, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
     parse_application_surface_request, resolve_application_binding,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
-    separate_application_tool_request, surface_rejection_metadata,
+    surface_rejection_metadata,
 };
 use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
@@ -1966,7 +1966,7 @@ fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
 }
 
 #[test]
-fn diagnostics_public_name_parses_only_the_canonical_request() {
+fn diagnostics_public_name_adapts_the_shipped_flat_request() {
     assert_eq!(
         ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics"),
         Some(ApplicationSurfaceOperation::DiagnosticsRead)
@@ -1979,31 +1979,35 @@ fn diagnostics_public_name_parses_only_the_canonical_request() {
         "scope": {"file": "src/lib.rs"},
         "maximum_diagnostics": 25,
         "cursor": "opaque",
-        "format": "json"
     });
-    let separated = separate_application_tool_request(canonical).unwrap();
-    assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::DiagnosticsRead,
-            separated.request.clone(),
-        )
-        .is_ok()
+    let canonical_request = parse_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        canonical.clone(),
+    )
+    .expect("canonical application request");
+    let separated = adapt_application_tool_request(
+        "tracedecay_diagnostics",
+        json!({
+            "scope": "file",
+            "path": "src/lib.rs",
+            "maximum_diagnostics": 25,
+            "cursor": "opaque",
+            "format": "json"
+        }),
+    )
+    .expect("shipped flat MCP/CLI request");
+    assert_eq!(separated.request, canonical);
+    let edge_request = parse_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        separated.request,
     );
     assert_eq!(
-        separated.request,
-        json!({
-            "scope": {"file": "src/lib.rs"},
-            "maximum_diagnostics": 25,
-            "cursor": "opaque"
-        })
+        serde_json::to_value(edge_request.expect("adapted canonical request")).unwrap(),
+        serde_json::to_value(canonical_request).unwrap()
     );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::DiagnosticsRead,
-            json!({"scope": "file", "path": "src/lib.rs"}),
-        )
-        .is_err(),
-        "the removed flat scope/path request must not be rewritten"
+        adapt_application_tool_request("tracedecay_diagnostics", json!({"scope": "package"}))
+            .is_err()
     );
 
     let page = PageRequest::new(25, Some(OpaqueCursor::new("opaque-http").expect("cursor")))
