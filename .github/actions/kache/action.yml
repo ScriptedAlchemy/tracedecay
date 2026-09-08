@@ -68,3 +68,14 @@ runs:
         cache-dir: ${{ steps.identity.outputs.store }}
         max-size: ${{ inputs.max-size }}
         pr-comment: "false"
+
+    # kache's permit scheduler paces compiles machine-wide by measured peak
+    # RSS (`ceil(rss / 512 MiB)` slots of `available_parallelism()`), which on
+    # a 3–4 core hosted runner lets one large unit own the whole pool: the
+    # perf-profile test lanes compiled one crate at a time (macOS run
+    # 34168826002: 2.6 h of compile work behind 5.0 h of permit waits). Cargo
+    # already bounds concurrency with its own jobserver, so the scheduler is
+    # turned off here and the wrapper stays a cache.
+    - name: Leave compile pacing to cargo
+      shell: bash
+      run: echo "KACHE_SCHEDULER=0" >> "$GITHUB_ENV"
