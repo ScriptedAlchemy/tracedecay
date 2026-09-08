@@ -306,12 +306,18 @@ impl GraphDb {
     /// **activation** path, re-hashing only when it has to.
     ///
     /// This is the verify-once boundary. A verified-generation marker that was
-    /// written against the exact container backing this open, and that records
-    /// this exact expected digest, means the full proof has already run over
-    /// these bytes and does not run again. Every other case -- no marker, a
-    /// marker for other bytes, a marker that does not name this generation, a
-    /// digest that differs by one character, or a container this process has
-    /// since written to -- falls through to the full row-streaming proof.
+    /// written against the exact container the resident engine opened, and
+    /// that records this exact expected digest, means the full proof has
+    /// already run over these bytes and does not run again. Every other case
+    /// -- no marker, a marker for other bytes, a marker that does not name
+    /// this generation, a digest that differs by one character, or a container
+    /// this process has since written to -- falls through to the full
+    /// row-streaming proof.
+    ///
+    /// The engine is opened first because the marker is only ever consulted
+    /// against the container the engine actually loaded: a proof admitted
+    /// before the open would be about whatever file the path named at that
+    /// moment, not about the rows the engine serves.
     ///
     /// `expected` always comes from the relational authority, never from the
     /// marker, so a marker can only ever assert freshness. It cannot name
@@ -326,6 +332,7 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
         check()?;
+        self.ensure_opened()?;
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         if let Some(canonical_bytes) = self.inner.markers.lookup(&locator, expected.as_str()) {
@@ -479,14 +486,16 @@ impl GraphDb {
         reopen_fallback: bool,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(GraphCommit, GraphRecoveredGenerationDigestV1), GraphDbError> {
-        // Cheapest proof first: a marker filed by an earlier open of these
-        // exact container bytes. `expected` still comes from the relational
-        // authority, so a marker can only assert freshness - it can neither
-        // name which generation is served nor make a wrong digest pass, and
-        // corruption stays a typed failure from the full proof below. This is
-        // the mount point for the verify-once path; without it the marker set
-        // is written at close and never consulted, because publication routes
-        // through here rather than through `verify_activated_generation`.
+        // Cheapest proof first: a marker filed by an earlier open of the exact
+        // container bytes the resident engine loaded. `expected` still comes
+        // from the relational authority, so a marker can only assert freshness
+        // - it can neither name which generation is served nor make a wrong
+        // digest pass, and corruption stays a typed failure from the full
+        // proof below. This is the mount point for the verify-once path;
+        // without it the marker set is written at close and never consulted,
+        // because publication routes through here rather than through
+        // `verify_activated_generation`.
+        self.ensure_opened()?;
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         if let Some(canonical_bytes) = self.inner.markers.lookup(&locator, expected.as_str()) {

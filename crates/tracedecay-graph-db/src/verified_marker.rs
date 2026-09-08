@@ -18,18 +18,36 @@
 //!
 //! A marker records, for one `.grafeo` container:
 //!
-//! * the container's file identity -- device, inode, length, and modification
-//!   time -- captured after the container was closed and synced, and
+//! * the container's identity -- the checkpoint generation the engine's own
+//!   handle reported after the container was closed and synced (see
+//!   [`ContainerIdentity`]), and
 //! * for each generation proven against that container, the recovered digest
 //!   that was proven and the number of canonical bytes the proof hashed.
 //!
-//! On a later open the container is identified from an opened handle
-//! (microseconds) and compared against the recorded identity. An exact match
-//! means the bytes that back the in-RAM store are the bytes the proof already
-//! ran over, so the recorded digest stands and the enumeration is skipped.
-//! Anything else -- a missing marker, an unparseable one, a self-digest
-//! mismatch, an identity mismatch, a missing durable file identity, or a
-//! generation the marker does not list -- falls back to the full proof.
+//! On a later open the identity is taken from the engine's own handle, the
+//! moment the engine has opened the container, and compared against the
+//! recorded identity. An exact match means the bytes that back the in-RAM
+//! store are the bytes the proof already ran over, so the recorded digest
+//! stands and the enumeration is skipped. Anything else -- a missing marker,
+//! an unparseable one, a self-digest mismatch, an identity mismatch, an
+//! engine that could not report its container, or a generation the marker
+//! does not list -- falls back to the full proof.
+//!
+//! # One owner: the engine
+//!
+//! The native engine is the only thing that knows which container it loaded,
+//! so it is the only thing allowed to say which container a proof is about.
+//! Every identity in this module is read through the engine's handle
+//! (`GrafeoDB::file_manager`), never through a path: a path-only stat taken
+//! before the open, or after the close, names whichever file occupies the
+//! path at that instant, and a replacement between that stat and the engine
+//! open would let a marker written for one container vouch for another.
+//!
+//! The proofs therefore live on the *engine incarnation*: admitted when an
+//! engine binds (eager open, lazy first use, reopen after hibernation),
+//! consulted only while that engine is resident and pristine, and published
+//! under the identity the same handle reports once that engine has closed.
+//! A handle with no resident engine has no proofs to offer.
 //!
 //! # What a marker cannot do
 //!
@@ -49,11 +67,13 @@
 //!
 //! # The integrity boundary, stated honestly
 //!
-//! File identity is an **OS-integrity assumption, not a cryptographic one**.
-//! `(device, inode, length, mtime)` detects a container that was replaced,
-//! extended, truncated, or rewritten through the filesystem. It does not
-//! detect bytes that changed underneath a stable inode without moving mtime --
-//! neither silent bit rot nor an adversary who restores the timestamp.
+//! Container identity is a **format-integrity assumption, not a cryptographic
+//! one**. The active header names a checkpoint by iteration, write time, and
+//! the CRC-32 of its section directory, and that directory carries the
+//! CRC-32 of every section, so any change to the rows that went through the
+//! container format changes the identity. It does not detect bytes that
+//! changed underneath an unchanged header -- neither silent bit rot nor an
+//! adversary who rewrites sections and their checksums in place.
 //!
 //! Two things stand behind that boundary:
 //!
@@ -67,11 +87,11 @@
 //!   the CRC had already passed.
 //!
 //! What a marker genuinely gives up is the *cryptographic* half against an
-//! adversary who can write to the store directory while preserving file
-//! metadata. That adversary can already rewrite the marker, the container, and
-//! -- being inside the daemon's private store -- the relational authority's
-//! expected digest as well. The proof it would have skipped was not defending
-//! against it either.
+//! adversary who can write to the store directory while keeping the header
+//! consistent. That adversary can already rewrite the marker, the container,
+//! and -- being inside the daemon's private store -- the relational
+//! authority's expected digest as well. The proof it would have skipped was
+//! not defending against it either.
 //!
 //! # Why not chunked or per-page digests
 //!
@@ -86,8 +106,9 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
+use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
@@ -134,103 +155,64 @@ impl GenerationVerification {
     }
 }
 
-/// The identity of a `.grafeo` container as the filesystem reports it.
+/// The identity of a `.grafeo` container as the engine that opened it reports
+/// it: the file header's creation stamp, the active database header the
+/// engine loaded from -- field for field -- and the container length, all read
+/// through the engine's own file handle.
 ///
-/// Identity is taken from an opened container handle, not from a path-only
-/// stat. On Unix that is the handle's `(device, inode, mtime)` triple. On
-/// Windows it is the volume serial and file index from
-/// `GetFileInformationByHandle`, plus length and modification time. A pair
-/// of `(device, inode) = (0, 0)` is not a file identity -- that was the
-/// historical non-Unix fallback, and it lets a same-length replacement that
-/// preserved its timestamp reuse a stale marker. Readers therefore treat a
-/// missing or zero file-id as a marker miss and run the full proof.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+/// The active header names one checkpoint of one container: its iteration,
+/// the time it was written, its row watermarks, and the CRC-32 of its section
+/// directory, which in turn checksums every section. Two containers holding
+/// different rows therefore report different identities, a checkpoint by any
+/// process moves the identity, and -- because it is read from the engine's
+/// handle -- it is the identity of the bytes the engine actually consumed,
+/// whatever file the path pointed at a moment earlier or later.
+///
+/// This is the same on every platform: no device/inode or volume/file-index
+/// is involved, so there is no per-OS identity path to keep honest.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContainerIdentity {
-    pub(crate) device: u64,
-    pub(crate) inode: u64,
-    pub(crate) len: u64,
-    pub(crate) modified_seconds: i64,
-    pub(crate) modified_nanoseconds: u32,
+    /// `FileHeader::creation_timestamp_ms`, written once at container creation.
+    created_ms: u64,
+    /// Active `DbHeader::iteration`: the checkpoint counter the engine loaded.
+    iteration: u64,
+    /// Active `DbHeader::checksum`: CRC-32 of the section directory, which
+    /// carries every section's own CRC-32.
+    checksum: u32,
+    snapshot_length: u64,
+    epoch: u64,
+    transaction_id: u64,
+    node_count: u64,
+    edge_count: u64,
+    /// Active `DbHeader::timestamp_ms`: when this checkpoint was written.
+    written_ms: u64,
+    directory_offset: u64,
+    /// Container length as the engine's handle reports it.
+    len: u64,
 }
 
 impl ContainerIdentity {
-    /// Reads the identity of `path`, or `None` when it cannot be established.
-    ///
-    /// A missing file, a symlink, an unreadable handle, a modification time
-    /// the platform declines to report, or a handle that does not expose a
-    /// durable file identity all yield `None`, which callers treat as "no
-    /// usable marker" rather than as an error: failing to take a shortcut is
-    /// never a failure.
-    pub(crate) fn read(path: &Path) -> Option<Self> {
-        // Refuse to follow a symlink at the container path: the marker must
-        // name the object the path itself denotes.
-        let metadata = std::fs::symlink_metadata(path).ok()?;
-        if !metadata.file_type().is_file() {
-            return None;
-        }
-        let file = std::fs::File::open(path).ok()?;
-        Self::from_opened(&file)
-    }
-
-    fn from_opened(file: &std::fs::File) -> Option<Self> {
-        let metadata = file.metadata().ok()?;
-        Self::from_opened_metadata(file, &metadata)?.if_durable()
-    }
-
-    /// A file identity is usable only when the durable file-id pair is not
-    /// the historical `(0, 0)` placeholder. Length and mtime alone cannot
-    /// distinguish a replacement that preserved those fields.
-    fn has_durable_file_id(self) -> bool {
-        self.device != 0 || self.inode != 0
-    }
-
-    fn if_durable(self) -> Option<Self> {
-        self.has_durable_file_id().then_some(self)
-    }
-
-    #[cfg(unix)]
-    fn from_opened_metadata(_file: &std::fs::File, metadata: &std::fs::Metadata) -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
+    /// The identity of the container `database` has open, read through the
+    /// engine's own handle, or `None` when the engine has no container (an
+    /// in-memory store) or cannot report its length. `None` is "no usable
+    /// marker", never an error: failing to take a shortcut is not a failure.
+    pub(crate) fn from_engine(database: &GrafeoDB) -> Option<Self> {
+        let manager = database.file_manager()?;
+        let header = manager.active_header();
         Some(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified_seconds: metadata.mtime(),
-            modified_nanoseconds: u32::try_from(metadata.mtime_nsec()).ok()?,
+            created_ms: manager.file_header().creation_timestamp_ms,
+            iteration: header.iteration,
+            checksum: header.checksum,
+            snapshot_length: header.snapshot_length,
+            epoch: header.epoch,
+            transaction_id: header.transaction_id,
+            node_count: header.node_count,
+            edge_count: header.edge_count,
+            written_ms: header.timestamp_ms,
+            directory_offset: header.directory_offset,
+            len: manager.file_size().ok()?,
         })
-    }
-
-    #[cfg(windows)]
-    fn from_opened_metadata(file: &std::fs::File, metadata: &std::fs::Metadata) -> Option<Self> {
-        let information = tracedecay_private_fs::windows_file::information(file).ok()?;
-        let (modified_seconds, modified_nanoseconds) = modified_stamp(metadata.modified().ok()?)?;
-        Some(Self {
-            device: u64::from(information.volume_serial_number),
-            inode: information.file_index,
-            len: metadata.len(),
-            modified_seconds,
-            modified_nanoseconds,
-        })
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn from_opened_metadata(_file: &std::fs::File, _metadata: &std::fs::Metadata) -> Option<Self> {
-        None
-    }
-}
-
-#[cfg(windows)]
-fn modified_stamp(modified: std::time::SystemTime) -> Option<(i64, u32)> {
-    match modified.duration_since(std::time::UNIX_EPOCH) {
-        Ok(since) => Some((i64::try_from(since.as_secs()).ok()?, since.subsec_nanos())),
-        Err(before) => {
-            let since = before.duration();
-            Some((
-                i64::try_from(since.as_secs()).ok()?.checked_neg()?,
-                since.subsec_nanos(),
-            ))
-        }
     }
 }
 
@@ -322,13 +304,8 @@ fn load(
         return BTreeMap::new();
     }
     // The identity gate. A marker written against different bytes describes a
-    // container this one is not. A `(0, 0)` file-id -- recorded by the
-    // historical non-Unix fallback or observed when the platform cannot name
-    // the file -- is not an identity, so it cannot authorize a hit.
-    if !observed.has_durable_file_id()
-        || !marker.body.container.has_durable_file_id()
-        || marker.body.container != observed
-    {
+    // container this one is not.
+    if marker.body.container != observed {
         return BTreeMap::new();
     }
     marker
@@ -370,95 +347,119 @@ impl GenerationKey {
     }
 }
 
-/// The marker set for one open database.
+/// The proofs that apply to one resident engine incarnation.
 ///
 /// Holds two things that never mix: `admitted`, the proofs a marker file
-/// carried into this open and that are still believable, and `proven`, the
-/// proofs this process established itself. Only `proven` is ever published,
-/// because only those were established against rows this process actually
-/// streamed -- with one exception noted in `record_fresh`.
-pub(crate) struct GenerationMarkers {
-    container: PathBuf,
-    /// Proofs carried in from a marker file whose recorded identity matched
-    /// the container at open. Empty for an in-memory or first-ever store.
+/// carried in against the identity this engine reported at open and that are
+/// still believable, and `proven`, the proofs this incarnation established
+/// itself. Only `proven` is ever published, because only those were
+/// established against rows this process actually streamed -- with one
+/// exception noted in `GenerationMarkers::record_fresh`.
+struct BoundEngine {
+    /// The container the engine loaded, as its own handle reported it.
+    identity: ContainerIdentity,
     admitted: BTreeMap<GenerationKey, ProvenGeneration>,
-    /// Proofs this open established or re-affirmed, published at close.
-    proven: std::sync::Mutex<BTreeMap<GenerationKey, ProvenGeneration>>,
+    proven: BTreeMap<GenerationKey, ProvenGeneration>,
     /// False once anything has taken the exclusive claim on this database.
     ///
     /// The exclusive claim is this crate's documented gate for every write
     /// that rewrites the container, so clearing it here is the single point
     /// that stops `admitted` from being consulted once the store has diverged
     /// from the bytes the marker was written against.
-    pristine: AtomicBool,
+    pristine: bool,
+}
+
+/// The marker set for one database handle.
+///
+/// Proofs are bound to an engine incarnation, not to the handle: they are
+/// admitted when the engine binds the container it opened, consulted only
+/// while that engine is resident, and published under the identity the same
+/// handle reports after it closes. Between incarnations -- before a lazy
+/// first use, or while hibernated -- there is nothing to consult, because
+/// there is no engine whose container a proof could be about.
+pub(crate) struct GenerationMarkers {
+    /// The marker lives beside this container; `None` for an in-memory store.
+    container: Option<PathBuf>,
+    engine: Mutex<Option<BoundEngine>>,
 }
 
 impl GenerationMarkers {
-    /// Opens the marker set for a persistent container.
+    /// A marker set for a database handle with no engine bound yet.
+    pub(crate) fn new(container: Option<&Path>) -> Self {
+        Self {
+            container: container.map(Path::to_path_buf),
+            engine: Mutex::new(None),
+        }
+    }
+
+    /// Binds a freshly opened engine incarnation.
     ///
-    /// `observed` must be the identity read from an opened handle **before**
-    /// grafeo opens the container, because an open may checkpoint the WAL and
-    /// move the modification time before any caller could read it. The durable
-    /// file-id half of that identity does not move with the WAL.
-    pub(crate) fn open(container: &Path, observed: Option<ContainerIdentity>) -> Self {
-        let admitted = observed
-            .map(|observed| load(container, observed))
-            .unwrap_or_default();
-        Self {
-            container: container.to_path_buf(),
-            admitted,
-            proven: std::sync::Mutex::new(BTreeMap::new()),
-            pristine: AtomicBool::new(true),
-        }
+    /// `identity` is what the engine's own handle reports for the container
+    /// it just loaded; the marker beside the container is admitted only when
+    /// it was written against exactly that identity. `None` -- an in-memory
+    /// store, or an engine that could not report its container -- binds
+    /// nothing, so every lookup misses and nothing is published.
+    pub(crate) fn bind(&self, identity: Option<ContainerIdentity>) {
+        let Ok(mut engine) = self.engine.lock() else {
+            return;
+        };
+        *engine = identity.map(|identity| BoundEngine {
+            identity,
+            admitted: self
+                .container
+                .as_deref()
+                .map(|container| load(container, identity))
+                .unwrap_or_default(),
+            proven: BTreeMap::new(),
+            pristine: true,
+        });
     }
 
-    /// A marker set for a database with no container to bind to.
-    pub(crate) fn detached() -> Self {
-        Self {
-            container: PathBuf::new(),
-            admitted: BTreeMap::new(),
-            proven: std::sync::Mutex::new(BTreeMap::new()),
-            pristine: AtomicBool::new(false),
-        }
-    }
-
-    /// Notes that the exclusive claim was taken, permanently retiring the
-    /// admitted proofs for this open.
+    /// Notes that the exclusive claim was taken, retiring the admitted proofs
+    /// for the rest of this engine incarnation.
     pub(crate) fn mark_container_mutated(&self) {
-        self.pristine.store(false, Ordering::Release);
+        if let Ok(mut engine) = self.engine.lock()
+            && let Some(engine) = engine.as_mut()
+        {
+            engine.pristine = false;
+        }
     }
 
-    /// Looks up a completed proof of `expected` for `locator`.
+    /// Looks up a completed proof of `expected` for `locator` against the
+    /// container the resident engine opened.
     ///
     /// Returns the canonical byte count the original proof hashed, for the
-    /// byte gauge, or `None` when the full proof has to run. The caller's
-    /// `expected` digest -- which comes from the relational authority, never
-    /// from the marker -- must match exactly.
+    /// byte gauge, or `None` when the full proof has to run -- including
+    /// whenever no engine is resident. The caller's `expected` digest --
+    /// which comes from the relational authority, never from the marker --
+    /// must match exactly.
     pub(crate) fn lookup(&self, locator: &GenerationLocator, expected: &str) -> Option<u64> {
-        if !self.pristine.load(Ordering::Acquire) {
-            return None;
-        }
+        let engine = self.engine.lock().ok()?;
+        let engine = engine.as_ref().filter(|engine| engine.pristine)?;
         let key = GenerationKey::from_locator(locator);
         // A proof this process established outranks an admitted one; both are
         // held to the same exact-digest comparison.
-        let proven = self
+        let record = engine
             .proven
-            .lock()
-            .ok()
-            .and_then(|proven| proven.get(&key).cloned());
-        let record = proven.or_else(|| self.admitted.get(&key).cloned())?;
+            .get(&key)
+            .or_else(|| engine.admitted.get(&key))?;
         (record.recovered_digest == expected).then_some(record.canonical_bytes)
     }
 
-    /// Records a proof this process established by streaming the rows.
+    /// Records a proof this process established by streaming the rows of the
+    /// resident engine. With no engine resident there is no container the
+    /// proof could be filed against, so it is dropped; the next open pays a
+    /// proof and nothing else.
     pub(crate) fn record_proven(
         &self,
         locator: &GenerationLocator,
         recovered_digest: &str,
         canonical_bytes: u64,
     ) {
-        if let Ok(mut proven) = self.proven.lock() {
-            proven.insert(
+        if let Ok(mut engine) = self.engine.lock()
+            && let Some(engine) = engine.as_mut()
+        {
+            engine.proven.insert(
                 GenerationKey::from_locator(locator),
                 ProvenGeneration {
                     recovered_digest: recovered_digest.to_owned(),
@@ -471,43 +472,81 @@ impl GenerationMarkers {
     /// Carries an admitted proof forward into the set that will be published.
     ///
     /// A marker hit is not a weaker fact than a full proof of the same bytes:
-    /// it *is* that proof, established earlier over a container this open has
-    /// confirmed is byte-identical. Without this, a daemon that starts, serves
-    /// reads, and stops without publishing anything would drop every proof it
-    /// inherited and make the next open re-derive all of them.
+    /// it *is* that proof, established earlier over a container this engine
+    /// has confirmed is byte-identical. Without this, a daemon that starts,
+    /// serves reads, and stops without publishing anything would drop every
+    /// proof it inherited and make the next open re-derive all of them.
     pub(crate) fn record_fresh(&self, locator: &GenerationLocator) {
-        let key = GenerationKey::from_locator(locator);
-        let Some(record) = self.admitted.get(&key).cloned() else {
-            return;
-        };
-        if let Ok(mut proven) = self.proven.lock() {
-            proven.entry(key).or_insert(record);
+        if let Ok(mut engine) = self.engine.lock()
+            && let Some(engine) = engine.as_mut()
+        {
+            let key = GenerationKey::from_locator(locator);
+            if let Some(record) = engine.admitted.get(&key).cloned() {
+                engine.proven.entry(key).or_insert(record);
+            }
         }
     }
 
-    /// Writes the marker for the container as it now stands.
+    /// Writes the resident engine's proofs under the identity it opened.
     ///
-    /// Must run **after** the container has been closed and synced, so the
-    /// identity recorded is the one the next open will observe. The stat is
-    /// taken here rather than passed in for the same reason.
+    /// For a read-only engine the container never moves while it is open, so
+    /// the identity bound at open is the one a concurrent open of the same
+    /// artifact observes; publishing mid-life lets that open resolve by
+    /// marker instead of re-streaming the rows.
+    pub(crate) fn publish_resident(&self) -> io::Result<()> {
+        let Ok(engine) = self.engine.lock() else {
+            return Ok(());
+        };
+        let Some(engine) = engine.as_ref() else {
+            return Ok(());
+        };
+        self.write(engine.identity, &engine.proven)
+    }
+
+    /// Releases the engine incarnation, publishing its proofs under `closed`.
+    ///
+    /// `closed` is what the engine's own handle reports **after** the engine
+    /// has closed and synced the container, so the identity recorded is the
+    /// one the next open will read from the same bytes. `None` -- an
+    /// uncertain close, or an engine that could not report its container --
+    /// releases the incarnation without publishing.
     ///
     /// The digests published were established against rows, not bytes: a
-    /// generation proven earlier in this open is still proven now, because the
-    /// container was re-serialized from an in-RAM store in which a sealed
-    /// generation's rows never changed.
-    pub(crate) fn publish(&self) -> io::Result<()> {
-        if self.container.as_os_str().is_empty() {
+    /// generation proven earlier in this incarnation is still proven now,
+    /// because the container was re-serialized from an in-RAM store in which
+    /// a sealed generation's rows never changed.
+    pub(crate) fn release(&self, closed: Option<ContainerIdentity>) -> io::Result<()> {
+        let Ok(mut engine) = self.engine.lock() else {
             return Ok(());
+        };
+        let Some(engine) = engine.take() else {
+            return Ok(());
+        };
+        match closed {
+            Some(closed) => self.write(closed, &engine.proven),
+            None => Ok(()),
         }
-        let Ok(proven) = self.proven.lock() else {
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bound_identity(&self) -> Option<ContainerIdentity> {
+        self.engine
+            .lock()
+            .ok()
+            .and_then(|engine| engine.as_ref().map(|engine| engine.identity))
+    }
+
+    fn write(
+        &self,
+        container: ContainerIdentity,
+        proven: &BTreeMap<GenerationKey, ProvenGeneration>,
+    ) -> io::Result<()> {
+        let Some(path) = self.container.as_deref() else {
             return Ok(());
         };
         if proven.is_empty() {
             return Ok(());
         }
-        let Some(container) = ContainerIdentity::read(&self.container) else {
-            return Ok(());
-        };
         let body = MarkerBody {
             version: MARKER_VERSION,
             container,
@@ -528,7 +567,7 @@ impl GenerationMarkers {
         let encoded = serde_json::to_vec(&MarkerFile { body, body_digest })
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         tracedecay_private_fs::framed_log::atomic_write(
-            &marker_path(&self.container),
+            &marker_path(path),
             MARKER_TEMP_KIND,
             &encoded,
             tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
@@ -542,11 +581,17 @@ mod tests {
 
     fn identity(len: u64) -> ContainerIdentity {
         ContainerIdentity {
-            device: 7,
-            inode: 11,
+            created_ms: 1_700_000_000_000,
+            iteration: 3,
+            checksum: 0x1234_5678,
+            snapshot_length: 0,
+            epoch: 9,
+            transaction_id: 27,
+            node_count: 12,
+            edge_count: 4,
+            written_ms: 1_700_000_100_000,
+            directory_offset: 16_384,
             len,
-            modified_seconds: 1_700_000_000,
-            modified_nanoseconds: 123,
         }
     }
 
@@ -589,62 +634,54 @@ mod tests {
         let digest = body.digest().unwrap();
         write_marker(&container, body, digest);
 
-        // Same inode, different length: the container grew since the proof.
+        // Same header, different length: the container grew since the proof.
         assert!(load(&container, identity(65)).is_empty());
     }
 
-    /// Length plus mtime is not a file identity. A marker that recorded
-    /// `(device, inode) = (0, 0)` -- the historical non-Unix fallback -- must
-    /// miss even when the observed stat matches those zeros exactly. Otherwise
-    /// a same-size replacement that preserved its timestamp would reuse the
-    /// witness, which is what Windows shard 4 observed.
+    /// A marker written against a different checkpoint of the same container
+    /// -- same creation stamp, same length, later iteration -- is a miss: the
+    /// rows behind the header the engine loaded are not the rows proven.
     #[test]
-    fn a_zero_identity_marker_is_rejected_even_when_length_and_mtime_match() {
+    fn a_marker_for_another_checkpoint_of_the_same_container_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");
-        let mut body = body(64, "sha256:abc");
-        body.container.device = 0;
-        body.container.inode = 0;
+        let body = body(64, "sha256:abc");
         let digest = body.digest().unwrap();
-        write_marker(&container, body.clone(), digest);
+        write_marker(&container, body, digest);
 
-        assert!(
-            load(&container, body.container).is_empty(),
-            "a marker without a durable file identity must not be believed"
-        );
+        let mut checkpointed = identity(64);
+        checkpointed.iteration += 1;
+        checkpointed.checksum ^= 1;
+        assert!(load(&container, checkpointed).is_empty());
     }
 
+    /// A marker in the shape an earlier build wrote -- an OS file identity
+    /// instead of the engine-reported checkpoint -- is a miss, not an error.
     #[test]
-    fn replacing_a_file_with_identical_bytes_and_mtime_changes_identity() {
+    fn a_marker_carrying_a_foreign_identity_shape_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("graph.grafeo");
-        std::fs::write(&path, [7_u8; 128]).unwrap();
-        let first = ContainerIdentity::read(&path).expect("original identity");
-        assert!(
-            first.has_durable_file_id(),
-            "a real container must expose a durable file identity, got {first:?}"
-        );
+        let container = temp.path().join("graph.grafeo");
+        let honest = body(64, "sha256:abc");
+        let digest = honest.digest().unwrap();
+        let mut parsed = serde_json::to_value(MarkerFile {
+            body: honest,
+            body_digest: digest,
+        })
+        .unwrap();
+        parsed["body"]["container"] = serde_json::json!({
+            "device": 7,
+            "inode": 11,
+            "len": 64,
+            "modified_seconds": 1_700_000_000,
+            "modified_nanoseconds": 123,
+        });
+        std::fs::write(
+            marker_path(&container),
+            serde_json::to_vec(&parsed).unwrap(),
+        )
+        .unwrap();
 
-        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let staged = path.with_extension("grafeo-copy");
-        std::fs::copy(&path, &staged).unwrap();
-        let staged_file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&staged)
-            .unwrap();
-        staged_file.set_modified(original_mtime).unwrap();
-        staged_file.sync_all().unwrap();
-        drop(staged_file);
-        std::fs::rename(&staged, &path).unwrap();
-
-        let second = ContainerIdentity::read(&path).expect("replacement identity");
-        assert!(second.has_durable_file_id());
-        assert_eq!(first.len, second.len);
-        assert_ne!(
-            (first.device, first.inode),
-            (second.device, second.inode),
-            "a replaced container must carry a new file identity, got {first:?} then {second:?}"
-        );
+        assert!(load(&container, identity(64)).is_empty());
     }
 
     /// The forged-marker case. Swapping the recorded digest without recomputing
@@ -688,10 +725,59 @@ mod tests {
 
     #[test]
     fn a_marker_is_not_consulted_once_the_container_has_been_mutated() {
-        let markers = GenerationMarkers::detached();
-        markers.record_proven(&super::tests::locator(), "sha256:abc", 10);
-        // `detached` starts non-pristine, which is the same gate
-        // `mark_container_mutated` sets.
+        let markers = GenerationMarkers::new(None);
+        markers.bind(Some(identity(64)));
+        markers.record_proven(&locator(), "sha256:abc", 10);
+        assert_eq!(markers.lookup(&locator(), "sha256:abc"), Some(10));
+
+        markers.mark_container_mutated();
+        assert!(markers.lookup(&locator(), "sha256:abc").is_none());
+    }
+
+    /// Proofs belong to the engine incarnation that established them. With no
+    /// engine bound there is no container a proof could be about, so nothing
+    /// is consulted, recorded, or published.
+    #[test]
+    fn proofs_are_consulted_only_while_an_engine_is_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let container = temp.path().join("graph.grafeo");
+        let markers = GenerationMarkers::new(Some(&container));
+
+        markers.record_proven(&locator(), "sha256:abc", 10);
+        assert!(markers.lookup(&locator(), "sha256:abc").is_none());
+        markers.publish_resident().unwrap();
+        assert!(!marker_path(&container).exists());
+
+        markers.bind(Some(identity(64)));
+        markers.record_proven(&locator(), "sha256:abc", 10);
+        assert_eq!(markers.lookup(&locator(), "sha256:abc"), Some(10));
+
+        // Releasing publishes under the identity the closed engine reports,
+        // and leaves nothing to consult until the next engine binds.
+        markers.release(Some(identity(65))).unwrap();
+        assert!(markers.lookup(&locator(), "sha256:abc").is_none());
+        assert_eq!(load(&container, identity(65)).len(), 1);
+        assert!(load(&container, identity(64)).is_empty());
+
+        markers.bind(Some(identity(65)));
+        assert_eq!(markers.lookup(&locator(), "sha256:abc"), Some(10));
+        markers.bind(None);
+        assert!(markers.lookup(&locator(), "sha256:abc").is_none());
+    }
+
+    /// An uncertain close releases the incarnation without publishing: proofs
+    /// established against an engine whose final bytes are unknown are not
+    /// recorded against any identity.
+    #[test]
+    fn releasing_without_an_identity_publishes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let container = temp.path().join("graph.grafeo");
+        let markers = GenerationMarkers::new(Some(&container));
+        markers.bind(Some(identity(64)));
+        markers.record_proven(&locator(), "sha256:abc", 10);
+
+        markers.release(None).unwrap();
+        assert!(!marker_path(&container).exists());
         assert!(markers.lookup(&locator(), "sha256:abc").is_none());
     }
 
