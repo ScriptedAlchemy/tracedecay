@@ -148,7 +148,7 @@ fn diagnostics_always_reaches_the_application_surface_owner() {
     );
     assert_eq!(
         dispatch_group_for_tool("tracedecay_diagnostics"),
-        None,
+        Some(McpToolDispatchGroup::ApplicationSurface),
         "diagnostics must not retain a second analysis owner",
     );
     assert_eq!(

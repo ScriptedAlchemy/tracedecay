@@ -57,21 +57,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: kache compiler cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-
       # `test-helpers` only unlocks the registered-store harness the
       # coverage test drives; it gates no production code.
       - name: Slice tests (hotpath off)
@@ -93,21 +78,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
-      - name: kache compiler cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
 
       - name: Sessions slice tests (hotpath off)
         run: |
