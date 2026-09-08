@@ -16,8 +16,12 @@ use zeroize::Zeroizing;
 use crate::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
-use crate::support::derive_projection;
-use tracedecay_lcm::payload::read_verified_payload_content;
+use crate::support::{
+    derive_projection, record_hydration_emitted_bytes, record_hydration_verified_bytes,
+};
+use tracedecay_lcm::payload::{
+    PayloadStreamError, VerifiedPayloadStream, open_verified_payload_stream,
+};
 use tracedecay_lcm::{LcmStorageKind, raw};
 use tracedecay_query::temporal::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
@@ -34,6 +38,9 @@ use super::store::execution_control_graph_cancellation;
 
 type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HydrationError>> + Send + 'a>>;
 const MAX_SUMMARY_SOURCE_RELATIONS: usize = 256;
+/// Window a file-backed payload is proven through; emission uses the grant's
+/// chunk size instead, so neither pass holds more than one window.
+const PAYLOAD_PROOF_WINDOW_BYTES: usize = 64 * 1024;
 
 mod external;
 use external::resolve_external_manifest;
@@ -94,6 +101,69 @@ impl fmt::Debug for PayloadSource {
     }
 }
 
+/// One authorized payload opened by a backend, bound to the exact source the
+/// adapter proves before any chunk reaches the sink.
+pub enum BoundedPayload {
+    /// The row engine already materialized the whole payload. The adapter's
+    /// proof runs over this exact buffer and emission chunks it in place, so no
+    /// further copy of the payload is made.
+    Owned(Zeroizing<Vec<u8>>),
+    /// An immutable payload file proven through one open handle. Emission
+    /// re-reads that handle in chunk-sized windows and refuses a source whose
+    /// identity or content changed since the proof.
+    File(VerifiedPayloadStream),
+}
+
+impl BoundedPayload {
+    /// Whether this payload carries exactly the bytes `descriptor` promises.
+    /// An owned buffer is hashed here; a file stream carries the hash it was
+    /// proven with through the handle it still holds.
+    fn matches(&self, descriptor: &PayloadDescriptor) -> bool {
+        match self {
+            Self::Owned(bytes) => content_matches_descriptor(bytes, descriptor),
+            Self::File(stream) => {
+                u64::try_from(descriptor.byte_count).is_ok_and(|count| count == stream.byte_count())
+                    && content_hash_equals(&descriptor.content_hash, stream.content_hash())
+            }
+        }
+    }
+
+    /// Hands the proven bytes to `emit` in chunks of at most `max_chunk_bytes`,
+    /// checkpointing `control` before every chunk. A file stream is re-read
+    /// through one chunk-sized window and re-validated around the emission.
+    fn emit(
+        self,
+        max_chunk_bytes: usize,
+        control: &ExecutionControl,
+        emit: &mut (dyn FnMut(&[u8]) -> Result<(), HydrationError> + Send),
+    ) -> Result<(), HydrationError> {
+        match self {
+            Self::Owned(bytes) => {
+                for chunk in bytes.chunks(max_chunk_bytes) {
+                    control.checkpoint()?;
+                    emit(chunk)?;
+                    record_hydration_emitted_bytes(chunk.len());
+                }
+                Ok(())
+            }
+            Self::File(stream) => {
+                let window_bytes = usize::try_from(stream.byte_count())
+                    .map_or(max_chunk_bytes, |count| count.min(max_chunk_bytes));
+                let mut window = zeroized_window(window_bytes)?;
+                let mut checkpoint = || control.checkpoint().map_err(HydrationError::Interrupted);
+                stream
+                    .emit(&mut window, &mut checkpoint, &mut |chunk| {
+                        emit(chunk)?;
+                        record_hydration_emitted_bytes(chunk.len());
+                        Ok(())
+                    })
+                    .map(drop)
+                    .map_err(hydration_stream_failure)
+            }
+        }
+    }
+}
+
 pub trait TemporalHydrationBackend: Send + Sync {
     /// Snapshot-backed production reads cannot observe mid-hydration drift, so
     /// the adapter may skip the post-read `resolve_current` recheck. Mutable
@@ -108,12 +178,16 @@ pub trait TemporalHydrationBackend: Send + Sync {
         anchor_id: &'a RetrievalAnchorId,
     ) -> BackendFuture<'a, HydrationResolution>;
 
-    fn read_bounded<'a>(
+    /// Opens the payload behind `descriptor` without exposing its bytes to a
+    /// sink. A file-backed payload is proven against the descriptor while it
+    /// is opened; an owned buffer is proven by the adapter afterwards. Either
+    /// way no chunk leaves the adapter before the proof passes.
+    fn open_bounded<'a>(
         &'a self,
         descriptor: &'a PayloadDescriptor,
         max_bytes: usize,
         control: &'a ExecutionControl,
-    ) -> BackendFuture<'a, Zeroizing<Vec<u8>>>;
+    ) -> BackendFuture<'a, BoundedPayload>;
 }
 
 pub struct SessionTemporalHydrationAdapter<B> {
@@ -165,15 +239,14 @@ impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
             });
         }
         control.checkpoint()?;
-        let bytes = self
+        let payload = self
             .backend
-            .read_bounded(&descriptor, max_bytes, control)
+            .open_bounded(&descriptor, max_bytes, control)
             .await?;
-        if bytes.len() != descriptor.byte_count
-            || !content_hash_matches(&descriptor.content_hash, &bytes)
-        {
+        if !payload.matches(&descriptor) {
             return Err(HydrationError::Unavailable);
         }
+        record_hydration_verified_bytes(descriptor.byte_count);
         control.checkpoint()?;
         if !self.backend.snapshot_is_stable() {
             let current = match self.backend.resolve_current(snapshot, anchor_id).await? {
@@ -184,17 +257,61 @@ impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
                 return Err(HydrationError::Unavailable);
             }
         }
-        if max_chunk_bytes == 0 && !bytes.is_empty() {
+        if max_chunk_bytes == 0 && descriptor.byte_count > 0 {
             return Err(HydrationError::BudgetExceeded {
                 resource: "chunk bytes",
             });
         }
-        for chunk in bytes.chunks(max_chunk_bytes.max(1)) {
-            control.checkpoint()?;
-            emit(chunk)?;
-        }
+        payload.emit(max_chunk_bytes.max(1), control, emit)?;
         Ok(control.checkpoint()?)
     }
+}
+
+/// A chunk-sized transient buffer that is wiped when dropped, reserved
+/// fallibly so an unsatisfiable window is a typed budget refusal.
+fn zeroized_window(bytes: usize) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+    let mut window = Vec::new();
+    window
+        .try_reserve_exact(bytes)
+        .map_err(|_| HydrationError::BudgetExceeded {
+            resource: "allocation",
+        })?;
+    window.resize(bytes, 0);
+    Ok(Zeroizing::new(window))
+}
+
+/// Payload-side stream failures are logged and typed as unavailable; the
+/// consumer's own checkpoint or sink outcome passes through unchanged.
+fn hydration_stream_failure(error: PayloadStreamError<HydrationError>) -> HydrationError {
+    match error {
+        PayloadStreamError::Payload(error) => hydration_failure(error),
+        PayloadStreamError::Consumer(error) => error,
+    }
+}
+
+/// Opens a payload file through the LCM filesystem authority and proves it
+/// against `descriptor` through one proof window before any byte can be read
+/// out again by [`BoundedPayload::emit`].
+fn open_payload_file(
+    storage_root: &Path,
+    payload_ref: &str,
+    descriptor: &PayloadDescriptor,
+    char_count: usize,
+    control: &ExecutionControl,
+) -> Result<BoundedPayload, HydrationError> {
+    let mut window = zeroized_window(descriptor.byte_count.min(PAYLOAD_PROOF_WINDOW_BYTES))?;
+    let mut checkpoint = || control.checkpoint().map_err(HydrationError::Interrupted);
+    open_verified_payload_stream(
+        storage_root,
+        payload_ref,
+        &descriptor.content_hash,
+        descriptor.byte_count,
+        char_count,
+        &mut window,
+        &mut checkpoint,
+    )
+    .map(BoundedPayload::File)
+    .map_err(hydration_stream_failure)
 }
 
 fn same_payload_descriptor(left: &PayloadDescriptor, right: &PayloadDescriptor) -> bool {
@@ -524,12 +641,12 @@ impl GlobalDbHydrationBackend<'_> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.hydrate.read")]
-    async fn read_bounded(
+    async fn open_bounded(
         &self,
         descriptor: &PayloadDescriptor,
         max_bytes: usize,
         control: &ExecutionControl,
-    ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+    ) -> Result<BoundedPayload, HydrationError> {
         hotpath::gauge!("session_temporal.hydration").inc(1u32);
         control.checkpoint()?;
         match &descriptor.source {
@@ -540,7 +657,7 @@ impl GlobalDbHydrationBackend<'_> {
                 source_observation_id,
                 projection_output_ordinal,
             } => {
-                read_occurrence_content(
+                open_occurrence_content(
                     &self.read,
                     self.storage_root,
                     descriptor,
@@ -549,7 +666,6 @@ impl GlobalDbHydrationBackend<'_> {
                     message_id,
                     source_observation_id,
                     *projection_output_ordinal,
-                    max_bytes,
                     control,
                 )
                 .await
@@ -578,26 +694,21 @@ impl GlobalDbHydrationBackend<'_> {
                     .await
                     .map_err(hydration_failure)?
                     .ok_or(HydrationError::Unavailable)?;
-                let content = Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?);
-                bounded_copy(content.as_bytes(), max_bytes, control)
+                let content: String = row.get(0).map_err(hydration_failure)?;
+                control.checkpoint()?;
+                Ok(BoundedPayload::Owned(Zeroizing::new(content.into_bytes())))
             }
             PayloadSource::External {
-                provider,
-                session_id,
                 payload_ref,
                 char_count,
-            } => {
-                let content = read_verified_payload_content(
-                    self.storage_root,
-                    payload_ref,
-                    &descriptor.content_hash,
-                    descriptor.byte_count,
-                    *char_count,
-                )
-                .map_err(hydration_failure)?;
-                let _ = (provider, session_id);
-                bounded_copy(content.as_bytes(), max_bytes, control)
-            }
+                ..
+            } => open_payload_file(
+                self.storage_root,
+                payload_ref,
+                descriptor,
+                *char_count,
+                control,
+            ),
         }
     }
 }
@@ -615,18 +726,18 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         Box::pin(self.resolve_current(snapshot, anchor_id))
     }
 
-    fn read_bounded<'a>(
+    fn open_bounded<'a>(
         &'a self,
         descriptor: &'a PayloadDescriptor,
         max_bytes: usize,
         control: &'a ExecutionControl,
-    ) -> BackendFuture<'a, Zeroizing<Vec<u8>>> {
-        Box::pin(self.read_bounded(descriptor, max_bytes, control))
+    ) -> BackendFuture<'a, BoundedPayload> {
+        Box::pin(self.open_bounded(descriptor, max_bytes, control))
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn read_occurrence_content(
+async fn open_occurrence_content(
     conn: &TemporalSqlRead<'_>,
     storage_root: &Path,
     descriptor: &PayloadDescriptor,
@@ -635,9 +746,8 @@ async fn read_occurrence_content(
     message_id: &str,
     source_observation_id: &str,
     projection_output_ordinal: i64,
-    max_bytes: usize,
     control: &ExecutionControl,
-) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+) -> Result<BoundedPayload, HydrationError> {
     control.checkpoint()?;
     let mut rows = conn
         .query(
@@ -671,7 +781,10 @@ async fn read_occurrence_content(
         canonical_projected_message(&observation, message_id, projection_output_ordinal)
         && content_matches_descriptor(message.text.as_bytes(), descriptor)
     {
-        return bounded_copy(message.text.as_bytes(), max_bytes, control);
+        control.checkpoint()?;
+        return Ok(BoundedPayload::Owned(Zeroizing::new(
+            message.text.into_bytes(),
+        )));
     }
 
     let raw_payload = raw::load_raw_message_by_identity(conn, provider, session_id, message_id)
@@ -682,7 +795,10 @@ async fn read_occurrence_content(
         LcmStorageKind::Inline
             if content_matches_descriptor(raw_payload.content.as_bytes(), descriptor) =>
         {
-            bounded_copy(raw_payload.content.as_bytes(), max_bytes, control)
+            control.checkpoint()?;
+            Ok(BoundedPayload::Owned(Zeroizing::new(
+                raw_payload.content.into_bytes(),
+            )))
         }
         LcmStorageKind::External => {
             let payload_ref = raw_payload
@@ -710,15 +826,7 @@ async fn read_occurrence_content(
             {
                 return Err(HydrationError::Unavailable);
             }
-            let content = read_verified_payload_content(
-                storage_root,
-                payload_ref,
-                &descriptor.content_hash,
-                descriptor.byte_count,
-                *char_count,
-            )
-            .map_err(hydration_failure)?;
-            bounded_copy(content.as_bytes(), max_bytes, control)
+            open_payload_file(storage_root, payload_ref, descriptor, *char_count, control)
         }
         _ => Err(HydrationError::Unavailable),
     }
@@ -1295,26 +1403,6 @@ fn classify_current_access(
     }
 }
 
-fn bounded_copy(
-    bytes: &[u8],
-    max_bytes: usize,
-    control: &ExecutionControl,
-) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
-    if bytes.len() > max_bytes {
-        return Err(HydrationError::BudgetExceeded {
-            resource: "payload bytes",
-        });
-    }
-    control.checkpoint()?;
-    let mut copy = Zeroizing::new(Vec::with_capacity(bytes.len()));
-    for chunk in bytes.chunks(64 * 1024) {
-        control.checkpoint()?;
-        copy.extend_from_slice(chunk);
-    }
-    control.checkpoint()?;
-    Ok(copy)
-}
-
 fn nonnegative_usize(value: Option<i64>) -> Result<usize, HydrationError> {
     value
         .and_then(|value| usize::try_from(value).ok())
@@ -1322,8 +1410,16 @@ fn nonnegative_usize(value: Option<i64>) -> Result<usize, HydrationError> {
 }
 
 fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
-    expected.strip_prefix("sha256:").unwrap_or(expected) == sha256_hex(bytes)
+    content_hash_equals(expected, &sha256_hex(bytes))
 }
+
+fn content_hash_equals(expected: &str, actual_hex: &str) -> bool {
+    expected.strip_prefix("sha256:").unwrap_or(expected) == actual_hex
+}
+
+#[cfg(test)]
+#[path = "hydration/file_stream_tests.rs"]
+mod file_stream_tests;
 
 #[cfg(test)]
 #[path = "hydration/graph_relation_tests.rs"]
@@ -2014,17 +2110,17 @@ mod tests {
             })
         }
 
-        fn read_bounded<'a>(
+        fn open_bounded<'a>(
             &'a self,
             _descriptor: &'a PayloadDescriptor,
             _max_bytes: usize,
             control: &'a ExecutionControl,
-        ) -> BackendFuture<'a, Zeroizing<Vec<u8>>> {
+        ) -> BackendFuture<'a, BoundedPayload> {
             Box::pin(async move {
                 self.calls.lock().expect("calls").push("read");
                 control.checkpoint()?;
                 match &*self.payload.lock().expect("payload") {
-                    Ok(payload) => Ok(Zeroizing::new(payload.clone())),
+                    Ok(payload) => Ok(BoundedPayload::Owned(Zeroizing::new(payload.clone()))),
                     Err(error) => Err(error.clone()),
                 }
             })

@@ -28,6 +28,29 @@ pub(crate) fn record_output_sessions(count: u64) {
     let _ = count;
 }
 
+/// Payload bytes whose integrity proof passed, whether or not they were later
+/// emitted. Compared with [`record_hydration_emitted_bytes`], the gap is proof
+/// work discarded by a revocation, refusal, or interruption before emission.
+#[inline(always)]
+pub(crate) fn record_hydration_verified_bytes(count: usize) {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.hydrate.verified_bytes")
+        .inc(u64::try_from(count).unwrap_or(u64::MAX));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = count;
+}
+
+/// Payload bytes handed to a hydration sink, charged per chunk so an
+/// interrupted emission still reports the partial work it did.
+#[inline(always)]
+pub(crate) fn record_hydration_emitted_bytes(count: usize) {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.hydrate.emitted_bytes")
+        .inc(u64::try_from(count).unwrap_or(u64::MAX));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = count;
+}
+
 /// Same composition as the observation-projection derive path: canonical
 /// envelopes go through store authority; legacy Claude records use the public
 /// sessions mapper. Kept here so this crate does not depend on global-db.
