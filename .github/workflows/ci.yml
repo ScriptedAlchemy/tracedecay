@@ -286,18 +286,37 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # rust-cache carries the dependency graph, keyed by toolchain and
+      # lockfile; the workspace crates are compiled fresh every run. There is
+      # deliberately no kache compiler store here. Both lanes ran one for a
+      # day (c002e7b1d) and it is what put the macOS lane past its 180 min:
+      #
+      # - The perf-profile test graph writes 15.7 GB (macOS) / 17.8 GB (Linux)
+      #   into the store per build against a 2 GiB LRU ceiling, so the entry
+      #   saved was whatever survived the last GC — the root crate's test
+      #   binaries, which every push changes. Restores hit 25/428 crates and
+      #   avoided 24 s of compile on a cold run (34168826002, macOS) and
+      #   45/430 crates, 6 min, on the Linux run that restored the previous
+      #   push's store (34231734416); that run's macOS lane restored a 2.6 GB
+      #   store and still compiled for 154m35s. Holding the compile would
+      #   need ~16 GB per lane of a 10 GB repository budget.
+      # - kache's scheduler takes a memory-weighted permit per compile from a
+      #   pool of `available_parallelism()` slots: a crate whose last build
+      #   peaked above 1 GiB RSS takes all three of macos-14's, above 1.5 GiB
+      #   all four of ubuntu-latest's, and an unmeasured link takes two. The
+      #   perf-profile graph ran serialized: kache's own report for the macOS
+      #   run 34168826002 shows 2.6 h of compile work and 5.0 h waiting for a
+      #   permit, 7.7 h of wrapper time = 3 cores x the 155 min the build
+      #   took, i.e. one compile in flight; Linux 34231734416: 2.2 h compile,
+      #   5.4 h permit wait, 4 cores x 116 min, 1.1 in flight. Before kache
+      #   the same libs reached the root crate in 18.6 min on the macOS
+      #   runner and compiled it in 5.2 min (34161919969, warm dependencies);
+      #   under kache 40.2 min and 9.5 min (34168826002).
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
-
-      - name: Enable kache
-        id: kache
-        uses: ./.github/actions/kache
-        with:
-          lane: test
-          max-size: 2GiB
 
       # Every `crates/tracedecay` integration target declares
       # `required-features = ["test-helpers"]`, because the fixture surface it
@@ -436,13 +455,6 @@ jobs:
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
-
-      - name: Save kache store
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ steps.kache.outputs.store-path }}
-          key: ${{ steps.kache.outputs.cache-key }}
 
   windows-build:
     name: Build Windows tests

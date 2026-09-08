@@ -17,11 +17,20 @@ description: >-
 inputs:
   lane:
     description: >-
-      Store name. One store per job shape: the perf-profile test lanes must
-      not share with dev-profile jobs, whose artifacts they can never hit.
+      Store name. One store per job shape: jobs with different cargo
+      profiles or feature sets can never hit each other's artifacts.
     required: true
   max-size:
-    description: LRU ceiling for the local store (kache's KACHE_MAX_SIZE).
+    description: >-
+      LRU ceiling for the local store (kache's KACHE_MAX_SIZE). It must hold
+      one build's whole output: kache evicts oldest-first, so a store smaller
+      than the build keeps the last-compiled tail — the root crates a push
+      changes — and restores nothing useful. The perf-profile test lanes
+      (15.7–17.8 GB per build) and the dev CLI build (4.3 GB) were dropped
+      for that reason; kache's memory-weighted permit scheduler also
+      serialized their builds (macOS test lane: 2.6 h of compile, 5.0 h of
+      permit wait, run 34168826002). Clippy's check-only build writes
+      1.2 GB, at the 1 GiB ceiling's 10% GC slack.
     required: true
 
 outputs:
