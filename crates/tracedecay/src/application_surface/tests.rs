@@ -19,7 +19,7 @@ use tracedecay_domain::{
     SanitizerRevision, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingId, CapabilityId, SchemaId, UseCaseId,
+    ApplicationSurfaceOperation, BindingId, BindingSurface, CapabilityId, SchemaId, UseCaseId,
 };
 
 use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
@@ -31,10 +31,10 @@ use super::{
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
     HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
-    application_http_context, application_negotiated_features,
+    adapt_application_tool_request, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
-    normalize_application_tool_args, parse_application_surface_request,
+    parse_application_surface_request, parse_http_application_surface_request,
     resolve_application_binding, resolve_application_surface_dispatch,
     resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
@@ -140,7 +140,7 @@ fn every_http_exposed_operation_resolves_from_the_canonical_catalog() {
     let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(catalog);
 
     for operation in ApplicationSurfaceOperation::ALL {
-        if is_http_application_operation_exposed(operation) {
+        if is_http_application_operation_exposed(operation).expect("HTTP exposure") {
             assert!(
                 resolve_application_binding(
                     &resolver,
@@ -244,6 +244,7 @@ fn dispatch_controls_retain_the_callers_deadline_and_live_cancellation_identity(
         CancellationSignal::active("cancel.application-surface").expect("cancellation");
     let caller = cancellation.clone();
     let input = application_surface_dispatch_input_with_controls(
+        BindingSurface::Mcp,
         ApplicationSurfaceOperation::FeedbackList,
         RequestId::new("request.application-surface").expect("request"),
         ApplicationSurfaceRequest::Feedback(
@@ -309,7 +310,7 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
         tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
-    for name in tracedecay_contracts::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for name in tracedecay_contracts::configuration::configuration_surface_operation_names() {
         let operation = ApplicationSurfaceOperation::from_tool_name(name)
             .unwrap_or_else(|| panic!("{name} must be a canonical surface operation"));
         assert_eq!(operation.as_str(), name);
@@ -395,30 +396,33 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     )
     .expect("application profile");
     for operation in ApplicationSurfaceOperation::ALL {
-        let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
-            .expect("operation name");
         let resolution_profile = &profile_id;
         // The production HTTP-exposure authority decides which operations
         // carry a public HTTP binding; everything resolves via CLI and MCP.
-        let expected_surfaces = if is_http_application_operation_exposed(operation) {
-            &[
-                (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
-                (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
-                (tracedecay_tool_catalog::BindingSurface::Http, "http"),
-            ][..]
-        } else {
-            &[
-                (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
-                (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
-            ][..]
-        };
+        let expected_surfaces =
+            if is_http_application_operation_exposed(operation).expect("HTTP exposure") {
+                &[
+                    (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
+                    (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+                    (tracedecay_tool_catalog::BindingSurface::Http, "http"),
+                ][..]
+            } else {
+                &[
+                    (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
+                    (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+                ][..]
+            };
         for &(surface, surface_name) in expected_surfaces {
+            let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(
+                operation.name_for_surface(surface),
+            )
+            .expect("operation name");
             let binding = tracedecay_daemon_protocol::BindingResolver::resolve_binding(
                 &resolver,
                 surface,
                 &tracedecay_daemon_protocol::BindingResolution {
                     profile_id: resolution_profile.clone(),
-                    operation: operation_name.clone(),
+                    operation: operation_name,
                     protocol_revision: APPLICATION_PROTOCOL_REVISION,
                     negotiated_features: application_negotiated_features(),
                 },
@@ -1962,41 +1966,47 @@ fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
 }
 
 #[test]
-fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
+fn diagnostics_public_name_adapts_the_shipped_flat_request() {
     assert_eq!(
         ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics"),
         Some(ApplicationSurfaceOperation::DiagnosticsRead)
     );
     assert_eq!(
         ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics_read"),
-        Some(ApplicationSurfaceOperation::DiagnosticsRead)
+        None
+    );
+    let canonical = json!({
+        "scope": {"file": "src/lib.rs"},
+        "maximum_diagnostics": 25,
+        "cursor": "opaque",
+    });
+    let canonical_request = parse_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        canonical.clone(),
+    )
+    .expect("canonical application request");
+    let separated = adapt_application_tool_request(
+        "tracedecay_diagnostics",
+        json!({
+            "scope": "file",
+            "path": "src/lib.rs",
+            "maximum_diagnostics": 25,
+            "cursor": "opaque",
+            "format": "json"
+        }),
+    )
+    .expect("shipped flat MCP/CLI request");
+    assert_eq!(separated.request, canonical);
+    let edge_request = parse_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        separated.request,
     );
     assert_eq!(
-        normalize_application_tool_args("tracedecay_diagnostics", json!({}))
-            .unwrap()
-            .request,
-        json!({"scope": "workspace", "maximum_diagnostics": 1000, "cursor": null})
-    );
-    assert_eq!(
-        normalize_application_tool_args(
-            "tracedecay_diagnostics",
-            json!({"scope": "file", "path": "src/lib.rs"}),
-        )
-        .unwrap()
-        .request,
-        json!({"scope": {"file": "src/lib.rs"}, "maximum_diagnostics": 1000, "cursor": null})
-    );
-    assert_eq!(
-        normalize_application_tool_args(
-            "tracedecay_diagnostics",
-            json!({"maximum_diagnostics": 25, "cursor": "opaque"}),
-        )
-        .unwrap()
-        .request,
-        json!({"scope": "workspace", "maximum_diagnostics": 25, "cursor": "opaque"})
+        serde_json::to_value(edge_request.expect("adapted canonical request")).unwrap(),
+        serde_json::to_value(canonical_request).unwrap()
     );
     assert!(
-        normalize_application_tool_args("tracedecay_diagnostics", json!({"scope": "package"}),)
+        adapt_application_tool_request("tracedecay_diagnostics", json!({"scope": "package"}))
             .is_err()
     );
 
@@ -2018,4 +2028,35 @@ fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
             "cursor": "opaque-http"
         })
     );
+
+    let omitted_mcp =
+        adapt_application_tool_request("tracedecay_diagnostics", json!({"scope": "workspace"}))
+            .expect("omitted MCP page controls");
+    let omitted_mcp = parse_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        omitted_mcp.request,
+    )
+    .expect("canonical MCP request");
+    let omitted_http = parse_http_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        json!({"scope": "workspace"}),
+        &PageRequest::first(
+            tracedecay_contracts::application_operation_default_page_size(
+                ApplicationSurfaceOperation::DiagnosticsRead,
+            ),
+        )
+        .expect("HTTP page"),
+    )
+    .expect("canonical HTTP request");
+    assert_eq!(
+        serde_json::to_value(&omitted_http).expect("HTTP diagnostics request"),
+        serde_json::to_value(&omitted_mcp).expect("MCP diagnostics request")
+    );
+    let ApplicationSurfaceRequest::Primitive(PrimitiveRequest::DiagnosticsRead(request)) =
+        omitted_http
+    else {
+        panic!("HTTP omission must decode to diagnostics read");
+    };
+    assert_eq!(request.maximum_diagnostics, 1_000);
+    assert!(request.cursor.is_none());
 }

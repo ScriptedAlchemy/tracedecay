@@ -1218,7 +1218,7 @@ fn documented_format_argument_never_reaches_the_reviewed_request() {
 }
 
 #[test]
-fn cli_and_mcp_normalize_documented_arguments_identically() {
+fn cli_and_mcp_separate_transport_metadata_identically() {
     for (tool_name, args) in documented_json_invocations() {
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
             .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
@@ -1228,7 +1228,7 @@ fn cli_and_mcp_normalize_documented_arguments_identically() {
             .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
         // The MCP transport reaches the reviewed schema through the same
         // adapter; an argument accepted there must be accepted here.
-        let mcp = normalize_application_tool_args(tool_name, arguments)
+        let mcp = adapt_application_tool_request(tool_name, arguments)
             .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
 
         assert_eq!(cli_request, mcp.request, "{tool_name}");
@@ -1274,12 +1274,13 @@ fn transport_equivalent_requests() -> Vec<TransportEquivalentRequest> {
             http_page: http_page(10, None),
         })
         .collect();
-    // The diagnostics read is the one operation whose page controls are plain
-    // body fields, so the HTTP query must land exactly there.
+    // Diagnostics retains its shipped flat CLI/MCP shape, while HTTP accepts
+    // the canonical request and carries page controls in the query.
     requests.push(TransportEquivalentRequest {
-        tool_name: "tracedecay_diagnostics_read",
+        tool_name: "tracedecay_diagnostics",
         arguments: json!({
-            "scope": {"file": "src/update_cmd.rs"},
+            "scope": "file",
+            "path": "src/update_cmd.rs",
             "maximum_diagnostics": 25,
             "cursor": "diagnostics-page-2",
         }),
@@ -1391,7 +1392,7 @@ fn assert_retained_transports_decode_one_canonical_request(
         false,
     )
     .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
-    let mcp = normalize_application_tool_args(
+    let mcp = adapt_application_tool_request(
         tool_name,
         with_format(equivalent.arguments.clone(), "json"),
     )
@@ -1472,7 +1473,7 @@ fn cli_mcp_and_http_decode_one_canonical_request() {
             false,
         )
         .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
-        let mcp = normalize_application_tool_args(
+        let mcp = adapt_application_tool_request(
             tool_name,
             with_format(equivalent.arguments.clone(), "json"),
         )

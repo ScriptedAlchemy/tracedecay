@@ -202,7 +202,7 @@ pub(super) fn validate_configuration_outcome(
 #[cfg(test)]
 mod tests {
     use tracedecay_contracts::{
-        OperationTermination, configuration::CONFIGURATION_SURFACE_OPERATION_NAMES,
+        OperationTermination, configuration::configuration_surface_operation_names,
         configuration_surface_operation,
     };
 
@@ -243,7 +243,7 @@ mod tests {
             }
         }
 
-        for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+        for name in configuration_surface_operation_names() {
             if CONFIGURATION_WIRE_OPERATIONS
                 .iter()
                 .any(|operation| operation.as_str() == name)

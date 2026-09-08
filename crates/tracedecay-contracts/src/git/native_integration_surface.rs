@@ -31,20 +31,19 @@ use tracedecay_domain::{
     RepositoryId, UtcMicros, WorktreeInventoryEpoch,
 };
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableSchemaAuthority, IdempotencyContract, InverseContract, InverseUnavailableReason,
-    LifecycleClass, OperationId, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
-    TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
+    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
+    InverseContract, InverseUnavailableReason, LifecycleClass, PrivacyClass, ProfileId,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::CancellationSignal;
-use crate::current_bindings;
+use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::native_integration::{
     NativeIntegrationCancelDispositionV1, NativeIntegrationPortError,
@@ -714,11 +713,13 @@ pub fn native_integration_surface_catalog_contribution()
 
     for spec in &NATIVE_INTEGRATION_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
-        let (spec_bindings, binding_ids) = current_bindings(
-            &capability_id,
-            spec.operation,
-            spec.surfaces.iter().copied(),
+        let operation = ApplicationSurfaceOperation::from_catalog_name(spec.operation).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "native integration surface operation",
+            },
         )?;
+        let (spec_bindings, binding_ids) =
+            current_application_bindings(&capability_id, operation, spec.surfaces.iter().copied())?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
@@ -734,66 +735,6 @@ pub fn native_integration_surface_catalog_contribution()
     })?;
     let schemas = native_integration_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
-}
-
-/// Daemon-owned public HTTP bindings for native worktree administration.
-///
-/// Native integration stack mutation remains CLI/MCP-only. Only worktree
-/// operations whose canonical surface includes HTTP are projected here, so
-/// the API router and official SDKs consume the same catalog authority.
-pub fn native_worktree_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = native_integration_surface_catalog_contribution()?;
-    let service_id = ServiceId::new("service.application.native-integration")?;
-    let mut bindings = Vec::new();
-
-    for spec in NATIVE_INTEGRATION_SPECS
-        .iter()
-        .filter(|spec| spec.surfaces.contains(&BindingSurface::Http))
-    {
-        let capability_id = CapabilityId::new(spec.capability)?;
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == &capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "native worktree executable capability",
-            })?;
-        let executable_schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "native worktree executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "native worktree HTTP binding",
-            })?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", spec.operation))?,
-                service_id.clone(),
-                executable_schema.request_schema().clone(),
-                executable_schema.result_schema().clone(),
-                CodecBindingKey::new(format!(
-                    "codec.application.native-integration.{}.json.v1",
-                    spec.operation
-                ))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path: format!("/application/native-integration/{}", spec.operation),
-                },
-            )?,
-        ));
-    }
-
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
 /// Resolve one native-integration wire operation to its canonical application
@@ -1049,7 +990,9 @@ fn handler_descriptor(
     spec: &NativeIntegrationSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     let result_schema = schema(spec.result_schema)?;
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        spec.operation,
+        "service.application.native-integration",
         ApplicationOperation::new(
             CapabilityId::new(spec.capability)?,
             UseCaseId::new(spec.use_case)?,

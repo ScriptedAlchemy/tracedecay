@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_tool_catalog::{OperationId, RouteExposureV1};
 
 #[test]
 fn configuration_surface_keeps_every_retained_operation_callable() {
@@ -21,11 +22,10 @@ fn configuration_surface_keeps_every_retained_operation_callable() {
 }
 
 #[test]
-fn configuration_executable_registry_binds_every_public_http_schema() {
+fn application_http_registry_binds_every_configuration_schema() {
     let contribution = configuration_surface_catalog_contribution().expect("contribution");
-    let registry = configuration_executable_binding_registry().expect("registry");
+    let registry = crate::application_http_executable_binding_registry().expect("registry");
 
-    assert_eq!(registry.iter().count(), CONFIGURATION_SPECS.len());
     for spec in &CONFIGURATION_SPECS {
         let operation_id =
             OperationId::new(format!("operation.application.{}", spec.name)).unwrap();
@@ -113,17 +113,6 @@ fn configuration_surface_requires_mounted_project_and_exact_layer_routes() {
 }
 
 #[test]
-fn exported_configuration_operation_names_match_the_catalog_specs() {
-    assert_eq!(
-        CONFIGURATION_SPECS
-            .iter()
-            .map(|spec| spec.name)
-            .collect::<Vec<_>>(),
-        CONFIGURATION_SURFACE_OPERATION_NAMES
-    );
-}
-
-#[test]
 fn empty_configuration_requests_reject_transport_arguments() {
     assert!(
         serde_json::from_value::<ConfigurationListRequestV1>(serde_json::json!({"format": "json"}))
@@ -190,7 +179,7 @@ fn invocation_payload_decode_rejects_the_tagged_envelope() {
 
 #[test]
 fn invocation_payload_decode_covers_every_configuration_operation_name() {
-    for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for name in configuration_surface_operation_names() {
         match configuration_wire_request_from_invocation_payload(name, serde_json::json!({})) {
             Ok(_) => {}
             Err(ApplicationContractError::Inconsistent {

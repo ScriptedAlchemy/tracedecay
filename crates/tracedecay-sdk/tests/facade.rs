@@ -148,7 +148,7 @@ fn configuration_family_is_http_mounted_and_not_generated_as_unavailable() {
         .map(|operation| operation.operation_id)
         .collect::<std::collections::BTreeSet<_>>();
 
-    for operation in contracts::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for operation in contracts::configuration::configuration_surface_operation_names() {
         let operation_id = format!("operation.application.{operation}");
         let binding = registry
             .get(&operation::OperationId::new(operation_id.clone()).expect("operation ID"))

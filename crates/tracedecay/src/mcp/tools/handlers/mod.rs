@@ -11,7 +11,6 @@ pub(crate) use hook_runtime::{
     hook_v2_pending_work_envelopes, replay_projectless_hermes_host_admission,
 };
 mod admin_project;
-pub mod analysis;
 mod analytics;
 mod application_surface;
 mod automation_runs;
@@ -273,9 +272,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
-    pub diagnostics_cache: Option<&'a tracedecay_lsp::compile_diagnostics::DiagnosticsCache>,
-    pub(crate) diagnostics_change_generation:
-        Option<crate::mcp::server::DiagnosticsChangeGenerationResolver>,
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:
@@ -354,8 +350,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_freshness_reader: None,
             explorer_semantic_reader: None,
             feedback_status_reader: None,
-            diagnostics_cache: None,
-            diagnostics_change_generation: None,
             diagnostics_lsp: None,
             application_invocation_executor: None,
             dashboard_application_invocation_executor: None,
@@ -403,9 +397,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
     scope_prefix: Option<&'a str>,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    let application_executor_available = options.application_invocation_executor.is_some();
     #[cfg(feature = "hotpath")]
-    let hotpath_tool_name = mcp_tool_hotpath_identity(tool_name, application_executor_available);
+    let hotpath_tool_name = mcp_tool_hotpath_identity(tool_name);
     let dispatch = async move {
         #[cfg(feature = "hotpath")]
         hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
@@ -537,11 +530,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
         }
         let selected_scope_prefix = scope_prefix;
         // Classify before moving `args` so large payloads are not cloned into every
-        // group probe. Application-surface tools still run before catalog checks;
-        // `tracedecay_diagnostics` without an executor falls through to the
-        // analysis group, whose binding row routes it to the local handler.
-        let dispatch_group =
-            classify_mcp_tool_dispatch_group(tool_name, application_executor_available);
+        // group probe. Application-surface tools still run before catalog checks.
+        let dispatch_group = classify_mcp_tool_dispatch_group(tool_name);
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
             // Application-surface tools return before the root guard below.
             // Reject unavailable effects before parsing, routing, or invoking
@@ -672,7 +662,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         cg,
                         args,
                         scope_prefix,
-                        project_session_db,
                         options,
                     ))
                     .await
@@ -806,18 +795,10 @@ fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
     }
 }
 
-/// The `diagnostics_read` name that still carries the pre-application argument
-/// shape, and so the only one [`dispatch_analysis_tools`] can serve in-process.
-const DIAGNOSTICS_COMPATIBILITY_TOOL: &str = "tracedecay_diagnostics";
-
 #[cfg(any(feature = "hotpath", test))]
-fn mcp_tool_hotpath_identity(
-    tool_name: &str,
-    application_invocation_executor_available: bool,
-) -> &str {
+fn mcp_tool_hotpath_identity(tool_name: &str) -> &str {
     if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
-        || classify_mcp_tool_dispatch_group(tool_name, application_invocation_executor_available)
-            .is_some()
+        || classify_mcp_tool_dispatch_group(tool_name).is_some()
     {
         tool_name
     } else {
@@ -825,23 +806,9 @@ fn mcp_tool_hotpath_identity(
     }
 }
 
-fn classify_mcp_tool_dispatch_group(
-    tool_name: &str,
-    application_invocation_executor_available: bool,
-) -> Option<McpToolDispatchGroup> {
-    if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
-        // `DiagnosticsRead` answers to two tool names. Only the compatibility
-        // name has an in-process analysis handler that accepts its arguments,
-        // so only that name is deferred when no executor is attached.
-        // `tracedecay_diagnostics_read` stays on the surface, which reports the
-        // transport as unavailable rather than failing as an unknown tool.
-        let defer_diagnostics_without_executor = operation
-            == ApplicationSurfaceOperation::DiagnosticsRead
-            && tool_name == DIAGNOSTICS_COMPATIBILITY_TOOL
-            && !application_invocation_executor_available;
-        if !defer_diagnostics_without_executor {
-            return Some(McpToolDispatchGroup::ApplicationSurface);
-        }
+fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGroup> {
+    if ApplicationSurfaceOperation::from_tool_name(tool_name).is_some() {
+        return Some(McpToolDispatchGroup::ApplicationSurface);
     }
     if let Some(group) = dispatch_group_for_tool(tool_name) {
         return Some(group);

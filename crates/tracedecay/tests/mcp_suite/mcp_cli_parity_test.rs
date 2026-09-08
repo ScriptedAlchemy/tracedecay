@@ -23,8 +23,7 @@ use tracedecay_mcp::get_tool_definitions;
 const NAME_ALIASES: &[(&str, &str)] = &[("query", "search")];
 
 /// Host cap on tool description length. Generous — it exists to catch runaway
-/// description growth, not to force terseness. Well above the longest current
-/// description (the multi-paragraph `tracedecay_diagnostics` blurb).
+/// description growth, not to force terseness.
 const MAX_DESCRIPTION_CHARS: usize = 8192;
 
 /// Reimplementation of `src/tool_command.rs::canonical_tool_name`. Kept in

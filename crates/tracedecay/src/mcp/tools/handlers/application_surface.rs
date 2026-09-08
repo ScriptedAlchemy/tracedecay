@@ -7,8 +7,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
 use crate::application_surface::{
-    ApplicationSurfaceInvocationResult, NormalizedApplicationToolArgs,
-    parse_application_surface_request,
+    ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
 };
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
@@ -32,8 +31,12 @@ pub(super) fn complete_protocol_controls(
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    let tool_name = format!("tracedecay_{}", operation.as_str());
-    complete_protocol_controls_for_tool(&tool_name, request_id, deadline, cancellation)
+    complete_protocol_controls_for_tool(
+        operation.mcp_tool_name(),
+        request_id,
+        deadline,
+        cancellation,
+    )
 }
 
 pub(super) fn complete_retained_protocol_controls(
@@ -99,14 +102,14 @@ fn complete_protocol_controls_with_ceiling(
 pub(super) async fn handle_application_surface(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,
-    normalized: NormalizedApplicationToolArgs,
+    normalized: ApplicationToolRequest,
     executor: Option<&dyn DaemonInvocationExecutor>,
     target: InvocationTarget,
     protocol_request_id: Option<RequestId>,
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
 ) -> Result<tracedecay_mcp::ToolResult> {
-    let NormalizedApplicationToolArgs {
+    let ApplicationToolRequest {
         request: request_args,
         requested_format,
     } = normalized;

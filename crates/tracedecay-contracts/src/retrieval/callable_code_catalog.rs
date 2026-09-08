@@ -1,17 +1,18 @@
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, PaginationContract,
-    PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
+    BindingStatus, BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
+    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
+    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
+    TerminalStateContract, UseCaseId,
 };
 
-use crate::current_bindings;
+use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -79,7 +80,14 @@ pub fn callable_code_handler_descriptors()
         .into_iter()
         .filter(|kind| canonical_surface_equivalent(*kind).is_none())
         .map(|kind| {
-            ApplicationHandlerDescriptor::new(
+            let surface_operation = reachable_surface_operation(kind).ok_or(
+                ApplicationContractError::Inconsistent {
+                    field: "callable code surface handler",
+                },
+            )?;
+            ApplicationHandlerDescriptor::for_catalog_operation(
+                surface_operation,
+                "service.application.callable-code",
                 callable_code_operation(kind)?,
                 callable_code_request_schema(kind)?,
                 callable_code_result_schema(kind)?,
@@ -103,9 +111,14 @@ pub fn callable_code_catalog_contribution()
             reachable_surface_operation(kind).ok_or(ApplicationContractError::Inconsistent {
                 field: "callable code surface operation binding",
             })?;
-        let (surface_bindings, mut binding_ids) = current_bindings(
+        let surface_operation = ApplicationSurfaceOperation::from_catalog_name(operation).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "callable code surface operation identity",
+            },
+        )?;
+        let (surface_bindings, mut binding_ids) = current_application_bindings(
             &code_query_capability_id(kind)?,
-            operation,
+            surface_operation,
             [
                 BindingSurface::Cli,
                 BindingSurface::Mcp,

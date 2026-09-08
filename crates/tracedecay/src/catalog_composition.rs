@@ -247,7 +247,7 @@ mod tests {
         ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_mcp::{ToolRegistryMode, project_catalog_discovery_scope};
-    use tracedecay_tool_catalog::{CapabilityId, SurfaceOperationName};
+    use tracedecay_tool_catalog::{BindingStatus, CapabilityId, SurfaceOperationName};
 
     // Growth tripwire only, not an MCP client or protocol limit. The complete
     // final-V2 profile measures 573,502 bytes after the typed Work and workflow
@@ -256,31 +256,19 @@ mod tests {
     // stated reason for the additional payload.
     const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 640 * 1024;
 
-    const DASHBOARD_OPERATIONS: [&str; 23] = [
-        "feedback_diagnostics",
-        "feedback_get",
-        "feedback_expand",
-        "feedback_list",
-        "feedback_impact",
-        "affected_tests",
-        "test_results",
-        "health_read",
-        "storage_status",
-        "diagnostics_read",
-        "configuration_list",
-        "configuration_explain",
-        "configuration_get",
-        "configuration_set",
-        "configuration_unset",
-        "configuration_batch",
-        "configuration_write_credential",
-        "configuration_observed_state",
-        "configuration_protected_preview",
-        "configuration_protected_apply",
-        "configuration_rollback_preview",
-        "configuration_rollback_apply",
-        "configuration_audit",
-    ];
+    fn dashboard_operations() -> Vec<String> {
+        application_catalog_contributions()
+            .expect("application contributions")
+            .into_iter()
+            .flat_map(|contribution| contribution.bindings().to_vec())
+            .filter(|binding| {
+                binding.surface() == BindingSurface::Dashboard
+                    && matches!(binding.status(), BindingStatus::Current)
+                    && !binding.is_alias()
+            })
+            .map(|binding| binding.operation().as_str().to_owned())
+            .collect()
+    }
 
     #[derive(Clone, Copy)]
     enum ParityOutcome {
@@ -350,16 +338,16 @@ mod tests {
         let composition =
             compose_application_catalog(ParityDispatcher).expect("application composition");
 
-        for operation in DASHBOARD_OPERATIONS {
+        for operation in dashboard_operations() {
             for outcome in [
                 ParityOutcome::Ready,
                 ParityOutcome::Unavailable,
                 ParityOutcome::Denied,
             ] {
                 let http =
-                    invoke_pre_render(&composition, BindingSurface::Http, operation, outcome);
+                    invoke_pre_render(&composition, BindingSurface::Http, &operation, outcome);
                 let dashboard =
-                    invoke_pre_render(&composition, BindingSurface::Dashboard, operation, outcome);
+                    invoke_pre_render(&composition, BindingSurface::Dashboard, &operation, outcome);
                 assert_eq!(dashboard, http, "{operation} changed before rendering");
             }
         }
@@ -404,15 +392,24 @@ mod tests {
             profile.budget().maximum_bindings(),
             DEFAULT_PROFILE_MAXIMUM_BINDINGS
         );
+        let expected_binding_count = application_catalog_contributions()
+            .expect("application contributions")
+            .iter()
+            .flat_map(CatalogContributionV1::bindings)
+            .filter(|binding| {
+                profile.includes_capability(binding.capability_id())
+                    && profile.enables_surface(binding.surface())
+            })
+            .count();
+        assert_eq!(eager_binding_count, expected_binding_count);
         assert!(
-            eager_binding_count > 320
-                && eager_binding_count <= profile.budget().maximum_bindings() as usize,
-            "acceptance must exercise the reviewed budget with the full eager profile loaded"
+            eager_binding_count <= profile.budget().maximum_bindings() as usize,
+            "the derived eager profile must stay within its reviewed budget"
         );
 
-        for operation in DASHBOARD_OPERATIONS {
+        for operation in dashboard_operations() {
             let operation_name =
-                SurfaceOperationName::new(operation).expect("surface operation name");
+                SurfaceOperationName::new(&operation).expect("surface operation name");
             let capability = snapshot
                 .resolve_binding(
                     &profile_id,

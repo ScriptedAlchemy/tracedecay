@@ -161,14 +161,6 @@ pub(crate) type CodeIndexReconcileSink = Arc<
 pub(crate) type CodeIndexFreshnessProbeSink =
     Arc<dyn Fn(PathBuf) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
-pub(crate) type DiagnosticsChangeGenerationFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send + 'static>>;
-
-/// Read bridge to the mounted scheduler's monotonic workspace-change epoch.
-/// Direct servers leave it absent and diagnostics use traversal recovery.
-pub(crate) type DiagnosticsChangeGenerationResolver =
-    Arc<dyn Fn(PathBuf) -> DiagnosticsChangeGenerationFuture + Send + Sync + 'static>;
-
 /// Type-erased bridge from a tool handler to the daemon-owned code-index
 /// generation authority. The daemon constructs this from its cloneable
 /// `CodeIndexSchedulerRegistryV1`; direct (non-daemon) servers leave it `None`,
@@ -287,7 +279,6 @@ pub struct McpServer {
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     identical_read_coalescer: IdenticalReadCoalescer,
-    diagnostics_cache: tracedecay_lsp::compile_diagnostics::DiagnosticsCache,
     diagnostics_lsp: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
     /// `Arc` so the retained background-refresh task can hold a cheap
@@ -368,7 +359,6 @@ pub struct McpServer {
     code_index_hook_sink: Option<CodeIndexHookSink>,
     code_index_reconcile_sink: Option<CodeIndexReconcileSink>,
     code_index_freshness_probe_sink: Option<CodeIndexFreshnessProbeSink>,
-    diagnostics_change_generation: Option<DiagnosticsChangeGenerationResolver>,
     /// Daemon-owned bridge to the code-index generation authority, the single
     /// mint for `file.daemon.<digest>` file identity and the generation every
     /// diagnostic producer must publish under. `None` for direct servers.
@@ -863,7 +853,6 @@ impl McpServer {
             code_index_hook_sink,
             code_index_reconcile_sink,
             code_index_freshness_probe_sink,
-            diagnostics_change_generation,
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,
@@ -1085,7 +1074,6 @@ impl McpServer {
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
             identical_read_coalescer: IdenticalReadCoalescer::default(),
-            diagnostics_cache: tracedecay_lsp::compile_diagnostics::DiagnosticsCache::default(),
             diagnostics_lsp,
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
             tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
@@ -1126,7 +1114,6 @@ impl McpServer {
             code_index_hook_sink,
             code_index_reconcile_sink,
             code_index_freshness_probe_sink,
-            diagnostics_change_generation,
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,
