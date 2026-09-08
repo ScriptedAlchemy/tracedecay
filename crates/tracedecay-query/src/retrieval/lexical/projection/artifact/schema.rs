@@ -236,6 +236,13 @@ impl LexicalArtifactLayoutV1 {
     pub(super) fn interns_row_dictionary(self) -> bool {
         self == Self::V14
     }
+
+    /// Revision 14 keeps `document_integrity` as `(document_id, digest
+    /// BLOB)`: the chunk id already lives in `rows` under the same key, and
+    /// the 32 digest bytes replace their 71-byte tagged hex form.
+    pub(super) fn stores_document_integrity_bytes(self) -> bool {
+        self == Self::V14
+    }
 }
 
 pub(super) fn digest_domain_for_revision(

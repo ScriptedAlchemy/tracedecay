@@ -554,6 +554,9 @@ impl FinalizationSectionV1 {
             (Self::SourcePages, _) => {
                 "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor FROM source_pages ORDER BY page_ordinal"
             }
+            (Self::DocumentIntegrity, LexicalArtifactLayoutV1::V14) => {
+                "SELECT document_id, digest FROM document_integrity ORDER BY document_id"
+            }
             (Self::DocumentIntegrity, _) => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id"
             }
@@ -612,8 +615,14 @@ impl FinalizationSectionV1 {
 
     /// Bounded resumes seek a native table key, never a computed cursor.
     #[hotpath::skip]
-    const fn seek_query(self, after: bool) -> &'static str {
+    const fn seek_query(self, layout: LexicalArtifactLayoutV1, after: bool) -> &'static str {
         match (self, after) {
+            (Self::DocumentIntegrity, false) if matches!(layout, LexicalArtifactLayoutV1::V14) => {
+                "SELECT document_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
+            }
+            (Self::DocumentIntegrity, true) if matches!(layout, LexicalArtifactLayoutV1::V14) => {
+                "SELECT document_id, digest FROM document_integrity WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
+            }
             (Self::SourcePages, false) => {
                 "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor FROM source_pages ORDER BY page_ordinal LIMIT ?1"
             }
@@ -1559,7 +1568,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 }
                 hotpath::measure_block!(
                     "query.artifact.batch.rows",
-                    append_prepared_rows(&transaction, pages, control)
+                    append_prepared_rows(&transaction, self.layout, pages, control)
                 )?;
                 record_batch_row_metrics(pages);
                 hotpath::measure_block!(
@@ -1721,8 +1730,14 @@ impl CodeLexicalArtifactBuilderV1 {
             let section_name = section.name();
             wake_metrics.phase(section);
             wake_metrics.probe();
-            let rows =
-                advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
+            let rows = advance_section_rows(
+                &transaction,
+                section,
+                self.layout,
+                &mut state,
+                remaining_work,
+                control,
+            )?;
             wake_metrics.add_rows(rows)?;
             if rows > 0 {
                 remaining_work = remaining_work.checked_sub(rows).ok_or_else(|| {
@@ -3281,16 +3296,20 @@ fn append_prepared_postings(
 
 fn append_prepared_rows(
     transaction: &Transaction<'_>,
+    layout: LexicalArtifactLayoutV1,
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut row_statement = transaction
         .prepare_cached("INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, ?2, ?3)")
         .map_err(sqlite_error)?;
+    let integrity_sql = if layout.stores_document_integrity_bytes() {
+        "INSERT INTO document_integrity(document_id, digest) VALUES (?1, ?2)"
+    } else {
+        "INSERT INTO document_integrity(document_id, chunk_id, digest) VALUES (?1, ?2, ?3)"
+    };
     let mut integrity_statement = transaction
-        .prepare_cached(
-            "INSERT INTO document_integrity(document_id, chunk_id, digest) VALUES (?1, ?2, ?3)",
-        )
+        .prepare_cached(integrity_sql)
         .map_err(sqlite_error)?;
     for page in pages {
         for document in &page.documents {
@@ -3302,13 +3321,22 @@ fn append_prepared_rows(
                     document.row.as_slice()
                 ])
                 .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-            integrity_statement
-                .execute(params![
-                    document.document_id,
-                    document.chunk_id.as_str(),
-                    document.integrity_digest.as_str()
-                ])
-                .map_err(sqlite_error)?;
+            if layout.stores_document_integrity_bytes() {
+                integrity_statement
+                    .execute(params![
+                        document.document_id,
+                        document.integrity_digest_bytes.as_slice()
+                    ])
+                    .map_err(sqlite_error)?;
+            } else {
+                integrity_statement
+                    .execute(params![
+                        document.document_id,
+                        document.chunk_id.as_str(),
+                        document.integrity_digest.as_str()
+                    ])
+                    .map_err(sqlite_error)?;
+            }
         }
     }
     Ok(())
@@ -3526,6 +3554,28 @@ fn create_schema(
                 CREATE TRIGGER builder_gate_exact_postings_insert BEFORE INSERT ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
                 CREATE TRIGGER builder_gate_exact_postings_update BEFORE UPDATE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
                 CREATE TRIGGER builder_gate_exact_postings_delete BEFORE DELETE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
+    if layout.stores_document_integrity_bytes() {
+        // Same triggers as the base table, recreated on the narrower shape.
+        connection
+            .execute_batch(
+                "
+                DROP TRIGGER content_epoch_document_integrity_insert;
+                DROP TRIGGER immutable_document_integrity_update;
+                DROP TRIGGER immutable_document_integrity_delete;
+                DROP TRIGGER builder_gate_document_integrity_insert;
+                DROP TABLE document_integrity;
+                CREATE TABLE document_integrity (
+                    document_id INTEGER PRIMARY KEY,
+                    digest BLOB NOT NULL
+                );
+                CREATE TRIGGER content_epoch_document_integrity_insert AFTER INSERT ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+                CREATE TRIGGER immutable_document_integrity_update BEFORE UPDATE ON document_integrity BEGIN SELECT RAISE(ABORT, 'immutable lexical document integrity'); END;
+                CREATE TRIGGER immutable_document_integrity_delete BEFORE DELETE ON document_integrity BEGIN SELECT RAISE(ABORT, 'immutable lexical document integrity'); END;
+                CREATE TRIGGER builder_gate_document_integrity_insert BEFORE INSERT ON document_integrity WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -4307,6 +4357,7 @@ fn validate_finalization_state(
 fn advance_section_rows(
     transaction: &Transaction<'_>,
     section: FinalizationSectionV1,
+    layout: LexicalArtifactLayoutV1,
     state: &mut PersistedFinalizationStateV1,
     maximum_rows: usize,
     control: &dyn CodeIndexExecutionControlV1,
@@ -4327,7 +4378,7 @@ fn advance_section_rows(
         | (FinalizationSectionV1::Vocabulary, None) => advance_native_section_rows(
             transaction,
             section,
-            section.seek_query(false),
+            section.seek_query(layout, false),
             params![limit],
             state,
             control,
@@ -4342,7 +4393,7 @@ fn advance_section_rows(
         ) => advance_native_section_rows(
             transaction,
             section,
-            section.seek_query(true),
+            section.seek_query(layout, true),
             params![value, limit],
             state,
             control,
@@ -4353,7 +4404,7 @@ fn advance_section_rows(
         ) => advance_native_section_rows(
             transaction,
             section,
-            section.seek_query(true),
+            section.seek_query(layout, true),
             params![value, limit],
             state,
             control,
@@ -4368,7 +4419,7 @@ fn advance_section_rows(
         ) => advance_native_section_rows(
             transaction,
             section,
-            section.seek_query(true),
+            section.seek_query(layout, true),
             params![page_ordinal, kind, ngram, limit],
             state,
             control,
@@ -4383,7 +4434,7 @@ fn advance_section_rows(
         ) => advance_native_section_rows(
             transaction,
             section,
-            section.seek_query(true),
+            section.seek_query(layout, true),
             params![field, term, document_id, limit],
             state,
             control,
@@ -4398,7 +4449,7 @@ fn advance_section_rows(
         ) => advance_native_section_rows(
             transaction,
             section,
-            section.seek_query(true),
+            section.seek_query(layout, true),
             params![page_ordinal, kind, ngram, limit],
             state,
             control,
@@ -4409,7 +4460,7 @@ fn advance_section_rows(
         ) => advance_native_section_rows(
             transaction,
             section,
-            section.seek_query(true),
+            section.seek_query(layout, true),
             params![first, second, limit],
             state,
             control,
@@ -5942,7 +5993,10 @@ mod tests {
         connection: &Connection,
         section: FinalizationSectionV1,
     ) -> Result<Vec<String>, CodeLexicalArtifactErrorV1> {
-        let query = format!("EXPLAIN QUERY PLAN {}", section.seek_query(true));
+        let query = format!(
+            "EXPLAIN QUERY PLAN {}",
+            section.seek_query(LexicalArtifactLayoutV1::V11, true)
+        );
         let mut statement = connection.prepare(&query).map_err(sqlite_error)?;
         let mut rows = match section {
             FinalizationSectionV1::SourcePages

@@ -633,6 +633,22 @@ fn verify_interned_term_layout(
             )));
         }
     }
+    if layout.stores_document_integrity_bytes() {
+        let document_integrity = table_columns(connection, "document_integrity")?;
+        let expected_document_integrity =
+            [("document_id", "INTEGER", 0, 1), ("digest", "BLOB", 1, 0)];
+        if !document_integrity
+            .iter()
+            .map(|(name, column_type, not_null, primary_key)| {
+                (name.as_str(), column_type.as_str(), *not_null, *primary_key)
+            })
+            .eq(expected_document_integrity)
+        {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact document integrity table has columns {document_integrity:?}; revision 14 requires raw digest bytes keyed by document"
+            )));
+        }
+    }
     if layout.interns_row_dictionary() {
         let row_dictionary = table_columns(connection, "row_dictionary")?;
         let expected_row_dictionary = [("entry_id", "INTEGER", 0, 1), ("entry", "BLOB", 1, 0)];

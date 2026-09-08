@@ -109,7 +109,10 @@ pub(super) struct PreparedDocumentV1 {
     pub(super) row: Vec<u8>,
     pub(super) term_postings: Vec<PreparedTermPostingV1>,
     pub(super) exact_postings: Vec<(String, Vec<u8>)>,
+    /// Tagged hex form persisted by layouts up to 13.
     pub(super) integrity_digest: ManifestDigest,
+    /// The same digest as the 32 raw bytes revision 14 persists.
+    pub(super) integrity_digest_bytes: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -237,6 +240,7 @@ pub(super) fn prepare_page(
         }),
     )?;
     let base_sections_receipt = prepare_base_sections_receipt(
+        layout,
         page.page_ordinal(),
         &imports,
         &documents,
@@ -289,6 +293,7 @@ pub(super) fn prepare_page(
 }
 
 fn prepare_base_sections_receipt(
+    layout: LexicalArtifactLayoutV1,
     page_ordinal: u64,
     imports: &[PreparedImportV1],
     documents: &[PreparedDocumentV1],
@@ -322,8 +327,12 @@ fn prepare_base_sections_receipt(
         checkpoint(control)?;
         document_integrity.begin_row()?;
         document_integrity.integer(document.document_id);
-        document_integrity.text(&document.chunk_id)?;
-        document_integrity.text(document.integrity_digest.as_str())?;
+        if layout.stores_document_integrity_bytes() {
+            document_integrity.blob(&document.integrity_digest_bytes)?;
+        } else {
+            document_integrity.text(&document.chunk_id)?;
+            document_integrity.text(document.integrity_digest.as_str())?;
+        }
 
         rows.begin_row()?;
         rows.integer(document.document_id);
@@ -458,7 +467,7 @@ fn prepare_document(
     let chunk_id = artifact_row.id.as_str().to_owned();
     let row = encode_artifact_row(layout, &artifact_row, row_dictionary)?;
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
-    let integrity_digest = document_integrity_digest(
+    let (integrity_digest, integrity_digest_bytes) = document_integrity_digest(
         document_id,
         chunk_id.as_bytes(),
         &row,
@@ -473,6 +482,7 @@ fn prepare_document(
             term_postings,
             exact_postings,
             integrity_digest,
+            integrity_digest_bytes,
         },
         ngram_postings,
     ))
@@ -484,7 +494,7 @@ fn document_integrity_digest(
     row: &[u8],
     term_postings: &[PreparedTermPostingV1],
     exact_postings: &[(String, Vec<u8>)],
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+) -> Result<(ManifestDigest, [u8; 32]), CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v3\0");
     hasher.update(document.to_le_bytes());
@@ -514,7 +524,10 @@ fn document_integrity_digest(
             hash_blob(hasher, term)
         },
     )?;
-    integrity_digest(hasher)
+    let bytes: [u8; 32] = hasher.finalize().into();
+    let digest = ManifestDigest::from_sha256_bytes(&bytes)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    Ok((digest, bytes))
 }
 
 fn hash_table(
@@ -629,6 +642,7 @@ fn prepared_retained_bytes(
             .checked_add(document.chunk_id.capacity())
             .and_then(|bytes| bytes.checked_add(document.row.capacity()))
             .and_then(|bytes| bytes.checked_add(document.integrity_digest.as_str().len()))
+            .and_then(|bytes| bytes.checked_add(document.integrity_digest_bytes.len()))
             .and_then(|bytes| {
                 bytes.checked_add(
                     document
