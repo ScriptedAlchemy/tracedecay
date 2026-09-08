@@ -2,11 +2,9 @@ use tracedecay_code_extraction::CppExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
-// Inlined rather than `mod`: each of these files compiles twice — as a
-// module of `main.rs` and as its own test target — and a `#[path] mod`
-// would load the same file as a module four times in the `main` binary,
-// which rustc rejects. `include!` gives each target its own copy in its
-// own namespace, and resolves identically in both compilations.
+// Inlined rather than `mod`: `include!` splices the shared docstring helpers
+// into this module's own namespace, so the tests below call them unqualified
+// without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
 #[test]
 fn test_cpp_file_node_is_root() {

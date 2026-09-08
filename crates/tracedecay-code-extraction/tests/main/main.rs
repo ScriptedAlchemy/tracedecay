@@ -2,7 +2,10 @@
 //!
 //! Each module was previously a standalone integration-test binary
 //! (`tests/<lang>_extraction_test.rs`). They are merged into a single
-//! binary to cut per-binary link time on Windows CI.
+//! binary to cut per-binary link time on Windows CI. The modules live under
+//! `tests/main/` so cargo's `tests/*.rs` auto-discovery cannot compile them a
+//! second time as their own binaries; `tests/extract_alloc.rs` stays separate
+//! because its counting `#[global_allocator]` is binary-global.
 
 mod astro;
 #[cfg(feature = "lang-bash")]
@@ -28,6 +31,7 @@ mod glsl;
 mod go;
 #[cfg(feature = "lang-gwbasic")]
 mod gwbasic;
+mod incremental_parse;
 mod java;
 mod kotlin;
 #[cfg(feature = "lang-lean")]
@@ -73,6 +77,7 @@ mod swift;
 #[cfg(feature = "lang-toml")]
 mod toml;
 mod typescript;
+mod typescript_import_evidence;
 #[cfg(feature = "lang-vbnet")]
 mod vbnet;
 #[cfg(feature = "lang-zig")]
