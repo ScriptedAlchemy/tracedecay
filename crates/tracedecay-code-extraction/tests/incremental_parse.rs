@@ -4,14 +4,16 @@ use tracedecay_code_extraction::incremental::{
     ParseCompleteness, ParseDocumentIdentity, ParseError, ParseInputEdit, ParseLimits,
     ParsePartialReason, ParsePoint, ParseResetReason, ParseReuse, RetainedParseDocument,
 };
-use tracedecay_code_extraction::parsed_extraction::ParsedExtractionDisposition;
+use tracedecay_code_extraction::parsed_extraction::{
+    ParsedExtractionDisposition, ParsedExtractionResetReason,
+};
 use tracedecay_code_extraction::{
     ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1, LanguageExtractor, RustExtractor,
     TypeScriptExtractor,
 };
 use tracedecay_domain::{
-    CommitId, ContentDigest, ManifestDigest, NodeKind, ProjectId, RefId, RepositoryDirtyStateV1,
-    RepositoryId, SourceSpan, TreeId, WorktreeId,
+    CommitId, ContentDigest, ExtractionResult, ManifestDigest, NodeKind, ProjectId, RefId,
+    RepositoryDirtyStateV1, RepositoryId, SourceSpan, TreeId, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -478,6 +480,135 @@ fn same_line_method_edit_keeps_both_methods_distinct_after_merge() {
         .collect::<std::collections::BTreeSet<_>>();
     assert!(callee_by_owner.contains(&("src/lib.rs::A::run".to_owned(), "alpha".to_owned())));
     assert!(callee_by_owner.contains(&("src/lib.rs::B::run".to_owned(), "gamma".to_owned())));
+}
+
+/// Canonical rows with the runtime-only timing fields zeroed, as JSON so the
+/// whole row set (file root span included) is compared at once.
+fn timeless_rows(result: &ExtractionResult) -> String {
+    let mut result = result.clone();
+    result.duration_ms = 0;
+    for node in &mut result.nodes {
+        node.updated_at = 0;
+    }
+    serde_json::to_string(&result).expect("canonical rows")
+}
+
+fn file_root_end_line(result: &ExtractionResult) -> u32 {
+    result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::File)
+        .expect("file root row")
+        .end_line
+}
+
+/// The file root's line span is read off the retained tree, so every
+/// line-ending shape must produce the rows a cold extraction of the same
+/// source produces: on the initial parse, after a same-line edit that merges
+/// through the changed-region path, and after a line-changing edit that takes
+/// the multiline reset path. The last shape moves the terminating newline
+/// without changing the row delta, so the file root's `end_line` changes on a
+/// same-line edit — reusing the prior span would be wrong there.
+#[test]
+fn file_root_span_matches_cold_extraction_for_every_line_ending_shape() {
+    let shapes = [
+        ("fn a() -> u32 { 1 }", "fn a() -> u32 { 12 }"),
+        ("fn a() -> u32 { 1 }\n", "fn a() -> u32 { 12 }\n"),
+        ("fn a() -> u32 { 1 }\n\n\n", "fn a() -> u32 { 12 }\n\n\n"),
+        (
+            "fn a() -> u32 { 1 }\r\nfn b() {}\r\n",
+            "fn a() -> u32 { 12 }\r\nfn b() {}\r\n",
+        ),
+        (
+            "fn a() -> u32 { 1 } // é界\nfn b() {}",
+            "fn a() -> u32 { 12 } // é界\nfn b() {}",
+        ),
+        ("", "fn a() {}"),
+        ("fn a() {}\nfn b() {}", "fn a() {}fn b() {}\n"),
+    ];
+    for (before, after) in shapes {
+        let (mut document, opened) = RetainedParseDocument::open(
+            identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+            "rust",
+            before,
+            ParseLimits::default(),
+        )
+        .expect("initial parse");
+        let initial = document
+            .extract_canonical(&RustExtractor, &opened, None)
+            .expect("initial canonical extraction");
+        let cold_before = RustExtractor.extract("src/lib.rs", before);
+        assert_eq!(
+            timeless_rows(&initial.result),
+            timeless_rows(&cold_before),
+            "initial rows for {before:?}"
+        );
+        assert_eq!(
+            file_root_end_line(&initial.result),
+            before.lines().count().saturating_sub(1) as u32,
+            "initial file root for {before:?}"
+        );
+
+        let report = document
+            .reparse(
+                identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+                after,
+            )
+            .expect("same-line incremental parse");
+        assert_eq!(
+            report.reuse,
+            ParseReuse::Incremental,
+            "{before:?} -> {after:?}"
+        );
+        let incremental = document
+            .extract_canonical(&RustExtractor, &report, Some(&initial.result))
+            .expect("same-line canonical extraction");
+        assert_eq!(
+            incremental.disposition,
+            ParsedExtractionDisposition::ChangedRegions,
+            "{before:?} -> {after:?}"
+        );
+        let cold_after = RustExtractor.extract("src/lib.rs", after);
+        assert_eq!(
+            timeless_rows(&incremental.result),
+            timeless_rows(&cold_after),
+            "same-line merged rows for {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            file_root_end_line(&incremental.result),
+            after.lines().count().saturating_sub(1) as u32,
+            "same-line file root for {after:?}"
+        );
+
+        let multiline = format!("{after}\nfn c() {{}}\n");
+        let report = document
+            .reparse(
+                identity("commit-c", "tree-c", RepositoryDirtyStateV1::Dirty),
+                multiline.as_str(),
+            )
+            .expect("multiline incremental parse");
+        let reset = document
+            .extract_canonical(&RustExtractor, &report, Some(&incremental.result))
+            .expect("multiline canonical extraction");
+        assert_eq!(
+            reset.disposition,
+            ParsedExtractionDisposition::Reset {
+                reason: ParsedExtractionResetReason::MultilineEdit
+            },
+            "{after:?} -> {multiline:?}"
+        );
+        let cold_multiline = RustExtractor.extract("src/lib.rs", &multiline);
+        assert_eq!(
+            timeless_rows(&reset.result),
+            timeless_rows(&cold_multiline),
+            "reset rows for {multiline:?}"
+        );
+        assert_eq!(
+            file_root_end_line(&reset.result),
+            multiline.lines().count().saturating_sub(1) as u32,
+            "reset file root for {multiline:?}"
+        );
+    }
 }
 
 #[test]

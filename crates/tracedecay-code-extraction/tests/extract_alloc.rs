@@ -586,10 +586,29 @@ fn representative_language_walks_allocate_by_changed_region() {
             incremental.result.errors
         );
 
+        // Informational timing: best of a few repeat walks smooths scheduler
+        // noise. A changed-region walk of one tiny trailing item must not pay
+        // for the megabyte of padding ahead of it.
+        let best_walk_time = (0..10)
+            .map(|_| {
+                let started = Instant::now();
+                let repeat = case.extractor.extract_parsed(
+                    case.file_path,
+                    &case.source,
+                    &tree,
+                    ParsedExtractionScope::ChangedRegions(&regions),
+                );
+                let elapsed = started.elapsed();
+                assert!(repeat.result.errors.is_empty());
+                elapsed
+            })
+            .min()
+            .expect("at least one timed walk");
+
         let cold_digest = canonical_digest(&cold);
         let incremental_digest = canonical_digest(&incremental.result);
         println!(
-            "{} ({}): source={} visited={} allocated={} digest={cold_digest}",
+            "{} ({}): source={} visited={} allocated={} best region walk {best_walk_time:?} digest={cold_digest}",
             case.file_path,
             case.tier,
             case.source.len(),
