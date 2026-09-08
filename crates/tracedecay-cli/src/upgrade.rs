@@ -10,10 +10,11 @@
 //! Beta and stable are separate channels — a beta build only sees beta
 //! releases and vice versa.
 
+use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, ExitStatus, Output};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -21,6 +22,7 @@ use tempfile::TempDir;
 
 use tracedecay::cloud::{self, InstallMethod};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_session_memory::user_config::UserConfig;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
@@ -610,13 +612,13 @@ pub enum UpgradeOutcome {
         binary: Option<PathBuf>,
         /// Version of the freshly installed binary: the release-manifest
         /// version for GitHub-release installs, the linked binary's
-        /// self-reported version for Homebrew. Daemon restore validates this
-        /// version — the binary it actually restarts — instead of the one
-        /// that was running before the upgrade. `None` only when Homebrew's
-        /// install could not be interrogated; restore verification then
-        /// validates the pre-upgrade version and, if a new daemon really was
-        /// installed, fails with a typed identity mismatch rather than
-        /// silently passing.
+        /// self-reported version for package-manager installs. Daemon restore
+        /// validates this version — the binary it actually restarts — instead
+        /// of the one that was running before the upgrade. `None` only when
+        /// the manager's install could not be interrogated; restore
+        /// verification then validates the pre-upgrade version and, if a new
+        /// daemon really was installed, fails with a typed identity mismatch
+        /// rather than silently passing.
         version: Option<String>,
     },
     /// Already on the latest version — the binary was not replaced.
@@ -684,21 +686,21 @@ impl ManagerCommand {
 
     /// Runs the manager with inherited stdio: delegated installation is the
     /// operator's interactive command, and may legitimately take a while.
-    fn status(&self) -> io::Result<std::process::ExitStatus> {
-        std::process::Command::new(&self.program)
-            .args(&self.args)
-            .status()
+    fn status(&self) -> io::Result<ExitStatus> {
+        Command::new(&self.program).args(&self.args).status()
     }
 
-    fn output(&self) -> io::Result<std::process::Output> {
-        std::process::Command::new(&self.program)
-            .args(&self.args)
-            .output()
+    /// Captures a short metadata answer from the manager under the shared
+    /// bounded process boundary (deadline, output bounds, settlement).
+    fn output(&self) -> std::result::Result<Output, GitCommandError> {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        bounded_command_output(command, None, &GitCommandBounds::default())
     }
 }
 
-impl std::fmt::Display for ManagerCommand {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ManagerCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.program)?;
         for arg in &self.args {
             write!(formatter, " {arg}")?;
@@ -767,7 +769,7 @@ impl PackageManager {
         let command = self.prefix_command(is_beta);
         let output = command
             .output()
-            .map_err(|error| format!("`{command}` could not run: {error}"))?;
+            .map_err(|error| format!("`{command}` {}", describe_process_failure(&error)))?;
         if !output.status.success() {
             return Err(format!("`{command}` exited with {}", output.status));
         }
@@ -927,42 +929,102 @@ fn perform_upgrade(download: &ReleaseDownload) -> Result<Option<PathBuf>> {
     Ok(installed_at)
 }
 
-/// Extracts the version from `tracedecay --version` output
-/// (e.g. `tracedecay 5.0.1` → `5.0.1`).
-fn parse_version_output(output: &str) -> Option<String> {
-    let version = output.split_whitespace().last()?;
-    Some(version.trim_start_matches('v').to_string())
-}
+/// A `--version` line is `tracedecay <release>[+<40-hex sha>[.dirty]]`, well
+/// under 128 bytes. 4 KiB leaves room for any such line and refuses an
+/// executable that chatters or loops without retaining unbounded output.
+const VERSION_PROBE_STDOUT_LIMIT: usize = 4 * 1024;
+/// A wedged binary must not hang the upgrade; a healthy one answers in
+/// milliseconds.
+const VERSION_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Asks the binary at `path` for its version, killing it after a short
-/// deadline so a wedged binary cannot hang the upgrade. `None` when it
-/// cannot be run, times out, or its output is unrecognizable.
-fn installed_binary_version(path: &Path) -> Option<String> {
-    let mut child = std::process::Command::new(path)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => return None,
-        }
-    };
-    if !status.success() {
+/// The version a `tracedecay --version` line reports: exactly one line,
+/// `tracedecay ` followed by a `SemVer` version. Build metadata is kept so a
+/// checkout build's `+<sha>` identity survives; anything else is not version
+/// evidence.
+fn parse_version_output(output: &str) -> Option<String> {
+    let mut lines = output.lines();
+    let line = lines.next()?;
+    if lines.next().is_some() {
         return None;
     }
-    let mut output = String::new();
-    child.stdout.take()?.read_to_string(&mut output).ok()?;
-    parse_version_output(&output)
+    let version = line.strip_prefix("tracedecay ")?;
+    semver::Version::parse(version).ok()?;
+    Some(version.to_owned())
+}
+
+/// Why a version probe produced no installed version.
+#[derive(Debug)]
+enum VersionProbeError {
+    /// Spawn, deadline, output-bound, or settlement failure at the process
+    /// boundary; the child was killed and reaped before this is reported.
+    Execution(GitCommandError),
+    /// The binary ran to completion but did not succeed.
+    ExitStatus(ExitStatus),
+    /// Stdout was not a single `tracedecay <semver>` line.
+    Unrecognized(String),
+}
+
+/// Neutral wording for the shared process boundary's failures, whose own
+/// messages are phrased for its primary `git` caller.
+fn describe_process_failure(error: &GitCommandError) -> String {
+    match error {
+        GitCommandError::Unavailable(source) => format!("could not run: {source}"),
+        GitCommandError::Cancelled => "was cancelled".to_owned(),
+        GitCommandError::DeadlineExceeded => {
+            "did not exit and release its output before the deadline".to_owned()
+        }
+        GitCommandError::OutputLimitExceeded { stream, bound } => {
+            format!("wrote more than {bound} bytes to {stream}")
+        }
+        GitCommandError::ReadOutput { stream, source } => {
+            format!("could not be read on {stream}: {source}")
+        }
+        GitCommandError::Wait(source) => format!("could not be waited for: {source}"),
+    }
+}
+
+impl fmt::Display for VersionProbeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Execution(error) => {
+                write!(formatter, "`--version` {}", describe_process_failure(error))
+            }
+            Self::ExitStatus(status) => write!(formatter, "`--version` exited with {status}"),
+            Self::Unrecognized(text) => {
+                write!(formatter, "unrecognized `--version` output {text:?}")
+            }
+        }
+    }
+}
+
+/// Asks the binary at `path` for its version under one absolute deadline,
+/// draining bounded stdout concurrently with the child's progress so a
+/// chatty binary cannot deadlock on a full pipe and a wedged one cannot hang
+/// the upgrade. Every exit path leaves the child killed and reaped.
+fn installed_binary_version(path: &Path) -> std::result::Result<String, VersionProbeError> {
+    installed_binary_version_within(path, VERSION_PROBE_DEADLINE)
+}
+
+fn installed_binary_version_within(
+    path: &Path,
+    deadline: Duration,
+) -> std::result::Result<String, VersionProbeError> {
+    let mut command = Command::new(path);
+    command.arg("--version");
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + deadline,
+        max_stdout_bytes: VERSION_PROBE_STDOUT_LIMIT,
+        ..GitCommandBounds::default()
+    };
+    let output =
+        bounded_command_output(command, None, &bounds).map_err(VersionProbeError::Execution)?;
+    if !output.status.success() {
+        return Err(VersionProbeError::ExitStatus(output.status));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|error| {
+        VersionProbeError::Unrecognized(String::from_utf8_lossy(error.as_bytes()).into_owned())
+    })?;
+    parse_version_output(&text).ok_or(VersionProbeError::Unrecognized(text))
 }
 
 /// Whether a delegated manager upgrade was a no-op: the binary the manager
@@ -1018,7 +1080,17 @@ fn run_delegated_upgrade(
             None
         }
     };
-    let installed_version = binary.as_deref().and_then(installed_binary_version);
+    let installed_version = match binary.as_deref().map(installed_binary_version) {
+        Some(Ok(version)) => Some(version),
+        Some(Err(reason)) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not read the {label}-installed binary's version \
+                 ({reason}); assuming a new install so the refresh chain runs"
+            );
+            None
+        }
+        None => None,
+    };
     if delegated_upgrade_was_noop(
         crate::product_runtime::PRODUCT_BUILD_VERSION,
         installed_version.as_deref(),
@@ -1225,16 +1297,172 @@ mod tests {
     }
 
     #[test]
-    fn parse_version_output_extracts_trailing_version() {
+    fn only_a_single_tracedecay_semver_line_is_version_evidence() {
         assert_eq!(
             parse_version_output("tracedecay 5.0.1\n").as_deref(),
             Some("5.0.1")
         );
+        let build = "0.1.0-beta.37+0123456789abcdef0123456789abcdef01234567.dirty";
         assert_eq!(
-            parse_version_output("tracedecay v5.0.1").as_deref(),
-            Some("5.0.1")
+            parse_version_output(&format!("tracedecay {build}\n")).as_deref(),
+            Some(build),
+            "build metadata identifies the exact binary and must survive"
         );
         assert_eq!(parse_version_output(""), None);
+        assert_eq!(parse_version_output("tracedecay v5.0.1"), None);
+        assert_eq!(parse_version_output("tracedecay"), None);
+        assert_eq!(parse_version_output("tracedecay not-a-version"), None);
+        assert_eq!(parse_version_output("error: missing runtime 5.0.1"), None);
+        assert_eq!(
+            parse_version_output("tracedecay 5.0.1\nwarning: a newer version exists\n"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    mod version_probe {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+
+        use tracedecay_runtime_core::git::GitCommandError;
+
+        use super::super::{
+            VersionProbeError, installed_binary_version, installed_binary_version_within,
+        };
+
+        fn script(dir: &Path, body: &str) -> PathBuf {
+            let path = dir.join("tracedecay");
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        #[test]
+        fn a_healthy_binary_reports_its_version() {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = script(dir.path(), "printf 'tracedecay 1.2.3+abcdef\\n'");
+
+            assert_eq!(installed_binary_version(&binary).unwrap(), "1.2.3+abcdef");
+        }
+
+        #[test]
+        fn failed_exits_and_malformed_output_are_not_version_evidence() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let failing = script(dir.path(), "printf 'tracedecay 1.2.3\\n'; exit 1");
+            assert!(matches!(
+                installed_binary_version(&failing),
+                Err(VersionProbeError::ExitStatus(_))
+            ));
+
+            let chatty = script(dir.path(), "printf 'tracedecay 1.2.3\\nnote: hi\\n'");
+            assert!(matches!(
+                installed_binary_version(&chatty),
+                Err(VersionProbeError::Unrecognized(_))
+            ));
+
+            let garbage = script(dir.path(), "printf 'segfault at 0x42 1.2.3\\n'");
+            assert!(matches!(
+                installed_binary_version(&garbage),
+                Err(VersionProbeError::Unrecognized(_))
+            ));
+
+            let invalid_utf8 = script(dir.path(), "printf 'tracedecay 1.2.3\\377\\n'");
+            assert!(matches!(
+                installed_binary_version(&invalid_utf8),
+                Err(VersionProbeError::Unrecognized(_))
+            ));
+
+            let missing = dir.path().join("absent");
+            assert!(matches!(
+                installed_binary_version(&missing),
+                Err(VersionProbeError::Execution(GitCommandError::Unavailable(
+                    _
+                )))
+            ));
+        }
+
+        #[test]
+        fn a_child_that_overfills_its_stdout_pipe_is_refused_without_a_deadlock() {
+            let dir = tempfile::tempdir().unwrap();
+            // Well past both the probe's byte bound and the kernel pipe
+            // capacity: a wait-before-read probe would block here until its
+            // deadline and then misclassify the binary as wedged.
+            let flood = script(dir.path(), "head -c 200000 /dev/zero | tr '\\0' a");
+            let started = Instant::now();
+
+            let error = installed_binary_version(&flood).unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    VersionProbeError::Execution(GitCommandError::OutputLimitExceeded {
+                        stream: "stdout",
+                        ..
+                    })
+                ),
+                "{error}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+
+        #[test]
+        fn a_wedged_binary_is_killed_and_reaped_at_the_deadline() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let wedged = script(
+                dir.path(),
+                &format!("echo $$ > '{}'; exec sleep 30", pid_file.display()),
+            );
+            let started = Instant::now();
+
+            let error =
+                installed_binary_version_within(&wedged, Duration::from_millis(300)).unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    VersionProbeError::Execution(GitCommandError::DeadlineExceeded)
+                ),
+                "{error}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(5));
+            #[cfg(target_os = "linux")]
+            {
+                let pid = fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+                assert!(
+                    !Path::new("/proc").join(&pid).exists(),
+                    "the probe must not leave its child running"
+                );
+            }
+        }
+
+        #[test]
+        fn a_descendant_holding_stdout_cannot_hold_the_probe_past_its_deadline() {
+            let dir = tempfile::tempdir().unwrap();
+            let leaky = script(
+                dir.path(),
+                "printf 'tracedecay 1.2.3\\n'; sleep 20 & exit 0",
+            );
+            let started = Instant::now();
+
+            let error =
+                installed_binary_version_within(&leaky, Duration::from_millis(300)).unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    VersionProbeError::Execution(GitCommandError::DeadlineExceeded)
+                ),
+                "{error}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "a successful parent exit does not close an inherited pipe; the deadline must"
+            );
+        }
     }
 
     // ── Installation ownership ──────────────────────────────────────────
