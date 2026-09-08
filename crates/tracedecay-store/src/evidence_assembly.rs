@@ -327,20 +327,26 @@ pub struct EvidenceSourceOccurrenceRecordV1 {
     pub valid_time: Option<UtcMicros>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceOccurrenceIdentityProjectionV1 {
-    pub owner: AnchorOwnerBindingV1,
-    pub timeline: EvidenceSourceTimelineV1,
-    pub exact_source_anchor: RetrievalAnchorId,
+/// Identity-bound material of one source occurrence, borrowed from wherever
+/// the caller already owns it.
+///
+/// Identity projections are transient serialization views: field names and
+/// order are the canonical identity schema, so a borrowed field serializes to
+/// exactly the bytes its owned counterpart would and existing durable ids do
+/// not move. Never copy record vectors to build one.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct SourceOccurrenceIdentityProjectionV1<'a> {
+    pub owner: &'a AnchorOwnerBindingV1,
+    pub timeline: &'a EvidenceSourceTimelineV1,
+    pub exact_source_anchor: &'a RetrievalAnchorId,
     pub source_order: u64,
-    pub coordinate: SourceOccurrenceCoordinateV1,
+    pub coordinate: &'a SourceOccurrenceCoordinateV1,
     pub occurrence_kind: SourceOccurrenceKindV1,
-    pub relations: Vec<SourceOccurrenceRelationV1>,
-    pub projector_version: ComponentVersion,
+    pub relations: &'a [SourceOccurrenceRelationV1],
+    pub projector_version: &'a ComponentVersion,
 }
 
-impl SourceOccurrenceIdentityProjectionV1 {
+impl SourceOccurrenceIdentityProjectionV1<'_> {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate().map_err(invalid)?;
         self.timeline.validate()?;
@@ -369,15 +375,13 @@ impl SourceOccurrenceIdentityProjectionV1 {
         if self.relations.len() > MAX_EVIDENCE_ASSEMBLY_MEMBERS_V1 {
             return Err(invalid("source occurrence relation count"));
         }
-        for relation in &self.relations {
+        for relation in self.relations {
             relation.validate()?;
         }
         ensure_unique(
-            &self
-                .relations
+            self.relations
                 .iter()
-                .map(|relation| relation.source_id().clone())
-                .collect::<Vec<_>>(),
+                .map(SourceOccurrenceRelationV1::source_id),
             "source occurrence relations",
         )?;
         let tool_result_relations = self
@@ -401,7 +405,7 @@ impl SourceOccurrenceIdentityProjectionV1 {
 }
 
 pub fn derive_source_occurrence_id_v1(
-    projection: &SourceOccurrenceIdentityProjectionV1,
+    projection: &SourceOccurrenceIdentityProjectionV1<'_>,
 ) -> EvidenceAssemblyStoreResult<SourceOccurrenceId> {
     projection.validate()?;
     let digest = canonical_identity_digest(SOURCE_OCCURRENCE_ID_DOMAIN_V1, projection)?;
@@ -409,16 +413,16 @@ pub fn derive_source_occurrence_id_v1(
 }
 
 impl EvidenceSourceOccurrenceRecordV1 {
-    pub fn identity_projection(&self) -> SourceOccurrenceIdentityProjectionV1 {
+    pub fn identity_projection(&self) -> SourceOccurrenceIdentityProjectionV1<'_> {
         SourceOccurrenceIdentityProjectionV1 {
-            owner: self.owner.clone(),
-            timeline: self.timeline.clone(),
-            exact_source_anchor: self.exact_source_anchor.clone(),
+            owner: &self.owner,
+            timeline: &self.timeline,
+            exact_source_anchor: &self.exact_source_anchor,
             source_order: self.source_order,
-            coordinate: self.coordinate.clone(),
+            coordinate: &self.coordinate,
             occurrence_kind: self.occurrence_kind,
-            relations: self.relations.clone(),
-            projector_version: self.projector_version.clone(),
+            relations: &self.relations,
+            projector_version: &self.projector_version,
         }
     }
 
@@ -451,7 +455,6 @@ impl EvidenceSourceOccurrenceRecordV1 {
         {
             return Err(invalid("source occurrence self relation"));
         }
-        self.identity_projection().validate()?;
         if self.occurrence_id != derive_source_occurrence_id_v1(&self.identity_projection())? {
             return Err(invalid("source occurrence identity"));
         }
@@ -468,14 +471,13 @@ pub struct CanonicalSourceOccurrenceSetRecordV1 {
     pub members: Vec<SourceOccurrenceId>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CanonicalSourceOccurrenceSetIdentityProjectionV1 {
-    pub owner: AnchorOwnerBindingV1,
-    pub canonical_members: Vec<SourceOccurrenceId>,
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct CanonicalSourceOccurrenceSetIdentityProjectionV1<'a> {
+    pub owner: &'a AnchorOwnerBindingV1,
+    pub canonical_members: &'a [SourceOccurrenceId],
 }
 
-impl CanonicalSourceOccurrenceSetIdentityProjectionV1 {
+impl CanonicalSourceOccurrenceSetIdentityProjectionV1<'_> {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate().map_err(invalid)?;
         validate_member_count(self.canonical_members.len())?;
@@ -491,7 +493,7 @@ impl CanonicalSourceOccurrenceSetIdentityProjectionV1 {
 }
 
 pub fn derive_canonical_source_occurrence_set_id_v1(
-    projection: &CanonicalSourceOccurrenceSetIdentityProjectionV1,
+    projection: &CanonicalSourceOccurrenceSetIdentityProjectionV1<'_>,
 ) -> EvidenceAssemblyStoreResult<CanonicalSourceOccurrenceSetIdV1> {
     projection.validate()?;
     let digest = canonical_identity_digest(OCCURRENCE_SET_ID_DOMAIN_V1, projection)?;
@@ -499,10 +501,10 @@ pub fn derive_canonical_source_occurrence_set_id_v1(
 }
 
 impl CanonicalSourceOccurrenceSetRecordV1 {
-    pub fn identity_projection(&self) -> CanonicalSourceOccurrenceSetIdentityProjectionV1 {
+    pub fn identity_projection(&self) -> CanonicalSourceOccurrenceSetIdentityProjectionV1<'_> {
         CanonicalSourceOccurrenceSetIdentityProjectionV1 {
-            owner: self.owner.clone(),
-            canonical_members: self.members.clone(),
+            owner: &self.owner,
+            canonical_members: &self.members,
         }
     }
 
@@ -734,19 +736,18 @@ pub struct EvidenceSpanRecordV1 {
     pub catalog_binding: EvidenceSpanCatalogBindingV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct EvidenceSpanIdentityProjectionV1 {
-    pub owner: AnchorOwnerBindingV1,
-    pub occurrence_set_id: CanonicalSourceOccurrenceSetIdV1,
-    pub ordered_runs: Vec<EvidenceSpanRunV1>,
-    pub exact_source_anchors: Vec<RetrievalAnchorId>,
-    pub projector_version: ComponentVersion,
-    pub horizon: EvidenceSpanHorizonV1,
-    pub catalog_binding: EvidenceSpanCatalogBindingV1,
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct EvidenceSpanIdentityProjectionV1<'a> {
+    pub owner: &'a AnchorOwnerBindingV1,
+    pub occurrence_set_id: &'a CanonicalSourceOccurrenceSetIdV1,
+    pub ordered_runs: &'a [EvidenceSpanRunV1],
+    pub exact_source_anchors: &'a [RetrievalAnchorId],
+    pub projector_version: &'a ComponentVersion,
+    pub horizon: &'a EvidenceSpanHorizonV1,
+    pub catalog_binding: &'a EvidenceSpanCatalogBindingV1,
 }
 
-impl EvidenceSpanIdentityProjectionV1 {
+impl EvidenceSpanIdentityProjectionV1<'_> {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate().map_err(invalid)?;
         self.occurrence_set_id.validate().map_err(invalid)?;
@@ -768,7 +769,7 @@ impl EvidenceSpanIdentityProjectionV1 {
         if self.exact_source_anchors.len() != occurrence_count {
             return Err(invalid("evidence span exact source cardinality"));
         }
-        for run in &self.ordered_runs {
+        for run in self.ordered_runs {
             match (
                 self.catalog_binding.source_capability(),
                 Some(&run.ordering_proof.catalog_binding),
@@ -784,7 +785,7 @@ impl EvidenceSpanIdentityProjectionV1 {
 }
 
 pub fn derive_evidence_span_id_v1(
-    projection: &EvidenceSpanIdentityProjectionV1,
+    projection: &EvidenceSpanIdentityProjectionV1<'_>,
 ) -> EvidenceAssemblyStoreResult<EvidenceSpanIdV1> {
     projection.validate()?;
     let digest = canonical_identity_digest(EVIDENCE_SPAN_ID_DOMAIN_V1, projection)?;
@@ -792,15 +793,15 @@ pub fn derive_evidence_span_id_v1(
 }
 
 impl EvidenceSpanRecordV1 {
-    pub fn identity_projection(&self) -> EvidenceSpanIdentityProjectionV1 {
+    pub fn identity_projection(&self) -> EvidenceSpanIdentityProjectionV1<'_> {
         EvidenceSpanIdentityProjectionV1 {
-            owner: self.owner.clone(),
-            occurrence_set_id: self.occurrence_set_id.clone(),
-            ordered_runs: self.runs.clone(),
-            exact_source_anchors: self.exact_source_anchors.clone(),
-            projector_version: self.projector_version.clone(),
-            horizon: self.horizon.clone(),
-            catalog_binding: self.catalog_binding.clone(),
+            owner: &self.owner,
+            occurrence_set_id: &self.occurrence_set_id,
+            ordered_runs: &self.runs,
+            exact_source_anchors: &self.exact_source_anchors,
+            projector_version: &self.projector_version,
+            horizon: &self.horizon,
+            catalog_binding: &self.catalog_binding,
         }
     }
 
@@ -830,10 +831,17 @@ impl EvidenceSpanRecordV1 {
                 return Err(invalid("evidence span run order"));
             }
         }
-        let occurrences = self.ordered_occurrence_ids();
-        validate_member_count(occurrences.len())?;
-        ensure_unique(&occurrences, "evidence span occurrences")?;
-        if self.exact_source_anchors.len() != occurrences.len() {
+        let occurrence_count = self
+            .runs
+            .iter()
+            .map(|run| run.occurrence_ids.len())
+            .sum::<usize>();
+        validate_member_count(occurrence_count)?;
+        ensure_unique(
+            self.runs.iter().flat_map(|run| &run.occurrence_ids),
+            "evidence span occurrences",
+        )?;
+        if self.exact_source_anchors.len() != occurrence_count {
             return Err(invalid("evidence span exact source cardinality"));
         }
         if self.span_id != derive_evidence_span_id_v1(&self.identity_projection())? {
@@ -871,23 +879,22 @@ pub struct EvidenceSpanProjectionReceiptV1 {
     pub exact_source_anchors: Vec<RetrievalAnchorId>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct EvidenceSpanProjectionReceiptIdentityProjectionV1 {
-    pub span_id: EvidenceSpanIdV1,
-    pub projector_snapshot: String,
-    pub projection_generation: ProjectionGenerationId,
-    pub projection_watermark: VectorWatermark,
-    pub source_watermark: ManifestDigest,
-    pub member_receipts: Vec<EvidenceSpanMemberReceiptBindingV1>,
-    pub ordered_occurrence_ids: Vec<SourceOccurrenceId>,
-    pub exact_source_anchors: Vec<RetrievalAnchorId>,
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct EvidenceSpanProjectionReceiptIdentityProjectionV1<'a> {
+    pub span_id: &'a EvidenceSpanIdV1,
+    pub projector_snapshot: &'a str,
+    pub projection_generation: &'a ProjectionGenerationId,
+    pub projection_watermark: &'a VectorWatermark,
+    pub source_watermark: &'a ManifestDigest,
+    pub member_receipts: &'a [EvidenceSpanMemberReceiptBindingV1],
+    pub ordered_occurrence_ids: &'a [SourceOccurrenceId],
+    pub exact_source_anchors: &'a [RetrievalAnchorId],
 }
 
-impl EvidenceSpanProjectionReceiptIdentityProjectionV1 {
+impl EvidenceSpanProjectionReceiptIdentityProjectionV1<'_> {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         EvidenceSpanIdV1::new(self.span_id.as_str()).map_err(invalid)?;
-        validate_label(&self.projector_snapshot, "evidence projector snapshot")?;
+        validate_label(self.projector_snapshot, "evidence projector snapshot")?;
         self.projection_generation.validate().map_err(invalid)?;
         self.source_watermark.validate().map_err(invalid)?;
         validate_member_count(self.ordered_occurrence_ids.len())?;
@@ -896,7 +903,7 @@ impl EvidenceSpanProjectionReceiptIdentityProjectionV1 {
         {
             return Err(invalid("evidence projection receipt cardinality"));
         }
-        for binding in &self.member_receipts {
+        for binding in self.member_receipts {
             binding.validate()?;
         }
         if self
@@ -908,7 +915,7 @@ impl EvidenceSpanProjectionReceiptIdentityProjectionV1 {
             return Err(EvidenceAssemblyStoreError::ReceiptRoleMismatch);
         }
         ensure_unique(
-            &self.ordered_occurrence_ids,
+            self.ordered_occurrence_ids,
             "evidence projection receipt occurrences",
         )?;
         Ok(())
@@ -916,7 +923,7 @@ impl EvidenceSpanProjectionReceiptIdentityProjectionV1 {
 }
 
 pub fn derive_evidence_span_projection_receipt_id_v1(
-    projection: &EvidenceSpanProjectionReceiptIdentityProjectionV1,
+    projection: &EvidenceSpanProjectionReceiptIdentityProjectionV1<'_>,
 ) -> EvidenceAssemblyStoreResult<EvidenceSpanProjectionReceiptIdV1> {
     projection.validate()?;
     let digest = canonical_identity_digest(PROJECTION_RECEIPT_ID_DOMAIN_V1, projection)?;
@@ -924,22 +931,21 @@ pub fn derive_evidence_span_projection_receipt_id_v1(
 }
 
 impl EvidenceSpanProjectionReceiptV1 {
-    pub fn identity_projection(&self) -> EvidenceSpanProjectionReceiptIdentityProjectionV1 {
+    pub fn identity_projection(&self) -> EvidenceSpanProjectionReceiptIdentityProjectionV1<'_> {
         EvidenceSpanProjectionReceiptIdentityProjectionV1 {
-            span_id: self.span_id.clone(),
-            projector_snapshot: self.projector_snapshot.clone(),
-            projection_generation: self.projection_generation.clone(),
-            projection_watermark: self.projection_watermark.clone(),
-            source_watermark: self.source_watermark.clone(),
-            member_receipts: self.member_receipts.clone(),
-            ordered_occurrence_ids: self.ordered_occurrence_ids.clone(),
-            exact_source_anchors: self.exact_source_anchors.clone(),
+            span_id: &self.span_id,
+            projector_snapshot: &self.projector_snapshot,
+            projection_generation: &self.projection_generation,
+            projection_watermark: &self.projection_watermark,
+            source_watermark: &self.source_watermark,
+            member_receipts: &self.member_receipts,
+            ordered_occurrence_ids: &self.ordered_occurrence_ids,
+            exact_source_anchors: &self.exact_source_anchors,
         }
     }
 
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.projection_receipt_id.validate().map_err(invalid)?;
-        self.identity_projection().validate()?;
         if self.projection_receipt_id
             != derive_evidence_span_projection_receipt_id_v1(&self.identity_projection())?
         {
@@ -1081,25 +1087,24 @@ pub struct RetrieverContributionRecordV1 {
     pub created_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RetrieverContributionIdentityProjectionV1 {
-    pub owner: EvidenceAssemblyOwnerV1,
-    pub retriever: RetrieverIdentityV1,
-    pub catalog_binding: SourceCapabilityCatalogBindingV1,
-    pub request_digest: PrivacyBoundRequestDigestV1,
-    pub scope_resolution_id: ScopeResolutionId,
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct RetrieverContributionIdentityProjectionV1<'a> {
+    pub owner: &'a EvidenceAssemblyOwnerV1,
+    pub retriever: &'a RetrieverIdentityV1,
+    pub catalog_binding: &'a SourceCapabilityCatalogBindingV1,
+    pub request_digest: &'a PrivacyBoundRequestDigestV1,
+    pub scope_resolution_id: &'a ScopeResolutionId,
     pub temporal_mode: TemporalModeV1,
-    pub watermarks: RetrieverWatermarkBindingV1,
-    pub horizon: EvidenceSpanHorizonV1,
-    pub occurrence_set_id: CanonicalSourceOccurrenceSetIdV1,
-    pub span_id: EvidenceSpanIdV1,
-    pub span_anchor_id: RetrievalAnchorId,
-    pub exact_source_anchors: Vec<RetrievalAnchorId>,
-    pub coverage: CoverageReportV1,
+    pub watermarks: &'a RetrieverWatermarkBindingV1,
+    pub horizon: &'a EvidenceSpanHorizonV1,
+    pub occurrence_set_id: &'a CanonicalSourceOccurrenceSetIdV1,
+    pub span_id: &'a EvidenceSpanIdV1,
+    pub span_anchor_id: &'a RetrievalAnchorId,
+    pub exact_source_anchors: &'a [RetrievalAnchorId],
+    pub coverage: &'a CoverageReportV1,
 }
 
-impl RetrieverContributionIdentityProjectionV1 {
+impl RetrieverContributionIdentityProjectionV1<'_> {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate()?;
         self.retriever.validate()?;
@@ -1122,7 +1127,7 @@ impl RetrieverContributionIdentityProjectionV1 {
 }
 
 pub fn derive_retriever_contribution_id_v1(
-    projection: &RetrieverContributionIdentityProjectionV1,
+    projection: &RetrieverContributionIdentityProjectionV1<'_>,
 ) -> EvidenceAssemblyStoreResult<RetrieverContributionIdV1> {
     projection.validate()?;
     let digest = canonical_identity_digest(RETRIEVER_CONTRIBUTION_ID_DOMAIN_V1, projection)?;
@@ -1130,21 +1135,21 @@ pub fn derive_retriever_contribution_id_v1(
 }
 
 impl RetrieverContributionRecordV1 {
-    pub fn identity_projection(&self) -> RetrieverContributionIdentityProjectionV1 {
+    pub fn identity_projection(&self) -> RetrieverContributionIdentityProjectionV1<'_> {
         RetrieverContributionIdentityProjectionV1 {
-            owner: self.owner.clone(),
-            retriever: self.retriever.clone(),
-            catalog_binding: self.catalog_binding.clone(),
-            request_digest: self.request_digest.clone(),
-            scope_resolution_id: self.scope_resolution_id.clone(),
+            owner: &self.owner,
+            retriever: &self.retriever,
+            catalog_binding: &self.catalog_binding,
+            request_digest: &self.request_digest,
+            scope_resolution_id: &self.scope_resolution_id,
             temporal_mode: self.temporal_mode,
-            watermarks: self.watermarks.clone(),
-            horizon: self.horizon.clone(),
-            occurrence_set_id: self.occurrence_set_id.clone(),
-            span_id: self.span_id.clone(),
-            span_anchor_id: self.span_anchor_id.clone(),
-            exact_source_anchors: self.exact_source_anchors.clone(),
-            coverage: self.coverage.clone(),
+            watermarks: &self.watermarks,
+            horizon: &self.horizon,
+            occurrence_set_id: &self.occurrence_set_id,
+            span_id: &self.span_id,
+            span_anchor_id: &self.span_anchor_id,
+            exact_source_anchors: &self.exact_source_anchors,
+            coverage: &self.coverage,
         }
     }
 
@@ -1166,8 +1171,6 @@ impl RetrieverContributionRecordV1 {
             std::slice::from_ref(&self.span_anchor_id),
             "retriever contribution anchor lineage",
         )?;
-        self.identity_projection().validate()?;
-        validate_member_count(self.exact_source_anchors.len())?;
         if self.contribution_id != derive_retriever_contribution_id_v1(&self.identity_projection())?
         {
             return Err(invalid("retriever contribution identity"));
@@ -1192,23 +1195,22 @@ pub struct EvidenceAssemblyPublicationReceiptV1 {
     pub exact_source_anchors: Vec<RetrievalAnchorId>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct EvidenceAssemblyPublicationIdentityProjectionV1 {
-    pub owner: EvidenceAssemblyOwnerV1,
-    pub idempotency_key: EvidenceAssemblyIdempotencyKeyV1,
-    pub assembly_digest: ManifestDigest,
-    pub occurrence_set_id: CanonicalSourceOccurrenceSetIdV1,
-    pub span_id: EvidenceSpanIdV1,
-    pub span_anchor_id: RetrievalAnchorId,
-    pub contribution_id: RetrieverContributionIdV1,
-    pub contribution_anchor_id: RetrievalAnchorId,
-    pub projection_receipt_id: EvidenceSpanProjectionReceiptIdV1,
-    pub ordered_occurrence_ids: Vec<SourceOccurrenceId>,
-    pub exact_source_anchors: Vec<RetrievalAnchorId>,
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct EvidenceAssemblyPublicationIdentityProjectionV1<'a> {
+    pub owner: &'a EvidenceAssemblyOwnerV1,
+    pub idempotency_key: &'a EvidenceAssemblyIdempotencyKeyV1,
+    pub assembly_digest: &'a ManifestDigest,
+    pub occurrence_set_id: &'a CanonicalSourceOccurrenceSetIdV1,
+    pub span_id: &'a EvidenceSpanIdV1,
+    pub span_anchor_id: &'a RetrievalAnchorId,
+    pub contribution_id: &'a RetrieverContributionIdV1,
+    pub contribution_anchor_id: &'a RetrievalAnchorId,
+    pub projection_receipt_id: &'a EvidenceSpanProjectionReceiptIdV1,
+    pub ordered_occurrence_ids: &'a [SourceOccurrenceId],
+    pub exact_source_anchors: &'a [RetrievalAnchorId],
 }
 
-impl EvidenceAssemblyPublicationIdentityProjectionV1 {
+impl EvidenceAssemblyPublicationIdentityProjectionV1<'_> {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate()?;
         self.idempotency_key
@@ -1228,7 +1230,7 @@ impl EvidenceAssemblyPublicationIdentityProjectionV1 {
             return Err(invalid("evidence publication receipt cardinality"));
         }
         ensure_unique(
-            &self.ordered_occurrence_ids,
+            self.ordered_occurrence_ids,
             "evidence publication receipt occurrences",
         )?;
         Ok(())
@@ -1236,7 +1238,7 @@ impl EvidenceAssemblyPublicationIdentityProjectionV1 {
 }
 
 pub fn derive_evidence_assembly_publication_receipt_id_v1(
-    projection: &EvidenceAssemblyPublicationIdentityProjectionV1,
+    projection: &EvidenceAssemblyPublicationIdentityProjectionV1<'_>,
 ) -> EvidenceAssemblyStoreResult<EvidenceAssemblyPublicationReceiptIdV1> {
     projection.validate()?;
     let digest = canonical_identity_digest(PUBLICATION_RECEIPT_ID_DOMAIN_V1, projection)?;
@@ -1256,22 +1258,24 @@ impl EvidenceAssemblyPublicationReceiptV1 {
         Ok(())
     }
 
-    pub fn identity_projection(
-        &self,
-        idempotency_key: EvidenceAssemblyIdempotencyKeyV1,
-    ) -> EvidenceAssemblyPublicationIdentityProjectionV1 {
+    /// The idempotency key lives on the write, not the receipt, so the caller
+    /// lends it alongside the receipt's own fields.
+    pub fn identity_projection<'a>(
+        &'a self,
+        idempotency_key: &'a EvidenceAssemblyIdempotencyKeyV1,
+    ) -> EvidenceAssemblyPublicationIdentityProjectionV1<'a> {
         EvidenceAssemblyPublicationIdentityProjectionV1 {
-            owner: self.owner.clone(),
+            owner: &self.owner,
             idempotency_key,
-            assembly_digest: self.assembly_digest.clone(),
-            occurrence_set_id: self.occurrence_set_id.clone(),
-            span_id: self.span_id.clone(),
-            span_anchor_id: self.span_anchor_id.clone(),
-            contribution_id: self.contribution_id.clone(),
-            contribution_anchor_id: self.contribution_anchor_id.clone(),
-            projection_receipt_id: self.projection_receipt_id.clone(),
-            ordered_occurrence_ids: self.ordered_occurrence_ids.clone(),
-            exact_source_anchors: self.exact_source_anchors.clone(),
+            assembly_digest: &self.assembly_digest,
+            occurrence_set_id: &self.occurrence_set_id,
+            span_id: &self.span_id,
+            span_anchor_id: &self.span_anchor_id,
+            contribution_id: &self.contribution_id,
+            contribution_anchor_id: &self.contribution_anchor_id,
+            projection_receipt_id: &self.projection_receipt_id,
+            ordered_occurrence_ids: &self.ordered_occurrence_ids,
+            exact_source_anchors: &self.exact_source_anchors,
         }
     }
 }
@@ -1424,9 +1428,7 @@ impl EvidenceAssemblyWriteV1 {
             return Err(invalid("evidence assembly digest"));
         }
         let expected_receipt_id = derive_evidence_assembly_publication_receipt_id_v1(
-            &self
-                .receipt
-                .identity_projection(self.idempotency_key.clone()),
+            &self.receipt.identity_projection(&self.idempotency_key),
         )?;
         if self.receipt.publication_receipt_id != expected_receipt_id {
             return Err(invalid("evidence assembly publication identity"));
@@ -1527,9 +1529,12 @@ fn validate_half_open(
     Ok(())
 }
 
-fn ensure_unique<T: Ord>(values: &[T], field: &'static str) -> EvidenceAssemblyStoreResult<()> {
+fn ensure_unique<T: Ord>(
+    values: impl IntoIterator<Item = T>,
+    field: &'static str,
+) -> EvidenceAssemblyStoreResult<()> {
     let mut seen = BTreeSet::new();
-    if values.iter().any(|value| !seen.insert(value)) {
+    if values.into_iter().any(|value| !seen.insert(value)) {
         return Err(invalid(field));
     }
     Ok(())
@@ -1586,8 +1591,40 @@ mod tests {
         }
     }
 
-    fn occurrence_projection() -> SourceOccurrenceIdentityProjectionV1 {
-        SourceOccurrenceIdentityProjectionV1 {
+    /// Owned identity material a test mutates before borrowing it as the
+    /// projection the derivation consumes.
+    struct OccurrenceIdentityFixture {
+        owner: AnchorOwnerBindingV1,
+        timeline: EvidenceSourceTimelineV1,
+        exact_source_anchor: RetrievalAnchorId,
+        source_order: u64,
+        coordinate: SourceOccurrenceCoordinateV1,
+        occurrence_kind: SourceOccurrenceKindV1,
+        relations: Vec<SourceOccurrenceRelationV1>,
+        projector_version: ComponentVersion,
+    }
+
+    impl OccurrenceIdentityFixture {
+        fn projection(&self) -> SourceOccurrenceIdentityProjectionV1<'_> {
+            SourceOccurrenceIdentityProjectionV1 {
+                owner: &self.owner,
+                timeline: &self.timeline,
+                exact_source_anchor: &self.exact_source_anchor,
+                source_order: self.source_order,
+                coordinate: &self.coordinate,
+                occurrence_kind: self.occurrence_kind,
+                relations: &self.relations,
+                projector_version: &self.projector_version,
+            }
+        }
+
+        fn id(&self) -> EvidenceAssemblyStoreResult<SourceOccurrenceId> {
+            derive_source_occurrence_id_v1(&self.projection())
+        }
+    }
+
+    fn occurrence_projection() -> OccurrenceIdentityFixture {
+        OccurrenceIdentityFixture {
             owner: owner().owner,
             timeline: EvidenceSourceTimelineV1 {
                 source: ObservationSourceIdentityV1::for_provider(
@@ -1738,18 +1775,18 @@ mod tests {
     #[test]
     fn occurrence_identity_is_deterministic_and_rekeys_immutable_material() {
         let projection = occurrence_projection();
-        let replay = derive_source_occurrence_id_v1(&projection).unwrap();
-        assert_eq!(replay, derive_source_occurrence_id_v1(&projection).unwrap());
+        let replay = projection.id().unwrap();
+        assert_eq!(replay, projection.id().unwrap());
 
         let mut changed = projection;
         changed.projector_version = ComponentVersion::new("projector.v2").unwrap();
-        assert_ne!(replay, derive_source_occurrence_id_v1(&changed).unwrap());
+        assert_ne!(replay, changed.id().unwrap());
     }
 
     #[test]
     fn occurrence_anchor_binds_exact_lineage() {
         let projection = occurrence_projection();
-        let occurrence_id = derive_source_occurrence_id_v1(&projection).unwrap();
+        let occurrence_id = projection.id().unwrap();
         let anchor = retrieval_anchor(
             RetrievalAnchorTargetV3::ExactSourceOccurrence(occurrence_id),
             vec![projection.exact_source_anchor.clone()],
@@ -1776,9 +1813,10 @@ mod tests {
     fn occurrence_set_identity_requires_canonical_membership_order() {
         let first = SourceOccurrenceId::new(format!("sha256:{}", "11".repeat(32))).unwrap();
         let second = SourceOccurrenceId::new(format!("sha256:{}", "22".repeat(32))).unwrap();
+        let owner = owner().owner;
         let canonical = CanonicalSourceOccurrenceSetIdentityProjectionV1 {
-            owner: owner().owner,
-            canonical_members: vec![first.clone(), second.clone()],
+            owner: &owner,
+            canonical_members: &[first.clone(), second.clone()],
         };
         assert!(
             derive_canonical_source_occurrence_set_id_v1(&canonical)
@@ -1789,8 +1827,8 @@ mod tests {
         assert!(matches!(
             derive_canonical_source_occurrence_set_id_v1(
                 &CanonicalSourceOccurrenceSetIdentityProjectionV1 {
-                    owner: owner().owner,
-                    canonical_members: vec![second, first],
+                    owner: &owner,
+                    canonical_members: &[second, first],
                 }
             ),
             Err(EvidenceAssemblyStoreError::InvalidData(_))
@@ -1800,13 +1838,13 @@ mod tests {
     #[test]
     fn mixed_message_tool_and_code_runs_reject_order_and_kind_lookalikes() {
         let message_projection = occurrence_projection();
-        let message_id = derive_source_occurrence_id_v1(&message_projection).unwrap();
+        let message_id = message_projection.id().unwrap();
 
         let mut invocation_projection = occurrence_projection();
         invocation_projection.source_order = 5;
         invocation_projection.coordinate = observation_coordinate(5, "55");
         invocation_projection.occurrence_kind = SourceOccurrenceKindV1::ToolInvocation;
-        let invocation_id = derive_source_occurrence_id_v1(&invocation_projection).unwrap();
+        let invocation_id = invocation_projection.id().unwrap();
 
         let mut result_projection = occurrence_projection();
         result_projection.source_order = 6;
@@ -1815,7 +1853,7 @@ mod tests {
         result_projection.relations = vec![SourceOccurrenceRelationV1::ToolResultFor {
             invocation_occurrence_id: invocation_id.clone(),
         }];
-        let result_id = derive_source_occurrence_id_v1(&result_projection).unwrap();
+        let result_id = result_projection.id().unwrap();
 
         let code_timeline = SourceTimelineKeyV1 {
             source: ObservationSourceIdentityV1::for_provider(
@@ -1829,7 +1867,7 @@ mod tests {
             source_generation: ObservationSourceGenerationV1::new(2).unwrap(),
             ordering_domain: ObservationOrderingDomainV1::FileBytes,
         };
-        let code_projection = SourceOccurrenceIdentityProjectionV1 {
+        let code_projection = OccurrenceIdentityFixture {
             owner: owner().owner,
             timeline: code_timeline.clone(),
             exact_source_anchor: RetrievalAnchorId::new("retrieval.code.fixture").unwrap(),
@@ -1844,7 +1882,7 @@ mod tests {
             relations: Vec::new(),
             projector_version: ComponentVersion::new("projector.v1").unwrap(),
         };
-        let code_id = derive_source_occurrence_id_v1(&code_projection).unwrap();
+        let code_id = code_projection.id().unwrap();
 
         let observation_ids = vec![message_id.clone(), invocation_id.clone(), result_id.clone()];
         let observation_run = EvidenceSpanRunV1 {
@@ -1879,54 +1917,59 @@ mod tests {
             last_source_order: 0,
             occurrence_ids: vec![code_id.clone()],
         };
+        let owner = owner().owner;
+        let mut canonical_members = vec![
+            message_id.clone(),
+            invocation_id.clone(),
+            result_id,
+            code_id,
+        ];
+        canonical_members.sort();
         let occurrence_set_id = derive_canonical_source_occurrence_set_id_v1(
             &CanonicalSourceOccurrenceSetIdentityProjectionV1 {
-                owner: owner().owner,
-                canonical_members: {
-                    let mut ids = vec![
-                        message_id.clone(),
-                        invocation_id.clone(),
-                        result_id,
-                        code_id,
-                    ];
-                    ids.sort();
-                    ids
-                },
+                owner: &owner,
+                canonical_members: &canonical_members,
             },
         )
         .unwrap();
         let observation_anchor = RetrievalAnchorId::new("retrieval.source.fixture").unwrap();
-        let projection = EvidenceSpanIdentityProjectionV1 {
-            owner: owner().owner,
-            occurrence_set_id,
-            ordered_runs: vec![observation_run, code_run],
-            exact_source_anchors: vec![
-                observation_anchor.clone(),
-                observation_anchor.clone(),
-                observation_anchor,
-                RetrievalAnchorId::new("retrieval.code.fixture").unwrap(),
-            ],
-            projector_version: ComponentVersion::new("projector.v1").unwrap(),
-            horizon: EvidenceSpanHorizonV1 {
-                knowledge_through: UtcMicros(7),
-                valid_through: Some(UtcMicros(7)),
-                contains_unknown_valid_time: false,
-            },
-            catalog_binding: EvidenceSpanCatalogBindingV1::SourceCapability {
-                binding: catalog_binding(),
-            },
+        let mut ordered_runs = vec![observation_run, code_run];
+        let exact_source_anchors = [
+            observation_anchor.clone(),
+            observation_anchor.clone(),
+            observation_anchor,
+            RetrievalAnchorId::new("retrieval.code.fixture").unwrap(),
+        ];
+        let projector_version = ComponentVersion::new("projector.v1").unwrap();
+        let horizon = EvidenceSpanHorizonV1 {
+            knowledge_through: UtcMicros(7),
+            valid_through: Some(UtcMicros(7)),
+            contains_unknown_valid_time: false,
         };
-        let forward = derive_evidence_span_id_v1(&projection).unwrap();
-        let mut reversed = projection;
-        reversed.ordered_runs.reverse();
-        for (ordinal, run) in reversed.ordered_runs.iter_mut().enumerate() {
+        let span_catalog_binding = EvidenceSpanCatalogBindingV1::SourceCapability {
+            binding: catalog_binding(),
+        };
+        let span_projection = |ordered_runs: &[EvidenceSpanRunV1]| {
+            derive_evidence_span_id_v1(&EvidenceSpanIdentityProjectionV1 {
+                owner: &owner,
+                occurrence_set_id: &occurrence_set_id,
+                ordered_runs,
+                exact_source_anchors: &exact_source_anchors,
+                projector_version: &projector_version,
+                horizon: &horizon,
+                catalog_binding: &span_catalog_binding,
+            })
+        };
+        let forward = span_projection(&ordered_runs).unwrap();
+        ordered_runs.reverse();
+        for (ordinal, run) in ordered_runs.iter_mut().enumerate() {
             run.assembly_ordinal = u64::try_from(ordinal).unwrap();
         }
-        assert_ne!(forward, derive_evidence_span_id_v1(&reversed).unwrap());
+        assert_ne!(forward, span_projection(&ordered_runs).unwrap());
 
         let mut missing_pair = result_projection;
         missing_pair.relations.clear();
-        assert!(derive_source_occurrence_id_v1(&missing_pair).is_err());
+        assert!(missing_pair.id().is_err());
         assert!(matches!(
             VerifiedSourceOrderingProofV1::verify(
                 message_projection.timeline,
@@ -1939,7 +1982,266 @@ mod tests {
         ));
         let mut code_lookalike = invocation_projection;
         code_lookalike.occurrence_kind = SourceOccurrenceKindV1::CodeChunk;
-        assert!(derive_source_occurrence_id_v1(&code_lookalike).is_err());
+        assert!(code_lookalike.id().is_err());
+    }
+
+    /// Every durable identity minted from one deterministic assembly, in the
+    /// order the six record kinds are derived.
+    fn assembly_identities() -> Vec<String> {
+        let message = occurrence_projection();
+        let message_id = message.id().unwrap();
+        let mut invocation = occurrence_projection();
+        invocation.source_order = 5;
+        invocation.coordinate = observation_coordinate(5, "55");
+        invocation.occurrence_kind = SourceOccurrenceKindV1::ToolInvocation;
+        let invocation_id = invocation.id().unwrap();
+        let mut result = occurrence_projection();
+        result.source_order = 6;
+        result.coordinate = observation_coordinate(6, "66");
+        result.occurrence_kind = SourceOccurrenceKindV1::ToolResult;
+        result.relations = vec![SourceOccurrenceRelationV1::ToolResultFor {
+            invocation_occurrence_id: invocation_id.clone(),
+        }];
+        let result_id = result.id().unwrap();
+        let code_timeline = SourceTimelineKeyV1 {
+            source: ObservationSourceIdentityV1::for_provider(
+                ProviderId::new("git.fixture").unwrap(),
+                SessionId::new("capture.fixture").unwrap(),
+            )
+            .unwrap(),
+            scope: ObservationScopeV1::Project {
+                project_id: ProjectId::new("project.fixture").unwrap(),
+            },
+            source_generation: ObservationSourceGenerationV1::new(2).unwrap(),
+            ordering_domain: ObservationOrderingDomainV1::FileBytes,
+        };
+        let code = OccurrenceIdentityFixture {
+            owner: owner().owner,
+            timeline: code_timeline.clone(),
+            exact_source_anchor: RetrievalAnchorId::new("retrieval.code.fixture").unwrap(),
+            source_order: 0,
+            coordinate: SourceOccurrenceCoordinateV1::CapturedWorktreeSlice {
+                repository_id: RepositoryId::new("repository.fixture").unwrap(),
+                repository_capture_id: tracedecay_domain::RepositoryCaptureId::new(
+                    "capture.fixture",
+                )
+                .unwrap(),
+                path_locator_digest: PrivacyDomainBoundLocatorDigest::new(format!(
+                    "sha256:{}",
+                    "77".repeat(32)
+                ))
+                .unwrap(),
+                byte_start: 0,
+                byte_end: 8,
+            },
+            occurrence_kind: SourceOccurrenceKindV1::CodeChunk,
+            relations: Vec::new(),
+            projector_version: ComponentVersion::new("projector.v1").unwrap(),
+        };
+        let code_id = code.id().unwrap();
+
+        let owner = owner();
+        let mut canonical_members = vec![
+            message_id.clone(),
+            invocation_id.clone(),
+            result_id.clone(),
+            code_id.clone(),
+        ];
+        canonical_members.sort();
+        let occurrence_set_id = derive_canonical_source_occurrence_set_id_v1(
+            &CanonicalSourceOccurrenceSetIdentityProjectionV1 {
+                owner: &owner.owner,
+                canonical_members: &canonical_members,
+            },
+        )
+        .unwrap();
+
+        let observation_ids = vec![message_id.clone(), invocation_id.clone(), result_id.clone()];
+        let observation_run = EvidenceSpanRunV1 {
+            assembly_ordinal: 0,
+            timeline: message.timeline.clone(),
+            ordering_proof: VerifiedSourceOrderingProofV1::verify(
+                message.timeline.clone(),
+                catalog_binding(),
+                catalog_binding(),
+                observation_ids.clone(),
+                vec![4, 5, 6],
+            )
+            .unwrap(),
+            timeline_digest: message.timeline.digest().unwrap(),
+            first_source_order: 4,
+            last_source_order: 6,
+            occurrence_ids: observation_ids,
+        };
+        let code_run = EvidenceSpanRunV1 {
+            assembly_ordinal: 1,
+            timeline: code_timeline.clone(),
+            ordering_proof: VerifiedSourceOrderingProofV1::verify(
+                code_timeline.clone(),
+                catalog_binding(),
+                catalog_binding(),
+                vec![code_id.clone()],
+                vec![0],
+            )
+            .unwrap(),
+            timeline_digest: code_timeline.digest().unwrap(),
+            first_source_order: 0,
+            last_source_order: 0,
+            occurrence_ids: vec![code_id.clone()],
+        };
+        let observation_anchor = RetrievalAnchorId::new("retrieval.source.fixture").unwrap();
+        let exact_source_anchors = vec![
+            observation_anchor.clone(),
+            observation_anchor.clone(),
+            observation_anchor,
+            RetrievalAnchorId::new("retrieval.code.fixture").unwrap(),
+        ];
+        let horizon = EvidenceSpanHorizonV1 {
+            knowledge_through: UtcMicros(7),
+            valid_through: None,
+            contains_unknown_valid_time: true,
+        };
+        let projector_version = ComponentVersion::new("projector.v1").unwrap();
+        let span_id = derive_evidence_span_id_v1(&EvidenceSpanIdentityProjectionV1 {
+            owner: &owner.owner,
+            occurrence_set_id: &occurrence_set_id,
+            ordered_runs: &[observation_run, code_run],
+            exact_source_anchors: &exact_source_anchors,
+            projector_version: &projector_version,
+            horizon: &horizon,
+            catalog_binding: &EvidenceSpanCatalogBindingV1::SourceCapability {
+                binding: catalog_binding(),
+            },
+        })
+        .unwrap();
+
+        let ordered_occurrence_ids = vec![
+            message_id.clone(),
+            invocation_id.clone(),
+            result_id.clone(),
+            code_id.clone(),
+        ];
+        let sanitization = SourceOccurrenceSanitizationV1::new(
+            SanitizationReceiptRefV1::new(
+                tracedecay_domain::SanitizationReceiptId::new("receipt.capture.fixture").unwrap(),
+                ComponentVersion::new("sanitizer.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizationReceiptRefV1::new(
+                tracedecay_domain::SanitizationReceiptId::new("receipt.projection.fixture")
+                    .unwrap(),
+                ComponentVersion::new("sanitizer.v1").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let member_receipts = ordered_occurrence_ids
+            .iter()
+            .map(|occurrence_id| EvidenceSpanMemberReceiptBindingV1 {
+                occurrence_id: occurrence_id.clone(),
+                sanitization: sanitization.clone(),
+            })
+            .collect::<Vec<_>>();
+        let digest = ManifestDigest::new(format!("sha256:{}", "aa".repeat(32))).unwrap();
+        let projection_receipt_id = derive_evidence_span_projection_receipt_id_v1(
+            &EvidenceSpanProjectionReceiptIdentityProjectionV1 {
+                span_id: &span_id,
+                projector_snapshot: "projector.snapshot.fixture",
+                projection_generation: &ProjectionGenerationId::new("projection.fixture").unwrap(),
+                projection_watermark: &VectorWatermark::default(),
+                source_watermark: &digest,
+                member_receipts: &member_receipts,
+                ordered_occurrence_ids: &ordered_occurrence_ids,
+                exact_source_anchors: &exact_source_anchors,
+            },
+        )
+        .unwrap();
+
+        let request_digest = PrivacyBoundRequestDigestV1 {
+            privacy_domain_id: owner.owner.privacy_domain_id().clone(),
+            key_epoch: owner.key_epoch,
+            digest: ManifestDigest::new(format!("sha256:{}", "bb".repeat(32))).unwrap(),
+        };
+        let span_anchor_id = RetrievalAnchorId::new("retrieval.span.fixture").unwrap();
+        let contribution_id =
+            derive_retriever_contribution_id_v1(&RetrieverContributionIdentityProjectionV1 {
+                owner: &owner,
+                retriever: &RetrieverIdentityV1 {
+                    capability_id: CapabilityId::new("capability.fixture").unwrap(),
+                    component_version: ComponentVersion::new("retriever.v1").unwrap(),
+                },
+                catalog_binding: &catalog_binding(),
+                request_digest: &request_digest,
+                scope_resolution_id: &ScopeResolutionId::new("scope.fixture").unwrap(),
+                temporal_mode: TemporalModeV1::Current,
+                watermarks: &RetrieverWatermarkBindingV1 {
+                    source_watermark: digest.clone(),
+                    projection_watermark: VectorWatermark::default(),
+                    index_watermark: Some(digest.clone()),
+                    summary_watermark: None,
+                },
+                horizon: &horizon,
+                occurrence_set_id: &occurrence_set_id,
+                span_id: &span_id,
+                span_anchor_id: &span_anchor_id,
+                exact_source_anchors: &exact_source_anchors,
+                coverage: &CoverageReportV1::default(),
+            })
+            .unwrap();
+
+        let publication_receipt_id = derive_evidence_assembly_publication_receipt_id_v1(
+            &EvidenceAssemblyPublicationIdentityProjectionV1 {
+                owner: &owner,
+                idempotency_key: &EvidenceAssemblyIdempotencyKeyV1::new(
+                    ManifestDigest::new(format!("sha256:{}", "cc".repeat(32))).unwrap(),
+                )
+                .unwrap(),
+                assembly_digest: &digest,
+                occurrence_set_id: &occurrence_set_id,
+                span_id: &span_id,
+                span_anchor_id: &span_anchor_id,
+                contribution_id: &contribution_id,
+                contribution_anchor_id: &RetrievalAnchorId::new("retrieval.contribution.fixture")
+                    .unwrap(),
+                projection_receipt_id: &projection_receipt_id,
+                ordered_occurrence_ids: &ordered_occurrence_ids,
+                exact_source_anchors: &exact_source_anchors,
+            },
+        )
+        .unwrap();
+
+        vec![
+            message_id.as_str().to_owned(),
+            invocation_id.as_str().to_owned(),
+            result_id.as_str().to_owned(),
+            code_id.as_str().to_owned(),
+            occurrence_set_id.as_str().to_owned(),
+            span_id.as_str().to_owned(),
+            projection_receipt_id.as_str().to_owned(),
+            contribution_id.as_str().to_owned(),
+            publication_receipt_id.as_str().to_owned(),
+        ]
+    }
+
+    /// Derived identities are durable: they are persisted and compared against
+    /// stored rows, so the canonical identity bytes of every record kind must
+    /// not move when the derivation code is restructured.
+    #[test]
+    fn derived_identities_match_pinned_durable_digests() {
+        assert_eq!(
+            assembly_identities(),
+            vec![
+                "sha256:ad1c2aab1be1647c6b66b303ad6fbe6b9194cb61de56c2f6abe6aa89d38a0098",
+                "sha256:04e1147d2415b541df5a4d7403e2d99ce8c797f058f9827efa15192ad5fb0d2b",
+                "sha256:b0f5f25a66ee94ffe2ad6f53a25426bae8e23523985174fd72da687a182f327e",
+                "sha256:48ac18f08d86bcbb019b084b1392585c396a9d2172a75c02b9660edd2dbc1869",
+                "sha256:9c6721fbf9632074d473acc92d7cf66dfa71727f06dc6a5290631cdbc45e67a2",
+                "sha256:1669d8e418625abcce6bb56d4778136d76085b6a857471e15e6a761c72a8ffa4",
+                "sha256:8d5d809282672648dc914abe58c4240aa1ec189e88c90b624dbfc12253b9c465",
+                "sha256:23ac7f403ea112ff0eddae51c9187f93e01980b4ff30f278c167622ef01b0d80",
+                "sha256:bad60bf9c69d5aacfac96dbd6e56eda9236efa9b7e189cabe86b6f5963f3d583",
+            ]
+        );
     }
 
     fn observation_coordinate(
