@@ -19,3 +19,7 @@ crates/tracedecay-agent-hosts/src/agents/hermes/templates/** text eol=lf
 # reviewed upstream-of-generation (grammar.js + patches), not line-by-line.
 # Collapse them out of PR diffs and language stats.
 crates/tracedecay-code-extraction/vendor/** linguist-generated=true
+# Vendored serde_json closure for source-provenance integration tests: Cargo
+# verifies `.cargo-checksum.json` byte-for-byte, so Git for Windows must not
+# rewrite line endings in the snapshot.
+crates/tracedecay-cli/tests/fixtures/source-provenance-cargo/vendor/** -text linguist-generated=true
