@@ -1,8 +1,11 @@
 //! HTTP client for the worldwide counter Cloudflare Worker and GitHub release
 //! version checking.
 //!
-//! All operations are best-effort with timeouts. Failures are silently
-//! ignored and never block the CLI.
+//! All operations are best-effort: failures surface as `None` / empty. They
+//! are synchronous `ureq` calls that block the calling thread for up to their
+//! own timeout, which an enclosing Tokio deadline cannot cut short. A caller
+//! on an async or deadline-bound path must run them on a blocking thread and
+//! bound the join itself (see the CLI status command).
 
 use std::cmp::Ordering;
 use std::time::Duration;
