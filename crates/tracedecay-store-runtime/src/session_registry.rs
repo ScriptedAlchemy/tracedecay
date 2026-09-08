@@ -37,11 +37,12 @@ use tracedecay_runtime_core::store_runtime::registry::{
     StoreRuntimeClientLease, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
 };
-use tracedecay_runtime_core::store_runtime::resolver::{
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
+
+use crate::store_locator_resolver::{
     LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
     LocalStoreRuntimeResolverV1,
 };
-use tracedecay_session_temporal_store::relations::SessionRelationScope;
 
 mod code_graph;
 mod code_graph_manifest;

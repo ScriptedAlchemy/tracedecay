@@ -10,9 +10,7 @@
 //! The lifecycle publisher and registry are the canonical runtime authority for
 //! shard attachment, maintenance, and retrieval.
 
-pub mod profile_paths;
 pub mod registry;
-pub mod resolver;
 pub mod shard;
 pub mod telemetry;
 mod verified_graph;
