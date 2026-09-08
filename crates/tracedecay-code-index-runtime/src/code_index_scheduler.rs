@@ -5649,6 +5649,34 @@ impl SourceFreshnessFenceV1 {
             generation_id: generation_id.clone(),
         })
     }
+
+    /// Whether the sealed source `snapshot_content_identity` names is the one
+    /// the last completed reconcile verified and the live worktree still
+    /// carries it. Judged from source truth alone — the fence never waits on
+    /// the scheduler mutex — so a query can answer "current" while the worker
+    /// owns a pass that is re-observing an unchanged tree or seating optional
+    /// graph work. A pass that published a successor moves this identity the
+    /// moment it marks reconciled, so the superseded owner is never called
+    /// current in the window before its serving slot is swapped.
+    fn serves_current_source(
+        &self,
+        snapshot_content_identity: &ContentDigest,
+        project_root: &Path,
+        shutting_down: &AtomicBool,
+    ) -> bool {
+        let describes_snapshot = {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.verified_against_source
+                && state.source_witness.as_ref().is_some_and(|witness| {
+                    witness
+                        .content_manifest
+                        .describes_snapshot(snapshot_content_identity)
+                })
+        };
+        describes_snapshot
+            && (self.ready_without_stat(project_root, shutting_down)
+                || self.exact_source_is_ready(project_root, shutting_down))
+    }
 }
 
 pub struct CodeIndexWorktreeSchedulerV1 {
