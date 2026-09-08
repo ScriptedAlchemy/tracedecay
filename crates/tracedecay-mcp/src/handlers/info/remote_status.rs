@@ -35,7 +35,8 @@ mod tests {
 
     use serde_json::{Value, json};
     use tracedecay_contracts::remote::status::{
-        RemoteOperationalStatusReadV1, RemoteOperationalStatusV1, RemoteSpoolOperationalStatusV1,
+        RemoteOperationalStatusReadV1, RemoteOperationalStatusReaderV1, RemoteOperationalStatusV1,
+        RemoteSpoolOperationalStatusV1,
     };
     use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
     use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
