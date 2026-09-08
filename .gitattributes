@@ -15,3 +15,7 @@ src/agents/claude_agents/** text eol=lf
 # their exact bytes.
 src/agents/hermes/templates/** text eol=lf
 crates/tracedecay-agent-hosts/src/agents/hermes/templates/** text eol=lf
+# Vendored, patched tree-sitter grammars: generated parser sources are
+# reviewed upstream-of-generation (grammar.js + patches), not line-by-line.
+# Collapse them out of PR diffs and language stats.
+crates/tracedecay-code-extraction/vendor/** linguist-generated=true
