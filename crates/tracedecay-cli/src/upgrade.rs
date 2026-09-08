@@ -1,18 +1,25 @@
 //! Self-update for the tracedecay binary.
 //!
-//! Direct installs use GitHub release assets, extracting the binary and
-//! replacing the running executable using `self_replace`. Homebrew installs
+//! Direct installs use GitHub release assets: the platform archive is
+//! verified against the release's `SHA256SUMS`, every required release member
+//! (the executable plus the runtime companions the executable resolves beside
+//! itself) is staged in an attempt-owned scratch directory, and only then is
+//! the bundle published around the running executable. Homebrew installs
 //! continue to delegate to Homebrew.
 //! Beta and stable are separate channels — a beta build only sees beta
 //! releases and vice versa.
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::fs::File;
+#[cfg(windows)]
+use std::io::Seek;
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use tracedecay::cloud::{self, InstallMethod};
@@ -20,6 +27,94 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::user_config::UserConfig;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
+
+/// Kind of a required release-archive member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseMemberKind {
+    /// The `tracedecay` entry point; published last, mode `0755`.
+    Executable,
+    /// A runtime file the executable resolves beside itself (`$ORIGIN`);
+    /// published before the entry point, mode `0644`.
+    Companion,
+}
+
+/// One member every release archive for this platform must carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReleaseMember {
+    name: &'static str,
+    kind: ReleaseMemberKind,
+}
+
+impl ReleaseMember {
+    #[cfg(unix)]
+    const fn mode(self) -> u32 {
+        match self.kind {
+            ReleaseMemberKind::Executable => 0o755,
+            ReleaseMemberKind::Companion => 0o644,
+        }
+    }
+}
+
+const EXECUTABLE_MEMBER: ReleaseMember = ReleaseMember {
+    name: if cfg!(windows) {
+        "tracedecay.exe"
+    } else {
+        "tracedecay"
+    },
+    kind: ReleaseMemberKind::Executable,
+};
+
+/// Runtime companions the Linux release archives carry beside the executable:
+/// the ONNX Runtime the binary is linked against with an `$ORIGIN` rpath and
+/// that library's redistribution notices. These are the `entry_name`s the
+/// Linux targets in `.github/release-targets.json` declare; the unit test
+/// `required_members_match_the_release_target_manifest` pins the two together
+/// so the installer and the packaging step cannot disagree about what a
+/// complete release is. Other platforms ship the executable alone.
+#[cfg(target_os = "linux")]
+const RUNTIME_COMPANIONS: &[&str] = &[
+    "libonnxruntime.so.1",
+    "onnxruntime-LICENSE",
+    "onnxruntime-ThirdPartyNotices.txt",
+];
+#[cfg(not(target_os = "linux"))]
+const RUNTIME_COMPANIONS: &[&str] = &[];
+
+/// Every member a release archive for this platform must contain.
+fn required_members() -> Vec<ReleaseMember> {
+    std::iter::once(EXECUTABLE_MEMBER)
+        .chain(RUNTIME_COMPANIONS.iter().map(|name| ReleaseMember {
+            name,
+            kind: ReleaseMemberKind::Companion,
+        }))
+        .collect()
+}
+
+/// A verified release whose required members sit in an attempt-owned scratch
+/// directory. The directory (and everything staged in it) is removed when the
+/// value drops, on every success and failure path.
+#[derive(Debug)]
+struct StagedRelease {
+    scratch: TempDir,
+    members: Vec<ReleaseMember>,
+}
+
+impl StagedRelease {
+    fn path_of(&self, member: ReleaseMember) -> PathBuf {
+        self.scratch.path().join(member.name)
+    }
+
+    fn executable(&self) -> PathBuf {
+        self.path_of(EXECUTABLE_MEMBER)
+    }
+
+    fn companions(&self) -> impl Iterator<Item = ReleaseMember> + '_ {
+        self.members
+            .iter()
+            .copied()
+            .filter(|member| member.kind == ReleaseMemberKind::Companion)
+    }
+}
 
 // Asset-naming and platform helpers live in `tracedecay::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
@@ -163,18 +258,17 @@ fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
     })
 }
 
-/// Downloads and verifies the archive, then extracts the first entry matching
-/// any of `bin_names` to a temp path. Returns the temp path.
-#[hotpath::measure(label = "cli.upgrade.download_and_extract")]
-fn download_and_extract(
+/// Downloads and verifies the archive, then stages every required release
+/// member in an attempt-owned scratch directory. Nothing is published here.
+#[hotpath::measure(label = "cli.upgrade.download_and_stage")]
+fn download_and_stage(
     download: &ReleaseDownload,
-    bin_names: &[&str],
-) -> Result<std::path::PathBuf> {
-    let tmp_path = std::env::temp_dir().join(format!(
-        "tracedecay_upgrade_{}{}",
-        std::process::id(),
-        if cfg!(windows) { ".exe" } else { "" }
-    ));
+    members: &[ReleaseMember],
+) -> Result<StagedRelease> {
+    let scratch = tempfile::Builder::new()
+        .prefix("tracedecay-upgrade-")
+        .tempdir()
+        .map_err(io_err("cannot create upgrade staging directory"))?;
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_mins(5)))
@@ -185,8 +279,6 @@ fn download_and_extract(
 
     let manifest = download_bytes(&agent, &download.checksums_url, "checksum manifest")?;
     let expected = expected_sha256(&manifest, &download.asset_name)?;
-    // Buffer the entire archive so the reader type is concrete
-    // (Cursor<Vec<u8>>), which keeps archive extraction platform-neutral.
     let raw = download_bytes(&agent, &download.asset_url, "release archive")?;
 
     eprintln!(" ({:.1} MiB)", raw.len() as f64 / 1_048_576.0);
@@ -195,104 +287,190 @@ fn download_and_extract(
     eprint!("  Extracting...");
 
     #[cfg(not(windows))]
-    extract_targz(&raw, bin_names, &tmp_path)?;
+    extract_targz(io::Cursor::new(&raw[..]), scratch.path(), members)?;
 
     #[cfg(windows)]
-    extract_zip(&raw, bin_names, &tmp_path)?;
+    extract_zip(io::Cursor::new(&raw[..]), scratch.path(), members)?;
 
     eprintln!(" Done");
-    Ok(tmp_path)
+    Ok(StagedRelease {
+        scratch,
+        members: members.to_vec(),
+    })
 }
 
-/// Extracts the first entry matching any of `bin_names` from a `.tar.gz`
-/// archive (Unix).
+/// The required member an archive entry path names, if any. Release archives
+/// are flat: only a single-component path (an optional leading `./` aside)
+/// can name a member, so nested entries are never unpacked.
+fn intended_member(path: &Path, members: &[ReleaseMember]) -> Option<ReleaseMember> {
+    let mut components = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir));
+    let Some(Component::Normal(name)) = components.next() else {
+        return None;
+    };
+    if components.next().is_some() {
+        return None;
+    }
+    let name = name.to_str()?;
+    members.iter().copied().find(|member| member.name == name)
+}
+
+/// Writes one archive member into `staging` under its own name, refusing a
+/// duplicate entry: an archive that names the same member twice is
+/// ambiguous, not a payload to pick from.
+fn stage_member(
+    staging: &Path,
+    member: ReleaseMember,
+    contents: &mut impl Read,
+    staged: &mut Vec<&'static str>,
+) -> Result<()> {
+    if staged.contains(&member.name) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "release archive contains duplicate entries for '{}'",
+                member.name
+            ),
+        });
+    }
+    let path = staging.join(member.name);
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(io_err("cannot create staged release member"))?;
+    io::copy(contents, &mut file).map_err(io_err("extract failed"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(member.mode()))
+            .map_err(io_err("cannot set staged member permissions"))?;
+    }
+    staged.push(member.name);
+    Ok(())
+}
+
+fn not_a_regular_file(member: ReleaseMember) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "release archive entry '{}' is not a regular file",
+            member.name
+        ),
+    }
+}
+
+/// Fails unless every required member was staged, naming the missing ones.
+fn require_complete_release(members: &[ReleaseMember], staged: &[&str]) -> Result<()> {
+    let missing: Vec<&str> = members
+        .iter()
+        .map(|member| member.name)
+        .filter(|name| !staged.contains(name))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: format!(
+            "release archive is missing required member(s): {}",
+            missing.join(", ")
+        ),
+    })
+}
+
+/// Stages every required member of a `.tar.gz` release archive (Unix).
 #[cfg(not(windows))]
-#[hotpath::measure(label = "cli.upgrade.extract_targz")]
-fn extract_targz(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
+fn extract_targz(archive: impl Read, staging: &Path, members: &[ReleaseMember]) -> Result<()> {
     use flate2::read::GzDecoder;
-    use std::io::Cursor;
     use tar::Archive;
 
-    let gz = GzDecoder::new(Cursor::new(data));
-    let mut archive = Archive::new(gz);
+    let mut archive = Archive::new(GzDecoder::new(archive));
+    let mut staged = Vec::new();
 
     for entry in archive.entries().map_err(io_err("archive open failed"))? {
         let mut entry = entry.map_err(io_err("archive read failed"))?;
         let path = entry
             .path()
             .map_err(io_err("archive path error"))?
-            .to_path_buf();
-
-        let file_name = path.file_name().and_then(|n| n.to_str());
-        if file_name.is_some_and(|n| bin_names.contains(&n)) {
-            entry.unpack(dest).map_err(io_err("extract failed"))?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(dest)
-                    .map_err(io_err("stat failed"))?
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(dest, perms).map_err(io_err("chmod failed"))?;
-            }
-
-            return Ok(());
+            .into_owned();
+        let Some(member) = intended_member(&path, members) else {
+            continue;
+        };
+        if !entry.header().entry_type().is_file() {
+            return Err(not_a_regular_file(member));
         }
+        stage_member(staging, member, &mut entry, &mut staged)?;
     }
 
-    Err(TraceDecayError::Config {
-        message: format!("binary '{}' not found in archive", bin_names.join("' or '")),
-    })
+    require_complete_release(members, &staged)
 }
 
-/// Extracts the first entry matching any of `bin_names` from a `.zip`
-/// archive (Windows).
+/// Stages every required member of a `.zip` release archive (Windows).
 #[cfg(windows)]
-#[hotpath::measure(label = "cli.upgrade.extract_zip")]
-fn extract_zip(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
-    use std::io::Cursor;
-
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| TraceDecayError::Config {
-            message: format!("zip open failed: {e}"),
-        })?;
+fn extract_zip(archive: impl Read + Seek, staging: &Path, members: &[ReleaseMember]) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(archive).map_err(|e| TraceDecayError::Config {
+        message: format!("zip open failed: {e}"),
+    })?;
+    let mut staged = Vec::new();
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| TraceDecayError::Config {
             message: format!("zip entry error: {e}"),
         })?;
-
-        let file_name = Path::new(file.name()).file_name().and_then(|n| n.to_str());
-        if file_name.is_some_and(|n| bin_names.contains(&n)) {
-            let mut out = std::fs::File::create(dest).map_err(io_err("create temp file failed"))?;
-            std::io::copy(&mut file, &mut out).map_err(io_err("extract failed"))?;
-            return Ok(());
+        let Some(member) = intended_member(Path::new(file.name()), members) else {
+            continue;
+        };
+        if !file.is_file() {
+            return Err(not_a_regular_file(member));
         }
+        stage_member(staging, member, &mut file, &mut staged)?;
     }
 
-    Err(TraceDecayError::Config {
-        message: format!("binary '{}' not found in zip", bin_names.join("' or '")),
-    })
+    require_complete_release(members, &staged)
 }
 
-/// Replaces the running binary with `new_exe`, dispatching to the
-/// appropriate strategy for the detected install method. Cleans up the
-/// temp file afterwards regardless of outcome. Returns the path the new
-/// binary was installed at, when known.
-#[hotpath::measure(label = "cli.upgrade.replace_binary")]
-fn replace_binary(
-    new_exe: &Path,
+/// Publishes a staged release around the running executable. Companions are
+/// renamed into the executable's directory first so the new entry point never
+/// appears without the runtime it resolves beside itself; the executable is
+/// replaced last. Returns the path the new binary was installed at, when
+/// known.
+#[hotpath::measure(label = "cli.upgrade.publish_release")]
+fn publish_release(
+    staged: &StagedRelease,
     method: &InstallMethod,
     new_version: &str,
 ) -> Result<Option<PathBuf>> {
-    let result = match method {
-        InstallMethod::Brew => replace_for_brew(new_exe, new_version),
-        InstallMethod::Scoop => replace_for_scoop(new_exe, new_version),
-        _ => replace_default(new_exe),
-    };
-    let _ = std::fs::remove_file(new_exe);
-    result
+    #[cfg(unix)]
+    {
+        if staged.companions().next().is_some() {
+            let executable = std::env::current_exe()
+                .and_then(|exe| exe.canonicalize())
+                .map_err(io_err("cannot resolve the running executable"))?;
+            let install_dir = executable.parent().ok_or_else(|| TraceDecayError::Config {
+                message: "cannot determine the running executable's directory".into(),
+            })?;
+            publish_companions(staged, install_dir)?;
+        }
+    }
+    match method {
+        InstallMethod::Brew => replace_for_brew(&staged.executable(), new_version),
+        InstallMethod::Scoop => replace_for_scoop(&staged.executable(), new_version),
+        _ => replace_default(&staged.executable()),
+    }
+}
+
+/// Publishes every staged companion into `install_dir`, each through its own
+/// exclusively created sibling and a rename, so a colliding name is replaced
+/// atomically and a currently mapped library is never written in place.
+#[cfg(unix)]
+fn publish_companions(staged: &StagedRelease, install_dir: &Path) -> Result<()> {
+    for member in staged.companions() {
+        publish_member(
+            &staged.path_of(member),
+            &install_dir.join(member.name),
+            member.mode(),
+        )?;
+    }
+    Ok(())
 }
 
 /// Default replacement using `self_replace`. Falls back to a direct copy
@@ -435,31 +613,38 @@ fn run_versioned_upgrade(
     })
 }
 
-/// Atomically replace a binary at `target` by copying `src` to a temp file
-/// in the same directory, setting permissions, then renaming over `target`.
-/// Avoids `ETXTBSY` on Linux (rename swaps directory entries rather than
-/// writing into the running executable).
+/// Atomically replaces `target` with the contents of `source`: the bytes are
+/// copied into an exclusively created sibling in `target`'s directory, given
+/// `mode`, then renamed over `target`. Rename swaps directory entries, so a
+/// running executable (`ETXTBSY`) or a currently mapped library is never
+/// written in place, and a failure leaves `target` untouched.
 #[cfg(unix)]
-fn install_binary(src: &Path, target: &Path) -> Result<()> {
+fn publish_member(source: &Path, target: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = target.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine target directory".into(),
     })?;
-    let temp = dir.join(format!(".tracedecay_upgrade_{}", std::process::id()));
-
-    std::fs::copy(src, &temp).map_err(io_err("cannot copy new binary"))?;
-
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
-            .map_err(io_err("cannot set permissions"))?;
-    }
-
-    if let Err(e) = std::fs::rename(&temp, target) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(io_err("cannot replace binary")(e));
-    }
-
+    let mut sibling = tempfile::Builder::new()
+        .prefix(".tracedecay-upgrade-")
+        .tempfile_in(dir)
+        .map_err(io_err("cannot stage release member beside its target"))?;
+    let mut source = File::open(source).map_err(io_err("cannot open staged release member"))?;
+    io::copy(&mut source, sibling.as_file_mut()).map_err(io_err("cannot copy release member"))?;
+    sibling
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(io_err("cannot set permissions"))?;
+    sibling
+        .persist(target)
+        .map_err(|error| io_err("cannot replace release member")(error.error))?;
     Ok(())
+}
+
+/// Replaces the executable at `target` with `src` (mode `0755`).
+#[cfg(unix)]
+fn install_binary(src: &Path, target: &Path) -> Result<()> {
+    publish_member(src, target, EXECUTABLE_MEMBER.mode())
 }
 
 #[cfg(unix)]
@@ -821,27 +1006,22 @@ fn record_previous_version() {
     }
 }
 
+/// Downloads, verifies, stages and publishes the complete release bundle.
 /// Returns the path the new binary was installed at, when known.
 fn perform_upgrade(
     version: &str,
     download: &ReleaseDownload,
     method: &InstallMethod,
 ) -> Result<Option<PathBuf>> {
-    let bin_names: &[&str] = if cfg!(windows) {
-        &["tracedecay.exe"]
-    } else {
-        &["tracedecay"]
-    };
-
-    let tmp = download_and_extract(download, bin_names)?;
+    let staged = download_and_stage(download, &required_members())?;
 
     let label = match method {
         InstallMethod::Brew => " (Homebrew Cellar)",
         InstallMethod::Scoop => " (Scoop)",
         _ => "",
     };
-    eprint!("  Replacing binary{label}...");
-    let installed_at = replace_binary(&tmp, method, version)?;
+    eprint!("  Installing release{label}...");
+    let installed_at = publish_release(&staged, method, version)?;
     eprintln!(" Done");
 
     Ok(installed_at)
@@ -1249,6 +1429,307 @@ mod tests {
         assert_eq!(result.unwrap(), current);
     }
 
+    /// The installer's idea of a complete release must be the packaging
+    /// step's: the companions it requires are exactly the runtime
+    /// `entry_name`s `.github/release-targets.json` declares for this
+    /// platform (none when the platform has no runtime, or no release target).
+    #[test]
+    fn required_members_match_the_release_target_manifest() {
+        let manifest_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/release-targets.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let target = manifest["include"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["name"] == current_platform());
+
+        let mut expected: Vec<&str> = Vec::new();
+        if let Some(runtime) = target.and_then(|target| target.get("runtime")) {
+            expected.push(runtime["entry_name"].as_str().unwrap());
+            for notice in runtime["notices"].as_array().unwrap() {
+                expected.push(notice["entry_name"].as_str().unwrap());
+            }
+        }
+
+        assert_eq!(RUNTIME_COMPANIONS, expected.as_slice());
+        let members = required_members();
+        assert_eq!(members[0], EXECUTABLE_MEMBER);
+        assert_eq!(members.len(), 1 + RUNTIME_COMPANIONS.len());
+    }
+
+    #[cfg(unix)]
+    mod release_bundle {
+        use std::fs;
+        use std::io::Cursor;
+        use std::os::unix::fs::PermissionsExt;
+
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use tar::{Builder, EntryType, Header};
+
+        use super::super::{
+            EXECUTABLE_MEMBER, ReleaseMember, ReleaseMemberKind, StagedRelease, extract_targz,
+            intended_member, publish_companions, publish_member,
+        };
+
+        const RUNTIME: ReleaseMember = ReleaseMember {
+            name: "libonnxruntime.so.1",
+            kind: ReleaseMemberKind::Companion,
+        };
+        const LICENSE: ReleaseMember = ReleaseMember {
+            name: "onnxruntime-LICENSE",
+            kind: ReleaseMemberKind::Companion,
+        };
+
+        /// The Linux release contract, independent of the test host so the
+        /// companion path is exercised on every Unix.
+        fn linux_members() -> Vec<ReleaseMember> {
+            vec![EXECUTABLE_MEMBER, RUNTIME, LICENSE]
+        }
+
+        struct Entry {
+            path: &'static str,
+            contents: &'static [u8],
+            kind: EntryType,
+        }
+
+        fn file(path: &'static str, contents: &'static [u8]) -> Entry {
+            Entry {
+                path,
+                contents,
+                kind: EntryType::Regular,
+            }
+        }
+
+        fn targz(entries: &[Entry]) -> Vec<u8> {
+            let mut builder = Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+            for entry in entries {
+                let mut header = Header::new_ustar();
+                header.set_entry_type(entry.kind);
+                header.set_mode(0o600);
+                header.set_size(entry.contents.len() as u64);
+                if entry.kind == EntryType::Symlink {
+                    header.set_link_name("tracedecay").unwrap();
+                }
+                builder
+                    .append_data(&mut header, entry.path, entry.contents)
+                    .unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap()
+        }
+
+        fn complete_release() -> Vec<u8> {
+            targz(&[
+                file("tracedecay", b"new-executable"),
+                file("libonnxruntime.so.1", b"new-runtime"),
+                file("onnxruntime-LICENSE", b"license"),
+            ])
+        }
+
+        fn stage(archive: &[u8], members: &[ReleaseMember]) -> super::super::Result<StagedRelease> {
+            let scratch = tempfile::tempdir().unwrap();
+            extract_targz(Cursor::new(archive), scratch.path(), members)?;
+            Ok(StagedRelease {
+                scratch,
+                members: members.to_vec(),
+            })
+        }
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn extraction_stages_every_required_member_with_its_publication_mode() {
+            let staged = stage(&complete_release(), &linux_members()).unwrap();
+
+            assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
+            assert_eq!(mode_of(&staged.executable()), 0o755);
+            assert_eq!(fs::read(staged.path_of(RUNTIME)).unwrap(), b"new-runtime");
+            assert_eq!(mode_of(&staged.path_of(RUNTIME)), 0o644);
+            assert_eq!(fs::read(staged.path_of(LICENSE)).unwrap(), b"license");
+            assert_eq!(
+                staged.companions().collect::<Vec<_>>(),
+                vec![RUNTIME, LICENSE]
+            );
+        }
+
+        #[test]
+        fn a_release_missing_its_runtime_companion_is_rejected() {
+            let executable_only = targz(&[file("tracedecay", b"new-executable")]);
+
+            let error = stage(&executable_only, &linux_members()).unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                message.contains(
+                    "missing required member(s): libonnxruntime.so.1, onnxruntime-LICENSE"
+                ),
+                "{message}"
+            );
+        }
+
+        #[test]
+        fn an_executable_only_release_satisfies_a_platform_without_companions() {
+            let executable_only = targz(&[file("tracedecay", b"new-executable")]);
+
+            let staged = stage(&executable_only, &[EXECUTABLE_MEMBER]).unwrap();
+
+            assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
+            assert_eq!(staged.companions().count(), 0);
+        }
+
+        #[test]
+        fn duplicate_executable_entries_are_ambiguous_not_a_choice() {
+            let duplicated = targz(&[
+                file("tracedecay", b"first"),
+                file("libonnxruntime.so.1", b"runtime"),
+                file("onnxruntime-LICENSE", b"license"),
+                file("tracedecay", b"second"),
+            ]);
+
+            let error = stage(&duplicated, &linux_members()).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("duplicate entries for 'tracedecay'"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn a_required_member_that_is_not_a_regular_file_is_rejected() {
+            let symlinked_runtime = targz(&[
+                file("tracedecay", b"new-executable"),
+                Entry {
+                    path: "libonnxruntime.so.1",
+                    contents: b"",
+                    kind: EntryType::Symlink,
+                },
+                file("onnxruntime-LICENSE", b"license"),
+            ]);
+
+            let error = stage(&symlinked_runtime, &linux_members()).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("'libonnxruntime.so.1' is not a regular file"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn only_flat_entries_can_name_a_required_member() {
+            use std::path::Path;
+
+            let members = linux_members();
+            assert_eq!(
+                intended_member(Path::new("tracedecay"), &members),
+                Some(EXECUTABLE_MEMBER)
+            );
+            assert_eq!(
+                intended_member(Path::new("./libonnxruntime.so.1"), &members),
+                Some(RUNTIME)
+            );
+            assert_eq!(intended_member(Path::new("bin/tracedecay"), &members), None);
+            assert_eq!(intended_member(Path::new("../tracedecay"), &members), None);
+            assert_eq!(intended_member(Path::new("/tracedecay"), &members), None);
+            assert_eq!(intended_member(Path::new("README"), &members), None);
+        }
+
+        #[test]
+        fn nested_and_unknown_entries_are_never_unpacked() {
+            let scratch = tempfile::tempdir().unwrap();
+            let archive = targz(&[
+                file("tracedecay", b"new-executable"),
+                file("bin/tracedecay", b"nested-decoy"),
+                file("libonnxruntime.so.1", b"runtime"),
+                file("onnxruntime-LICENSE", b"license"),
+                file("README", b"unrequested"),
+            ]);
+
+            extract_targz(Cursor::new(&archive[..]), scratch.path(), &linux_members()).unwrap();
+
+            let mut staged: Vec<String> = fs::read_dir(scratch.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            staged.sort();
+            assert_eq!(
+                staged,
+                ["libonnxruntime.so.1", "onnxruntime-LICENSE", "tracedecay"]
+            );
+            assert_eq!(
+                fs::read(scratch.path().join("tracedecay")).unwrap(),
+                b"new-executable"
+            );
+        }
+
+        #[test]
+        fn publishing_places_companions_where_the_executable_resolves_them() {
+            let staged = stage(&complete_release(), &linux_members()).unwrap();
+            let install = tempfile::tempdir().unwrap();
+            let executable = install.path().join("tracedecay");
+            fs::write(&executable, b"old-executable").unwrap();
+            fs::write(install.path().join("libonnxruntime.so.1"), b"old-runtime").unwrap();
+
+            publish_companions(&staged, install.path()).unwrap();
+            super::super::install_binary(&staged.executable(), &executable).unwrap();
+
+            assert_eq!(fs::read(&executable).unwrap(), b"new-executable");
+            assert_eq!(mode_of(&executable), 0o755);
+            let runtime = install.path().join("libonnxruntime.so.1");
+            assert_eq!(fs::read(&runtime).unwrap(), b"new-runtime");
+            assert_eq!(mode_of(&runtime), 0o644);
+            assert_eq!(
+                fs::read(install.path().join("onnxruntime-LICENSE")).unwrap(),
+                b"license"
+            );
+            let mut published: Vec<String> = fs::read_dir(install.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            published.sort();
+            assert_eq!(
+                published,
+                ["libonnxruntime.so.1", "onnxruntime-LICENSE", "tracedecay"],
+                "no staging sibling may outlive publication"
+            );
+        }
+
+        #[test]
+        fn a_failed_companion_publication_leaves_the_target_untouched() {
+            let staged = stage(&complete_release(), &linux_members()).unwrap();
+            let install = tempfile::tempdir().unwrap();
+            // The target name is occupied by a directory, so the rename over it
+            // must fail after the sibling was fully staged.
+            let occupied = install.path().join("libonnxruntime.so.1");
+            fs::create_dir(&occupied).unwrap();
+            fs::write(occupied.join("marker"), b"keep").unwrap();
+
+            let error = publish_member(&staged.path_of(RUNTIME), &occupied, 0o644).unwrap_err();
+
+            assert!(
+                error.to_string().contains("cannot replace release member"),
+                "{error}"
+            );
+            assert_eq!(fs::read(occupied.join("marker")).unwrap(), b"keep");
+            let leftovers: Vec<_> = fs::read_dir(install.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| name != "libonnxruntime.so.1")
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "staging sibling leaked: {leftovers:?}"
+            );
+        }
+    }
+
     // ── Regression tests for symlink upgrade bug ────────────────────────
     //
     // The self-replace crate resolves symlinks via `fs::read_link`, which
@@ -1528,12 +2009,13 @@ mod tests {
             super::super::install_binary(&src, &target).unwrap();
 
             assert_eq!(fs::read(&target).unwrap(), b"new-binary-content");
-            // Temp file should be cleaned up
-            assert!(
-                !tmp.path()
-                    .join(format!(".tracedecay_upgrade_{}", std::process::id()))
-                    .exists()
-            );
+            // The staging sibling is renamed away, never left behind.
+            let mut entries: Vec<_> = fs::read_dir(tmp.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            entries.sort();
+            assert_eq!(entries, ["new-binary", "tracedecay"]);
         }
 
         #[test]
