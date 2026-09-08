@@ -18,9 +18,11 @@ use super::{
     next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
-use super::{binary_version, connect_with_restart_grace, log_daemon_event, version_skew_action};
+use super::{binary_version, connect_with_restart_grace, log_daemon_event};
 #[cfg(unix)]
 use tracedecay_daemon_identity::connection_for_socket_path;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, version_skew_action};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
 #[cfg(not(unix))]
@@ -193,7 +195,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// dispatch ceiling for that exact request — "nothing may run unbounded", per
 /// [`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
 /// — plus
-/// [`DAEMON_TOOL_RESPONSE_GRACE`](super::DAEMON_TOOL_RESPONSE_GRACE), the grace
+/// [`DAEMON_TOOL_RESPONSE_GRACE`](tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE), the grace
 /// this crate already keeps reading for beyond a request deadline. A daemon
 /// honouring its own contract always answers first, so the bound cannot cut
 /// short correct work, including a slow `tools/call` from a batch client. Only a
@@ -223,7 +225,7 @@ fn disconnect_drain_bound(request: &DaemonProxyRequest<'_>) -> Duration {
     let ceiling = request_tool_name(request.parsed.as_ref())
         .and_then(|tool| crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok())
         .unwrap_or_else(|| crate::mcp::tools::handlers::tool_dispatch_ceiling(""));
-    ceiling.saturating_add(super::DAEMON_TOOL_RESPONSE_GRACE)
+    ceiling.saturating_add(DAEMON_TOOL_RESPONSE_GRACE)
 }
 
 /// The tool a `tools/call` line names, or `None` for any other method.

@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 #[cfg(unix)]
 use tracedecay_daemon_identity::profile_identity;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
 use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
 
 #[cfg(unix)]

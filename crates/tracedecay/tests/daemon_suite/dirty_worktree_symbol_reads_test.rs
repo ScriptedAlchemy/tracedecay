@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay::daemon::DaemonHandshake;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use crate::code_index_journey::{
     commit_all, deliver_save, exact_identity, exact_symbol, git, initialize_tracedecay,

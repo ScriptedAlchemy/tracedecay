@@ -333,10 +333,16 @@ fn missing_index_classifier_covers_every_auto_init_store_miss() {
 #[cfg(unix)]
 #[test]
 fn client_version_skew_flags_only_real_mismatches() {
-    assert_eq!(super::super::client_version_skew("1.2.3", "1.2.3"), None);
-    assert_eq!(super::super::client_version_skew("", "1.2.3"), None);
     assert_eq!(
-        super::super::client_version_skew("1.3.0", "1.2.3"),
+        tracedecay_daemon_protocol::client_version_skew("1.2.3", "1.2.3"),
+        None
+    );
+    assert_eq!(
+        tracedecay_daemon_protocol::client_version_skew("", "1.2.3"),
+        None
+    );
+    assert_eq!(
+        tracedecay_daemon_protocol::client_version_skew("1.3.0", "1.2.3"),
         Some("1.3.0".to_string())
     );
 }

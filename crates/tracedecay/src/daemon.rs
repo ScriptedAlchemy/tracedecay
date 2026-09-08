@@ -37,7 +37,7 @@ pub(crate) use tracedecay_daemon_protocol::{
     DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome, DaemonInvocationRequest,
     DaemonInvocationResponse, default_loopback_endpoint, parse_daemon_invocation_request,
 };
-pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
+pub(crate) use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[cfg(unix)]
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
@@ -49,7 +49,6 @@ use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-pub use tracedecay_daemon_protocol::SOCKET_ENV;
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
 #[cfg(unix)]

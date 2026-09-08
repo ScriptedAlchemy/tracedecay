@@ -11,13 +11,14 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay::daemon::{DaemonHandshake, call_tool};
+use tracedecay::daemon::call_tool;
 use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use crate::code_index_journey::{
     ExactIndexIdentity, RECEIPT_TIMEOUT, assert_exact_identity, assert_project_identity,

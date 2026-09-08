@@ -6,7 +6,8 @@ use super::settle_in_process_invocation;
 use tracedecay_application::{CancellationSignal, clock::now_micros};
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_protocol::{
-    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
+    DAEMON_TOOL_RESPONSE_GRACE, DaemonInvocationOutcome, DaemonInvocationProblem,
+    DaemonInvocationResponse,
 };
 use tracedecay_daemon_service::RequestCancellationRegistryV1;
 
@@ -130,7 +131,7 @@ async fn in_process_effect_without_settlement_returns_reset_required() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(10)).await;
     tokio::task::yield_now().await;
-    tokio::time::advance(crate::daemon::DAEMON_TOOL_RESPONSE_GRACE).await;
+    tokio::time::advance(DAEMON_TOOL_RESPONSE_GRACE).await;
     tokio::task::yield_now().await;
     assert!(
         settlement.is_finished(),

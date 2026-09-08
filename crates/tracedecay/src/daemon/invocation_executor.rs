@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationProblem, ProjectRuntimeRequestLeaseV1,
     WorkApplicationOutcomeV1,
@@ -628,9 +629,7 @@ async fn settle_in_process_invocation(
             // effect merely outlived its budget. Wait for the authoritative
             // settlement over the same grace the daemon's own clients keep
             // reading for, so the effect's real terminal is the one reported.
-            match tokio::time::timeout(crate::daemon::DAEMON_TOOL_RESPONSE_GRACE, &mut invocation)
-                .await
-            {
+            match tokio::time::timeout(DAEMON_TOOL_RESPONSE_GRACE, &mut invocation).await {
                 Ok(Ok(response)) => Ok(response),
                 Ok(Err(_)) | Err(_) => Ok(DaemonInvocationResponse::problem(
                     request_id,
