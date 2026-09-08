@@ -233,8 +233,7 @@ pub use multi_root::{
 };
 pub use observability::*;
 pub use observatory_surface::{
-    OBSERVATORY_READ_OPERATION, ObservatoryReadFuture, ObservatoryReadPortV1,
-    ObservatoryReadRequestV1, ObservatoryReadResultV1, ObservatoryReadServiceV1,
+    OBSERVATORY_READ_OPERATION, ObservatoryReadRequestV1, ObservatoryReadResultV1,
     observatory_read_catalog_contribution, observatory_read_handler_descriptor,
     observatory_read_operation, observatory_read_request_schema, observatory_read_result_schema,
 };
