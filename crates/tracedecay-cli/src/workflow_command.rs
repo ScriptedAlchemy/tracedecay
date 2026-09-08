@@ -3,7 +3,7 @@
 use std::io::Read;
 
 use serde_json::Value;
-use tracedecay_application::ApplicationResult;
+use tracedecay_contracts::ApplicationResult;
 
 use crate::cli::WorkflowInvocationArgs;
 
@@ -59,7 +59,7 @@ fn read_request(path: &std::path::Path) -> tracedecay_domain::errors::Result<Val
 #[cfg(test)]
 mod tests {
     use super::workflow_json_line;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
         ResultContractRef, RetryDirective,
     };

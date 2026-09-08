@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest, SessionLookupResult,
     SessionRetrievalStructuralRefusalV1, TemporalRetrievalFailure, TemporalRetrievalFuture,
     TemporalRetrievalPort,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
     EvidenceCoverage, EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, PageCursor, PageState, RetrievalEvidence, TemporalState, now_micros,
@@ -343,7 +343,7 @@ fn temporal_state(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::retrieval::{
+    use tracedecay_contracts::retrieval::{
         PageRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
     };
     use tracedecay_domain::{RetrievalAnchorId, SessionId};

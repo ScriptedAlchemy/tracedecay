@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use tracedecay_application::SessionTemporalRefreshWakePort;
+use tracedecay_contracts::SessionTemporalRefreshWakePort;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const LIVE_TRANSCRIPT_REFRESH_DEADLINE: Duration = Duration::from_secs(5);
@@ -92,7 +92,7 @@ pub(crate) async fn join_required_live_transcript_refresh(
 mod tests {
     use serde_json::json;
 
-    use tracedecay_application::UnavailableSessionTemporalRefreshWake;
+    use tracedecay_contracts::UnavailableSessionTemporalRefreshWake;
 
     #[tokio::test]
     async fn completed_hook_ingest_fails_when_its_refresh_owner_is_unavailable() {

@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use tracedecay::dashboard;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_application::{
-    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
-    RequestAdmission, RequestContext, ResolvedScope,
-};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
 use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
+use tracedecay_contracts::{
+    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
+    RequestAdmission, RequestContext, ResolvedScope,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};

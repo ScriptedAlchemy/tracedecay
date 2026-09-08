@@ -8,7 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::{TempDir, tempdir};
-use tracedecay_application::{
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_contracts::{
     ApplicationOperation, AuthorityReceipt, CancellationContext, CancellationSignal,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectTermination, IdempotencyKey,
     OperationTermination, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext,
@@ -16,10 +20,6 @@ use tracedecay_application::{
     SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
     source_edit_reconciliation_operation, source_edit_rollback_operation,
 };
-use tracedecay_code_index::graph_projection::{
-    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
-};
-use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1, ComponentVersion,
@@ -336,7 +336,7 @@ pub(super) fn fixture_request_for_edit(
     let rollback_operation = source_edit_rollback_operation().unwrap();
     let scope = fixture_scope();
     let grant = CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new("grant.edit.fixture").unwrap(),
+        tracedecay_contracts::CapabilityGrantId::new("grant.edit.fixture").unwrap(),
         1,
         digest(SHA256_A),
         ActorId::new("actor.edit.issuer").unwrap(),
@@ -405,14 +405,14 @@ pub(super) fn fixture_request_for_edit(
 
 #[derive(Clone)]
 pub(super) struct FixtureSourceEditAuthorization(
-    pub(super) tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    pub(super) tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
 );
 
 pub(super) fn fixture_authorization(
     request: &SourceEditEffectRequestV1,
 ) -> FixtureSourceEditAuthorization {
     FixtureSourceEditAuthorization(
-        tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+        tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
             request.authority.clone(),
             request.proof.clone(),
             request.context.scope(),
@@ -435,7 +435,7 @@ impl SourceEditAuthorizationPort for FixtureSourceEditAuthorization {
         &'a self,
         _context: &'a RequestContext,
         _operation: &'a ApplicationOperation,
-        _admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
+        _admission: &'a tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
         _observed_at: UtcMicros,
     ) -> SourceEditAuthorizationFuture<'a> {
         Box::pin(async move { Ok(self.0.clone()) })
@@ -443,7 +443,7 @@ impl SourceEditAuthorizationPort for FixtureSourceEditAuthorization {
 }
 
 pub(super) struct CancelBeforeEffectAuthorization {
-    pub(super) admission: tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    pub(super) admission: tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     pub(super) cancellation: CancellationSignal,
     pub(super) rechecks: AtomicUsize,
 }
@@ -462,7 +462,7 @@ impl SourceEditAuthorizationPort for CancelBeforeEffectAuthorization {
         &'a self,
         _context: &'a RequestContext,
         _operation: &'a ApplicationOperation,
-        _admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
+        _admission: &'a tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
         _observed_at: UtcMicros,
     ) -> SourceEditAuthorizationFuture<'a> {
         Box::pin(async move {

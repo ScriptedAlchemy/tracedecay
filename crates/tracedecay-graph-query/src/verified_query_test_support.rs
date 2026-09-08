@@ -3,12 +3,12 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tracedecay_application::{
-    ApplicationOperation, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot,
-    DisclosureClass, RequestContext, ResolvedScope,
-};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_contracts::{
+    ApplicationOperation, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot,
+    DisclosureClass, RequestContext, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
@@ -23,7 +23,7 @@ use super::{
 };
 
 pub(super) fn graph_operation() -> ApplicationOperation {
-    tracedecay_application::retrieval::catalog::primitive_read_operation("node")
+    tracedecay_contracts::retrieval::catalog::primitive_read_operation("node")
         .expect("graph operation catalog")
         .expect("registered node operation")
 }

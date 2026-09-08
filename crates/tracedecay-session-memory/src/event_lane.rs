@@ -10,7 +10,7 @@ use std::sync::{OnceLock, atomic};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ObservabilityApplicationV1, ObservabilityHorizonV1,
     ObservabilityQueryV1, now_micros,
 };
@@ -448,7 +448,7 @@ pub async fn replay_after(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use tracedecay_application::ObservabilityQueryPort;
+    use tracedecay_contracts::ObservabilityQueryPort;
 
     #[test]
     fn family_stream_names_are_distinct_and_stable() {

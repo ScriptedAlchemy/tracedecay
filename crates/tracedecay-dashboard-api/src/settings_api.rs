@@ -18,7 +18,7 @@ use tracedecay_api::configuration::{
     parse_user_settings_patch, settings_validation_error,
     validate_code_index_worker_settings_patch, validate_user_settings_patch,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
 };
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::task::JoinSet;
-use tracedecay_application::clock::now_micros;
+use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
     ObservationIdentityMaterialV1, ObservationSourceCursorV1, ProjectionGenerationId,

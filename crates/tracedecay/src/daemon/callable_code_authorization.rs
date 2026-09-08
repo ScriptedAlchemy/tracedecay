@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
@@ -12,14 +12,14 @@ use tracedecay_application::{
 use tracedecay_daemon_service::callable_code_request_context;
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
+use tracedecay_application::{
+    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
+    ProjectSourceAccessSnapshot,
+};
 use tracedecay_configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
 use tracedecay_graph_query::CodeGraphReadError;
-use tracedecay_usecases::{
-    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
-    ProjectSourceAccessSnapshot,
-};
 
 type CurrentAccessFuture<'a> = Pin<
     Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, ApplicationProblem>> + Send + 'a>,
@@ -297,7 +297,7 @@ impl DaemonCallableCodeAuthorization {
         {
             return Err(concealed());
         }
-        let policy = tracedecay_application::PolicyDecisionRef::new(
+        let policy = tracedecay_contracts::PolicyDecisionRef::new(
             format!(
                 "route.callable-code.{}",
                 current.binding.binding_id.as_str()
@@ -428,7 +428,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CallableCodeOperationKind, CancellationContext, CancellationSignal, CapabilityGrantId,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestId, callable_code_operations,
     };
@@ -571,10 +571,10 @@ mod tests {
     #[tokio::test]
     async fn graph_read_admission_preserves_exact_scope_and_caller_control() {
         let operation =
-            tracedecay_application::retrieval::catalog::primitive_read_operation("health_read")
+            tracedecay_contracts::retrieval::catalog::primitive_read_operation("health_read")
                 .expect("health operation")
                 .expect("registered health operation");
-        let observed_at = tracedecay_application::now_micros();
+        let observed_at = tracedecay_contracts::now_micros();
         let mut mounted = access(&operation);
         mounted.grant_expires_at = UtcMicros(observed_at.0.saturating_add(60_000_000));
         let source = DaemonCallableCodeAuthorizationSource {

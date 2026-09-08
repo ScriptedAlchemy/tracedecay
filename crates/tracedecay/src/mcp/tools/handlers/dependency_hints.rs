@@ -1,11 +1,11 @@
 use serde_json::{Value, json};
-use tracedecay_application::retrieval::{
-    PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
-};
-use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
-use tracedecay_usecases::code_index::{
+use tracedecay_application::code_index::{
     CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
     CodeIndexIgnoredDependencyAdmissionRequestV1,
+};
+use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_contracts::retrieval::{
+    PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -28,8 +28,8 @@ pub(super) async fn external_import_hint(
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
 ) -> Result<Option<Value>> {
     let candidates = hotpath::measure_block!("mcp.search.import_hint.scan", {
         ignored_dependency_candidates(graph, query, limit, scope_prefix, deadline, cancellation)?
@@ -82,8 +82,8 @@ pub(super) async fn admit_verified_ignored_dependency(
     graph: &VerifiedGraphQuery,
     query: &str,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
 ) -> Result<()> {
     let candidates =
         ignored_dependency_candidates(graph, query, 1, scope_prefix, deadline, cancellation)?;
@@ -162,18 +162,17 @@ fn ignored_dependency_candidates(
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
 ) -> Result<Vec<CodeIndexImportEvidenceV1>> {
-    if cancellation.is_some_and(tracedecay_application::CancellationSignal::is_cancelled) {
+    if cancellation.is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled) {
         return Err(TraceDecayError::project_route(
             "code-graph-cancelled",
             false,
             "verified dependency import read was cancelled",
         ));
     }
-    if deadline.is_some_and(|deadline| deadline.is_elapsed_at(tracedecay_application::now_micros()))
-    {
+    if deadline.is_some_and(|deadline| deadline.is_elapsed_at(tracedecay_contracts::now_micros())) {
         return Err(TraceDecayError::project_route(
             "code-graph-timed-out",
             true,

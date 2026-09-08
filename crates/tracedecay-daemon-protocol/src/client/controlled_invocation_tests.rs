@@ -15,7 +15,7 @@ use crate::contract::{
 };
 use crate::handshake::DaemonHandshake;
 use crate::lsp_wire::{FrameSend, LspSessionAccess, LspSessionCredential, LspSessionId};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CancellationSignal, Deadline, WorkGraphReadRequestV1,
     WorkProductSelectionScopeV1,
 };

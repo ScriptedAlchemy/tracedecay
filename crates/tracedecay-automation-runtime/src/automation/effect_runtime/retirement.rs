@@ -11,7 +11,7 @@ use crate::automation::automatic_facts::{
 use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::retained_surfaces::AutomationTaskV1;
+use tracedecay_contracts::retained_surfaces::AutomationTaskV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_tagged_lowercase_hex};
 use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_private_fs::framed_log::{
@@ -1587,7 +1587,7 @@ mod tests {
         write_private_file(&source_path, &source_bytes);
 
         let curator = classify_for_task(
-            tracedecay_application::retained_surfaces::AutomationTaskV1::MemoryCurator,
+            tracedecay_contracts::retained_surfaces::AutomationTaskV1::MemoryCurator,
             root.path(),
         )
         .await
@@ -1596,7 +1596,7 @@ mod tests {
         assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
 
         let reflector = classify_for_task(
-            tracedecay_application::retained_surfaces::AutomationTaskV1::SessionReflector,
+            tracedecay_contracts::retained_surfaces::AutomationTaskV1::SessionReflector,
             root.path(),
         )
         .await

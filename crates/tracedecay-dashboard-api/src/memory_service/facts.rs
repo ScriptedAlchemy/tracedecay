@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use super::super::DashboardState;
 use super::super::read_model::DashboardCoverageCompletenessV1;
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_application::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
+use tracedecay_contracts::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
 use tracedecay_domain::{FactId, PayloadAccessState};
 use tracedecay_store::{
     FactReadControl, ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactSummaryV1,

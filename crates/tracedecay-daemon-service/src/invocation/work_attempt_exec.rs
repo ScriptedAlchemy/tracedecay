@@ -2,7 +2,7 @@
 //! under the durable Work attempt authority.
 //!
 //! Every durable transition routes through
-//! [`tracedecay_application::WorkAttemptService`]; this module owns only the
+//! [`tracedecay_contracts::WorkAttemptService`]; this module owns only the
 //! live process — spawn, bounded stream capture, the cancellation ladder, and
 //! terminal evidence capture. Provider resolution is fail-closed through the
 //! pinned executable-binding authority; an unresolved provider is a typed
@@ -55,7 +55,12 @@ use std::sync::Mutex as ProcessMapMutex;
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
-use tracedecay_application::{
+use tracedecay_application::observability::{
+    BoundedObservabilityProducerV1, WorkNoProgressObservationV1, WorkOwnerObservationResultV1,
+    record_no_progress_observation, record_terminal_attempt_product_views,
+    record_work_operation_resource,
+};
+use tracedecay_contracts::{
     WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1, WorkProviderAvailabilityV1,
     WorkProviderFallbackRecordV1,
 };
@@ -68,11 +73,6 @@ use tracedecay_domain::{
 use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerLaunchReceipt, CodexAppServerSummaryConfig,
     CodexAppServerWorkExecution, run_work_with_codex_app_server,
-};
-use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, WorkNoProgressObservationV1, WorkOwnerObservationResultV1,
-    record_no_progress_observation, record_terminal_attempt_product_views,
-    record_work_operation_resource,
 };
 
 use tracedecay_configuration::config::work_executable_binding::{
@@ -472,7 +472,7 @@ async fn run_attempt(
         );
         return;
     };
-    let services = match tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+    let services = match tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     ) {
         Ok(services) => services,
@@ -719,7 +719,7 @@ fn availability_state(error: WorkExecutableBindingError) -> WorkProviderAvailabi
 /// Seals a terminal denial for an attempt whose provider never started:
 /// fence to `RecoveryRequired`, then fail recovery with the typed outcome.
 fn settle_unstarted<S>(
-    attempts: &tracedecay_application::WorkAttemptService<S>,
+    attempts: &tracedecay_contracts::WorkAttemptService<S>,
     context: &RequestContext,
     identity: &WorkAttemptIdentityV1,
     attempt: &WorkAttemptV1,
@@ -727,7 +727,7 @@ fn settle_unstarted<S>(
     provider_fallback: Option<WorkProviderFallbackRecordV1>,
     observability_producer: Option<&BoundedObservabilityProducerV1>,
 ) where
-    S: tracedecay_application::WorkAttemptStoragePort,
+    S: tracedecay_contracts::WorkAttemptStoragePort,
 {
     if let Err(problem) = attempts.mark_provider_unavailable(context, identity) {
         tracing::warn!(
@@ -782,7 +782,7 @@ fn admitted_provider_environment(
 
 #[hotpath::measure(label = "daemon.service.work_attempt.provider", future = true)]
 async fn execute_provider_with_environment<S>(
-    attempts: &tracedecay_application::WorkAttemptService<S>,
+    attempts: &tracedecay_contracts::WorkAttemptService<S>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -792,7 +792,7 @@ async fn execute_provider_with_environment<S>(
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) where
-    S: tracedecay_application::WorkAttemptStoragePort,
+    S: tracedecay_contracts::WorkAttemptStoragePort,
 {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
@@ -998,7 +998,7 @@ struct AppServerSessionOutput {
 /// shape the stdio path uses.
 #[hotpath::measure(label = "daemon.service.work_attempt.app_server", future = true)]
 async fn execute_app_server<S>(
-    attempts: &tracedecay_application::WorkAttemptService<S>,
+    attempts: &tracedecay_contracts::WorkAttemptService<S>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -1008,7 +1008,7 @@ async fn execute_app_server<S>(
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) where
-    S: tracedecay_application::WorkAttemptStoragePort,
+    S: tracedecay_contracts::WorkAttemptStoragePort,
 {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
@@ -1244,13 +1244,13 @@ fn offer_no_progress_observation(
 /// durable cancellation request has been observed.
 #[hotpath::measure(label = "daemon.service.work_attempt.cancel_ladder", future = true)]
 async fn cancel_ladder<S>(
-    attempts: &tracedecay_application::WorkAttemptService<S>,
+    attempts: &tracedecay_contracts::WorkAttemptService<S>,
     context: &RequestContext,
     identity: &WorkAttemptIdentityV1,
     child: &mut tokio::process::Child,
 ) -> WorkAttemptProviderOutcomeV1
 where
-    S: tracedecay_application::WorkAttemptStoragePort,
+    S: tracedecay_contracts::WorkAttemptStoragePort,
 {
     if let Err(problem) = attempts.acknowledge_cancellation(context, identity, current_micros()) {
         tracing::warn!(

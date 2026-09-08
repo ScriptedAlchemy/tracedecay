@@ -20,18 +20,18 @@ struct RecordingUnavailableExecutor {
     >,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for RecordingUnavailableExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for RecordingUnavailableExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -39,8 +39,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        _deadline: tracedecay_application::Deadline,
-        _cancellation: tracedecay_application::CancellationSignal,
+        _deadline: tracedecay_contracts::Deadline,
+        _cancellation: tracedecay_contracts::CancellationSignal,
         policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -68,7 +68,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,
@@ -116,7 +116,7 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
     ];
 
     for (tool_name, _, idempotency_key) in controls {
-        let cancellation = tracedecay_application::CancellationSignal::active(format!(
+        let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
             "cancellation.{}",
             tool_name.strip_prefix("tracedecay_").unwrap()
         ))

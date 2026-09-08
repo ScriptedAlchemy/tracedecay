@@ -5,13 +5,13 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
-use tracedecay_application::context_scout::{
+use tracedecay_automation_runtime::automation::config::AutomationConfig;
+use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1,
     ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
     ContextScoutWorkV1,
 };
-use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookReadyGuidanceV1,

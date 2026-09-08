@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use tracedecay_application::{WorkProductSelectionScopeV1, WorkTaskSessionRequestV1};
+use tracedecay_contracts::{WorkProductSelectionScopeV1, WorkTaskSessionRequestV1};
 use tracedecay_domain::{
     AttemptId, ObservationSourceIdentityV1, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
     RunId, SessionId, TaskId, TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorktreeId,

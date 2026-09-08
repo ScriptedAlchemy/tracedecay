@@ -92,7 +92,7 @@ hotpath = [
     "hotpath/ureq-3",
     "tracedecay-agent-hosts/hotpath",
     "tracedecay-api/hotpath",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-automation/hotpath",
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-code-extraction/hotpath",
@@ -131,7 +131,7 @@ hotpath = [
     "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
     "tracedecay-tool-catalog/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-application/hotpath",
 ]
 hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
@@ -139,7 +139,7 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-agent-hosts/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
@@ -178,7 +178,7 @@ hotpath-alloc = [
     "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
 ]
 hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
@@ -186,7 +186,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-agent-hosts/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
@@ -225,7 +225,7 @@ hotpath-cpu = [
     "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
 ]
 # Binary-only: the live query server runs in this process, so no library crate
 # needs a passthrough for it.
@@ -333,7 +333,7 @@ test-transport = [
     "tracedecay-automation-runtime/test-transport",
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-host-admission/test-transport",
-    "tracedecay-usecases/test-transport",
+    "tracedecay-application/test-transport",
     "tracedecay-graph-query/test-helpers",
     "tracedecay-mcp/test-transport",
     # The observation-seed fixture bridge (`dashboard::observation_seed`) is
@@ -365,7 +365,7 @@ rmcp-benchmark = [
 # adapter itself lives in `tracedecay-semantic`, which owns the pins.
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
-    "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-application/semantic-fastembed",
     "tracedecay-code-index-runtime/semantic-fastembed",
 ]
 # SEMANTIC Model2Vec static-embedding backend: a safetensors token table
@@ -374,7 +374,7 @@ semantic-fastembed = [
 # cataloged `PotionCode16MV2` selection is servable, not merely listed.
 semantic-model2vec = [
     "tracedecay-semantic/semantic-model2vec",
-    "tracedecay-usecases/semantic-model2vec",
+    "tracedecay-application/semantic-model2vec",
     "tracedecay-code-index-runtime/semantic-model2vec",
 ]
 # Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
@@ -384,11 +384,11 @@ semantic-model2vec = [
 # CPU-only adapter. See `tracedecay-semantic/src/execution_provider.rs`.
 semantic-gpu-coreml = [
     "tracedecay-semantic/semantic-gpu-coreml",
-    "tracedecay-usecases/semantic-gpu-coreml",
+    "tracedecay-application/semantic-gpu-coreml",
 ]
 semantic-gpu-cuda = [
     "tracedecay-semantic/semantic-gpu-cuda",
-    "tracedecay-usecases/semantic-gpu-cuda",
+    "tracedecay-application/semantic-gpu-cuda",
 ]
 
 [lib]
@@ -423,7 +423,7 @@ tree-sitter = "0.26"
 constant_time_eq = "0.5.0"
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
@@ -465,7 +465,7 @@ tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 clap = { version = "4.6", features = ["derive"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -548,7 +548,7 @@ tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["t
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["test-helpers"] }
 # Journal tests in the composition root call effect_runtime journal internals
 # that stay crate-private in production and compile only under test-helpers.
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0", features = ["test-helpers"] }

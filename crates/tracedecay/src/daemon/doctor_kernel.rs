@@ -1,7 +1,7 @@
 //! Daemon-side Doctor signal gatherers for the read-only kernel source ports.
 //!
 //! The transport-neutral Doctor kernel
-//! ([`tracedecay_application::doctor`]) owns the seven source-port adapters,
+//! ([`tracedecay_contracts::doctor`]) owns the seven source-port adapters,
 //! [`DaemonRuntimeHealthSignalV1`], and [`compose_doctor_report`]. This module
 //! gathers live daemon signals (scheduler, diagnostic broker, registered
 //! stores, host-bundle receipts) and maps daemon-owned types into those kernel
@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::PinnedRuntimeConfiguration;
-use tracedecay_application::doctor::{
+use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
+use tracedecay_contracts::doctor::{
     AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
     DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorStorageFamilyReadV1,
@@ -26,12 +27,11 @@ use tracedecay_application::doctor::{
     RemoteOperationalReadV1, SemanticOwnerReadV1, advisory_feedback_read_from_publication,
     compose_doctor_report, merge_storage_reads, runtime_health_read, storage_family_read,
 };
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
-use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::maintenance::GuardedStoreTelemetryPort;
 use tracedecay_daemon_service::{
@@ -229,8 +229,8 @@ pub async fn language_server_read_from_broker(
 #[must_use]
 pub fn observability_read_from_model(
     model: Result<
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1,
-        tracedecay_usecases::feedback::concrete::FeedbackRuntimeError,
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1,
+        tracedecay_application::feedback::concrete::FeedbackRuntimeError,
     >,
 ) -> ObservabilityReadV1 {
     match model {
@@ -243,7 +243,7 @@ pub fn observability_read_from_model(
             ObservabilityReadV1::Absent
         }
         Ok(model) => {
-            use tracedecay_application::feedback::observations::FeedbackCoverageV1;
+            use tracedecay_contracts::feedback::observations::FeedbackCoverageV1;
             let (state, coverage) = match model.coverage {
                 FeedbackCoverageV1::Known => (
                     ObservabilityStateV1::Current,
@@ -376,7 +376,7 @@ pub async fn collect_unregistered_store_findings(
 /// is emitted as typed unknown telemetry rather than silently omitted.
 struct CollectedStoreTelemetryV1 {
     findings: DoctorStorageFamilyReadV1,
-    table_growth_evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+    table_growth_evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
 }
 
 const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
@@ -477,11 +477,11 @@ fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
 }
 
 fn permits_synchronous_table_growth(
-    read: &tracedecay_application::storage::StorageTelemetryReadV1,
+    read: &tracedecay_contracts::storage::StorageTelemetryReadV1,
 ) -> bool {
     matches!(
         read,
-        tracedecay_application::storage::StorageTelemetryReadV1::Observed { sample }
+        tracedecay_contracts::storage::StorageTelemetryReadV1::Observed { sample }
             if sample.total_bytes().get() <= MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
     )
 }
@@ -490,13 +490,13 @@ fn permits_synchronous_table_growth(
 async fn collect_over_budget_store_findings(
     context: &RequestContext,
     telemetry_ports: &[(
-        tracedecay_application::storage::StoreKeyV1,
+        tracedecay_contracts::storage::StoreKeyV1,
         GuardedStoreTelemetryPort,
     )],
     retention: &crate::config::RetentionConfig,
 ) -> CollectedStoreTelemetryV1 {
     use std::collections::BTreeMap;
-    use tracedecay_application::storage::{
+    use tracedecay_contracts::storage::{
         StorageTelemetryReadV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
         over_budget_finding, table_growth_doctor_evidence, table_growth_finding,
     };
@@ -587,7 +587,7 @@ fn incident_debris_findings_from_census(
         ) else {
             return DoctorStorageFamilyReadV1::Unknown;
         };
-        let Ok(finding) = tracedecay_application::storage::incident_debris_finding(&scan) else {
+        let Ok(finding) = tracedecay_contracts::storage::incident_debris_finding(&scan) else {
             return DoctorStorageFamilyReadV1::Unknown;
         };
         findings.push(finding);
@@ -614,7 +614,7 @@ pub async fn collect_retention_backlog_findings(
     else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let Ok(store) = tracedecay_application::storage::StoreKeyV1::new(file_name.to_owned()) else {
+    let Ok(store) = tracedecay_contracts::storage::StoreKeyV1::new(file_name.to_owned()) else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
     let Ok(snapshot) = profile_sessions.read_snapshot().await else {
@@ -633,7 +633,7 @@ pub async fn collect_retention_backlog_findings(
     hotpath::gauge!("daemon.doctor.retention_backlog_records_total").inc(records.len() as u64);
     let mut findings = Vec::new();
     for record in records {
-        let Ok(finding) = tracedecay_application::storage::retention_backlog_finding(
+        let Ok(finding) = tracedecay_contracts::storage::retention_backlog_finding(
             &record,
             DoctorCoverageCompletenessV1::Complete,
         ) else {
@@ -657,19 +657,19 @@ pub(super) async fn collect_code_generation_retention_findings(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &super::maintenance::StoreTelemetrySamplingRegistry,
     configuration: Option<
-        &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+        &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     >,
     code_index_store_root: &Path,
     project_root: &Path,
 ) -> DoctorStorageFamilyReadV1 {
-    use tracedecay_application::storage::{
-        CodeGenerationRetentionRecordV1, SemanticVectorRetentionRecordV1, StorageByteSizeV1,
-        StoreKeyV1, code_generation_retention_finding, semantic_vector_retention_finding,
-    };
     use tracedecay_code_index_retention::code_index_generations::{
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
         plan_code_generation_retention_with_verification, plan_scope_root_retention,
+    };
+    use tracedecay_contracts::storage::{
+        CodeGenerationRetentionRecordV1, SemanticVectorRetentionRecordV1, StorageByteSizeV1,
+        StoreKeyV1, code_generation_retention_finding, semantic_vector_retention_finding,
     };
 
     if !code_index_store_root
@@ -1057,7 +1057,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                         &project_root,
                     ),
                     language_server_read_from_broker(&diagnostic_broker),
-                    tracedecay_usecases::feedback::concrete::feedback_observation_read_model(
+                    tracedecay_application::feedback::concrete::feedback_observation_read_model(
                         &graph,
                     ),
                     async {
@@ -1172,7 +1172,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
 }
 
 pub(crate) fn doctor_report_request_context(
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
 ) -> Result<RequestContext, ApplicationContractError> {
     let observed_at = now_micros();
     let expires_at =

@@ -7,9 +7,9 @@ use std::sync::{
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::CodeGenerationId;
-use tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1;
 
 use super::super::CodeIndexGenerationPublishedV1;
 use super::{

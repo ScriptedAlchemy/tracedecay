@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracedecay_application::source_edit::{
-    AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
-    RenameSymbolBindingV1,
-};
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::ports::project_runtime::{ProjectRuntime, RuntimeFuture};
 use tracedecay_configuration::UserSettingsDaemonClient;
+use tracedecay_contracts::source_edit::{
+    AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
+    RenameSymbolBindingV1,
+};
 use tracedecay_dashboard_api::DashboardProjectRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId, UserProfileId};

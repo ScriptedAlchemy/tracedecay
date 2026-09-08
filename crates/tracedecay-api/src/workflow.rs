@@ -12,7 +12,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, RequestId, RetryDirective, TaskHandoffGrant, TaskHandoffIssueRequest,
     TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowDefinitionActivateRequest,
     WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionDisposition,
@@ -350,7 +350,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
     use tower::ServiceExt;
-    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
 
     use super::{
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn read_only_operations_mirror_the_catalog_effect_class() {
-        let registry = tracedecay_application::workflow_executable_binding_registry()
+        let registry = tracedecay_contracts::workflow_executable_binding_registry()
             .expect("canonical Workflow executable registry");
         for operation in WorkflowOperation::ALL {
             let operation_id =

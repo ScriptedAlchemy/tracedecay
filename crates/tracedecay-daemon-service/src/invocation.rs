@@ -19,10 +19,10 @@ use std::time::Duration;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, Semaphore};
-use tracedecay_application::feedback::{
+use tracedecay_contracts::feedback::{
     FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AffectedTestsRetrievalPort, AnalyzerAdmittedDiagnosticProviderV1, ApplicationContractError,
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
@@ -86,8 +86,8 @@ use tracedecay_agent_hosts::agents::context_scout_ports::{
     ProjectContextScoutAddressRegistryV1,
 };
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
-use tracedecay_application::ConfigurationWireRequestV1;
-use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_application::CallableCodeAuthorizationSourcePort;
+use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
@@ -101,21 +101,51 @@ use tracedecay_configuration::{
     ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
     configuration_layer_scope_digest,
 };
+use tracedecay_contracts::ConfigurationWireRequestV1;
+use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
-use tracedecay_usecases::CallableCodeAuthorizationSourcePort;
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
 
-use tracedecay_application::feedback::observations::{
+use tracedecay_application::advisory::{
+    AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
+    open_advisory_production_authorities, register_advisory_daemon_startup,
+};
+use tracedecay_application::feedback::concrete::{
+    FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
+};
+use tracedecay_application::feedback::cycle_production::production_proximity_feedback_cycle_input;
+use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
+use tracedecay_application::feedback::owner::{
+    DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
+    FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
+};
+use tracedecay_application::feedback::{
+    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
+    ProductionFeedbackCycleProximityPortV1, open_feedback_cycle_runtime,
+};
+use tracedecay_application::lsp_runtime::{
+    DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
+    production_semantic_authorities,
+};
+use tracedecay_application::operation_stream::{
+    OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
+};
+use tracedecay_application::primitives::{PrimitiveDispatch, PrimitiveProjectRuntime};
+use tracedecay_application::semantic_runtime::{
+    ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
+    SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
+};
+use tracedecay_contracts::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
     FeedbackOperationV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
 };
-use tracedecay_application::request_identity::{
+use tracedecay_contracts::request_identity::{
     GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
     mint_global_opaque_id,
 };
-use tracedecay_application::retrieval::{PrimitiveInvocation, PrimitiveRequest};
+use tracedecay_contracts::retrieval::{PrimitiveInvocation, PrimitiveRequest};
 #[cfg(test)]
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
     ProblemTerminality,
 };
@@ -133,36 +163,6 @@ pub(crate) use tracedecay_daemon_protocol::{
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_usecases::advisory::{
-    AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
-    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
-    open_advisory_production_authorities, register_advisory_daemon_startup,
-};
-use tracedecay_usecases::feedback::concrete::{
-    FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
-};
-use tracedecay_usecases::feedback::cycle_production::production_proximity_feedback_cycle_input;
-use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
-use tracedecay_usecases::feedback::owner::{
-    DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
-    FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
-};
-use tracedecay_usecases::feedback::{
-    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
-    ProductionFeedbackCycleProximityPortV1, open_feedback_cycle_runtime,
-};
-use tracedecay_usecases::lsp_runtime::{
-    DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
-    production_semantic_authorities,
-};
-use tracedecay_usecases::operation_stream::{
-    OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
-};
-use tracedecay_usecases::primitives::{PrimitiveDispatch, PrimitiveProjectRuntime};
-use tracedecay_usecases::semantic_runtime::{
-    ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
-    SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
-};
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
@@ -344,7 +344,7 @@ pub struct DaemonInvocationService {
     store_observability: StoreObservabilityRegistryV1,
     operation_events: OperationEventAuthority,
     github_stack_coordinator:
-        Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1>,
+        Arc<tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1>,
     #[cfg(any(test, feature = "test-helpers"))]
     pub work_attempt_processes: Arc<work_attempt_exec::WorkAttemptProcessRegistryV1>,
     #[cfg(not(any(test, feature = "test-helpers")))]
@@ -360,7 +360,7 @@ pub struct DaemonInvocationService {
         Mutex<
             BTreeMap<
                 PathBuf,
-                Arc<tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1>,
+                Arc<tracedecay_application::native_integration::NativeIntegrationStatusBroadcastV1>,
             >,
         >,
     >,
@@ -402,7 +402,8 @@ impl DaemonInvocationService {
             store_observability: StoreObservabilityRegistryV1::default(),
             operation_events: daemon_operation_event_authority(),
             github_stack_coordinator: Arc::new(
-                tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1::default(),
+                tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1::default(
+                ),
             ),
             work_attempt_processes: Arc::new(
                 work_attempt_exec::WorkAttemptProcessRegistryV1::default(),
@@ -463,14 +464,14 @@ impl DaemonInvocationService {
     pub async fn native_integration_status_broadcast(
         &self,
         project_root: &Path,
-    ) -> Arc<tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1> {
+    ) -> Arc<tracedecay_application::native_integration::NativeIntegrationStatusBroadcastV1> {
         let mut broadcasts = self.native_integration_status_broadcasts.lock().await;
         Arc::clone(broadcasts.entry(project_root.to_path_buf()).or_default())
     }
 
     pub fn github_stack_coordinator(
         &self,
-    ) -> Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
+    ) -> Arc<tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
         Arc::clone(&self.github_stack_coordinator)
     }
 
@@ -532,7 +533,7 @@ impl DaemonInvocationService {
     pub async fn install_worktree_cleanup_recovery_fences(
         &self,
         owner: &DaemonNativeIntegrationOwner,
-    ) -> Result<(), tracedecay_application::NativeIntegrationPortError> {
+    ) -> Result<(), tracedecay_contracts::NativeIntegrationPortError> {
         let roots = owner.cleanup_recovery_roots()?;
         self.worktree_holder_admission
             .mark_recovery_required(roots)

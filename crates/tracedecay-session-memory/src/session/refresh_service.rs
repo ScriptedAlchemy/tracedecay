@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::Serialize;
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{SessionSourceCoverageV1, UtcMicros};
 
 use super::refresh::SessionRefreshTarget;

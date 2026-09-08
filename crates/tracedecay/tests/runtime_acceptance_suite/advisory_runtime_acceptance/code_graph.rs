@@ -2,13 +2,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::{CancellationSignal, RequestAdmission, ResolvedScope};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
 use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+use tracedecay_contracts::{CancellationSignal, RequestAdmission, ResolvedScope};
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, ContentDigest, FileOccurrenceId,

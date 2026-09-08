@@ -11,27 +11,27 @@ use reqwest::blocking::Client as HttpClient;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_api::remote::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
-use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
-use tracedecay_application::remote::capture_protocol::RemoteCaptureRequestV1;
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, remote_capture_result_contract_v1,
     remote_enrollment_result_contract_v1, remote_replay_result_contract_v1,
 };
-use tracedecay_application::remote::query::{
+use tracedecay_contracts::remote::query::{
     RemoteQueryRequestV1, RemoteQueryResultV1, remote_exact_observation_query_result_contract_v1,
 };
-use tracedecay_application::remote::recovery::{
+use tracedecay_contracts::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1, remote_backup_result_contract_v1,
     remote_promotion_result_contract_v1, remote_restore_result_contract_v1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
-use tracedecay_application::remote::transfer::{
+use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
     remote_frame_transfer_result_contract_v1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblemKind, ApplicationResult,
     EffectResult, OperationTermination, RequestId, ResultContractRef,
 };

@@ -42,7 +42,7 @@ pub(super) fn work_executable_binding_for_tool(
                 },
             )
         })?;
-    tracedecay_application::work_executable_binding(&operation_id)
+    tracedecay_contracts::work_executable_binding(&operation_id)
         .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)
 }
 
@@ -53,7 +53,7 @@ pub(super) fn work_executable_binding_for_tool(
 /// [`work_executable_binding_for_tool`].
 pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
-    let registry = tracedecay_application::work_executable_binding_registry()
+    let registry = tracedecay_contracts::work_executable_binding_registry()
         .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
     tracedecay_api::WorkOperation::ALL
         .into_iter()
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn bindings_are_a_projection_of_the_executable_registry() {
-        let registry = tracedecay_application::work_executable_binding_registry().unwrap();
+        let registry = tracedecay_contracts::work_executable_binding_registry().unwrap();
         let work_bindings = dispatch_catalog_bindings()
             .unwrap()
             .into_iter()

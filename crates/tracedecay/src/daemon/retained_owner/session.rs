@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     ClosedUtcIntervalV1, GitScopeV1, HydrationStateResultV1, MessageRelationshipScopeV1,
     MessageSearchHitV1, MessageSearchRequestV1, MessageSearchResultV1, MessageTypeFilterV1,
     RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
@@ -12,7 +12,7 @@ use tracedecay_application::retained_surfaces::{
     TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1,
     TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowsRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, now_micros,
@@ -136,7 +136,7 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
     {
         tokio::select! {
             biased;
-            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::DuringRead)),
+            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
             result = super::bounded_execution(context, future) => result,
         }
     }
@@ -204,7 +204,7 @@ impl DirectRetainedSessionPortV1 {
         // transaction and misreport an unknown effect as a pre-admission error.
         if !context.cancellation_signal.try_begin_commit() {
             return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::BeforeEffect,
+                tracedecay_contracts::CancellationStage::BeforeEffect,
             ));
         }
         let handled = hotpath::future!(
@@ -303,7 +303,7 @@ impl DirectRetainedSessionPortV1 {
         F: std::future::Future<Output = Result<T, TraceDecayError>>,
     {
         tokio::select! {
-            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::DuringRead)),
+            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
             result = super::bounded_execution(context, future) => result,
         }
     }
@@ -390,7 +390,7 @@ impl MessageSearchInput {
         // refuses with the generic problem.
         let provider =
             ProviderScope::parse_optional(request.provider.as_deref()).map_err(|error| {
-                tracedecay_application::SafeDiagnostic::new(
+                tracedecay_contracts::SafeDiagnostic::new(
                     "application.retained.message-search-provider-invalid",
                     error.clone(),
                 )
@@ -398,11 +398,11 @@ impl MessageSearchInput {
                     RetainedSurfaceExecutionErrorV1::InvalidRequest,
                     |diagnostic| {
                         RetainedSurfaceExecutionErrorV1::ApplicationProblem(
-                            tracedecay_application::ApplicationProblem::InvalidRequest {
+                            tracedecay_contracts::ApplicationProblem::InvalidRequest {
                                 diagnostic,
-                                retry: tracedecay_application::RetryDirective::Never,
+                                retry: tracedecay_contracts::RetryDirective::Never,
                                 legal_actions: vec![
-                                    tracedecay_application::LegalAction::CorrectRequest,
+                                    tracedecay_contracts::LegalAction::CorrectRequest,
                                 ],
                             },
                         )
@@ -625,12 +625,12 @@ impl MessageSearchInput {
             }
             SessionRetrievalServiceOutcome::TimedOut => {
                 return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                    tracedecay_application::CancellationStage::DuringRead,
+                    tracedecay_contracts::CancellationStage::DuringRead,
                 ));
             }
             SessionRetrievalServiceOutcome::Cancelled => {
                 return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                    tracedecay_application::CancellationStage::DuringRead,
+                    tracedecay_contracts::CancellationStage::DuringRead,
                 ));
             }
         }
@@ -785,17 +785,15 @@ fn optional_string(value: Option<&str>) -> Result<Option<String>, RetainedSurfac
 }
 
 fn time_filter(
-    value: Option<&tracedecay_application::retained_surfaces::RetainedTimeFilterV1>,
+    value: Option<&tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1>,
     bound: SearchTimeBound,
 ) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
     let value = match value {
         None => return Ok(None),
-        Some(tracedecay_application::retained_surfaces::RetainedTimeFilterV1::Micros(value)) => {
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Micros(value)) => {
             i64::try_from(*value).map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
         }
-        Some(tracedecay_application::retained_surfaces::RetainedTimeFilterV1::Expression(
-            value,
-        )) => {
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Expression(value)) => {
             let value = value.trim();
             if value.is_empty() {
                 return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
@@ -826,12 +824,12 @@ async fn retrieve_bounded(
         RequestAdmission::Admitted => {}
         RequestAdmission::Cancelled => {
             return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::BeforeRead,
+                tracedecay_contracts::CancellationStage::BeforeRead,
             ));
         }
         RequestAdmission::TimedOut => {
             return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeRead,
+                tracedecay_contracts::CancellationStage::BeforeRead,
             ));
         }
     }
@@ -845,7 +843,7 @@ async fn retrieve_bounded(
         .ok()
         .map(Duration::from_micros)
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeRead,
+            tracedecay_contracts::CancellationStage::BeforeRead,
         ))?;
     let retrieval = hotpath::future!(
         service.retrieve_admitted_with_cancellation(
@@ -857,10 +855,10 @@ async fn retrieve_bounded(
     );
     tokio::select! {
         () = context.cancellation_signal.cancelled() => {
-            Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::DuringRead))
+            Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead))
         }
         outcome = tokio::time::timeout(remaining, retrieval) => {
-            outcome.map_err(|_| RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_application::CancellationStage::DuringRead))
+            outcome.map_err(|_| RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_contracts::CancellationStage::DuringRead))
         }
     }
 }
@@ -1117,7 +1115,7 @@ const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
 
 #[cfg(test)]
 mod refusal_tests {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
     };
     use tracedecay_domain::CursorManifestLimitKindV1;
@@ -1139,7 +1137,7 @@ mod refusal_tests {
             let error = message_search_cursor_manifest_refusal(kind, 257, 256);
             assert!(!matches!(
                 &error,
-                tracedecay_application::RetainedSurfaceExecutionErrorV1::Saturated
+                tracedecay_contracts::RetainedSurfaceExecutionErrorV1::Saturated
             ));
             let problem = retained_surface_execution_problem(error);
             assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);

@@ -16,10 +16,10 @@
 #[global_allocator]
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
-pub use tracedecay_application::request_identity;
+pub use tracedecay_application as application;
+pub use tracedecay_application::git_query;
+pub use tracedecay_contracts::request_identity;
 pub(crate) use tracedecay_graph_query as graph;
-pub use tracedecay_usecases as application;
-pub use tracedecay_usecases::git_query;
 pub mod tracedecay;
 // Crate-root re-exports the composition root reaches through its
 // `crate::dashboard::*` shim: the application-surface injection contract and
@@ -289,7 +289,7 @@ pub type DoctorReportReadFuture = Pin<
         dyn Future<
                 Output = std::result::Result<
                     AdmittedDoctorReportV1,
-                    tracedecay_application::ApplicationContractError,
+                    tracedecay_contracts::ApplicationContractError,
                 >,
             > + Send
             + 'static,
@@ -297,7 +297,7 @@ pub type DoctorReportReadFuture = Pin<
 >;
 pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
 pub type RemoteOperationalStatusReader = Arc<
-    dyn Fn() -> tracedecay_application::remote::status::RemoteOperationalStatusReadV1
+    dyn Fn() -> tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1
         + Send
         + Sync
         + 'static,
@@ -362,17 +362,17 @@ pub struct DashboardStateCompositionV1 {
     /// Daemon-owned canonical authority for browser-confirmed SSE delivery.
     /// Standalone dashboards leave this absent and emit no receipt token.
     pub delivery_settlement_authority:
-        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+        Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
 }
 
 #[derive(Clone)]
 pub struct AdmittedDoctorReportV1 {
-    pub report: tracedecay_application::doctor::DoctorReportV1,
-    pub table_growth_evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+    pub report: tracedecay_contracts::doctor::DoctorReportV1,
+    pub table_growth_evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
 }
 
 impl AdmittedDoctorReportV1 {
-    pub fn new(report: tracedecay_application::doctor::DoctorReportV1) -> Self {
+    pub fn new(report: tracedecay_contracts::doctor::DoctorReportV1) -> Self {
         Self {
             report,
             table_growth_evidence: Vec::new(),
@@ -381,7 +381,7 @@ impl AdmittedDoctorReportV1 {
 
     pub fn with_table_growth_evidence(
         mut self,
-        evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+        evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
     ) -> Self {
         self.table_growth_evidence = evidence;
         self
@@ -406,7 +406,7 @@ pub struct DashboardState {
     /// project id, or unresolvable exact root): handlers report their typed
     /// unavailable states from it and never re-resolve scope from paths or
     /// the CWD per request.
-    pub resolved_scope: Option<tracedecay_application::ResolvedScope>,
+    pub resolved_scope: Option<tracedecay_contracts::ResolvedScope>,
     /// Canonical per-request admission for the verified code graph.
     pub code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
     /// Canonical exact-project verified projection resolver.
@@ -1145,18 +1145,18 @@ static DASHBOARD_HTTP_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// they never manufacture an actor, grant, scope, or projection generation.
 #[derive(Clone, Debug)]
 pub struct DashboardHttpRequestControlV1 {
-    request_id: tracedecay_application::RequestId,
-    deadline: tracedecay_application::Deadline,
-    cancellation: tracedecay_application::CancellationSignal,
+    request_id: tracedecay_contracts::RequestId,
+    deadline: tracedecay_contracts::Deadline,
+    cancellation: tracedecay_contracts::CancellationSignal,
     observed_at: tracedecay_domain::UtcMicros,
 }
 
 impl DashboardHttpRequestControlV1 {
     #[cfg(feature = "test-transport")]
     pub fn from_parts_for_test(
-        request_id: tracedecay_application::RequestId,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
+        request_id: tracedecay_contracts::RequestId,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Self {
         Self {
@@ -1167,15 +1167,15 @@ impl DashboardHttpRequestControlV1 {
         }
     }
 
-    pub fn request_id(&self) -> tracedecay_application::RequestId {
+    pub fn request_id(&self) -> tracedecay_contracts::RequestId {
         self.request_id.clone()
     }
 
-    pub fn deadline(&self) -> tracedecay_application::Deadline {
+    pub fn deadline(&self) -> tracedecay_contracts::Deadline {
         self.deadline.clone()
     }
 
-    pub fn cancellation(&self) -> &tracedecay_application::CancellationSignal {
+    pub fn cancellation(&self) -> &tracedecay_contracts::CancellationSignal {
         &self.cancellation
     }
 
@@ -1185,7 +1185,7 @@ impl DashboardHttpRequestControlV1 {
 }
 
 struct DashboardHttpCancellationGuard {
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
     completed: bool,
 }
 
@@ -1287,19 +1287,19 @@ fn admit_dashboard_http_control(
     let observed_at = tracedecay_session_memory::context::application_observed_at();
     let sequence = DASHBOARD_HTTP_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let identity = format!("dashboard.http.{}.{}", observed_at.0, sequence);
-    let request_id = match tracedecay_application::RequestId::new(format!("request.{identity}")) {
+    let request_id = match tracedecay_contracts::RequestId::new(format!("request.{identity}")) {
         Ok(request_id) => request_id,
         Err(error) => return Err(Box::new(internal_error_response(error))),
     };
     let cancellation =
-        match tracedecay_application::CancellationSignal::active(format!("cancel.{identity}")) {
+        match tracedecay_contracts::CancellationSignal::active(format!("cancel.{identity}")) {
             Ok(cancellation) => cancellation,
             Err(error) => return Err(Box::new(internal_error_response(error))),
         };
     let request_deadline_micros = dashboard_http_request_deadline_micros(request.uri().path());
     let deadline_at =
         tracedecay_domain::UtcMicros(observed_at.0.saturating_add(request_deadline_micros));
-    let deadline = match tracedecay_application::Deadline::new(deadline_at) {
+    let deadline = match tracedecay_contracts::Deadline::new(deadline_at) {
         Ok(deadline) => deadline,
         Err(error) => return Err(Box::new(internal_error_response(error))),
     };
@@ -2253,11 +2253,11 @@ mod authority_tests {
 
     fn dashboard_lcm_test_control() -> DashboardHttpRequestControlV1 {
         DashboardHttpRequestControlV1 {
-            request_id: tracedecay_application::RequestId::new("request.dashboard-lcm-test")
+            request_id: tracedecay_contracts::RequestId::new("request.dashboard-lcm-test")
                 .expect("dashboard LCM test request"),
-            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
                 .expect("dashboard LCM test deadline"),
-            cancellation: tracedecay_application::CancellationSignal::active(
+            cancellation: tracedecay_contracts::CancellationSignal::active(
                 "cancel.dashboard-lcm-test",
             )
             .expect("dashboard LCM test cancellation"),
@@ -2931,15 +2931,15 @@ mod authority_tests {
     /// native-integration status result.
     #[derive(Clone)]
     struct SingleCollectionRuntime {
-        scope_set: tracedecay_application::AuthorizedScopeSet,
-        native_integration_status: Option<tracedecay_application::NativeIntegrationSurfaceResultV1>,
+        scope_set: tracedecay_contracts::AuthorizedScopeSet,
+        native_integration_status: Option<tracedecay_contracts::NativeIntegrationSurfaceResultV1>,
         rebound_roots: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     }
 
     impl SingleCollectionRuntime {
         fn with_native_integration_status(
             mut self,
-            result: tracedecay_application::NativeIntegrationSurfaceResultV1,
+            result: tracedecay_contracts::NativeIntegrationSurfaceResultV1,
         ) -> Self {
             self.native_integration_status = Some(result);
             self
@@ -2950,7 +2950,7 @@ mod authority_tests {
 
             let capability = "capability.multi-root.query";
             let use_case = "use-case.multi-root.query";
-            let scope = tracedecay_application::ResolvedScope::new(
+            let scope = tracedecay_contracts::ResolvedScope::new(
                 ProjectId::new("project.dashboard-collection").expect("project"),
                 tracedecay_domain::RepositoryId::new("repository.dashboard-collection")
                     .expect("repository"),
@@ -2958,7 +2958,7 @@ mod authority_tests {
                 Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
             )
             .expect("scope");
-            let grant = tracedecay_application::CapabilityGrantSnapshot::new(
+            let grant = tracedecay_contracts::CapabilityGrantSnapshot::new(
                 "grant.dashboard-collection"
                     .to_owned()
                     .try_into()
@@ -2976,22 +2976,22 @@ mod authority_tests {
                 BTreeSet::from([
                     tracedecay_tool_catalog::UseCaseId::new(use_case).expect("use case")
                 ]),
-                tracedecay_application::DisclosureClass::Evidence,
+                tracedecay_contracts::DisclosureClass::Evidence,
             )
             .expect("grant");
-            let context = tracedecay_application::RequestContext::new(
+            let context = tracedecay_contracts::RequestContext::new(
                 tracedecay_domain::ActorId::new("actor.requester").expect("actor"),
                 scope,
                 grant,
-                tracedecay_application::RequestId::new("request.dashboard-collection")
+                tracedecay_contracts::RequestId::new("request.dashboard-collection")
                     .expect("request id"),
-                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(900))
+                tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(900))
                     .expect("deadline"),
-                tracedecay_application::CancellationContext::active("cancel.dashboard-collection")
+                tracedecay_contracts::CancellationContext::active("cancel.dashboard-collection")
                     .expect("cancellation"),
             )
             .expect("context");
-            let scope_set = tracedecay_application::AuthorizedScopeSetAuthority::authorize(
+            let scope_set = tracedecay_contracts::AuthorizedScopeSetAuthority::authorize(
                 tracedecay_domain::ScopeSetId::new(collection).expect("collection id"),
                 tracedecay_domain::ScopeSetRevision::new(1).expect("revision"),
                 vec![context],
@@ -3033,7 +3033,7 @@ mod authority_tests {
 
         fn apply_configuration_batch(
             &self,
-            _request_id: tracedecay_application::RequestId,
+            _request_id: tracedecay_contracts::RequestId,
             _mutations: Vec<tracedecay_configuration::DirectConfigurationMutation>,
             _expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
             _idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey,
@@ -3041,7 +3041,7 @@ mod authority_tests {
             Box::pin(async {
                 Err(
                     DashboardConfigurationApplyError::ApplicationContractViolation(
-                        tracedecay_application::ApplicationContractError::Inconsistent {
+                        tracedecay_contracts::ApplicationContractError::Inconsistent {
                             field: "single-collection test runtime configuration",
                         },
                     ),
@@ -3170,7 +3170,7 @@ mod authority_tests {
     async fn dashboard_serves_the_native_integration_status_application_result() {
         let fixture = DashboardStateFixture::open("project.dashboard-native-status").await;
         let mut state = fixture.state;
-        let projection = tracedecay_application::NativeIntegrationStatusProjectionV1 {
+        let projection = tracedecay_contracts::NativeIntegrationStatusProjectionV1 {
             transaction_id: tracedecay_domain::NativeIntegrationTransactionId::new(
                 "transaction.dashboard.native",
             )
@@ -3198,7 +3198,7 @@ mod authority_tests {
         state.application_invocation_executor = Some(Arc::new(
             SingleCollectionRuntime::persisted("scope-set.dashboard-native")
                 .with_native_integration_status(
-                    tracedecay_application::NativeIntegrationSurfaceResultV1::Status(
+                    tracedecay_contracts::NativeIntegrationSurfaceResultV1::Status(
                         projection.clone(),
                     ),
                 ),
@@ -3248,7 +3248,7 @@ mod authority_tests {
         let doctor_reader: DoctorReportReader = Arc::new(|| {
             Box::pin(async {
                 Err(
-                    tracedecay_application::ApplicationContractError::Inconsistent {
+                    tracedecay_contracts::ApplicationContractError::Inconsistent {
                         field: "dashboard authority test reader",
                     },
                 )

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_application::clock::now_micros;
+use tracedecay_contracts::clock::now_micros;
 use tracing::Instrument;
 
 use tracedecay_domain::{

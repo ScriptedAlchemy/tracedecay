@@ -3,10 +3,10 @@
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
     AdmitWorkSynthesisCommand, AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1,
     CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,

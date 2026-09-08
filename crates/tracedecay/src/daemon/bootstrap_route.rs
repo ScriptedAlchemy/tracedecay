@@ -8,7 +8,7 @@ use super::*;
 
 fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<serde_json::Value> {
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+        tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("MCP bootstrap profile is invalid: {error}"),

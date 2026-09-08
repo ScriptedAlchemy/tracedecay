@@ -6,7 +6,7 @@
 //! method is admitted here: the gateway cannot preflight, approve, apply, or
 //! cancel a native integration, apply edits, or mutate Git through this path.
 
-use tracedecay_application::NativeIntegrationStatusProjectionV1;
+use tracedecay_contracts::NativeIntegrationStatusProjectionV1;
 
 pub const TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD: &str = "tracedecay/nativeIntegrationStatus";
 

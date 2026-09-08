@@ -38,16 +38,16 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
-use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
-use tracedecay_application::{
+use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, LegalAction, RequestId, RetryDirective,
     SafeDiagnostic,
 };
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_domain::{EnrollmentGrantV1, ProjectId};
 
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const MAX_HTTP_APPLICATION_PROJECT_ROUTERS: usize = 8;
@@ -564,7 +564,7 @@ fn outer_application_request_id(
         return Err(OuterApplicationRequestIdError::DuplicateHeader);
     }
     let curate_path = tracedecay_api::retained_route_path(
-        tracedecay_application::retained_surfaces::RetainedSurfaceOperation::FactStoreCurate,
+        tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation::FactStoreCurate,
     );
     if curate_path.strip_prefix('/') != Some(tail) {
         return Err(OuterApplicationRequestIdError::DisallowedOperation);

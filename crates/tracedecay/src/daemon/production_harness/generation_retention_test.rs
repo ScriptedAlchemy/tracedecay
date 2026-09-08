@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     DoctorEvidenceStateV1, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
     DoctorStorageIncompleteReasonV1,
 };
@@ -27,6 +27,14 @@ use tracedecay_semantic_contracts::{
 
 use super::journey_test_support::git;
 use super::*;
+use tracedecay_application::semantic_runtime::{
+    ProjectSemanticActivationExt, RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
+    SemanticVectorGraphScopeV1, SemanticVectorRetentionAuthorizationV1,
+    VerifiedSemanticVectorGraphRuntimeV1, project_semantic_retained_vector_generations,
+};
+use tracedecay_application::store::vector_generations::{
+    GraphVectorGenerationStoreV1, SemanticVectorStageDescriptorV1, VectorGenerationPlanV1,
+};
 use tracedecay_code_index_retention::code_index_generations::{
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
 };
@@ -37,14 +45,6 @@ use tracedecay_store::{
     SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
     SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
     SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1, StoreShardIdV1,
-};
-use tracedecay_usecases::semantic_runtime::{
-    ProjectSemanticActivationExt, RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
-    SemanticVectorGraphScopeV1, SemanticVectorRetentionAuthorizationV1,
-    VerifiedSemanticVectorGraphRuntimeV1, project_semantic_retained_vector_generations,
-};
-use tracedecay_usecases::store::vector_generations::{
-    GraphVectorGenerationStoreV1, SemanticVectorStageDescriptorV1, VectorGenerationPlanV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -172,7 +172,7 @@ async fn set_project_setting(
         .current()
         .await
         .expect("current production configuration");
-    let request = tracedecay_application::ConfigurationSetRequestV1 {
+    let request = tracedecay_contracts::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
             project_id: graph
                 .configuration_runtime()
@@ -1187,7 +1187,7 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
         .expect("current production configuration")
         .revision_id()
         .clone();
-    let request = tracedecay_application::ConfigurationSetRequestV1 {
+    let request = tracedecay_contracts::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project { project_id },
         key: tracedecay_domain::configuration::SettingKey::new(
             crate::config::SEMANTIC_RUNTIME_SETTING_KEY,
@@ -1487,7 +1487,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     let (newest_linked_code, newest_linked_vector) =
         wait_for_semantic_generation(&released, &linked, &newest_linked_code_id).await;
     assert!(
-        tracedecay_usecases::semantic_runtime::project_semantic_retained_code_generation(
+        tracedecay_application::semantic_runtime::project_semantic_retained_code_generation(
             &linked,
             &newer_linked_code_id,
         )
@@ -1541,7 +1541,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         ));
     }
     assert!(
-        tracedecay_usecases::semantic_runtime::project_semantic_retained_code_generation(
+        tracedecay_application::semantic_runtime::project_semantic_retained_code_generation(
             &linked,
             &newer_linked_code_id,
         )

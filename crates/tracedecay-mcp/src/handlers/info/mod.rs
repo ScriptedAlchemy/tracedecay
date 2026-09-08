@@ -75,7 +75,7 @@ pub(super) fn enrich_markdown_sections(
 /// Emits one symbol's markdown-section lane under its outline/read bullet.
 ///
 /// The summary lines themselves are composed in
-/// `tracedecay-usecases::context::markdown_sections`; this adapter only owns
+/// `tracedecay-application::context::markdown_sections`; this adapter only owns
 /// the markdown builder and the two-space bullet continuation indent.
 pub(super) fn render_section_md(md: &mut Md, section: Option<&Value>) {
     let Some(section) = section else {

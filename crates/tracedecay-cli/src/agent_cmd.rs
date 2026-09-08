@@ -309,8 +309,8 @@ fn apply_host_bundle_artifact_action_at(
             message: "artifact backup/restore requires exactly one canonical component".to_string(),
         });
     };
-    let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
-        tracedecay_application::request_identity::GlobalOperationIdentityKind::HostArtifact,
+    let operation_id = tracedecay_contracts::request_identity::mint_global_operation_id(
+        tracedecay_contracts::request_identity::GlobalOperationIdentityKind::HostArtifact,
     )
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("could not generate host artifact operation id: {error}"),
@@ -408,8 +408,8 @@ fn component_set_request(
 ) -> tracedecay_domain::errors::Result<
     tracedecay_agent_hosts::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
 > {
-    let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
-        tracedecay_application::request_identity::GlobalOperationIdentityKind::HostComponentSet,
+    let operation_id = tracedecay_contracts::request_identity::mint_global_operation_id(
+        tracedecay_contracts::request_identity::GlobalOperationIdentityKind::HostComponentSet,
     )
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("could not generate host lifecycle operation id: {error}"),
@@ -1222,8 +1222,8 @@ fn feedback_request(
 ) -> tracedecay_domain::errors::Result<
     tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleExecutionRequestV1,
 > {
-    let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
-        tracedecay_application::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
+    let operation_id = tracedecay_contracts::request_identity::mint_global_operation_id(
+        tracedecay_contracts::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
     )
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("could not generate feedback rollback operation id: {error}"),

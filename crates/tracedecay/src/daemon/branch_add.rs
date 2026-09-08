@@ -654,7 +654,7 @@ fn capture_exact_branch_source_inner<'a>(
             project_identity.clone(),
             scope.repository_id.clone(),
             scope.worktree_id.clone(),
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
         )
         .map_err(|error| {
             TraceDecayError::project_route(

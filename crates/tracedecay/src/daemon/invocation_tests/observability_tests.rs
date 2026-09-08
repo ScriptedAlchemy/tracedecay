@@ -4,9 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tracedecay_application::{
-    ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+use tracedecay_application::observability::{
+    BoundedObservabilityProducerV1, DeliverySettlementRecordOutcomeV1,
+    ObservabilityEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
+    ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
 };
+use tracedecay_contracts::{ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1};
 use tracedecay_daemon_service::{
     DaemonInvocationService, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
@@ -17,11 +20,6 @@ use tracedecay_domain::{
     ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
     ObservabilityTerminalResultV1, ProjectId, RepositoryId, RetrievalQueryObservedV1, UtcMicros,
     WorktreeId, canonical_sha256,
-};
-use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, DeliverySettlementRecordOutcomeV1,
-    ObservabilityEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
-    ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
 };
 
 fn digest(byte: char) -> ManifestDigest {
@@ -326,14 +324,14 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
     );
     let repository_id =
         RepositoryId::new("repository.observability-store-alias").expect("repository id");
-    let root_scope = tracedecay_application::ResolvedScope::new(
+    let root_scope = tracedecay_contracts::ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
         WorktreeId::new("worktree.observability-store-alias").expect("root worktree id"),
         None,
     )
     .expect("root scope");
-    let linked_scope = tracedecay_application::ResolvedScope::new(
+    let linked_scope = tracedecay_contracts::ResolvedScope::new(
         project_id.clone(),
         repository_id,
         WorktreeId::new("worktree.observability-store-alias-linked").expect("linked worktree id"),
@@ -343,7 +341,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
     assert_ne!(root_scope.scope_digest, linked_scope.scope_digest);
     let configuration_revision = digest('1');
     let configuration_provenance_revision = digest('2');
-    let policy_revision = |scope: &tracedecay_application::ResolvedScope| {
+    let policy_revision = |scope: &tracedecay_contracts::ResolvedScope| {
         canonical_sha256(&(
             "tracedecay.daemon.configuration-policy.v1",
             &scope.scope_digest,

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     FactStoreCurateRequestV1, RetainedAutomationExecutionPortV1, RetainedSurfaceExecutionContextV1,
     RetainedSurfaceExecutionFutureV1,
 };

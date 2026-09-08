@@ -951,7 +951,7 @@ impl ProductionProjectCompositionHarnessV1 {
 async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
 ) -> Result<()> {
     // A linked worktree without the `sync.watch_linked_worktrees` opt-in
     // serves but never indexes: no publication can satisfy this wait, and the

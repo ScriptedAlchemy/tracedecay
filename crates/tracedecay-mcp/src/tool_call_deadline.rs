@@ -17,7 +17,7 @@
 //! *because* the deadline elapsed is still read.
 
 use serde_json::{Value, json};
-use tracedecay_application::Deadline;
+use tracedecay_contracts::Deadline;
 use tracedecay_domain::UtcMicros;
 
 /// `_meta` key naming the caller's absolute request deadline, in UTC micros.

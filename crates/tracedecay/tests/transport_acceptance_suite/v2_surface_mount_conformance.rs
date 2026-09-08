@@ -55,7 +55,7 @@ use tracedecay_api::{
     WorkOperation, WorkflowOperation, http_application_full_route_path,
     is_http_application_operation_exposed, retained_application_route_path,
 };
-use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityManifestV1, CatalogSnapshotV1,

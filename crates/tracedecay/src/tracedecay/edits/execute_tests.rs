@@ -2,7 +2,7 @@ use std::fs;
 use std::sync::atomic::AtomicUsize;
 
 use tempfile::tempdir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CancellationStage, Deadline, EffectTermination, IdempotencyKey,
     SourceEditAuthorizationAdmissionV1, SourceEditKind, SourceEditRequest,
     SourceEditRollbackRequestV1, source_edit_operation, source_edit_rollback_operation,

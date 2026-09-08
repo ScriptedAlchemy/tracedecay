@@ -1,7 +1,7 @@
 //! Typed retained session-query mappers over mounted daemon authorities.
 
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+use tracedecay_contracts::retained_surfaces::{
     CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1, RetainedErrorV1,
     RetainedOutcomeStatusV1, SessionCorrelationHitV1, SessionGitRefV1, SessionGitRelationV1,
     SessionsForRequestV1, SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1,
@@ -278,10 +278,10 @@ fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 
         }
         GitCorrelationError::Corrupt(_) => RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
         GitCorrelationError::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         GitCorrelationError::BudgetExhausted => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         error @ (GitCorrelationError::Db(_) | GitCorrelationError::Unavailable(_)) => {
             RetainedSurfaceExecutionErrorV1::unavailable(error.to_string())
@@ -299,25 +299,25 @@ fn limit(value: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
 }
 
 fn time_filter(
-    value: Option<&tracedecay_application::retained_surfaces::RetainedTimeFilterV1>,
+    value: Option<&tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1>,
     bound: SearchTimeBound,
 ) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
     match value {
         None => Ok(None),
-        Some(tracedecay_application::retained_surfaces::RetainedTimeFilterV1::Micros(value)) => {
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Micros(value)) => {
             i64::try_from(*value)
                 .map(Some)
                 .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
         }
-        Some(tracedecay_application::retained_surfaces::RetainedTimeFilterV1::Expression(
-            value,
-        )) => value
-            .parse::<i64>()
-            .ok()
-            .filter(|value| *value >= 0)
-            .or_else(|| parse_search_time_filter_bound(value, current_timestamp(), bound))
-            .map(Some)
-            .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest),
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Expression(value)) => {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .or_else(|| parse_search_time_filter_bound(value, current_timestamp(), bound))
+                .map(Some)
+                .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        }
     }
 }
 

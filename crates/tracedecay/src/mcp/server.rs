@@ -16,7 +16,7 @@ use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::tracedecay::TraceDecay;
-use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
+use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_framing::is_wire_oversized_io_error;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -38,7 +38,7 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 
 use super::tools::default_catalog_discovery_authority;
-use tracedecay_application::ProjectRegistryReadPort;
+use tracedecay_contracts::ProjectRegistryReadPort;
 use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
@@ -154,7 +154,8 @@ pub(crate) type DiagnosticsChangeGenerationResolver =
 /// and a producer without it publishes nothing rather than minting its own file
 /// identity.
 pub(crate) type CodeIndexPublicationIdentityResolver = Arc<
-    dyn tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1 + 'static,
+    dyn tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1
+        + 'static,
 >;
 
 /// Code-index search boundary contracts, owned by the query kernel.
@@ -172,19 +173,19 @@ pub(crate) use tracedecay_query::code_search::*;
 /// request context, authority receipt, policy proof, and authorization service.
 /// None of those authority-bearing values may be supplied by the transport.
 pub(crate) struct SourceEditInvocationV1 {
-    pub(crate) edit: tracedecay_application::SourceEditRequest,
-    pub(crate) idempotency_key: Option<tracedecay_application::IdempotencyKey>,
+    pub(crate) edit: tracedecay_contracts::SourceEditRequest,
+    pub(crate) idempotency_key: Option<tracedecay_contracts::IdempotencyKey>,
     pub(crate) expected_state: Option<tracedecay_domain::ManifestDigest>,
-    pub(crate) request_id: tracedecay_application::RequestId,
-    pub(crate) deadline: tracedecay_application::Deadline,
-    pub(crate) cancellation: tracedecay_application::CancellationSignal,
+    pub(crate) request_id: tracedecay_contracts::RequestId,
+    pub(crate) deadline: tracedecay_contracts::Deadline,
+    pub(crate) cancellation: tracedecay_contracts::CancellationSignal,
 }
 
 pub(crate) type SourceEditFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = tracedecay_domain::errors::Result<
-                    tracedecay_application::source_edit::SourceEditSurfaceResultV1,
+                    tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
                 >,
             > + Send
             + 'static,
@@ -199,15 +200,15 @@ pub(crate) type SourceEditExecutor =
 /// Authority-bearing context and proof fields are deliberately absent: the
 /// daemon-owned executor constructs them from the current project admission.
 pub(crate) struct SourceEditReconciliationInvocationV1 {
-    pub(crate) kind: tracedecay_application::SourceEditKind,
-    pub(crate) effect_id: tracedecay_application::EffectId,
-    pub(crate) idempotency_key: tracedecay_application::IdempotencyKey,
-    pub(crate) attempt_idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(crate) kind: tracedecay_contracts::SourceEditKind,
+    pub(crate) effect_id: tracedecay_contracts::EffectId,
+    pub(crate) idempotency_key: tracedecay_contracts::IdempotencyKey,
+    pub(crate) attempt_idempotency_key: tracedecay_contracts::IdempotencyKey,
     pub(crate) input_digest: tracedecay_domain::ManifestDigest,
-    pub(crate) disposition: tracedecay_application::SourceEditReconciliationDispositionV1,
-    pub(crate) request_id: tracedecay_application::RequestId,
-    pub(crate) deadline: tracedecay_application::Deadline,
-    pub(crate) cancellation: tracedecay_application::CancellationSignal,
+    pub(crate) disposition: tracedecay_contracts::SourceEditReconciliationDispositionV1,
+    pub(crate) request_id: tracedecay_contracts::RequestId,
+    pub(crate) deadline: tracedecay_contracts::Deadline,
+    pub(crate) cancellation: tracedecay_contracts::CancellationSignal,
 }
 
 pub(crate) type SourceEditReconciliationExecutor =
@@ -221,14 +222,14 @@ pub(crate) type SourceEditReconciliationExecutor =
 /// The preimage bytes never cross this boundary either — they stay in the
 /// server-side rollback record and the caller only names public digests.
 pub(crate) struct SourceEditRollbackInvocationV1 {
-    pub(crate) effect_id: tracedecay_application::EffectId,
-    pub(crate) original_idempotency_key: tracedecay_application::IdempotencyKey,
-    pub(crate) idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(crate) effect_id: tracedecay_contracts::EffectId,
+    pub(crate) original_idempotency_key: tracedecay_contracts::IdempotencyKey,
+    pub(crate) idempotency_key: tracedecay_contracts::IdempotencyKey,
     pub(crate) original_input_digest: tracedecay_domain::ManifestDigest,
     pub(crate) expected_state: tracedecay_domain::ManifestDigest,
-    pub(crate) request_id: tracedecay_application::RequestId,
-    pub(crate) deadline: tracedecay_application::Deadline,
-    pub(crate) cancellation: tracedecay_application::CancellationSignal,
+    pub(crate) request_id: tracedecay_contracts::RequestId,
+    pub(crate) deadline: tracedecay_contracts::Deadline,
+    pub(crate) cancellation: tracedecay_contracts::CancellationSignal,
 }
 
 pub(crate) type SourceEditRollbackExecutor =
@@ -280,7 +281,7 @@ pub struct McpServer {
     /// the handle instead of opening a new connection per call.
     global_db: Option<RegisteredGlobalDbLeaseV1>,
     profile_root: Option<PathBuf>,
-    profile_identity: Option<Arc<dyn tracedecay_application::ProfileIdentityReadPort>>,
+    profile_identity: Option<Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
     profile_retained_authority:
         Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
@@ -299,9 +300,9 @@ pub struct McpServer {
     /// prepares under; daemon-owned servers carry the bootstrap worker plan's.
     background_cpu: Option<Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>>,
     project_session_refresh_wake:
-        Option<Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>>,
+        Option<Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>>,
     user_session_refresh_wake:
-        Option<Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>>,
+        Option<Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     /// Exact registered session-store coordinates retained with the project
     /// refresh authority. V2 refresh requests must match these values; caller
@@ -309,7 +310,7 @@ pub struct McpServer {
     project_session_store_id: Option<tracedecay_session_memory::context::SessionStoreId>,
     project_session_root_id: Option<tracedecay_session_memory::context::SessionRootId>,
     session_sync_service:
-        Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
+        Option<std::sync::Weak<dyn tracedecay_contracts::session_sync::SessionSyncServicePort>>,
     project_application_retrieval: Option<MountedProjectApplicationRetrievalV1>,
     project_lcm_authority: Option<Arc<dyn MountedLcmAuthorityPort>>,
     user_lcm_authority: Option<Arc<dyn MountedLcmAuthorityPort>>,
@@ -329,7 +330,7 @@ pub struct McpServer {
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     remote_operational_status:
-        Option<Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>>,
+        Option<Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>>,
     dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
@@ -469,9 +470,9 @@ pub struct McpServer {
         Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     daemon_invocation_service: Option<tracedecay_daemon_service::DaemonInvocationService>,
     delivery_settlement_authority:
-        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+        Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
     delivery_settlement_recorder:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
     /// Daemon-owned route liveness. A failed post-open health check revokes
     /// every tool on retained transports before cache retirement can await.
     project_server_live: Option<Arc<AtomicBool>>,
@@ -490,7 +491,7 @@ impl MountedProjectApplicationRetrievalV1 {
     #[hotpath::measure(label = "mcp.server.retrieval_scope_check")]
     fn retrieval_for_scope(
         &self,
-        expected_scope: &tracedecay_application::ResolvedScope,
+        expected_scope: &tracedecay_contracts::ResolvedScope,
     ) -> Result<Arc<dyn SessionApplicationRetrievalPortV1>> {
         let mounted_scope =
             self.identity
@@ -517,7 +518,7 @@ impl MountedProjectApplicationRetrievalV1 {
 
     fn work_evidence_retrieval(
         &self,
-        expected_scope: &tracedecay_application::ResolvedScope,
+        expected_scope: &tracedecay_contracts::ResolvedScope,
         federated_authority: Arc<
             dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
         >,
@@ -672,7 +673,7 @@ impl McpServer {
         // wake, while the session read authorities still mount.
         if context.project_session_refresh_wake.is_none() && context.project_session_db.is_some() {
             context.project_session_refresh_wake = Some(Arc::new(
-                tracedecay_application::UnavailableSessionTemporalRefreshWake,
+                tracedecay_contracts::UnavailableSessionTemporalRefreshWake,
             ));
         }
         // The daemon mounts the project retained owner at project open, so
@@ -926,7 +927,7 @@ impl McpServer {
         let diagnostics_lsp = match diagnostics_lsp {
             Some(diagnostics_lsp) => diagnostics_lsp,
             None => {
-                tracedecay_usecases::dashboard_diagnostics::open_diagnostic_broker(
+                tracedecay_application::dashboard_diagnostics::open_diagnostic_broker(
                     cg.project_root().to_path_buf(),
                     &cg.store_layout().dashboard_root,
                 )
@@ -1252,7 +1253,7 @@ impl McpServer {
 
     pub(crate) fn profile_identity(
         &self,
-    ) -> Option<&dyn tracedecay_application::ProfileIdentityReadPort> {
+    ) -> Option<&dyn tracedecay_contracts::ProfileIdentityReadPort> {
         self.profile_identity.as_deref()
     }
 
@@ -1291,7 +1292,7 @@ impl McpServer {
     #[hotpath::measure(label = "mcp.server.mount_work_evidence")]
     pub(crate) fn work_evidence_retrieval(
         &self,
-        expected_scope: &tracedecay_application::ResolvedScope,
+        expected_scope: &tracedecay_contracts::ResolvedScope,
         federated_authority: Arc<
             dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
         >,
@@ -1309,14 +1310,14 @@ impl McpServer {
 
     pub(crate) fn project_session_application_retrieval_service(
         &self,
-        expected_scope: &tracedecay_application::ResolvedScope,
+        expected_scope: &tracedecay_contracts::ResolvedScope,
     ) -> Result<Arc<dyn SessionApplicationRetrievalPortV1>> {
         self.project_session_retrieval_for_scope(expected_scope)
     }
 
     fn project_session_retrieval_for_scope(
         &self,
-        expected_scope: &tracedecay_application::ResolvedScope,
+        expected_scope: &tracedecay_contracts::ResolvedScope,
     ) -> Result<Arc<dyn SessionApplicationRetrievalPortV1>> {
         match self.project_application_retrieval.as_ref() {
             Some(mounted) => mounted.retrieval_for_scope(expected_scope),
@@ -1332,7 +1333,7 @@ impl McpServer {
         project_root: &Path,
         project_id: tracedecay_domain::ProjectId,
         configuration_digest: tracedecay_domain::ManifestDigest,
-    ) -> Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>> {
+    ) -> Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>> {
         let project_workflow_index = self.project_session_db.as_ref().map(|database| {
             Arc::new(DaemonWorkflowIndexReadService::new(database.clone()))
                 as Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>
@@ -1480,7 +1481,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 }
 
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    tracedecay_application::request_identity::mcp_connection_request_id(id, connection_scope)
+    tracedecay_contracts::request_identity::mcp_connection_request_id(id, connection_scope)
         .map(|request_id| request_id.as_str().to_owned())
 }
 

@@ -9,11 +9,11 @@
 use axum::body::to_bytes;
 use serde_json::Value;
 use tracedecay_api::{HttpApplicationControls, WorkflowHttpRequest, WorkflowOperation};
-use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::ToolResult;
@@ -112,7 +112,7 @@ fn workflow_controls(
             )
         })?;
     let registry =
-        tracedecay_application::workflow_executable_binding_registry().map_err(|error| {
+        tracedecay_contracts::workflow_executable_binding_registry().map_err(|error| {
             TraceDecayError::project_route(
                 "workflow.catalog_unavailable",
                 false,
@@ -163,7 +163,7 @@ fn workflow_controls(
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
-    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
 
     use super::handle_workflow;

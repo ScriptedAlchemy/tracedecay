@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, CancellationStage, OperationBudgetUsage, OperationReceipt,
     OperationTermination, RequestContext,
 };

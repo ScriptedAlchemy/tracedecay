@@ -136,9 +136,9 @@ pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 pub(super) use tool_call_support::{json_result, text_tool_result};
 
 use serde_json::{Value, json};
-use tracedecay_application::RetainedSurfaceOperation;
+use tracedecay_contracts::RetainedSurfaceOperation;
 #[cfg(test)]
-use tracedecay_application::{
+use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, retained_surface_application_operation,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
@@ -164,7 +164,7 @@ use retained_catalog::dispatch_profile_retained_application_tool;
 use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
-use tracedecay_application::ProjectRegistryReadPort;
+use tracedecay_contracts::ProjectRegistryReadPort;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
@@ -266,7 +266,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     pub(crate) doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) remote_operational_status: Option<
-        std::sync::Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>,
+        std::sync::Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>,
     >,
     pub(crate) code_index_freshness_reader:
         Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
@@ -285,11 +285,11 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) daemon_invocation_service:
         Option<&'a tracedecay_daemon_service::DaemonInvocationService>,
     pub(crate) dashboard_delivery_settlement_authority:
-        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
-    pub application_request_id: Option<tracedecay_application::RequestId>,
-    pub application_deadline: Option<tracedecay_application::Deadline>,
-    pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
-    pub application_invocation_target: tracedecay_application::InvocationTarget,
+        Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
+    pub application_request_id: Option<tracedecay_contracts::RequestId>,
+    pub application_deadline: Option<tracedecay_contracts::Deadline>,
+    pub application_cancellation: Option<tracedecay_contracts::CancellationSignal>,
+    pub application_invocation_target: tracedecay_contracts::InvocationTarget,
     /// The code-index generation authority producers resolve identity through.
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
@@ -321,7 +321,7 @@ pub struct ToolCallRegistryOptions<'a> {
     /// Daemon-owned bounded native transcript and session/Git convergence.
     /// Absence is a typed unavailable authority, never a local store fallback.
     pub(crate) session_sync_service:
-        Option<&'a dyn tracedecay_application::session_sync::SessionSyncServicePort>,
+        Option<&'a dyn tracedecay_contracts::session_sync::SessionSyncServicePort>,
     /// One-shot report from the single verified-graph open funnel
     /// (`dispatch_groups::admitted_graph_query`) back to the top-level
     /// dispatch boundary: set when a graph-backed tool answered from the last
@@ -364,7 +364,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_request_id: None,
             application_deadline: None,
             application_cancellation: None,
-            application_invocation_target: tracedecay_application::InvocationTarget::CurrentProject,
+            application_invocation_target: tracedecay_contracts::InvocationTarget::CurrentProject,
             code_index_publication_identity: None,
             code_index_reconcile_sink: None,
             code_index_search_executor: None,

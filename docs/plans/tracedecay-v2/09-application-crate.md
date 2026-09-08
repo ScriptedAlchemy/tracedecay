@@ -1,12 +1,14 @@
-# TraceDecay V2 application crate
+# TraceDecay V2 application layer
 
 ## Status / role
 
-`tracedecay-application` is the transport-neutral use-case layer between
-product adapters and the domain, query, store, policy, and runtime owners. The
-existing application core continues to provide request context, authorization,
-scope, evidence envelopes, cursors, cancellation, idempotency, receipts, and
-stable problems for shipped operations.
+Plan 09 is implemented across two dependency-ordered crates.
+`tracedecay-contracts` owns the transport-neutral request context,
+authorization, scope, evidence envelopes, cursors, cancellation, idempotency,
+receipts, stable problems, and runtime/storage ports.
+`tracedecay-application` composes those contracts with the query, store,
+configuration, indexing, semantic, session, policy, and runtime owners for
+product adapters.
 
 Completion and activity status is owned solely by
 [the plan-set index](00-plan-set-index.md). This component plan defines
@@ -14,7 +16,7 @@ retained delivery requirements and does not infer milestone status from branch
 artifacts.
 
 **Request-context correction (2026-07-26).** Two live `RequestContext` models
-remain. `crates/tracedecay-application/src/context.rs` carries the required
+remain. `crates/tracedecay-contracts/src/context.rs` carries the required
 `ResolvedScope`; the legacy root model in `src/application/context.rs` carries
 session identity and digests but no scope field. That root model therefore
 cannot satisfy this plan's scope contract. Convergence on the scope-carrying
@@ -27,10 +29,10 @@ by `refactor(usecases): move src/application into tracedecay-usecases`
 (8946d412f5) and since reshaped into the session-identity type that *maps into*
 the application scope rather than carrying a rival context. Exactly one
 `RequestContext` is defined repo-wide — the scope-carrying one at
-`crates/tracedecay-application/src/context.rs:429`, whose
+`crates/tracedecay-contracts/src/context.rs:429`, whose
 `scope: ResolvedScope` is a required field. Scope resolution is
 fail-closed on profile identity:
-`crates/tracedecay-usecases/src/context/mod.rs:182` (`application_scope`)
+`crates/tracedecay-session-memory/src/context/mod.rs:182` (`application_scope`)
 returns `ApplicationScopeError::ProfileIdentityWithoutProject` rather than
 fabricating project/repository/worktree fields from a path or the CWD, and
 `:217` (`session_request_scope`) resolves profile-owned session requests only

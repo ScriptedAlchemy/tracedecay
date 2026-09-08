@@ -1,11 +1,11 @@
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
-use tracedecay_application::ApplicationContractError;
-use tracedecay_usecases::observability::{
+use tracedecay_application::observability::{
     BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
 };
+use tracedecay_contracts::ApplicationContractError;
 
 /// The live observability owners for one registered project-session store.
 ///
@@ -54,7 +54,7 @@ impl StoreObservabilityCoreV1 {
     }
 
     #[hotpath::skip]
-    async fn shutdown(&self) -> Result<(), tracedecay_application::ApplicationContractError> {
+    async fn shutdown(&self) -> Result<(), tracedecay_contracts::ApplicationContractError> {
         let mut first_error = None;
         if let Err(error) = self.work_observations.shutdown().await {
             tracing::warn!(%error, "registered Work owner-observation recovery was incomplete");
@@ -489,7 +489,7 @@ impl RegisteredObservabilityProducerV1 {
 
     pub(crate) fn delivery_settlement_authority(
         &self,
-    ) -> Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1> {
+    ) -> Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1> {
         Arc::clone(&self.delivery_settlement_authority)
     }
 

@@ -21,14 +21,21 @@
 
 use super::*;
 
-use tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION;
-use tracedecay_application::git::NativeIntegrationApprovalProjectionV1;
-use tracedecay_application::git::{
+use tracedecay_application::native_integration::NativeIntegrationStatusBroadcastV1;
+use tracedecay_application::observability::{
+    BoundedObservabilityProducerV1, WorkConflictObservationResultV1,
+    WorkConflictObservationUnavailableV1, record_native_integration_transition,
+    record_work_conflict_observation,
+};
+use tracedecay_application::stack_coordinator::StackCoordinatorErrorV1;
+use tracedecay_contracts::NATIVE_INTEGRATION_APPLY_OPERATION;
+use tracedecay_contracts::git::NativeIntegrationApprovalProjectionV1;
+use tracedecay_contracts::git::{
     NativeWorktreeSurfaceRequest, NativeWorktreeSurfaceResultV1, WorktreeCleanupReconciliationV1,
     WorktreeCleanupRemovalV1, WorktreeConfirmationOutcomeV1, WorktreeContractError,
     WorktreeInspectionOutcomeV1, WorktreeInventoryOutcomeV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CancellationState, NativeIntegrationApplyRequestV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationContractError, NativeIntegrationPortError,
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
@@ -41,19 +48,12 @@ use tracedecay_domain::{
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
 };
 use tracedecay_store::NativeIntegrationStore;
-use tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1;
-use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, WorkConflictObservationResultV1,
-    WorkConflictObservationUnavailableV1, record_native_integration_transition,
-    record_work_conflict_observation,
-};
-use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_agent_hosts::native_integration::stack_signals::{
     signal_from_preflight, signal_from_receipt,
 };
-use tracedecay_application::NativeIntegrationSurfaceRequest;
+use tracedecay_contracts::NativeIntegrationSurfaceRequest;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// How long a minted preview stays approvable. The preview must outlive its
@@ -812,10 +812,10 @@ fn worktree_unavailable_for_operation(
 
 fn registered_topology_request(
     owner: &DaemonNativeIntegrationOwner,
-    snapshot: tracedecay_application::NativeIntegrationStackSnapshotSurfaceRequest,
+    snapshot: tracedecay_contracts::NativeIntegrationStackSnapshotSurfaceRequest,
     observed_at: UtcMicros,
 ) -> Result<
-    tracedecay_application::NativeIntegrationStackResolutionRequestV1,
+    tracedecay_contracts::NativeIntegrationStackResolutionRequestV1,
     NativeIntegrationPortError,
 > {
     let scope_set = owner.authorized_scope_set(
@@ -864,13 +864,13 @@ pub(super) fn live_cancellation_signal(
 
 fn unavailable_native_integration() -> ApplicationProblem {
     ApplicationProblem::Unavailable {
-        classification: tracedecay_application::ApplicationUnavailableClassV1::Authority,
+        classification: tracedecay_contracts::ApplicationUnavailableClassV1::Authority,
         diagnostic: SafeDiagnostic {
             code: "native_integration_runtime_unavailable".to_owned(),
             message: "The native-integration runtime did not complete the request".to_owned(),
         },
         retry: RetryDirective::AfterDelay,
-        legal_actions: vec![tracedecay_application::LegalAction::Retry],
+        legal_actions: vec![tracedecay_contracts::LegalAction::Retry],
     }
 }
 
@@ -900,7 +900,7 @@ fn invalid_native_integration_request() -> ApplicationProblem {
                 .to_owned(),
         },
         retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
     }
 }
 

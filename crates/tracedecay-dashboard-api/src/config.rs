@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_application::storage::{StorageByteSizeV1, StoreKeyV1, StoreSizeBudgetV1};
+use tracedecay_contracts::storage::{StorageByteSizeV1, StoreKeyV1, StoreSizeBudgetV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+pub use tracedecay_application::config::retrieval;
 pub use tracedecay_configuration::config::*;
-pub use tracedecay_usecases::config::retrieval;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetentionConfig {

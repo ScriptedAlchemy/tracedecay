@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Barrier};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, EffectId, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
     ResolvedScope, TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
@@ -422,7 +422,7 @@ fn definition_effects_retain_sources_without_sql_topology_authority() {
         .unwrap()
         .outcome(),
         &WorkflowEffectOutcomeV1::Problem(
-            tracedecay_application::WorkflowEffectProblemV1::InvalidRequest
+            tracedecay_contracts::WorkflowEffectProblemV1::InvalidRequest
         )
     );
 
@@ -849,7 +849,7 @@ fn rejected_effect_replays_the_exact_problem_without_reapplying() {
     assert_eq!(
         retry.terminal().unwrap().outcome(),
         &WorkflowEffectOutcomeV1::Problem(
-            tracedecay_application::WorkflowEffectProblemV1::InvalidRequest
+            tracedecay_contracts::WorkflowEffectProblemV1::InvalidRequest
         )
     );
     assert_eq!(store.count("workflow_handoffs"), 1);
@@ -980,7 +980,7 @@ fn authority_drift_cannot_alias_an_existing_effect_reservation() {
                 UtcMicros(30),
             )
             .unwrap_err(),
-            tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
+            tracedecay_contracts::WorkflowEffectAuthorityErrorV1::IdentityConflict
         );
     }
     assert_eq!(store.count("workflow_definition_source_journal"), 0);
@@ -1008,7 +1008,7 @@ fn prepared_input_cannot_mutate_under_another_inputs_receipt() {
             UtcMicros(20),
         )
         .unwrap_err(),
-        tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
+        tracedecay_contracts::WorkflowEffectAuthorityErrorV1::IdentityConflict
     );
     assert_eq!(store.count("workflow_definition_source_journal"), 0);
 }

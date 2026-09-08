@@ -1,7 +1,7 @@
 //! Projection from automation/store authority receipts into the application terminal.
 
 use crate::automation::AutomationCommittedReceipt;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunRequestV1,
     AutomationRunSummaryV1, AutomationSkipReasonV1, AutomationTaskRequestV1, AutomationTaskV1,
     FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1,

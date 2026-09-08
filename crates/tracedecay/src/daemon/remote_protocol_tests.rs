@@ -1,22 +1,22 @@
 use std::sync::Arc;
 
-use tracedecay_application::remote::auth::{
+use tracedecay_contracts::remote::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1,
 };
-use tracedecay_application::remote::composition::{
+use tracedecay_contracts::remote::composition::{
     AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalEvidenceV1,
     PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1,
     RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAdmissionErrorV1, RemoteCredentialAdmissionPortV1,
     RemoteCredentialAdmissionServiceV1, RemoteCredentialUseV1,
 };
-use tracedecay_application::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
-use tracedecay_application::remote::status::{
+use tracedecay_contracts::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
+use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, DoctorCoverageCompletenessV1,
     PolicyDecisionRef, RemoteListenerReadV1, RemoteOperationalReadV1, ResolvedScope,
 };
@@ -120,7 +120,7 @@ fn remote_query_coverage_does_not_fabricate_unavailable_pending_count() {
     let result = remote_query_result(
         ShardCoverageStateV1::Unknown,
         PendingLocalEvidenceV1::Unavailable {
-            reason: tracedecay_application::remote::composition::PendingLocalUnavailableReasonV1::AuthorityUnavailable,
+            reason: tracedecay_contracts::remote::composition::PendingLocalUnavailableReasonV1::AuthorityUnavailable,
         },
     );
     result

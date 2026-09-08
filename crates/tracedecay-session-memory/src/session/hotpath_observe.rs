@@ -4,7 +4,7 @@
 //! generation identifiers as labels. Every macro expands to a no-op unless
 //! this crate's `hotpath` feature is selected.
 
-use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 
 /// Count one bounded session-retrieval budget stage. Keys stay static; the
 /// stage is never a dynamic label.

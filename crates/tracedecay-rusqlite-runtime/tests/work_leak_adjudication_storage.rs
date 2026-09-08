@@ -3,7 +3,7 @@
 mod common;
 mod work_registered_store;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, VerifiedWorkLeakEvidenceV1, WorkAttemptStoragePort,
     WorkLeakAdjudicationOutcomeV1, WorkLeakAdjudicationReceiptV1,
     WorkLeakAdjudicationStorageErrorV1, WorkLeakAdjudicationStoragePortV1,

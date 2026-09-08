@@ -1,7 +1,7 @@
 //! Exact Work-attempt effect-holder persistence.
 
 use serde::Deserialize;
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1, WorkAttemptEffectResolutionV1,
     WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };

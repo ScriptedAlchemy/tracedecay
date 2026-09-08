@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, RegisteredRootLocatorV1, RequestContext,
     RequestId, ResolvedScope, SharedProfileStoreLocatorV1,

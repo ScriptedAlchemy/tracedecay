@@ -12,7 +12,7 @@ mod work_registered_store;
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{WorkPlacementStorageError, WorkPlacementStoragePort};
+use tracedecay_contracts::{WorkPlacementStorageError, WorkPlacementStoragePort};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
     WorkPlacementBlockerV1, WorkPlacementIdentityV1, WorkPlacementKindV1,

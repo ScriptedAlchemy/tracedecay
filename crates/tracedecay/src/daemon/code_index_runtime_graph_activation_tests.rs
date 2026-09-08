@@ -10,15 +10,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope, now_micros,
-};
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
     scoped_code_index_store_root,
+};
+use tracedecay_contracts::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId, ResolvedScope, now_micros,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_graph_query::{

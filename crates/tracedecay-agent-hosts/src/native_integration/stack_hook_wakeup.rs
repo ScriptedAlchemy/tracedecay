@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
 

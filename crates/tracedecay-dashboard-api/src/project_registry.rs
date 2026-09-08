@@ -6,7 +6,7 @@ use tracedecay_global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
 
-pub use tracedecay_application::{
+pub use tracedecay_contracts::{
     ProjectRegistryEntry, ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup,
     PublicCodeProject,
 };

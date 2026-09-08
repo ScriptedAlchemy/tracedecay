@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use tracedecay_application::{ApplicationProblem, ResultContractRef};
 use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_code_index::intake::content_digest;
+use tracedecay_contracts::{ApplicationProblem, ResultContractRef};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
@@ -337,7 +337,7 @@ async fn admitted_graph_query(
         .as_ref()
         .ok_or_else(|| graph_read_unavailable("the caller cancellation signal is unavailable"))?;
     let operation =
-        tracedecay_application::retrieval::catalog::primitive_read_operation(operation_name)
+        tracedecay_contracts::retrieval::catalog::primitive_read_operation(operation_name)
             .map_err(|error| TraceDecayError::Config {
                 message: format!("invalid graph read operation: {error}"),
             })?
@@ -432,7 +432,7 @@ pub(crate) fn tool_dispatch_ceiling(tool_name: &str) -> std::time::Duration {
 /// apply to a non-positive budget.
 pub(crate) fn tool_dispatch_budget(
     tool_name: &str,
-    deadline: Option<&tracedecay_application::Deadline>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
 ) -> Option<std::time::Duration> {
     let ceiling = tool_dispatch_ceiling(tool_name);
     match deadline {
@@ -1300,17 +1300,18 @@ fn dispatch_retained_application_tools_inner<'a>(
                     tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
                         request_id.as_str(),
                         request,
-                        tracedecay_application::now_micros(),
+                        tracedecay_contracts::now_micros(),
                         deadline.clone(),
                         cancellation.context(),
                     );
-                let policy = if tracedecay_application::retained_surfaces::retained_surface_operation_is_effect(
-                    retained_operation,
-                ) {
-                    InvocationCancellationPolicy::AuthoritativeEffect
-                } else {
-                    InvocationCancellationPolicy::ReadOnly
-                };
+                let policy =
+                    if tracedecay_contracts::retained_surfaces::retained_surface_operation_is_effect(
+                        retained_operation,
+                    ) {
+                        InvocationCancellationPolicy::AuthoritativeEffect
+                    } else {
+                        InvocationCancellationPolicy::ReadOnly
+                    };
                 match hotpath::future!(
                     executor.invoke_controlled(invocation, deadline, cancellation, policy),
                     label = "mcp.retained.invoke"
@@ -1396,16 +1397,16 @@ fn dispatch_retained_application_tools_inner<'a>(
 /// the same way, with the indistinguishable disclosure the retained surface
 /// already uses for a foreign selector.
 async fn restate_selected_project_scope(
-    result: tracedecay_application::ApplicationResult<
-        tracedecay_application::retained_surfaces::RetainedSurfaceResultV1,
+    result: tracedecay_contracts::ApplicationResult<
+        tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1,
     >,
     selected_project_id: &str,
     global_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
     contract: ResultContractRef,
-    request_id: tracedecay_application::RequestId,
+    request_id: tracedecay_contracts::RequestId,
 ) -> Result<
-    tracedecay_application::ApplicationResult<
-        tracedecay_application::retained_surfaces::RetainedSurfaceResultV1,
+    tracedecay_contracts::ApplicationResult<
+        tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1,
     >,
 > {
     use super::tool_call_support::SelectedProjectScopeV1;
@@ -1419,7 +1420,7 @@ async fn restate_selected_project_scope(
             contract.clone(),
             request_id.clone(),
             ApplicationProblem::not_found_or_not_authorized(
-                tracedecay_application::RetryDirective::Never,
+                tracedecay_contracts::RetryDirective::Never,
             ),
         )
     };
@@ -1434,7 +1435,7 @@ async fn restate_selected_project_scope(
         SelectedProjectScopeV1::Restated(scope) => {
             if matches!(
                 envelope.outcome,
-                tracedecay_application::ApplicationOutcome::Evidence(_)
+                tracedecay_contracts::ApplicationOutcome::Evidence(_)
             ) {
                 envelope.scope = *scope;
                 Ok(Ok(envelope))

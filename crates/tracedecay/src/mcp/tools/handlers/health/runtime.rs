@@ -1,6 +1,6 @@
 //! `tracedecay_runtime` — daemon, store, and session-observation health, including the optional doctor report.
 
-use tracedecay_usecases::semantic_runtime::project_lifecycle_status;
+use tracedecay_application::semantic_runtime::project_lifecycle_status;
 
 use super::*;
 
@@ -299,13 +299,13 @@ pub(crate) async fn handle_runtime(
     .await
     .ok()
     .and_then(|pinned| {
-        tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
+        tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
             &pinned.into_current_state(),
         )
         .ok()
     });
     value["semantic_runtime"] = serde_json::to_value(
-        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
+        tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
             Some(cg.project_root()),
             semantic_configuration,
         ),

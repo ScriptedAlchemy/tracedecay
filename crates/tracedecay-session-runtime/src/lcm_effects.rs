@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;

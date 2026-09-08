@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrant, TaskHandoffScope, WorkHandoffFrontierV1, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,

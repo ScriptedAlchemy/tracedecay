@@ -8,7 +8,7 @@ use crate::config::USER_DATA_DIR_ENV;
 
 #[derive(Clone)]
 struct FixtureCodeGraphProjection {
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     store: Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore>,
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
@@ -77,7 +77,7 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for FixtureCodeGraphPro
 
 #[derive(Clone)]
 struct FixtureCodeGraphAdmission {
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
 }
 
 impl tracedecay_graph_query::CodeGraphReadAdmissionPort for FixtureCodeGraphAdmission {
@@ -94,8 +94,8 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for FixtureCodeGraphAdmi
             }
             let actor = tracedecay_domain::ActorId::new("actor.mcp-verified-graph-fixture")
                 .expect("graph fixture actor");
-            let grant = tracedecay_application::CapabilityGrantSnapshot::new(
-                tracedecay_application::CapabilityGrantId::new("grant.mcp-verified-graph-fixture")
+            let grant = tracedecay_contracts::CapabilityGrantSnapshot::new(
+                tracedecay_contracts::CapabilityGrantId::new("grant.mcp-verified-graph-fixture")
                     .expect("graph fixture grant identity"),
                 1,
                 tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
@@ -106,14 +106,14 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for FixtureCodeGraphAdmi
                 self.scope.clone(),
                 BTreeSet::from([request.operation.capability_id().clone()]),
                 BTreeSet::from([request.operation.use_case_id().clone()]),
-                tracedecay_application::DisclosureClass::Evidence,
+                tracedecay_contracts::DisclosureClass::Evidence,
             )
             .map_err(|error| {
                 tracedecay_graph_query::CodeGraphReadError::InvalidRequest {
                     detail: error.to_string(),
                 }
             })?;
-            tracedecay_application::RequestContext::new(
+            tracedecay_contracts::RequestContext::new(
                 actor,
                 self.scope.clone(),
                 grant,
@@ -194,13 +194,13 @@ fn verified_graph_options_with_freshness<'a>(
         .as_micros() as i64;
     if options.application_request_id.is_none() {
         options.application_request_id = Some(
-            tracedecay_application::RequestId::new("request.mcp-verified-graph-fixture")
+            tracedecay_contracts::RequestId::new("request.mcp-verified-graph-fixture")
                 .expect("graph fixture request identity"),
         );
     }
     if options.application_deadline.is_none() {
         options.application_deadline = Some(
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
                 now.saturating_add(30_000_000),
             ))
             .expect("graph fixture deadline"),
@@ -208,7 +208,7 @@ fn verified_graph_options_with_freshness<'a>(
     }
     if options.application_cancellation.is_none() {
         options.application_cancellation = Some(
-            tracedecay_application::CancellationSignal::active("cancel.mcp-verified-graph-request")
+            tracedecay_contracts::CancellationSignal::active("cancel.mcp-verified-graph-request")
                 .expect("graph fixture request cancellation"),
         );
     }
@@ -223,7 +223,7 @@ fn verified_graph_options_with_freshness<'a>(
         tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
             .expect("registered graph fixture scope");
     let cancellation =
-        tracedecay_application::CancellationSignal::active("cancel.mcp-verified-graph-fixture")
+        tracedecay_contracts::CancellationSignal::active("cancel.mcp-verified-graph-fixture")
             .expect("graph fixture cancellation");
     let projection =
         tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore::memory(

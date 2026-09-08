@@ -16,7 +16,7 @@ mod work_registered_store;
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot, CreateWorkProductRequestV1,
     Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
@@ -213,7 +213,7 @@ fn create(
     command: &str,
     occurred_at: UtcMicros,
     items: Vec<WorkItemV1>,
-) -> Result<tracedecay_application::WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
+) -> Result<tracedecay_contracts::WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
     mutations(store).create(
         &context(),
         &binding(),

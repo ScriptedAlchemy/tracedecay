@@ -1,4 +1,4 @@
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
     DoctorStorageFindingKindV1, DoctorStorageFindingV1,

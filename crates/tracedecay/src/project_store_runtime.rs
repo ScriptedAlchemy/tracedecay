@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
+use tracedecay_application::tracedecay::ProjectStoreRuntimeV1;
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
-use tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1;
 
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 

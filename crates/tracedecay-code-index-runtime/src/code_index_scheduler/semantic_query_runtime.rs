@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::task;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     EphemeralSanitizedQueryViewV1, OptionalStagePublicStatus, RetrievalRequest, RetrieverKind,
     SemanticRetrievalContinuationV1,
@@ -25,6 +25,11 @@ use super::registry::unique_mounted_for_scope;
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::SemanticCompatibilityPinsV1;
 use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
+use tracedecay_application::semantic_runtime::{
+    AuthorizedProjectSemanticSearchParametersV1, CommittedRetrievalProfileStateV1,
+    ProductionProjectSemanticSearchBridgeV1, ProductionSemanticRetrievalConfigurationStoreV1,
+    SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
+};
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_set};
@@ -34,11 +39,6 @@ use tracedecay_query::retrieval::semantic::{
     SemanticCompositionExecutionOutcomeV1, SemanticExecutionControl, SemanticQueryModeV1,
     SemanticQueryServiceError, SemanticRerankExecutionPortV1, SemanticRerankReadinessV1,
     SemanticRetrievalRequestV1,
-};
-use tracedecay_usecases::semantic_runtime::{
-    AuthorizedProjectSemanticSearchParametersV1, CommittedRetrievalProfileStateV1,
-    ProductionProjectSemanticSearchBridgeV1, ProductionSemanticRetrievalConfigurationStoreV1,
-    SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
 };
 
 #[derive(Clone)]

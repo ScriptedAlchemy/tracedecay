@@ -1,7 +1,7 @@
 //! Workflow effect journaling and receipt-to-outcome translation.
 
 use serde::Serialize;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, AuthorityReceipt, Deadline, EffectId,
     EffectTermination, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
     TaskHandoffError, TaskHandoffGrant, TaskHandoffRedeemed, WorkflowDefinitionDisposition,

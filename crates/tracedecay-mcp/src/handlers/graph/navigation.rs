@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     CalleeV1, CalleesSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, ImpactSurfaceRequestV1,
     NodeDetailsV1, NodeExpansionCostV1, NodeSurfaceRequestV1,
 };

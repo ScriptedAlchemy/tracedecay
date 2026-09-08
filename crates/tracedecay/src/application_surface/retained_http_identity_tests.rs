@@ -3,11 +3,11 @@ use std::sync::Mutex;
 use axum::body::to_bytes;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     FactStoreAddResultV1, FactStoreRemoveResultV1, RetainedSurfaceOperation,
     RetainedSurfaceResultV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblem, AuthorityReceipt, CancellationSignal,
     CapabilityGrantId, Deadline, DisclosureClass, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, LegalAction, OperationBudgetUsage, OperationReceipt,
@@ -43,7 +43,7 @@ fn effect_receipt(
     outcome: EffectTermination,
 ) -> EffectReceipt {
     EffectReceipt {
-        operation: tracedecay_application::retained_surface_application_operation(operation)
+        operation: tracedecay_contracts::retained_surface_application_operation(operation)
             .expect("retained application operation")
             .use_case_id()
             .clone(),
@@ -146,18 +146,15 @@ impl StaticDaemonResponseExecutor {
     }
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for StaticDaemonResponseExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for StaticDaemonResponseExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
-        Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
-        >,
+        Result<tracedecay_contracts::ApplicationResponse, tracedecay_contracts::InvocationError>,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -188,7 +185,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for StaticDaemonRespon
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,
@@ -228,7 +225,7 @@ async fn invoke_retained_http_with_response(
     );
     let executor = StaticDaemonResponseExecutor::new(response);
     let selected_request_id = request_id.clone();
-    invoke_registered_http::<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1, _>(
+    invoke_registered_http::<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1, _>(
         &executor,
         operation,
         request_id,
@@ -241,7 +238,7 @@ async fn invoke_retained_http_with_response(
             tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
                 scope,
                 outcome,
-            } => tracedecay_application::retained_surface_outcome_matches_terminal(
+            } => tracedecay_contracts::retained_surface_outcome_matches_terminal(
                 operation,
                 &selected_request_id,
                 &scope,
@@ -354,7 +351,7 @@ async fn registered_http_rejects_unbound_partial_effect_receipts_without_exposin
     else {
         unreachable!("fixture is a partial effect");
     };
-    committed_receipt.operation = tracedecay_application::retained_surface_application_operation(
+    committed_receipt.operation = tracedecay_contracts::retained_surface_application_operation(
         RetainedSurfaceOperation::FactStoreAdd,
     )
     .expect("other application operation")
@@ -446,7 +443,7 @@ async fn registered_http_rejects_successes_with_the_wrong_payload_receipt_or_sco
     let ApplicationOutcome::Effect(effect) = &mut wrong_operation else {
         unreachable!("fixture is an effect");
     };
-    effect.receipt.operation = tracedecay_application::retained_surface_application_operation(
+    effect.receipt.operation = tracedecay_contracts::retained_surface_application_operation(
         RetainedSurfaceOperation::FactStoreAdd,
     )
     .expect("other application operation")

@@ -473,7 +473,7 @@ impl Client {
         route: &str,
         request: &Value,
         options: OperationRequestOptions,
-        expected_request_id: Option<&tracedecay_application::RequestId>,
+        expected_request_id: Option<&tracedecay_contracts::RequestId>,
     ) -> Result<ApplicationResponse, ClientError> {
         admit_canonical_sdk_http_binding(operation_id, binding_id, route)?;
         let route = route.strip_prefix("/application").ok_or_else(|| {
@@ -605,7 +605,7 @@ impl Client {
     fn decode_application_response(
         &self,
         response: Response,
-        expected_request_id: Option<&tracedecay_application::RequestId>,
+        expected_request_id: Option<&tracedecay_contracts::RequestId>,
     ) -> Result<ApplicationResponse, ClientError> {
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -669,7 +669,7 @@ fn admit_canonical_sdk_http_binding(
     static BINDINGS: OnceLock<Result<CanonicalSdkHttpBindings, String>> = OnceLock::new();
     let bindings = BINDINGS
         .get_or_init(|| {
-            let registry = tracedecay_application::sdk_executable_binding_registry()
+            let registry = tracedecay_contracts::sdk_executable_binding_registry()
                 .map_err(|error| error.to_string())?;
             Ok(registry
                 .iter()
@@ -1483,7 +1483,7 @@ impl ProblemError {
         if let Some(object) = canonical_envelope.as_object_mut() {
             object.remove("binding_id");
         }
-        let decoded: tracedecay_application::ApplicationProblemEnvelope =
+        let decoded: tracedecay_contracts::ApplicationProblemEnvelope =
             serde_json::from_value(canonical_envelope)
                 .map_err(|error| protocol(status, format!("invalid problem envelope: {error}")))?;
         if !status_matches_problem(status, decoded.problem.kind()) {
@@ -1673,11 +1673,8 @@ impl ProblemError {
     }
 }
 
-fn status_matches_problem(
-    status: u16,
-    kind: tracedecay_application::ApplicationProblemKind,
-) -> bool {
-    use tracedecay_application::ApplicationProblemKind;
+fn status_matches_problem(status: u16, kind: tracedecay_contracts::ApplicationProblemKind) -> bool {
+    use tracedecay_contracts::ApplicationProblemKind;
     status
         == match kind {
             ApplicationProblemKind::InvalidRequest => 400,

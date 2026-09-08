@@ -22,8 +22,8 @@ const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
 struct McpSemanticExecutionControlV1<A> {
     started: std::time::Instant,
     admission_provider: A,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 impl<A> McpSemanticExecutionControlV1<A> {
@@ -31,17 +31,17 @@ impl<A> McpSemanticExecutionControlV1<A> {
         mcp_search_request_termination(
             self.deadline.as_ref(),
             self.cancellation.as_ref(),
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros().0,
         )
     }
 }
 
 pub fn mcp_search_request_termination(
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
     now_micros: i64,
 ) -> Option<code_search::CodeIndexSearchUnavailableReasonV1> {
-    if cancellation.is_some_and(tracedecay_application::CancellationSignal::is_cancelled) {
+    if cancellation.is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled) {
         return Some(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled);
     }
     deadline
@@ -1279,7 +1279,7 @@ mod tests {
     use std::process::Command;
     use std::sync::atomic::AtomicBool;
 
-    use tracedecay_application::ResolvedScope;
+    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{AuthorizationRevision, PrincipalId, ProjectId};
     use tracedecay_query::code_search::{
         CodeIndexSearchAuthorityV1, CodeIndexSearchModeV1, CodeIndexSearchOutcomeV1,

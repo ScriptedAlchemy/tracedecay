@@ -128,8 +128,8 @@ fn facts_read_status(coverage: &memory_service::MemoryFactsCoverageV1) -> Memory
     let graph_complete = matches!(
         coverage.graph,
         None | Some(
-            tracedecay_application::memory::FactSearchGraphCoverageV1::Complete { .. }
-                | tracedecay_application::memory::FactSearchGraphCoverageV1::NotApplicable
+            tracedecay_contracts::memory::FactSearchGraphCoverageV1::Complete { .. }
+                | tracedecay_contracts::memory::FactSearchGraphCoverageV1::NotApplicable
         )
     );
     if coverage.completeness == DashboardCoverageCompletenessV1::Complete && graph_complete {
@@ -922,7 +922,7 @@ pub async fn oplog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_application::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
+    use tracedecay_contracts::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
 
     fn fact_coverage(
         completeness: DashboardCoverageCompletenessV1,
@@ -938,15 +938,15 @@ mod tests {
     }
 
     fn request_control(
-        cancellation: tracedecay_application::CancellationSignal,
+        cancellation: tracedecay_contracts::CancellationSignal,
         deadline: i64,
     ) -> DashboardHttpRequestControlV1 {
         DashboardHttpRequestControlV1 {
-            request_id: tracedecay_application::RequestId::new(
+            request_id: tracedecay_contracts::RequestId::new(
                 "request.dashboard-memory-status-test",
             )
             .expect("request identity"),
-            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(deadline))
+            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(deadline))
                 .expect("request deadline"),
             cancellation,
             observed_at: tracedecay_domain::UtcMicros(1),
@@ -998,10 +998,9 @@ mod tests {
 
     #[test]
     fn read_failures_preserve_live_request_terminal_state() {
-        let cancellation = tracedecay_application::CancellationSignal::active(
-            "cancel.dashboard-memory-status-test",
-        )
-        .expect("cancellation signal");
+        let cancellation =
+            tracedecay_contracts::CancellationSignal::active("cancel.dashboard-memory-status-test")
+                .expect("cancellation signal");
         let control = request_control(cancellation.clone(), i64::MAX);
         assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
         assert_eq!(
@@ -1009,7 +1008,7 @@ mod tests {
             DashboardDomainStateV1::Cancelled,
         );
 
-        let cancellation = tracedecay_application::CancellationSignal::active(
+        let cancellation = tracedecay_contracts::CancellationSignal::active(
             "cancel.dashboard-memory-timeout-status-test",
         )
         .expect("cancellation signal");

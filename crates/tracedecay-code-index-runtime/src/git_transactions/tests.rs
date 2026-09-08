@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationStage, GitIndexApplyRequestV1, GitIndexTransactionPort,
     GitIndexTransactionPortError, OperationTermination,
 };

@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeTimelineRequest,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
     CodeQueryScope, CodeRelationRequest, CodeSymbolSearchRequest, Deadline, DisclosureClass,
     ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest, PhraseSearchRequest,
@@ -38,17 +38,17 @@ use crate::semantic_code::{
     production_fastembed_catalog,
 };
 #[cfg(feature = "semantic-fastembed")]
+use tracedecay_application::semantic_runtime::{
+    ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
+    SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
+};
+#[cfg(feature = "semantic-fastembed")]
 use tracedecay_graph_db::NeverCancelled;
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_semantic_contracts::{DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings};
-#[cfg(feature = "semantic-fastembed")]
-use tracedecay_usecases::semantic_runtime::{
-    ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
-    SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
-};
 
 use super::registry::{
     ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
@@ -2399,14 +2399,14 @@ fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
 /// entries are what the census costs; bytes are not.
 #[test]
 fn oversized_generations_still_produce_a_complete_retention_finding() {
-    use tracedecay_application::doctor::DoctorCoverageCompletenessV1;
-    use tracedecay_application::storage::{
-        CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
-        code_generation_retention_finding,
-    };
     use tracedecay_code_index_retention::code_index_generations::{
         DEFAULT_SUPERSEDED_GENERATION_FLOOR, GenerationDigestVerificationV1,
         plan_code_generation_retention_with_verification,
+    };
+    use tracedecay_contracts::doctor::DoctorCoverageCompletenessV1;
+    use tracedecay_contracts::storage::{
+        CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
+        code_generation_retention_finding,
     };
 
     const ONE_GIB: u64 = 1024 * 1024 * 1024;
@@ -2490,7 +2490,7 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     // complete census produces at this size is the backlog itself.
     assert_eq!(
         finding.finding().state(),
-        tracedecay_application::doctor::DoctorEvidenceStateV1::Stale
+        tracedecay_contracts::doctor::DoctorEvidenceStateV1::Stale
     );
 }
 
@@ -2543,7 +2543,7 @@ impl SemanticExecutionControl for ReadySemanticControlV1 {
 }
 
 fn application_context(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     repository: RepositoryId,
     worktree: WorktreeId,
 ) -> RequestContext {
@@ -2555,8 +2555,7 @@ fn application_context(
     )
     .expect("resolved scope");
     let grant = CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new("grant.code-index.fixture")
-            .expect("grant id"),
+        tracedecay_contracts::CapabilityGrantId::new("grant.code-index.fixture").expect("grant id"),
         1,
         ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest"),
         ActorId::new("actor.code-index.issuer").expect("issuer"),
@@ -2734,21 +2733,21 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
     );
     for (state, reason) in [
         (
-            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
                 completed_units: 1,
                 total_units: 2,
             },
             "semantic_indexing",
         ),
         (
-            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Degraded {
+            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
                 active_generation: None,
                 reason: SemanticFallbackReasonV1::RuntimeFailure,
             },
             "semantic_degraded",
         ),
         (
-            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Failed {
+            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Failed {
                 model_id: "model.fixture".to_owned(),
                 artifact_digest: format!("sha256:{}", "a".repeat(64)),
                 detail: "fixture failure".to_owned(),
@@ -6456,7 +6455,7 @@ fn ordinary_background_reconcile_does_not_supersede_in_flight_text_work() {
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    let control = tracedecay_usecases::code_index::DaemonCodeIndexControlV1::new(
+    let control = tracedecay_application::code_index::DaemonCodeIndexControlV1::new(
         Arc::clone(&scheduler.epoch),
         Arc::clone(&scheduler.shutting_down),
     );
@@ -6481,7 +6480,7 @@ fn observed_change_after_neutral_wake_supersedes_in_flight_text_work() {
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    let control = tracedecay_usecases::code_index::DaemonCodeIndexControlV1::new(
+    let control = tracedecay_application::code_index::DaemonCodeIndexControlV1::new(
         Arc::clone(&scheduler.epoch),
         Arc::clone(&scheduler.shutting_down),
     );
@@ -11745,7 +11744,8 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
 /// machinery the production provider resolves.
 #[cfg(feature = "semantic-fastembed")]
 struct IsolatedSemanticVectorGraphProviderV1 {
-    graph: Arc<tracedecay_usecases::store::vector_generations::IsolatedSemanticEvaluationGraphV1>,
+    graph:
+        Arc<tracedecay_application::store::vector_generations::IsolatedSemanticEvaluationGraphV1>,
     current: tracedecay_domain::CodeGenerationId,
     generation_reads: std::sync::atomic::AtomicUsize,
 }
@@ -11756,7 +11756,7 @@ impl IsolatedSemanticVectorGraphProviderV1 {
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> Arc<Self> {
         let graph =
-            tracedecay_usecases::store::vector_generations::isolated_semantic_evaluation_graph(
+            tracedecay_application::store::vector_generations::isolated_semantic_evaluation_graph(
                 &[generation],
                 Arc::new(NeverCancelled),
             )
@@ -14144,7 +14144,7 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
         let scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        tracedecay_usecases::code_index::DaemonCodeIndexControlV1::new(
+        tracedecay_application::code_index::DaemonCodeIndexControlV1::new(
             Arc::clone(&scheduler.epoch),
             Arc::clone(&scheduler.shutting_down),
         )
@@ -14352,6 +14352,16 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use tracedecay_application::diagnostics_publication::{
+        CodeIndexPublicationIdentityPortV1, CompilerDiagnosticPublicationOutcomeV1,
+        publish_compiler_diagnostics_through_code_index_v1,
+    };
+    use tracedecay_application::diagnostics_store::DiagnosticsStore;
+    use tracedecay_application::lsp_runtime::{
+        DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
+        LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
+        LspFeedbackDocumentSnapshotPort, LspFeedbackProjectionScope,
+    };
     use tracedecay_domain::feedback::{
         FeedbackCycleId, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
         FeedbackDiagnosticClassificationV1, FeedbackDiagnosticProducerV1,
@@ -14361,16 +14371,6 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     };
     use tracedecay_domain::{ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan};
     use tracedecay_lsp::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure, LspRuntimeFuture};
-    use tracedecay_usecases::diagnostics_publication::{
-        CodeIndexPublicationIdentityPortV1, CompilerDiagnosticPublicationOutcomeV1,
-        publish_compiler_diagnostics_through_code_index_v1,
-    };
-    use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
-    use tracedecay_usecases::lsp_runtime::{
-        DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
-        LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
-        LspFeedbackDocumentSnapshotPort, LspFeedbackProjectionScope,
-    };
 
     struct FixedDocument(String);
 
@@ -14445,7 +14445,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     .await
     .expect("open diagnostics database");
 
-    let parsed = tracedecay_usecases::diagnose::parse_cargo_output(
+    let parsed = tracedecay_application::diagnose::parse_cargo_output(
         "error[E0308]: mismatched types\n  --> src/lib.rs:2:22\n",
     );
     assert_eq!(parsed.len(), 1, "fixture cargo output must parse");
@@ -14611,7 +14611,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
         Arc::new(
-            tracedecay_usecases::feedback::diagnostics::DatabaseDiagnosticStore::new(
+            tracedecay_application::feedback::diagnostics::DatabaseDiagnosticStore::new(
                 database.clone(),
             ),
         ),
@@ -14689,11 +14689,11 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 /// the LSP projection could only refuse.
 #[tokio::test]
 async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
-    use tracedecay_domain::ComponentVersion;
-    use tracedecay_usecases::diagnostics_publication::{
+    use tracedecay_application::diagnostics_publication::{
         CompilerDiagnosticPublicationOutcomeV1, publish_compiler_diagnostics_through_code_index_v1,
     };
-    use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
+    use tracedecay_application::diagnostics_store::DiagnosticsStore;
+    use tracedecay_domain::ComponentVersion;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let database_root = TempDir::new().expect("database root");
@@ -14713,7 +14713,7 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     .expect("open diagnostics database");
     let store = DiagnosticsStore::new(database.clone());
 
-    let parsed = tracedecay_usecases::diagnose::parse_cargo_output(
+    let parsed = tracedecay_application::diagnose::parse_cargo_output(
         "error[E0308]: mismatched types\n  --> src/lib.rs:1:1\n",
     );
     let outcome = publish_compiler_diagnostics_through_code_index_v1(
@@ -16468,8 +16468,8 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         crate::config::resolver::resolve_configuration(&configuration_registry, &[layer])
             .expect("resolve configured native graph refusal")
             .snapshot;
-    let config = tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
-        tracedecay_usecases::config::RuntimeConfigurationTarget {
+    let config = tracedecay_application::config::PinnedRuntimeConfiguration::new(
+        tracedecay_application::config::RuntimeConfigurationTarget {
             project_id: test_project_id(),
             project_root: fixture.path().to_path_buf(),
         },
@@ -17381,9 +17381,9 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
     .expect("registered runtime");
     let database = runtime.project_database_arc().expect("project database");
     let producer = Arc::new(
-        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+        tracedecay_application::observability::BoundedObservabilityProducerV1::start(
             database.clone(),
-            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+            tracedecay_application::observability::ObservabilityProducerIdentityV1 {
                 authorized_scope_ref: scope.project_id.as_str().to_owned(),
                 process_boot_id: "boot:code-index-readiness".to_owned(),
                 producer_revision: "code-index-readiness-test.v1".to_owned(),
@@ -17493,9 +17493,9 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
     .expect("registered runtime");
     let database = runtime.project_database_arc().expect("project database");
     let producer = Arc::new(
-        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+        tracedecay_application::observability::BoundedObservabilityProducerV1::start(
             database.clone(),
-            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+            tracedecay_application::observability::ObservabilityProducerIdentityV1 {
                 authorized_scope_ref: scope.project_id.as_str().to_owned(),
                 process_boot_id: "boot:code-index-observability".to_owned(),
                 producer_revision: "code-index-observability-test.v1".to_owned(),
@@ -17536,20 +17536,21 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
     registry.shutdown().await;
     producer.shutdown().await.expect("flush producer");
 
-    let port =
-        tracedecay_usecases::observability::RegisteredObservabilityPortV1::new(database.as_ref());
+    let port = tracedecay_application::observability::RegisteredObservabilityPortV1::new(
+        database.as_ref(),
+    );
     let observability_query =
-        |event_kinds: Vec<String>| tracedecay_application::ObservabilityQueryV1 {
+        |event_kinds: Vec<String>| tracedecay_contracts::ObservabilityQueryV1 {
             authorized_scope_ref: scope.project_id.as_str().to_owned(),
             event_kinds,
-            horizon: tracedecay_application::ObservabilityHorizonV1 {
+            horizon: tracedecay_contracts::ObservabilityHorizonV1 {
                 since_micros: 0,
                 until_micros: i64::MAX,
             },
             after_watermark: None,
             limit: 256,
         };
-    let index_page = tracedecay_application::ObservabilityQueryPort::query(
+    let index_page = tracedecay_contracts::ObservabilityQueryPort::query(
         &port,
         observability_query(vec!["index.measurement.observed.v1".to_owned()]),
     )
@@ -17566,7 +17567,7 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
         "a published reconcile must leave a canonical publication observation"
     );
 
-    let retrieval_page = tracedecay_application::ObservabilityQueryPort::query(
+    let retrieval_page = tracedecay_contracts::ObservabilityQueryPort::query(
         &port,
         observability_query(vec![
             "retrieval.planner.decided.v1".to_owned(),

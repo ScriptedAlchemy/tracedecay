@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
-use tracedecay_application::CancellationSignal;
+use tracedecay_contracts::CancellationSignal;
 use tracedecay_daemon_identity::invocation_client_for_current;
 use tracedecay_daemon_protocol::{
     DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption,

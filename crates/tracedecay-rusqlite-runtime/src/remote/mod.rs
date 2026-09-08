@@ -11,7 +11,7 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use thiserror::Error;
-use tracedecay_application::remote::{
+use tracedecay_contracts::remote::{
     auth::{
         RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
         RemoteEnrollmentAuthorityPortV1, RemoteEnrollmentCommitReceiptV1,
@@ -37,7 +37,7 @@ use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlValue,
 };
 use crate::repository::RetainedExactSqlCapability;
-use tracedecay_application::{
+use tracedecay_contracts::{
     OperationBudgetUsage,
     remote::replay::{
         RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,

@@ -3,10 +3,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 #[cfg(test)]
-use tracedecay_application::context_scout::ContextScoutFeedbackV1;
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::ContextScoutFeedbackV1;
+use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
@@ -675,7 +675,7 @@ async fn dispatch_decoded(
     started: Instant,
     admission: &DaemonAdmissionPort<'_>,
     delivery: &impl AsyncHookFeedbackDeliveryPortV1<
-        tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
     >,
 ) -> HookDispatch {
     let PreparedBoundHook {
@@ -837,7 +837,7 @@ pub(crate) async fn commit_context_scout_feedback(
 
 fn render_host_delivery(
     guidance: Option<String>,
-    feedback_notice: Option<&tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>,
+    feedback_notice: Option<&tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: bool,
 ) -> Option<String> {
     let notice = feedback_notice

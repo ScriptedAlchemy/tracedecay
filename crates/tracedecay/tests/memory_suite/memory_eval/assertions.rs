@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use tracedecay_application::retained_surfaces::FactFeedbackActionV1;
+use tracedecay_contracts::retained_surfaces::FactFeedbackActionV1;
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
-use tracedecay_application::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
+use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
 
 use crate::commands::reject_truncation_envelope;
 use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};

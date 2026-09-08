@@ -12,32 +12,32 @@ static BRANCH_REF_READ_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
 enum BranchRouteReadErrorV1 {
     Capacity,
     Task,
-    Ref(tracedecay_application::branch_snapshots::LocalBranchSnapshotErrorV1),
+    Ref(tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1),
 }
 
 async fn run_branch_ref_read<T, F>(
     project_root: std::path::PathBuf,
     max_refs: usize,
     after: Option<String>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
     operation: F,
 ) -> std::result::Result<T, BranchRouteReadErrorV1>
 where
     T: Send + 'static,
     F: FnOnce(
             &Path,
-            &tracedecay_application::branch_snapshots::LocalBranchReadControlV1,
+            &tracedecay_contracts::branch_snapshots::LocalBranchReadControlV1,
         ) -> std::result::Result<
             T,
-            tracedecay_application::branch_snapshots::LocalBranchSnapshotErrorV1,
+            tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1,
         > + Send
         + 'static,
 {
     let permit = Arc::clone(&BRANCH_REF_READ_ADMISSION)
         .try_acquire_owned()
         .map_err(|_| BranchRouteReadErrorV1::Capacity)?;
-    let terminal_control = tracedecay_application::branch_snapshots::LocalBranchReadControlV1 {
+    let terminal_control = tracedecay_contracts::branch_snapshots::LocalBranchReadControlV1 {
         max_refs,
         after: after.clone(),
         deadline: deadline.clone(),
@@ -47,7 +47,7 @@ where
         let _permit = permit;
         operation(
             &project_root,
-            &tracedecay_application::branch_snapshots::LocalBranchReadControlV1 {
+            &tracedecay_contracts::branch_snapshots::LocalBranchReadControlV1 {
                 max_refs,
                 after,
                 deadline,
@@ -74,7 +74,7 @@ where
 }
 
 fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
-    use tracedecay_application::branch_snapshots::LocalBranchSnapshotErrorV1;
+    use tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1;
 
     match error {
         BranchRouteReadErrorV1::Capacity => ("branch_read_capacity_unavailable", true),
@@ -108,8 +108,8 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
 pub(crate) async fn handle_branch_list(
     cg: &TraceDecay,
     args: Value,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let limit = args
         .get("limit")
@@ -270,8 +270,8 @@ pub(crate) async fn handle_branch_search(
     args: Value,
     executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let branch = args
         .get("branch")
@@ -517,8 +517,8 @@ pub(crate) async fn handle_branch_diff(
     args: Value,
     executor: Option<&crate::mcp::server::CodeIndexBranchDiffExecutor>,
     authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let base_name = args
         .get("base")
@@ -770,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_branch_ref_read_owns_worker_until_settlement() {
         let cancellation =
-            tracedecay_application::CancellationSignal::active("branch-ref-owned-settlement")
+            tracedecay_contracts::CancellationSignal::active("branch-ref-owned-settlement")
                 .expect("cancellation");
         let worker_cancellation = cancellation.clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -788,7 +788,7 @@ mod tests {
             },
         ));
         started_rx.await.expect("blocking worker started");
-        cancellation.cancel(tracedecay_application::clock::now_micros());
+        cancellation.cancel(tracedecay_contracts::clock::now_micros());
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(25), &mut read)
                 .await
@@ -799,7 +799,7 @@ mod tests {
         assert!(matches!(
             read.await.expect("branch read task"),
             Err(BranchRouteReadErrorV1::Ref(
-                tracedecay_application::branch_snapshots::LocalBranchSnapshotErrorV1::Cancelled
+                tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1::Cancelled
             ))
         ));
     }

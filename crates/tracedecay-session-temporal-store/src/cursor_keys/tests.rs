@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use tempfile::tempdir;
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::{IntoParams, params};

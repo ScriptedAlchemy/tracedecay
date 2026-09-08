@@ -3,11 +3,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_usecases::primitives::{
+use tracedecay_application::primitives::{
     ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
     open_production_primitive_runtime,
 };
-use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 
 use crate::daemon::DaemonInvocationState;
 use crate::mcp::McpServer;

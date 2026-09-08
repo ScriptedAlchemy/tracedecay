@@ -7,7 +7,7 @@
 //! aggregate, and every state a transition passes through is appended to an
 //! immutable journal.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
     WorkflowDefinitionLifecycleState, WorkflowDefinitionTransitionEntry,
     WorkflowDefinitionTransitionOutcome,
@@ -237,7 +237,7 @@ fn decode_transition(
     let to_revision = decode_revision(sql_integer(&row.values, 0))?;
     let from_revision = decode_revision(sql_integer(&row.values, 1))?;
     let operation = sql_text(&row.values, 2)
-        .and_then(tracedecay_application::WorkflowLifecycleOperation::from_operation_key)
+        .and_then(tracedecay_contracts::WorkflowLifecycleOperation::from_operation_key)
         .ok_or(DispositionError::Corrupt)?;
     let from_state = decode_state(sql_text(&row.values, 3))?;
     let to_state = decode_state(sql_text(&row.values, 4))?;

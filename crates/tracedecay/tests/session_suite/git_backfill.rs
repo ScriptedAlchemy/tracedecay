@@ -15,6 +15,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::ProjectId;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -23,7 +24,6 @@ use tracedecay_sessions::runtime::git_correlation::{
     SessionsForQuery, normalize_worktree,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::observation::ObservationCancellation;
 
 use crate::common;
 

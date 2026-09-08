@@ -16,7 +16,7 @@ doctest = false
 hotpath = [
     "hotpath/hotpath",
     "hotpath/tokio",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-code-index-retention/hotpath",
@@ -34,12 +34,12 @@ hotpath = [
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-application/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-code-index-retention/hotpath-alloc",
@@ -57,12 +57,12 @@ hotpath-alloc = [
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-code-index-retention/hotpath-cpu",
@@ -80,7 +80,7 @@ hotpath-cpu = [
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
 ]
 # Cross-crate fixture surface for composition-root store-runtime tests:
 # schema-convergence gates and remote-recovery authority reads exercised by
@@ -98,7 +98,7 @@ sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
@@ -116,7 +116,7 @@ tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version =
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"

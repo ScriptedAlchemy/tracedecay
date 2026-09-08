@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use tracedecay_application::session_sync::{
+use tracedecay_contracts::session_sync::{
     SessionSyncCommandV1, SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1,
     SessionSyncRequestV1, SessionSyncScopeV1, SessionTranscriptImportV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId, now_micros,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};

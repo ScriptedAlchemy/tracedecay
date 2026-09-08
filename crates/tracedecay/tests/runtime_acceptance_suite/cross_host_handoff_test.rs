@@ -1,6 +1,7 @@
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_application::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -13,7 +14,6 @@ use tracedecay_runtime_core::privacy::{
 };
 use tracedecay_sessions::admission::{HostAdmissionScope, HostAdmissionStatus};
 use tracedecay_store::{ObservationReplayRequest, StoredObservation};
-use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
 const PROJECT_ID: &str = "project.cross-host-handoff";
 const PROJECT_PATH: &str = "repo://cross-host-handoff";

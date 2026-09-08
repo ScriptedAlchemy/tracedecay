@@ -6,7 +6,7 @@
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use tracedecay_application::ApplicationProblemKind;
+use tracedecay_contracts::ApplicationProblemKind;
 
 #[cfg(any(feature = "hotpath", test))]
 pub(crate) const fn problem_kind_label(kind: ApplicationProblemKind) -> &'static str {
@@ -69,7 +69,7 @@ pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
 #[cfg(test)]
 mod tests {
     use super::problem_kind_label;
-    use tracedecay_application::ApplicationProblemKind;
+    use tracedecay_contracts::ApplicationProblemKind;
 
     #[test]
     fn problem_kind_labels_are_the_typed_snake_case_names() {

@@ -16,7 +16,7 @@ pub use verified::{
     verified_trait_dispatch_targets,
 };
 
-use tracedecay_application::retrieval::PrimitiveNotFoundV1;
+use tracedecay_contracts::retrieval::PrimitiveNotFoundV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::{ToolResult, text_tool_result};

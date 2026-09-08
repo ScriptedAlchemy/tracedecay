@@ -8,7 +8,7 @@ use crate::ToolDefinition;
 type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 
 pub(super) fn observatory_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
-    let registry = tracedecay_application::mcp_executable_binding_registry()
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .map_err(|error| crate::McpCatalogError::Initialization(error.to_string()))?;
     let operation_id = OperationId::new("operation.application.observatory_read".to_owned())
         .map_err(|_| invalid_observatory_discovery("MCP Observatory operation identity"))?;
@@ -48,7 +48,7 @@ mod tests {
             .expect("observatory definition")
             .pop()
             .expect("one observatory definition");
-        let registry = tracedecay_application::mcp_executable_binding_registry()
+        let registry = tracedecay_contracts::mcp_executable_binding_registry()
             .expect("observatory executable registry");
         let operation = OperationId::new("operation.application.observatory_read".to_owned())
             .expect("observatory operation id");

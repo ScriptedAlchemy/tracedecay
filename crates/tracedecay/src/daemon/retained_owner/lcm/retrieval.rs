@@ -4,13 +4,13 @@ use std::collections::BTreeMap;
 
 use futures_util::stream::{self, StreamExt};
 
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     LcmDescribeRequestV1, LcmDescribeResultV1, LcmDescribeTargetV1, LcmExpandQueryRequestV1,
     LcmExpandRequestV1, LcmExpandResultV1, LcmExpandTargetV1, LcmGrepRequestV1, LcmGrepResultV1,
     LcmGrepSortV1, LcmLoadSessionRequestV1, LcmLoadSessionResultV1, LcmNodeIdV1, LcmSearchScopeV1,
     RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
 };
 use tracedecay_domain::{HydrationStateV1, RetrievalGrainV1, SessionId, TemporalModeV1};
@@ -665,10 +665,10 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
         }
         SessionRetrievalServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         SessionRetrievalServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         SessionRetrievalServiceOutcome::Locked => RetainedSurfaceExecutionErrorV1::unavailable(
             "the session store is locked for retrieval",
@@ -715,10 +715,10 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
             RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
         }
         LcmDescribeServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         LcmDescribeServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         LcmDescribeServiceOutcome::Locked => RetainedSurfaceExecutionErrorV1::unavailable(
             "the session store is locked for retrieval",
@@ -760,10 +760,10 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
             RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
         }
         LcmExpandServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         LcmExpandServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         LcmExpandServiceOutcome::Locked => RetainedSurfaceExecutionErrorV1::unavailable(
             "the session store is locked for retrieval",
@@ -1077,7 +1077,7 @@ fn default_context_budget() -> ContextBudget {
 
 #[cfg(test)]
 mod refusal_tests {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblemKind, CancellationStage, LegalAction, RetainedSurfaceExecutionErrorV1,
         RetryDirective, retained_surface_execution_problem,
     };
@@ -1172,7 +1172,7 @@ fn bounded_limit(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
     };
 

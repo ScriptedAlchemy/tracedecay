@@ -316,7 +316,7 @@ async fn lsp_file_diagnostics(
     let language = adapter.language.clone();
     let documents = documents_for_adapter(cg.project_root(), &adapter, vec![path.clone()])
         .await
-        .map_err(tracedecay_usecases::analyzer_runtime_config_error)?;
+        .map_err(tracedecay_application::analyzer_runtime_config_error)?;
     if documents.is_empty() {
         return Ok(None);
     }

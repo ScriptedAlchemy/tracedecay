@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
     CreateWorkCommand, Deadline, DisclosureClass, ReplanDependenciesCommand, RequestContext,
     RequestId, ResolvedScope, ReviewProposalCommand, WorkProjectionPortError,
@@ -473,7 +473,7 @@ fn append_is_idempotent_cas_checked_and_exactly_scope_bound() {
         .unwrap_err();
     assert_eq!(
         concealed.kind(),
-        tracedecay_application::ApplicationProblemKind::NotFoundOrNotAuthorized
+        tracedecay_contracts::ApplicationProblemKind::NotFoundOrNotAuthorized
     );
 }
 

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 use tracedecay_query::search_quality::{CandidateWorkloadV1, SearchEvalError, packaged};
 

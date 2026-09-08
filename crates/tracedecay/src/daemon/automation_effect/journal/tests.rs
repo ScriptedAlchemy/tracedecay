@@ -2,7 +2,9 @@ use super::*;
 
 use serde_json::json;
 use std::collections::BTreeMap;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_automation_runtime::automation::AutomationCommittedReceipt;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
+use tracedecay_contracts::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
     AutomationTaskRequestV1, AutomationTaskV1, MemoryAutomationCurationReceiptV1,
@@ -10,10 +12,8 @@ use tracedecay_application::retained_surfaces::{
     RetainedSurfaceResultV1, SessionReflectorRunInputV1, UserJobRunInputV1,
     retained_surface_application_operation, retained_surface_execution_problem,
 };
-use tracedecay_automation_runtime::automation::AutomationCommittedReceipt;
-use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemEnvelope, AuthorityReceipt, Deadline, DisclosureClass,
     EffectId, EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationBudgetUsage,
     OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
@@ -132,7 +132,7 @@ fn admission(run_id: &str, request_id: &str) -> DurableAutomationAdmission {
         input_digest: digest('0'),
         configuration_digest: digest('2'),
         effect_authority_digest: digest('a'),
-        grant_id: tracedecay_application::CapabilityGrantId::new("grant.memory-journal")
+        grant_id: tracedecay_contracts::CapabilityGrantId::new("grant.memory-journal")
             .expect("grant"),
         grant_revision: 1,
         grant_digest: digest('6'),
@@ -183,13 +183,13 @@ fn session_reflector_admission(run_id: &str, request_id: &str) -> DurableAutomat
         task: AutomationTaskRequestV1::SessionReflector(SessionReflectorRunInputV1 {
             provider: "cursor".to_owned(),
             query: "project timed-out session evidence".to_owned(),
-            scope: tracedecay_application::retained_surfaces::LcmSearchScopeV1::Current,
+            scope: tracedecay_contracts::retained_surfaces::LcmSearchScopeV1::Current,
             session_id: None,
             include_summaries: true,
             evidence_limit: 5,
             include_recent_sessions: false,
             recent_sessions_limit: 1,
-            sort: tracedecay_application::retained_surfaces::LcmGrepSortV1::Recency,
+            sort: tracedecay_contracts::retained_surfaces::LcmGrepSortV1::Recency,
             source: None,
             role: None,
             start_time: None,
@@ -254,16 +254,16 @@ fn retirement_admission_for_recovery_project(
             .expect("retirement recovery scope");
     let mut admission = admission(run_id, request_id);
     admission.request.task = AutomationTaskRequestV1::SessionReflector(
-        tracedecay_application::retained_surfaces::SessionReflectorRunInputV1 {
+        tracedecay_contracts::retained_surfaces::SessionReflectorRunInputV1 {
             provider: "cursor".to_owned(),
             query: "retire exact shipped proposal history".to_owned(),
-            scope: tracedecay_application::retained_surfaces::LcmSearchScopeV1::Current,
+            scope: tracedecay_contracts::retained_surfaces::LcmSearchScopeV1::Current,
             session_id: None,
             include_summaries: true,
             evidence_limit: 5,
             include_recent_sessions: false,
             recent_sessions_limit: 1,
-            sort: tracedecay_application::retained_surfaces::LcmGrepSortV1::Recency,
+            sort: tracedecay_contracts::retained_surfaces::LcmGrepSortV1::Recency,
             source: None,
             role: None,
             start_time: None,
@@ -310,7 +310,7 @@ fn retained_external_authority(
 ) {
     use std::collections::BTreeSet;
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CancellationSignal, CapabilityGrantSnapshot, RequestContext,
         RetainedSurfaceExecutionContextV1,
     };
@@ -644,7 +644,7 @@ fn partial_receipt_template(request_id: &RequestId, scope: &ResolvedScope) -> Ef
 
 fn authority(scope: &ResolvedScope) -> AuthorityReceipt {
     AuthorityReceipt {
-        grant_id: tracedecay_application::CapabilityGrantId::new("grant.memory-journal")
+        grant_id: tracedecay_contracts::CapabilityGrantId::new("grant.memory-journal")
             .expect("grant"),
         grant_revision: 1,
         grant_digest: digest('6'),
@@ -686,10 +686,11 @@ fn retirement_terminal(admission: &DurableAutomationAdmission) -> AutomationSett
         admission.request.run_id.as_str(),
         AutomationTaskV1::SessionReflector,
         AutomationRunTerminalV1::Skipped {
-            reason: tracedecay_application::retained_surfaces::AutomationSkipReasonV1::from_ledger_reason(
-                "shipped_fact_proposal_history_retired",
-            )
-            .expect("retirement skip reason"),
+            reason:
+                tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1::from_ledger_reason(
+                    "shipped_fact_proposal_history_retired",
+                )
+                .expect("retirement skip reason"),
             summary: AutomationRunSummaryV1 {
                 reviewed_count: 0,
                 accepted_count: 0,
@@ -1040,7 +1041,7 @@ fn cancellation_does_not_suppress_an_already_durable_terminal_replay() {
     let terminal = success_terminal(&admission, "run.cancelled-replay");
     persist_terminal_blocking(&path, &admission, terminal.clone()).expect("terminal");
     let cancellation =
-        tracedecay_application::CancellationSignal::active("cancellation.durable-replay")
+        tracedecay_contracts::CancellationSignal::active("cancellation.durable-replay")
             .expect("cancellation");
     assert!(cancellation.cancel(UtcMicros(20)));
 
@@ -1689,16 +1690,16 @@ fn durable_journal_reports_changed_task_identity_as_a_conflict() {
     reserve_or_replay_blocking(&path, original).expect("reserve");
     let mut changed = admission("run.memory-journal", "request.memory-journal");
     changed.request.task = AutomationTaskRequestV1::SessionReflector(
-        tracedecay_application::retained_surfaces::SessionReflectorRunInputV1 {
+        tracedecay_contracts::retained_surfaces::SessionReflectorRunInputV1 {
             provider: "cursor".to_owned(),
             query: "changed task".to_owned(),
-            scope: tracedecay_application::retained_surfaces::LcmSearchScopeV1::Current,
+            scope: tracedecay_contracts::retained_surfaces::LcmSearchScopeV1::Current,
             session_id: None,
             include_summaries: true,
             evidence_limit: 5,
             include_recent_sessions: false,
             recent_sessions_limit: 1,
-            sort: tracedecay_application::retained_surfaces::LcmGrepSortV1::Recency,
+            sort: tracedecay_contracts::retained_surfaces::LcmGrepSortV1::Recency,
             source: None,
             role: None,
             start_time: None,
@@ -2006,7 +2007,7 @@ fn physical_reopen_retains_original_grant_when_current_registration_rotates() {
     let original = admission("run.memory-journal", "request.memory-journal");
     reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
     let rotated_grant =
-        tracedecay_application::CapabilityGrantId::new("grant.rotated").expect("rotated grant");
+        tracedecay_contracts::CapabilityGrantId::new("grant.rotated").expect("rotated grant");
     let reopened = read_indexed_record_blocking(&path)
         .expect("physical reopen")
         .expect("record");
@@ -2163,7 +2164,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let failed = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,
         &dashboard_root,
-        &tracedecay_application::CancellationSignal::active(
+        &tracedecay_contracts::CancellationSignal::active(
             "cancellation.terminal-retirement-failure",
         )
         .expect("failure cancellation"),
@@ -2287,7 +2288,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let rejected = recovery_index::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
-        &tracedecay_application::CancellationSignal::active(
+        &tracedecay_contracts::CancellationSignal::active(
             "cancellation.terminal-retirement-mismatch",
         )
         .expect("mismatch cancellation"),
@@ -2306,7 +2307,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let recovered = recovery_index::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
-        &tracedecay_application::CancellationSignal::active(
+        &tracedecay_contracts::CancellationSignal::active(
             "cancellation.terminal-retirement-recovery",
         )
         .expect("recovery cancellation"),
@@ -2351,7 +2352,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let entry_plus_marker = recovery_index::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
-        &tracedecay_application::CancellationSignal::active(
+        &tracedecay_contracts::CancellationSignal::active(
             "cancellation.terminal-retirement-entry-plus-marker",
         )
         .expect("entry-plus-marker cancellation"),
@@ -2400,7 +2401,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let replayed = recovery_index::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
-        &tracedecay_application::CancellationSignal::active(
+        &tracedecay_contracts::CancellationSignal::active(
             "cancellation.terminal-retirement-idempotent",
         )
         .expect("idempotent cancellation"),
@@ -2442,7 +2443,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
         recovery_index::reconcile_reserved_automation_effects_for_project(
             &reopened,
             &dashboard_root,
-            &tracedecay_application::CancellationSignal::active(
+            &tracedecay_contracts::CancellationSignal::active(
                 "cancellation.terminal-retirement-archive-live-source",
             )
             .expect("archive-live-source cancellation"),
@@ -2821,7 +2822,7 @@ async fn post_write_reservation_error_retains_reserved_journal_and_pending_recov
     let report = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
-        &tracedecay_application::CancellationSignal::active("cancellation.post-write-reservation")
+        &tracedecay_contracts::CancellationSignal::active("cancellation.post-write-reservation")
             .expect("recovery cancellation"),
     )
     .await
@@ -2882,7 +2883,7 @@ async fn prewrite_reservation_error_retains_index_until_missing_journal_recovery
     let report = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
-        &tracedecay_application::CancellationSignal::active("cancellation.prewrite-reservation")
+        &tracedecay_contracts::CancellationSignal::active("cancellation.prewrite-reservation")
             .expect("recovery cancellation"),
     )
     .await
@@ -2913,10 +2914,8 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
     let report = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
-        &tracedecay_application::CancellationSignal::active(
-            "cancellation.clean-eof-corrupt-intent",
-        )
-        .expect("recovery cancellation"),
+        &tracedecay_contracts::CancellationSignal::active("cancellation.clean-eof-corrupt-intent")
+            .expect("recovery cancellation"),
     )
     .await
     .expect("project-open corrupt-intent repair");
@@ -2976,7 +2975,7 @@ async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() 
     let report = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
-        &tracedecay_application::CancellationSignal::active("cancellation.partial-corrupt-intent")
+        &tracedecay_contracts::CancellationSignal::active("cancellation.partial-corrupt-intent")
             .expect("recovery cancellation"),
     )
     .await
@@ -3055,7 +3054,7 @@ fn cancellation_observed_under_lock_leaves_foreign_reservation_pending() {
     let mut reopened = original.clone();
     reopened.process_run_id = "process.reopened".to_owned();
     let cancellation =
-        tracedecay_application::CancellationSignal::active("cancellation.memory-journal.recovery")
+        tracedecay_contracts::CancellationSignal::active("cancellation.memory-journal.recovery")
             .expect("cancellation");
     assert!(cancellation.cancel(UtcMicros(20)));
     assert!(
@@ -3716,7 +3715,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let recovery = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
-        &tracedecay_application::CancellationSignal::active("cancellation.corrupt-spool-recovery")
+        &tracedecay_contracts::CancellationSignal::active("cancellation.corrupt-spool-recovery")
             .expect("recovery cancellation"),
     )
     .await

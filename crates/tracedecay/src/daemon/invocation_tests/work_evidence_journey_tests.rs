@@ -3,7 +3,7 @@ use super::*;
 use std::collections::BTreeSet;
 
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, PrepareWorkProductMutationRequestV1, StartWorkAttemptCommand,
     WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1, WorkAttemptStoragePort,
@@ -357,11 +357,11 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         UtcMicros(journey_now.0.saturating_sub(60_000_000)),
         UtcMicros(journey_now.0.saturating_add(600_000_000)),
         scope.clone(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
             .collect(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
             .collect(),

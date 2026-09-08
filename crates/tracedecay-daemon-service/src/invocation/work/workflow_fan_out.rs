@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_application::{ApplicationProblem, RequestContext};
+use tracedecay_contracts::{ApplicationProblem, RequestContext};
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -18,14 +18,14 @@ pub(crate) use recovery::{WorkflowFanOutRecoveryOwnerV1, reconcile_active_workfl
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reconcile_workflow_fan_out(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     mut projection: tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
     attempt_processes: Arc<super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     project_root: &Path,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
     let initial_sequence = projection.sequence();
@@ -66,7 +66,7 @@ pub(super) fn reconcile_workflow_fan_out(
         );
         return Ok(projection);
     }
-    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
@@ -134,7 +134,7 @@ pub(super) fn reconcile_workflow_fan_out(
             }
             match work.attempts().status(
                 context,
-                &tracedecay_application::WorkAttemptStatusRequestV1 {
+                &tracedecay_contracts::WorkAttemptStatusRequestV1 {
                     task_id: identity.task_id().clone(),
                     run_id: identity.run_id().clone(),
                     attempt_id: identity.attempt_id().clone(),
@@ -251,7 +251,7 @@ pub(super) fn reconcile_workflow_fan_out(
             }
             admit_workflow_child(registered, context, &work, child, observed_at)?;
             let product_binding = workflow_product_binding()?;
-            let product = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+            let product = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
                 &registered.database,
                 product_binding.clone(),
             )
@@ -264,7 +264,7 @@ pub(super) fn reconcile_workflow_fan_out(
                     &product_binding,
                     &revisions,
                     &registered.work_topology_policy,
-                    tracedecay_application::StartWorkAttemptCommand {
+                    tracedecay_contracts::StartWorkAttemptCommand {
                         task_id: child.task_id.clone(),
                         run_id: child.attempt_identity.run_id().clone(),
                         attempt_id: child.attempt_identity.attempt_id().clone(),
@@ -317,13 +317,13 @@ pub(super) fn reconcile_workflow_fan_out(
 
 fn reconcile_cancelled_fan_out(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     projection: tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
 ) -> Result<(tracedecay_domain::WorkflowRunProjection, bool), DaemonInvocationProblem> {
-    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
@@ -347,7 +347,7 @@ fn reconcile_cancelled_fan_out(
             }
             match work.attempts().status(
                 context,
-                &tracedecay_application::WorkAttemptStatusRequestV1 {
+                &tracedecay_contracts::WorkAttemptStatusRequestV1 {
                     task_id: child.task_id.clone(),
                     run_id: child.attempt_identity.run_id().clone(),
                     attempt_id: child.attempt_identity.attempt_id().clone(),
@@ -380,7 +380,7 @@ fn reconcile_cancelled_fan_out(
 }
 
 fn settle_workflow_fan_out(
-    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     attempts: &[tracedecay_domain::WorkAttemptV1],
@@ -486,7 +486,7 @@ fn settle_workflow_fan_out(
 
 fn request_fan_out_cancellation(
     context: &RequestContext,
-    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     terminal: &[tracedecay_domain::WorkAttemptV1],
@@ -502,7 +502,7 @@ fn request_fan_out_cancellation(
         }
         let Ok(attempt) = services.attempts().status(
             context,
-            &tracedecay_application::WorkAttemptStatusRequestV1 {
+            &tracedecay_contracts::WorkAttemptStatusRequestV1 {
                 task_id: child.task_id.clone(),
                 run_id: child.attempt_identity.run_id().clone(),
                 attempt_id: child.attempt_identity.attempt_id().clone(),
@@ -528,7 +528,7 @@ fn request_fan_out_cancellation(
             .attempts()
             .request_cancellation(
                 context,
-                tracedecay_application::CancelWorkAttemptCommand {
+                tracedecay_contracts::CancelWorkAttemptCommand {
                     task_id: child.task_id.clone(),
                     run_id: child.attempt_identity.run_id().clone(),
                     attempt_id: child.attempt_identity.attempt_id().clone(),
@@ -544,7 +544,7 @@ fn request_fan_out_cancellation(
 }
 
 fn apply_scheduler_command(
-    services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
     command: tracedecay_domain::WorkflowRunCommand,
     operation: &str,
@@ -565,7 +565,7 @@ fn apply_scheduler_command(
         digest.as_str()
     ))
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-    tracedecay_application::WorkflowRunService::new(services.effects().clone())
+    tracedecay_contracts::WorkflowRunService::new(services.effects().clone())
         .apply(
             projection.run_id(),
             projection.sequence(),
@@ -582,12 +582,12 @@ fn apply_scheduler_command(
 pub(crate) fn admit_workflow_child(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
-    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
     occurred_at: UtcMicros,
 ) -> Result<(), DaemonInvocationProblem> {
-    let selection = tracedecay_application::WorkProductSelectionScopeV1::relations(
-        [tracedecay_application::WorkRelationScopeV1::Repository {
+    let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
+        [tracedecay_contracts::WorkRelationScopeV1::Repository {
             project_id: context.scope().project_id.clone(),
             repository_id: context.scope().repository_id.clone(),
         }]
@@ -596,7 +596,7 @@ pub(crate) fn admit_workflow_child(
     )
     .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
     let binding = workflow_product_binding()?;
-    let product = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+    let product = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
         &registered.database,
         binding.clone(),
     )
@@ -618,12 +618,12 @@ pub(crate) fn admit_workflow_child(
                 .create(
                     context,
                     &binding,
-                    tracedecay_application::CreateWorkProductRequestV1 {
+                    tracedecay_contracts::CreateWorkProductRequestV1 {
                         selection: selection.clone(),
                         initial_graph,
-                        mutation: tracedecay_application::WorkProductMutationIdentityV1 {
+                        mutation: tracedecay_contracts::WorkProductMutationIdentityV1 {
                             expected_authority:
-                                tracedecay_application::WorkProductExpectedAuthorityV1::NoPriorGraph,
+                                tracedecay_contracts::WorkProductExpectedAuthorityV1::NoPriorGraph,
                             command_id: child.create_command_id.clone(),
                             causation_event_id: None,
                             evidence: Vec::new(),
@@ -641,7 +641,7 @@ pub(crate) fn admit_workflow_child(
                 context,
                 &binding,
                 selection.clone(),
-                tracedecay_application::WorkProductChangeDraftV1::CreateTask {
+                tracedecay_contracts::WorkProductChangeDraftV1::CreateTask {
                     initiative: child.initiative.clone(),
                     plan: child.plan.clone(),
                     milestone: child.milestone.clone(),
@@ -669,7 +669,7 @@ pub(crate) fn admit_workflow_child(
             context,
             &binding,
             selection.clone(),
-            tracedecay_application::WorkProductChangeDraftV1::DecideProposal {
+            tracedecay_contracts::WorkProductChangeDraftV1::DecideProposal {
                 proposal: child.proposal.clone(),
                 disposition: tracedecay_domain::WorkProposalDispositionV1::Accepted,
             },
@@ -698,7 +698,7 @@ pub(crate) fn admit_workflow_child(
             context,
             &binding,
             selection,
-            tracedecay_application::WorkProductChangeDraftV1::AdmitExecution {
+            tracedecay_contracts::WorkProductChangeDraftV1::AdmitExecution {
                 task_id: child.task_id.clone(),
             },
             child.admit_command_id.clone(),
@@ -712,8 +712,8 @@ pub(crate) fn admit_workflow_child(
 }
 
 pub(crate) fn workflow_product_binding()
--> Result<tracedecay_application::WorkProductBindingV1, DaemonInvocationProblem> {
-    Ok(tracedecay_application::WorkProductBindingV1::new(
+-> Result<tracedecay_contracts::WorkProductBindingV1, DaemonInvocationProblem> {
+    Ok(tracedecay_contracts::WorkProductBindingV1::new(
         CapabilityId::new("capability.work.mutate_graph")
             .map_err(|_| DaemonInvocationProblem::Unavailable)?,
         UseCaseId::new("use-case.work.mutate_graph")
@@ -723,26 +723,26 @@ pub(crate) fn workflow_product_binding()
 
 pub(crate) fn workflow_product_revision_pins(
     registered: &RegisteredWorkRuntime,
-) -> Result<tracedecay_application::WorkProductRevisionPinsV1, DaemonInvocationProblem> {
+) -> Result<tracedecay_contracts::WorkProductRevisionPinsV1, DaemonInvocationProblem> {
     super::preparation::current_work_product_revision_pins(registered)
         .map_err(|_| DaemonInvocationProblem::Unavailable)
 }
 
 fn current_workflow_product_graph(
-    product: &tracedecay_usecases::work::RegisteredWorkProductServicesV1,
+    product: &tracedecay_application::work::RegisteredWorkProductServicesV1,
     context: &RequestContext,
-    selection: tracedecay_application::WorkProductSelectionScopeV1,
+    selection: tracedecay_contracts::WorkProductSelectionScopeV1,
     observed_at: UtcMicros,
 ) -> Result<Option<tracedecay_domain::WorkProductGraphV1>, DaemonInvocationProblem> {
     match product.reads().read_graph(
         context,
-        tracedecay_application::WorkGraphReadRequestV1::current(selection, observed_at),
+        tracedecay_contracts::WorkGraphReadRequestV1::current(selection, observed_at),
     ) {
-        Ok(tracedecay_application::WorkGraphReadV1::Current { snapshot, .. }) => {
+        Ok(tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. }) => {
             Ok(Some(snapshot.graph().clone()))
         }
         Ok(_) => Err(DaemonInvocationProblem::Unavailable),
-        Err(tracedecay_application::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => {
+        Err(tracedecay_contracts::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => {
             Ok(None)
         }
         Err(_) => Err(DaemonInvocationProblem::Unavailable),
@@ -768,11 +768,11 @@ fn workflow_child_task_matches(
 #[allow(clippy::too_many_arguments)]
 fn apply_workflow_child_product_mutation(
     registered: &RegisteredWorkRuntime,
-    product: &tracedecay_usecases::work::RegisteredWorkProductServicesV1,
+    product: &tracedecay_application::work::RegisteredWorkProductServicesV1,
     context: &RequestContext,
-    binding: &tracedecay_application::WorkProductBindingV1,
-    selection: tracedecay_application::WorkProductSelectionScopeV1,
-    change: tracedecay_application::WorkProductChangeDraftV1,
+    binding: &tracedecay_contracts::WorkProductBindingV1,
+    selection: tracedecay_contracts::WorkProductSelectionScopeV1,
+    change: tracedecay_contracts::WorkProductChangeDraftV1,
     command_id: tracedecay_domain::WorkCommandId,
     occurred_at: UtcMicros,
 ) -> Result<(), DaemonInvocationProblem> {
@@ -782,7 +782,7 @@ fn apply_workflow_child_product_mutation(
         .prepare_mutation(
             context,
             binding,
-            tracedecay_application::PrepareWorkProductMutationRequestV1 {
+            tracedecay_contracts::PrepareWorkProductMutationRequestV1 {
                 selection,
                 change,
                 causation_event_id: None,
@@ -806,15 +806,17 @@ pub(crate) fn reconcile_workflow_fan_out_after_attempt(
     project_root: &Path,
     identity: &tracedecay_domain::WorkAttemptIdentityV1,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
 ) {
-    let Ok(services) = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
-        &registered.database,
-    ) else {
+    let Ok(services) =
+        tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
+            &registered.database,
+        )
+    else {
         return;
     };
-    let Ok(projection) = tracedecay_application::WorkflowRunStoragePort::projection(
+    let Ok(projection) = tracedecay_contracts::WorkflowRunStoragePort::projection(
         services.effects(),
         identity.run_id(),
     ) else {
@@ -844,7 +846,7 @@ pub(super) fn synchronize_fan_out_run_controls(
     paused: bool,
     occurred_at: UtcMicros,
 ) -> Result<(), DaemonInvocationProblem> {
-    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
@@ -858,7 +860,7 @@ pub(super) fn synchronize_fan_out_run_controls(
             }
             let reading = match work.run_control().read(
                 context,
-                &tracedecay_application::WorkRunControlRequestV1 {
+                &tracedecay_contracts::WorkRunControlRequestV1 {
                     task_id: child.task_id.clone(),
                     run_id: child.attempt_identity.run_id().clone(),
                 },
@@ -868,11 +870,11 @@ pub(super) fn synchronize_fan_out_run_controls(
                 Err(_) => return Err(DaemonInvocationProblem::Unavailable),
             };
             match (paused, reading) {
-                (true, tracedecay_application::WorkRunControlReadingV1::Uncontrolled { .. }) => {
+                (true, tracedecay_contracts::WorkRunControlReadingV1::Uncontrolled { .. }) => {
                     work.run_control()
                         .pause(
                             context,
-                            tracedecay_application::PauseWorkRunCommand {
+                            tracedecay_contracts::PauseWorkRunCommand {
                                 task_id: child.task_id.clone(),
                                 run_id: child.attempt_identity.run_id().clone(),
                                 reason: tracedecay_domain::WorkRunControlReasonV1::OperatorRequest,
@@ -884,12 +886,12 @@ pub(super) fn synchronize_fan_out_run_controls(
                 }
                 (
                     true,
-                    tracedecay_application::WorkRunControlReadingV1::Controlled { control, .. },
+                    tracedecay_contracts::WorkRunControlReadingV1::Controlled { control, .. },
                 ) if control.state() == tracedecay_domain::WorkRunControlStateV1::Running => {
                     work.run_control()
                         .pause(
                             context,
-                            tracedecay_application::PauseWorkRunCommand {
+                            tracedecay_contracts::PauseWorkRunCommand {
                                 task_id: child.task_id.clone(),
                                 run_id: child.attempt_identity.run_id().clone(),
                                 reason: tracedecay_domain::WorkRunControlReasonV1::OperatorRequest,
@@ -901,12 +903,12 @@ pub(super) fn synchronize_fan_out_run_controls(
                 }
                 (
                     false,
-                    tracedecay_application::WorkRunControlReadingV1::Controlled { control, .. },
+                    tracedecay_contracts::WorkRunControlReadingV1::Controlled { control, .. },
                 ) if control.state() == tracedecay_domain::WorkRunControlStateV1::Paused => {
                     work.run_control()
                         .resume(
                             context,
-                            tracedecay_application::ResumeWorkRunCommand {
+                            tracedecay_contracts::ResumeWorkRunCommand {
                                 task_id: child.task_id.clone(),
                                 run_id: child.attempt_identity.run_id().clone(),
                                 reason: tracedecay_domain::WorkRunControlReasonV1::OperatorRequest,

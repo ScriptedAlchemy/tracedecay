@@ -24,13 +24,13 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationRequest, WorkOperation, WorkflowOperation,
     application_problem_response, is_http_application_operation_exposed, sse_response,
 };
-pub use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_application::git::{
+pub use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_contracts::git::{
     GitHubStackSignalExpandSurfaceRequest, NativeWorktreeSurfaceRequest,
 };
-use tracedecay_application::handlers::CanonicalApplicationDispatcher;
-use tracedecay_application::retrieval::{HealthDeltaRequest, PrimitiveRequest};
-use tracedecay_application::{
+use tracedecay_contracts::handlers::CanonicalApplicationDispatcher;
+use tracedecay_contracts::retrieval::{HealthDeltaRequest, PrimitiveRequest};
+use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     ApplicationResult, CancellationContext, CancellationSignal, CancellationStage,
@@ -58,12 +58,21 @@ use crate::catalog_composition::{
     ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
     compose_application_catalog_with,
 };
-use tracedecay_application::feedback::observations::{
+use tracedecay_application::operation_stream::{
+    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    OperationRequestControls,
+};
+use tracedecay_application::primitives::{
+    CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
+    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, QualifiedNamePrimitiveRequest,
+    SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest, StorageStatusPrimitiveRequest,
+};
+use tracedecay_contracts::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
     FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
 };
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-pub use tracedecay_application::{
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+pub use tracedecay_contracts::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
     CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
@@ -77,15 +86,6 @@ use tracedecay_daemon_protocol::{
     InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
-use tracedecay_usecases::operation_stream::{
-    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
-    OperationRequestControls,
-};
-use tracedecay_usecases::primitives::{
-    CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
-    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, QualifiedNamePrimitiveRequest,
-    SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest, StorageStatusPrimitiveRequest,
-};
 
 mod configuration_wire;
 mod handoff;
@@ -190,7 +190,7 @@ fn compatibility_diagnostics_request(
     }))
 }
 
-pub type FeedbackSurfaceRequest = tracedecay_application::feedback::FeedbackHandleRequestV1;
+pub type FeedbackSurfaceRequest = tracedecay_contracts::feedback::FeedbackHandleRequestV1;
 
 /// Canonical explicit advisory trigger. Project/root/scope/provider identities and
 /// the resulting read handle are all minted by the authenticated daemon.
@@ -247,7 +247,7 @@ pub enum ApplicationSurfaceRequest {
     ObservatoryRead(ObservatoryReadRequestV1),
     Configuration(ConfigurationWireRequestV1),
     ContextScout(ContextScoutSurfaceRequest),
-    Retained(tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1),
+    Retained(tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1),
 }
 
 pub struct ApplicationSurfaceInvocationResult {
@@ -354,7 +354,7 @@ pub(crate) async fn invoke_multi_root_surface_request(
     request_id: RequestId,
     page: PageRequest,
     deadline: Deadline,
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
     body: Value,
 ) -> Result<Value, ApplicationSurfaceAdapterError> {
     let request = parse_application_surface_request(operation, body)?;
@@ -460,7 +460,7 @@ impl RegisteredHttpOperation for WorkOperation {
         std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
         ApplicationSurfaceAdapterError,
     > {
-        tracedecay_application::work_executable_binding_registry()
+        tracedecay_contracts::work_executable_binding_registry()
             .map(std::borrow::Cow::Borrowed)
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
@@ -489,7 +489,7 @@ impl RegisteredHttpOperation for WorkflowOperation {
         std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
         ApplicationSurfaceAdapterError,
     > {
-        tracedecay_application::workflow_executable_binding_registry()
+        tracedecay_contracts::workflow_executable_binding_registry()
             .map(std::borrow::Cow::Borrowed)
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
@@ -522,7 +522,7 @@ impl RegisteredHttpOperation for HandoffOperation {
         std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
         ApplicationSurfaceAdapterError,
     > {
-        tracedecay_application::handoff_executable_binding_registry()
+        tracedecay_contracts::handoff_executable_binding_registry()
             .map(std::borrow::Cow::Owned)
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
@@ -616,8 +616,8 @@ async fn invoke_registered_http<T, O>(
     select_outcome: impl FnOnce(
         tracedecay_daemon_protocol::DaemonInvocationOutcome,
     ) -> Option<(
-        tracedecay_application::ResolvedScope,
-        tracedecay_application::ApplicationOutcome<T>,
+        tracedecay_contracts::ResolvedScope,
+        tracedecay_contracts::ApplicationOutcome<T>,
     )>,
 ) -> Response
 where
@@ -1189,9 +1189,9 @@ async fn http_operation_events_through_executor(
     controls: &HttpApplicationControls,
     next_sequence: u64,
 ) -> Response {
-    let context = match tracedecay_application::ApplicationInvocationContext::new(
+    let context = match tracedecay_contracts::ApplicationInvocationContext::new(
         request_id.clone(),
-        tracedecay_application::InvocationTarget::CurrentProject,
+        tracedecay_contracts::InvocationTarget::CurrentProject,
         controls.deadline.clone(),
         controls.cancellation.clone(),
     ) {
@@ -1203,7 +1203,7 @@ async fn http_operation_events_through_executor(
             );
         }
     };
-    let request = match tracedecay_application::ApplicationRequest::operation_events(
+    let request = match tracedecay_contracts::ApplicationRequest::operation_events(
         operation_id.request_id().clone(),
         256,
         next_sequence.checked_sub(1),
@@ -1216,7 +1216,7 @@ async fn http_operation_events_through_executor(
             );
         }
     };
-    let invocation = match tracedecay_application::ApplicationInvocation::new(context, request) {
+    let invocation = match tracedecay_contracts::ApplicationInvocation::new(context, request) {
         Ok(invocation) => invocation,
         Err(error) => {
             return operation_event_problem(
@@ -1226,11 +1226,11 @@ async fn http_operation_events_through_executor(
         }
     };
     let response = hotpath::future!(
-        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+        tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
         label = "application_surface.http.events.invoke"
     )
     .await;
-    let tracedecay_application::ApplicationResponse::Stream(response) = (match response {
+    let tracedecay_contracts::ApplicationResponse::Stream(response) = (match response {
         Ok(response) => response,
         Err(error) => return operation_event_invocation_failure(request_id, error),
     }) else {
@@ -1250,47 +1250,47 @@ enum OperationEventInvocationFailure {
 }
 
 fn operation_event_failure_from_invocation(
-    error: tracedecay_application::InvocationError,
+    error: tracedecay_contracts::InvocationError,
 ) -> OperationEventInvocationFailure {
     match error {
-        tracedecay_application::InvocationError::Denied => {
+        tracedecay_contracts::InvocationError::Denied => {
             OperationEventInvocationFailure::Stream(OperationEventError::NotFoundOrNotAuthorized)
         }
-        tracedecay_application::InvocationError::Cancelled
-        | tracedecay_application::InvocationError::DeadlineExceeded => {
+        tracedecay_contracts::InvocationError::Cancelled
+        | tracedecay_contracts::InvocationError::DeadlineExceeded => {
             OperationEventInvocationFailure::Stream(OperationEventError::RequestNotAdmitted)
         }
-        tracedecay_application::InvocationError::Conflict => {
+        tracedecay_contracts::InvocationError::Conflict => {
             OperationEventInvocationFailure::Stream(OperationEventError::InvalidFrontier)
         }
-        tracedecay_application::InvocationError::InvalidRequest
-        | tracedecay_application::InvocationError::Unavailable
-        | tracedecay_application::InvocationError::Unreachable { .. } => {
+        tracedecay_contracts::InvocationError::InvalidRequest
+        | tracedecay_contracts::InvocationError::Unavailable
+        | tracedecay_contracts::InvocationError::Unreachable { .. } => {
             OperationEventInvocationFailure::Stream(OperationEventError::ResumeUnavailable)
         }
-        tracedecay_application::InvocationError::Problem(problem) => match problem.kind() {
-            tracedecay_application::ApplicationProblemKind::NotFoundOrNotAuthorized => {
+        tracedecay_contracts::InvocationError::Problem(problem) => match problem.kind() {
+            tracedecay_contracts::ApplicationProblemKind::NotFoundOrNotAuthorized => {
                 OperationEventInvocationFailure::Stream(
                     OperationEventError::NotFoundOrNotAuthorized,
                 )
             }
-            tracedecay_application::ApplicationProblemKind::Cancelled
-            | tracedecay_application::ApplicationProblemKind::TimedOut => {
+            tracedecay_contracts::ApplicationProblemKind::Cancelled
+            | tracedecay_contracts::ApplicationProblemKind::TimedOut => {
                 OperationEventInvocationFailure::Stream(OperationEventError::RequestNotAdmitted)
             }
-            tracedecay_application::ApplicationProblemKind::Conflict
-            | tracedecay_application::ApplicationProblemKind::Stale => {
+            tracedecay_contracts::ApplicationProblemKind::Conflict
+            | tracedecay_contracts::ApplicationProblemKind::Stale => {
                 OperationEventInvocationFailure::Stream(OperationEventError::InvalidFrontier)
             }
-            tracedecay_application::ApplicationProblemKind::InvalidRequest
-            | tracedecay_application::ApplicationProblemKind::Unsupported
-            | tracedecay_application::ApplicationProblemKind::Unavailable
-            | tracedecay_application::ApplicationProblemKind::Saturated => {
+            tracedecay_contracts::ApplicationProblemKind::InvalidRequest
+            | tracedecay_contracts::ApplicationProblemKind::Unsupported
+            | tracedecay_contracts::ApplicationProblemKind::Unavailable
+            | tracedecay_contracts::ApplicationProblemKind::Saturated => {
                 OperationEventInvocationFailure::Stream(OperationEventError::ResumeUnavailable)
             }
-            tracedecay_application::ApplicationProblemKind::PartialEffect
-            | tracedecay_application::ApplicationProblemKind::ExecutionFailed
-            | tracedecay_application::ApplicationProblemKind::ResetRequired => {
+            tracedecay_contracts::ApplicationProblemKind::PartialEffect
+            | tracedecay_contracts::ApplicationProblemKind::ExecutionFailed
+            | tracedecay_contracts::ApplicationProblemKind::ResetRequired => {
                 OperationEventInvocationFailure::Application(*problem)
             }
         },
@@ -1299,7 +1299,7 @@ fn operation_event_failure_from_invocation(
 
 fn operation_event_invocation_failure(
     request_id: &RequestId,
-    error: tracedecay_application::InvocationError,
+    error: tracedecay_contracts::InvocationError,
 ) -> Response {
     match operation_event_failure_from_invocation(error) {
         OperationEventInvocationFailure::Stream(error) => {
@@ -1522,9 +1522,9 @@ async fn http_operation_cancel_through_executor(
     controls: &HttpApplicationControls,
     observed_at: UtcMicros,
 ) -> Response {
-    let context = match tracedecay_application::ApplicationInvocationContext::new(
+    let context = match tracedecay_contracts::ApplicationInvocationContext::new(
         request_id.clone(),
-        tracedecay_application::InvocationTarget::CurrentProject,
+        tracedecay_contracts::InvocationTarget::CurrentProject,
         controls.deadline.clone(),
         controls.cancellation.clone(),
     ) {
@@ -1536,7 +1536,7 @@ async fn http_operation_cancel_through_executor(
             );
         }
     };
-    let request = match tracedecay_application::ApplicationRequest::operation_cancel(
+    let request = match tracedecay_contracts::ApplicationRequest::operation_cancel(
         operation_id.request_id().clone(),
     ) {
         Ok(request) => request,
@@ -1547,7 +1547,7 @@ async fn http_operation_cancel_through_executor(
             );
         }
     };
-    let invocation = match tracedecay_application::ApplicationInvocation::new(context, request) {
+    let invocation = match tracedecay_contracts::ApplicationInvocation::new(context, request) {
         Ok(invocation) => invocation,
         Err(error) => {
             return operation_event_problem(
@@ -1557,11 +1557,11 @@ async fn http_operation_cancel_through_executor(
         }
     };
     let response = hotpath::future!(
-        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+        tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
         label = "application_surface.http.cancel.invoke"
     )
     .await;
-    let tracedecay_application::ApplicationResponse::Cancellation(response) = (match response {
+    let tracedecay_contracts::ApplicationResponse::Cancellation(response) = (match response {
         Ok(response) => response,
         Err(error) => return operation_event_invocation_failure(request_id, error),
     }) else {
@@ -2656,8 +2656,8 @@ pub async fn execute_application_surface(
     let cancellation = invocation.cancellation;
     let cancellation_context = cancellation.context();
     let resolved_scope = match &invocation.scope {
-        tracedecay_application::InvocationTarget::CurrentProject => None,
-        tracedecay_application::InvocationTarget::Resolved(scope) => Some(scope.clone()),
+        tracedecay_contracts::InvocationTarget::CurrentProject => None,
+        tracedecay_contracts::InvocationTarget::Resolved(scope) => Some(scope.clone()),
     };
     let request_deadline = deadline.clone();
     let migrated_payload = match (&operation, &invocation.request) {
@@ -2693,23 +2693,23 @@ pub async fn execute_application_surface(
                 requested_format,
             });
         };
-        let binding = tracedecay_application::ApplicationInvocationBinding::new(
+        let binding = tracedecay_contracts::ApplicationInvocationBinding::new(
             binding_id.clone(),
             surface,
             SurfaceOperationName::new(operation.as_str())?,
             result_contract.clone(),
             invocation.page,
         )?;
-        let context = tracedecay_application::ApplicationInvocationContext::new(
+        let context = tracedecay_contracts::ApplicationInvocationContext::new(
             request_id.clone(),
             invocation.scope,
             deadline,
             cancellation,
         )?;
-        let request = tracedecay_application::ApplicationRequest::surface(binding, payload)?;
-        let invocation = tracedecay_application::ApplicationInvocation::new(context, request)?;
+        let request = tracedecay_contracts::ApplicationRequest::surface(binding, payload)?;
+        let invocation = tracedecay_contracts::ApplicationInvocation::new(context, request)?;
         let result = match hotpath::future!(
-            tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+            tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
             label = "application_surface.execute.invoke"
         )
         .await
@@ -2741,7 +2741,7 @@ pub async fn execute_application_surface(
             // Same dispatch-failure contract as the non-migrated arm below: an
             // unreachable daemon never saw the request, so it is an error, not
             // a retryable problem envelope.
-            Err(tracedecay_application::InvocationError::Unreachable {
+            Err(tracedecay_contracts::InvocationError::Unreachable {
                 reason_code,
                 detail,
             }) => {
@@ -3869,19 +3869,19 @@ fn invocation_problem(
 }
 
 fn invocation_contract_problem(
-    error: tracedecay_application::InvocationError,
+    error: tracedecay_contracts::InvocationError,
 ) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
     Ok(match error {
-        tracedecay_application::InvocationError::Denied => {
+        tracedecay_contracts::InvocationError::Denied => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        tracedecay_application::InvocationError::Cancelled => {
+        tracedecay_contracts::InvocationError::Cancelled => {
             ApplicationProblem::cancelled_before_admission()
         }
-        tracedecay_application::InvocationError::DeadlineExceeded => {
+        tracedecay_contracts::InvocationError::DeadlineExceeded => {
             ApplicationProblem::timed_out_before_admission()
         }
-        tracedecay_application::InvocationError::InvalidRequest => {
+        tracedecay_contracts::InvocationError::InvalidRequest => {
             ApplicationProblem::InvalidRequest {
                 diagnostic: SafeDiagnostic::new(
                     "application.surface.invalid_request",
@@ -3891,7 +3891,7 @@ fn invocation_contract_problem(
                 legal_actions: Vec::new(),
             }
         }
-        tracedecay_application::InvocationError::Conflict => ApplicationProblem::Conflict {
+        tracedecay_contracts::InvocationError::Conflict => ApplicationProblem::Conflict {
             diagnostic: SafeDiagnostic::new(
                 "application.surface.conflict",
                 "The application request conflicts with current state",
@@ -3899,7 +3899,7 @@ fn invocation_contract_problem(
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
         },
-        tracedecay_application::InvocationError::Unavailable => {
+        tracedecay_contracts::InvocationError::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(
                 "application.surface.unavailable",
                 "The application service for this operation is unavailable",
@@ -3908,7 +3908,7 @@ fn invocation_contract_problem(
         // Dispatchers intercept unreachable before republishing problems; this
         // projection keeps the connect diagnostic for any caller that still
         // renders it as a problem.
-        tracedecay_application::InvocationError::Unreachable {
+        tracedecay_contracts::InvocationError::Unreachable {
             reason_code,
             detail,
         } => ApplicationProblem::unavailable(SafeDiagnostic {
@@ -3918,7 +3918,7 @@ fn invocation_contract_problem(
         // The daemon's typed problem is the authority; republishing it keeps
         // its diagnostic (e.g. `configuration.conflict`) intact instead of
         // substituting a generic surface code.
-        tracedecay_application::InvocationError::Problem(problem) => *problem,
+        tracedecay_contracts::InvocationError::Problem(problem) => *problem,
     })
 }
 

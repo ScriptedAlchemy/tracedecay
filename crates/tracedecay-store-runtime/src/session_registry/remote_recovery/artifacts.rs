@@ -4,7 +4,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
-use tracedecay_application::remote::recovery::RecoveryAuthorityExpectationV1;
+use tracedecay_contracts::remote::recovery::RecoveryAuthorityExpectationV1;
 use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;

@@ -10,7 +10,7 @@
 use serde_json::Value;
 use std::path::Path;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,

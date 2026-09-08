@@ -1,10 +1,10 @@
-use tracedecay_application::ResolvedScope;
-use tracedecay_application::remote::capture_protocol::RemoteCapturePolicyEvidencePortV1;
-use tracedecay_application::remote::query::{
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::remote::capture_protocol::RemoteCapturePolicyEvidencePortV1;
+use tracedecay_contracts::remote::query::{
     RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationEvidenceV1,
     RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
 };
-use tracedecay_application::remote::replay::{
+use tracedecay_contracts::remote::replay::{
     RemoteReplayApplicationErrorV1, RemoteReplayFrameV1, RemoteReplayPolicyDecisionV1,
     RemoteReplayPolicyEvidencePortV1, RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1,
 };

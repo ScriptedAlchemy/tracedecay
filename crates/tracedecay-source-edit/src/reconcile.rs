@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationStage, EffectTermination, ReconciliationState,
     SourceEditAuthorizationPort, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
     SourceEditReconciliationRequestV1, now_micros, source_edit_operation,
@@ -69,7 +69,7 @@ where
                 "source edit reconciliation identity does not match the retained effect",
             ));
         }
-        let authority = tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+        let authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
             request.authority.clone(),
             request.proof.clone(),
             request.context.scope(),
@@ -184,7 +184,7 @@ fn recover_reconciliation_attempt(
 
 pub(super) struct SourceEditReconciliationAttemptV1<'a> {
     pub(super) operation: &'a ApplicationOperation,
-    pub(super) authority: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    pub(super) authority: &'a tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     pub(super) input_digest: &'a ManifestDigest,
     pub(super) control: Option<&'a SourceEditEffectControlV1>,
 }
@@ -331,7 +331,7 @@ fn reconcile_prepared_source_edit_controlled(
 pub(super) async fn recover_source_edit_transaction(
     durability: &SourceEditDurability,
     graph: &SourceEditRuntime,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
 ) -> Result<()> {
     let Some(journal) = durability.load_journal()? else {
         return Ok(());
@@ -528,8 +528,8 @@ mod tests {
     use crate::plan::PlannedSourceEditFile;
     use std::fs;
     use tempfile::tempdir;
-    use tracedecay_application::source_edit::EditResult;
-    use tracedecay_application::{CancellationSignal, Deadline};
+    use tracedecay_contracts::source_edit::EditResult;
+    use tracedecay_contracts::{CancellationSignal, Deadline};
     use tracedecay_domain::UtcMicros;
 
     #[test]
@@ -730,7 +730,7 @@ mod tests {
             cancellation,
         );
         let reconciliation_authority =
-            tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+            tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
                 reconciliation.authority.clone(),
                 reconciliation.proof.clone(),
                 reconciliation.context.scope(),
@@ -810,7 +810,7 @@ mod tests {
         let attempt_input = digest(SHA256_B);
         let operation = source_edit_reconciliation_operation().unwrap();
         let reconciliation_authority =
-            tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+            tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
                 reconciliation.authority.clone(),
                 reconciliation.proof.clone(),
                 reconciliation.context.scope(),

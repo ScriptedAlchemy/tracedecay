@@ -19,8 +19,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use tracedecay_application::RetainedSurfaceOperation;
-use tracedecay_application::multi_root::{
+use tracedecay_contracts::RetainedSurfaceOperation;
+use tracedecay_contracts::multi_root::{
     MultiRootApplicationOperation, multi_root_capability_manifest,
 };
 use tracedecay_tool_catalog::{
@@ -1040,7 +1040,7 @@ pub(super) fn registered_project_reader_tool_names() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::RetainedSurfaceOperation;
+    use tracedecay_contracts::RetainedSurfaceOperation;
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, ProfileId};
 
     use super::*;
@@ -1477,7 +1477,7 @@ mod tests {
         };
         use tracedecay_mcp::{explore_call_budget, project_catalog_discovery_scope};
 
-        let profile_id = ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID)
+        let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
             .expect("default profile");
         get_catalog_filtered_tool_definitions_with_budget(
             0,

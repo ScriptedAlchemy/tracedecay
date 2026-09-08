@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationObservation, CancellationStage, EffectTermination,
     ReconciliationState, SourceEditAuthorizationPort, SourceEditRollbackRequestV1, now_micros,
     source_edit_rollback_operation,
@@ -26,7 +26,7 @@ use super::verify::{application_contract_error, application_problem, config_erro
 fn durable_request(
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
 ) -> SourceEditDurableRequestV1 {
     SourceEditDurableRequestV1 {
         operation: operation.use_case_id().clone(),
@@ -46,7 +46,7 @@ fn durable_request(
 fn rollback_journal(
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     predicted_state: Option<ManifestDigest>,
     candidate_files: Vec<String>,
@@ -90,7 +90,7 @@ fn persist_pre_effect(
     durability: &SourceEditDurability,
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     outcome: SourceEditOutcome,
     termination: EffectTermination,
@@ -152,7 +152,7 @@ where
     let durability = SourceEditDurability::for_graph(graph);
     let _lock = durability.lock()?;
     let input_digest = request.input_digest().map_err(application_contract_error)?;
-    let requested_authority = tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+    let requested_authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
         request.authority.clone(),
         request.proof.clone(),
         request.context.scope(),

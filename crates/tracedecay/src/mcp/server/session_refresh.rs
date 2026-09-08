@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::PoisonError;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::ProjectId;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -53,7 +53,7 @@ impl SessionScopeAuthorizer for DaemonSessionRefreshAuthorizer<'_> {
 
 #[derive(Clone)]
 struct DaemonSessionRefreshWake(
-    std::sync::Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>,
+    std::sync::Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>,
 );
 
 impl SessionRefreshSchedulerPort for DaemonSessionRefreshWake {
@@ -81,7 +81,7 @@ enum SessionRefreshHandleLookup {
 impl DaemonSessionRefreshService {
     pub(crate) fn new(
         database: RegisteredGlobalDbLeaseV1,
-        wake: std::sync::Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>,
+        wake: std::sync::Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>,
         expected_project_id: Option<String>,
     ) -> Self {
         Self {

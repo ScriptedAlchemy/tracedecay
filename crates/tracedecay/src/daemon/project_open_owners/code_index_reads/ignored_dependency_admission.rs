@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracedecay_application::{RequestAdmission, RequestContext, ResolvedScope};
-use tracedecay_code_index::production::CodeIndexExecutionControlV1;
-use tracedecay_session_memory::context::application_observed_at;
-use tracedecay_usecases::code_index::{
+use tracedecay_application::code_index::{
     CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionFutureV1,
     CodeIndexIgnoredDependencyAdmissionPortV1, CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
+use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_contracts::{RequestAdmission, RequestContext, ResolvedScope};
+use tracedecay_session_memory::context::application_observed_at;
 
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,

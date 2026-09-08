@@ -73,7 +73,7 @@ pub(super) fn configuration_effect(
     effective_deadline_at: UtcMicros,
 ) -> Result<ApplicationOutcome<serde_json::Value>, ConfigurationError> {
     let application_operation =
-        tracedecay_application::configuration::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
             .map_err(ConfigurationError::validation)?
             .ok_or_else(|| {
                 ConfigurationError::validation_message("unknown configuration operation")

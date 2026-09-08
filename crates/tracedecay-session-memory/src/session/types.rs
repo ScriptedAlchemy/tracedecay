@@ -1,7 +1,7 @@
 use std::fmt;
 
-use tracedecay_application::RequestContext;
-use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_contracts::RequestContext;
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{
     ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
@@ -454,7 +454,7 @@ impl SessionAuthorizationGrant {
         self.binding.configuration_digest()
     }
 
-    pub fn deadline(&self) -> &tracedecay_application::Deadline {
+    pub fn deadline(&self) -> &tracedecay_contracts::Deadline {
         self.context.deadline()
     }
 
@@ -644,7 +644,7 @@ impl std::error::Error for SessionRetrievalError {}
 mod tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId,
     };

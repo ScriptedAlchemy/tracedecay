@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn catalog_filtered_discovery_uses_the_deterministic_maximal_registry() {
-        let profile_id = ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID)
+        let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
             .expect("default profile");
         let definitions = get_catalog_filtered_tool_definitions_with_budget(
             0,
@@ -416,8 +416,7 @@ mod tests {
 
     #[test]
     fn catalog_filter_preserves_non_catalog_tools_and_filters_catalog_bindings() {
-        let profile =
-            ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+        let profile = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
         let definitions = get_catalog_filtered_tool_definitions_with_budget(
             10_000,
             4,
@@ -445,7 +444,7 @@ mod tests {
 
     fn default_discovery_inputs() -> (ProfileId, BTreeSet<CapabilityId>, BTreeSet<ScopeDimension>) {
         (
-            ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID)
+            ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
                 .expect("default profile"),
             default_catalog_discovery_authority().expect("default discovery authority"),
             project_catalog_discovery_scope(),

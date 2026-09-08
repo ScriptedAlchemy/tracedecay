@@ -3,18 +3,18 @@
 use std::sync::Arc;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_application::ApplicationOutcome;
-use tracedecay_application::now_micros;
-use tracedecay_application::retained_surfaces::{
-    FactStoreCurateRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-    RetainedSurfaceResultV1,
-};
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
 use tracedecay_automation_runtime::automation::runner::{
     MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
+};
+use tracedecay_contracts::ApplicationOutcome;
+use tracedecay_contracts::now_micros;
+use tracedecay_contracts::retained_surfaces::{
+    FactStoreCurateRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    RetainedSurfaceResultV1,
 };
 use tracedecay_daemon_service::DaemonInvocationService;
 

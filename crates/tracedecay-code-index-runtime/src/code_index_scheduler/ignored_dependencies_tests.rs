@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::ResolvedScope;
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, CodeIndexIgnoredSourceAdmissionV1,
     MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
 };
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{CodeGenerationId, ProjectId};
 use tracedecay_graph_db::NeverCancelled;
 

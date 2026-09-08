@@ -1,11 +1,11 @@
 //! Typed terminal results for failed managed affected-test executions.
 
 use serde_json::{Value, json};
-use tracedecay_application::{Deadline, OperationTermination};
+use tracedecay_contracts::{Deadline, OperationTermination};
 use tracedecay_domain::UtcMicros;
 
+use tracedecay_application::operation_stream::OperationEmitter;
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::operation_stream::OperationEmitter;
 
 use super::{
     TestTarget, emit_observed_test_results, finish_test_run, managed_test_terminal,

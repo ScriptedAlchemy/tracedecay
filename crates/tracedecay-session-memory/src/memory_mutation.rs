@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     PreparedRetainedEffect, RequestAdmission, RetainedSurfaceExecutionContextV1,
     RetainedSurfaceExecutionErrorV1, effective_memory_deadline, now_micros,
 };
@@ -105,12 +105,12 @@ where
         RequestAdmission::Admitted if !context.cancellation_signal.is_cancelled() => {}
         RequestAdmission::Admitted | RequestAdmission::Cancelled => {
             return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::BeforeEffect,
+                tracedecay_contracts::CancellationStage::BeforeEffect,
             ));
         }
         RequestAdmission::TimedOut => {
             return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeEffect,
+                tracedecay_contracts::CancellationStage::BeforeEffect,
             ));
         }
     }
@@ -119,7 +119,7 @@ where
         .ok()
         .map(Duration::from_micros)
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         ))?;
     tokio::pin!(future);
     tokio::select! {
@@ -129,14 +129,14 @@ where
             if context.cancellation_signal.commit_started() {
                 classify_memory_settlement(context, future.await)
             } else {
-                Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::BeforeEffect))
+                Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::BeforeEffect))
             }
         }
         () = tokio::time::sleep(remaining) => {
             if context.cancellation_signal.commit_started() {
                 classify_memory_settlement(context, future.await)
             } else {
-                Err(RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_application::CancellationStage::BeforeEffect))
+                Err(RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_contracts::CancellationStage::BeforeEffect))
             }
         }
     }
@@ -152,18 +152,18 @@ fn classify_memory_settlement<T>(
     match outcome {
         Ok(value) if commit_started => Ok((value, timed_out)),
         Ok(_) if cancelled => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         )),
         Ok(_) if timed_out => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         )),
         Ok(value) => Ok((value, false)),
         Err(_) if cancelled && !commit_started => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         )),
         Err(RetainedSurfaceExecutionErrorV1::Cancelled(_)) if timed_out => {
             Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeEffect,
+                tracedecay_contracts::CancellationStage::BeforeEffect,
             ))
         }
         Err(error) => Err(error),

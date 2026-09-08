@@ -51,7 +51,7 @@ async fn files_for_session(
 
 async fn wait_for_exact_interactive_graph_ready(
     engine: &DaemonEngine,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
 ) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracedecay_application::{RequestContext, ResolvedScope};
+use tracedecay_contracts::{RequestContext, ResolvedScope};
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,

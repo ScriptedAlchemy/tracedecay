@@ -1,7 +1,7 @@
 //! Typed Git application-surface requests and bounded Git-read decoding.
 
 use serde_json::Value;
-use tracedecay_application::git::GitReadRequestV1;
+use tracedecay_contracts::git::GitReadRequestV1;
 use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;

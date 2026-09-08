@@ -11,18 +11,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_application::{Deadline, ResolvedScope, now_micros};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
 };
+use tracedecay_contracts::{Deadline, ResolvedScope, now_micros};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 
 fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), CodeGraphReadError> {
     if request.cancellation.is_cancelled()
         || request
             .live_cancellation
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
     {
         return Err(CodeGraphReadError::Cancelled);
     }
@@ -35,9 +35,9 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
         return Err(CodeGraphReadError::TimedOut);
     }
     match request.context.admission_at(observed_at) {
-        tracedecay_application::RequestAdmission::Admitted => Ok(()),
-        tracedecay_application::RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
-        tracedecay_application::RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+        tracedecay_contracts::RequestAdmission::Admitted => Ok(()),
+        tracedecay_contracts::RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
+        tracedecay_contracts::RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
     }
 }
 

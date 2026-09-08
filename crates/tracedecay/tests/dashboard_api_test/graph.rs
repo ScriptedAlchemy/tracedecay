@@ -26,14 +26,14 @@ fn assert_ready_verified_generation(body: &Value) {
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::tracedecay::TraceDecay;
-use tracedecay_application::{
-    CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
-    ResolvedScope,
-};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_contracts::{
+    CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
+    ResolvedScope,
+};
 use tracedecay_domain::code_intelligence::{Edge, EdgeKind, Node, NodeKind, Visibility};
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
@@ -541,7 +541,7 @@ fn compose_graph_authority(
         })
         .collect();
     let cancellation =
-        tracedecay_application::CancellationSignal::active("cancel.dashboard-graph-fixture")
+        tracedecay_contracts::CancellationSignal::active("cancel.dashboard-graph-fixture")
             .unwrap_or_else(|error| panic!("fixture graph cancellation: {error}"));
     let projection = HermeticCodeGraphProjectionStore::memory(&cancellation)
         .unwrap_or_else(|error| panic!("fixture graph projection: {error}"));

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, Deadline,
     RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
 };

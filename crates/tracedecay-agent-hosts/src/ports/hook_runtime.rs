@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use serde_json::Value;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
 use tracedecay_hooks::DaemonHookEvent;
 use tracedecay_runtime_core::storage::StoreLayout;
@@ -169,7 +169,7 @@ mod test_runtime {
     fn scope(
         _: &Path,
         _: &tracedecay_domain::ProjectId,
-    ) -> std::result::Result<tracedecay_application::ResolvedScope, String> {
+    ) -> std::result::Result<tracedecay_contracts::ResolvedScope, String> {
         Err("crate test hook runtime has no scope resolver".to_owned())
     }
 

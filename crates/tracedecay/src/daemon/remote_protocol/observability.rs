@@ -2,24 +2,24 @@
 
 use std::sync::Arc;
 
-use tracedecay_application::remote::auth::OpaqueRemoteCredential;
-use tracedecay_application::remote::composition::{
+use tracedecay_application::observability::BoundedObservabilityProducerV1;
+use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
+use tracedecay_contracts::remote::composition::{
     PendingLocalEvidenceV1, PendingLocalUnavailableReasonV1, ShardCoverageStateV1,
 };
-use tracedecay_application::remote::credential_admission::RemoteCredentialClassV1;
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::credential_admission::RemoteCredentialClassV1;
+use tracedecay_contracts::remote::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
-use tracedecay_application::remote::query::{
+use tracedecay_contracts::remote::query::{
     RemoteExactObservationQueryProtocolAdapterV1, RemoteExactObservationQueryServiceV1,
     RemoteQueryRequestV1, RemoteQueryResultV1,
 };
-use tracedecay_application::{ApplicationContractError, ApplicationOutcome, OperationTermination};
+use tracedecay_contracts::{ApplicationContractError, ApplicationOutcome, OperationTermination};
 use tracedecay_domain::{
     CoverageStateV1, CurrentRemoteAuthorityStateV1, ObservedTernaryV1,
     RemoteAuthorityUnavailableReasonV1, RemoteCoverageObservedV1, RemoteOperationV1, UtcMicros,
 };
-use tracedecay_usecases::observability::BoundedObservabilityProducerV1;
 
 use crate::daemon::remote_query::DaemonRemoteExactObservationQueryPortV1;
 use tracedecay_daemon_service::DaemonInvocationService;
@@ -78,7 +78,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
             Err(_) => super::unavailable_response(
                 request_id,
                 observed_at,
-                tracedecay_application::remote::query::
+                tracedecay_contracts::remote::query::
                     remote_exact_observation_query_result_contract_v1(),
             )?,
         };
@@ -106,7 +106,7 @@ pub(super) fn record_remote_query_response(
         return;
     };
     let observation = remote_query_response_observation(expected_shards, response);
-    let _ = tracedecay_usecases::observability::record_remote_coverage_observation(
+    let _ = tracedecay_application::observability::record_remote_coverage_observation(
         Some(producer),
         observation,
         remote_authority_observed_at(&response.authority),

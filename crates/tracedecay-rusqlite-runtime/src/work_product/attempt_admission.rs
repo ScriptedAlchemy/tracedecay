@@ -5,7 +5,7 @@
 //! graph reads hydrate an accepted identity only when one canonical attempt row
 //! exists for it, so no second binding journal or table is needed.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptInsertOutcome, WorkAttemptStorageError, WorkProductAttemptAdmissionErrorV1,
     WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionPortV1,
     WorkProductAttemptAdmissionV1, WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1,
@@ -250,7 +250,7 @@ fn product_commit(outcome: &WorkProductEventCommitOutcomeV1) -> &WorkProductEven
 
 fn graph_for_product(
     transaction: &ExactSqlTransaction,
-    context: &tracedecay_application::WorkProductPortContextV1,
+    context: &tracedecay_contracts::WorkProductPortContextV1,
     product: &WorkProductEventCommitV1,
 ) -> Result<WorkProductGraphV1, AdmissionError> {
     let journal =
@@ -335,7 +335,7 @@ fn map_graph_admission_error(error: tracedecay_domain::WorkRuntimeContractError)
 }
 
 fn require_request_active(
-    context: &tracedecay_application::WorkProductPortContextV1,
+    context: &tracedecay_contracts::WorkProductPortContextV1,
 ) -> Result<(), AdmissionError> {
     if context.cancellation().is_cancelled() {
         return Err(AdmissionError::Cancelled);

@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde_json::json;
-use tracedecay_application::{
+use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
+use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope, now_micros,
 };
-use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
 use tracedecay_domain::{
     ActorId, CodeGenerationId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
     WorktreeId,

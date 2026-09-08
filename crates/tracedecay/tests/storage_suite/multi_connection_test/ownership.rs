@@ -211,7 +211,7 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
     let (_, capture_report) = tracedecay_hooks::HookSpoolV1::open(
         data_root.join("hook-v2-spool").join(host.hook_key()),
         tracedecay_hooks::HookSpoolConfigV1::stock(host),
-        tracedecay_application::now_micros(),
+        tracedecay_contracts::now_micros(),
     )
     .expect("open native capture receipt");
     // Sequence survives daemon replay/acknowledgement, so this proves each

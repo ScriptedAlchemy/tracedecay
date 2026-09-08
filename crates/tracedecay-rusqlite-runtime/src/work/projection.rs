@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{WorkProjectionPortError, WorkProjectionReadPort, WorkStorageError};
+use tracedecay_contracts::{WorkProjectionPortError, WorkProjectionReadPort, WorkStorageError};
 use tracedecay_domain::{
     ProjectionGenerationId, TaskId, WorkAuthority, WorkEvent, WorkProjection,
     WorkProjectionCoverageV1, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1,

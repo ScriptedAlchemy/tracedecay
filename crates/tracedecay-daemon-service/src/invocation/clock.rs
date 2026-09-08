@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::clock::now_micros as application_now_micros;
+use tracedecay_contracts::clock::now_micros as application_now_micros;
 use tracedecay_domain::UtcMicros;
 
 pub fn now_millis() -> u64 {

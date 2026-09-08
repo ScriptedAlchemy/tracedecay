@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use tracedecay_api::WorkflowOperation;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationResult, CancellationSignal, Deadline, LegalAction, ResultContractRef,
     RetryDirective, SafeDiagnostic, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
@@ -21,7 +21,7 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     WorkflowApplicationInvocation, WorkflowApplicationOutcome,
@@ -100,22 +100,22 @@ fn decode_workflow_invocation(
         WorkflowOperation::HandoffRedeem => decode::<TaskHandoffRedeemRequest>(body)
             .map(WorkflowApplicationInvocation::HandoffRedeem),
         WorkflowOperation::StartRun => {
-            decode::<tracedecay_application::WorkflowRunStartRequest>(body)
+            decode::<tracedecay_contracts::WorkflowRunStartRequest>(body)
                 .map(|request| WorkflowApplicationInvocation::StartRun(Box::new(request)))
         }
         WorkflowOperation::PauseRun => {
-            decode::<tracedecay_application::WorkflowRunPauseRequest>(body)
+            decode::<tracedecay_contracts::WorkflowRunPauseRequest>(body)
                 .map(WorkflowApplicationInvocation::PauseRun)
         }
         WorkflowOperation::ResumeRun => {
-            decode::<tracedecay_application::WorkflowRunResumeRequest>(body)
+            decode::<tracedecay_contracts::WorkflowRunResumeRequest>(body)
                 .map(WorkflowApplicationInvocation::ResumeRun)
         }
         WorkflowOperation::CancelRun => {
-            decode::<tracedecay_application::WorkflowRunCancelRequest>(body)
+            decode::<tracedecay_contracts::WorkflowRunCancelRequest>(body)
                 .map(WorkflowApplicationInvocation::CancelRun)
         }
-        WorkflowOperation::GetRun => decode::<tracedecay_application::WorkflowRunGetRequest>(body)
+        WorkflowOperation::GetRun => decode::<tracedecay_contracts::WorkflowRunGetRequest>(body)
             .map(WorkflowApplicationInvocation::GetRun),
     }
 }
@@ -287,7 +287,7 @@ fn erase_workflow_outcome(
 
 fn workflow_problem(
     result_contract: ResultContractRef,
-    request_id: tracedecay_application::RequestId,
+    request_id: tracedecay_contracts::RequestId,
     problem: ApplicationProblem,
 ) -> Result<ApplicationProblemEnvelope> {
     ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)

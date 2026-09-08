@@ -4,8 +4,8 @@ use super::*;
 use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
 };
-use tracedecay_application::CallableCodeSurfaceRequest;
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::CallableCodeSurfaceRequest;
+use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
 };
 use tracedecay_daemon_protocol::{
@@ -59,11 +59,11 @@ pub(super) async fn execute_primitive(
         Ok(_) | Err(_) => return concealed_application_problem(wire_request_id),
     };
     let Ok(Some(operation)) =
-        tracedecay_application::feedback::feedback_surface_operation(surface_operation.as_str())
+        tracedecay_contracts::feedback::feedback_surface_operation(surface_operation.as_str())
             .and_then(|operation| {
                 operation.map_or_else(
                     || {
-                        tracedecay_application::retrieval::catalog::primitive_read_operation(
+                        tracedecay_contracts::retrieval::catalog::primitive_read_operation(
                             surface_operation.as_str(),
                         )
                     },
@@ -121,7 +121,7 @@ pub(super) async fn execute_primitive(
             Ok(authority) => authority,
             Err(problem) => return application_problem(wire_request_id, problem),
         };
-        if !tracedecay_usecases::primitives::runtime::reauthorize_primitive_evidence(
+        if !tracedecay_application::primitives::runtime::reauthorize_primitive_evidence(
             &mut result,
             publication_authority,
         ) {
@@ -769,7 +769,7 @@ async fn execute_context_scout_state_transition(
         wire_request_id,
         Some(registered.clone()),
         ApplicationSurfaceOperation::ConfigurationSet,
-        ConfigurationWireRequestV1::Set(tracedecay_application::ConfigurationSetRequestV1 {
+        ConfigurationWireRequestV1::Set(tracedecay_contracts::ConfigurationSetRequestV1 {
             layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                 project_id: registered.scope.project_id.clone(),
             },

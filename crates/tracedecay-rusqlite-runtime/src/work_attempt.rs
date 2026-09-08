@@ -2,7 +2,7 @@
 //! registered exact-SQL channel.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptAdmissionKind, WorkAttemptCapacityV1, WorkAttemptEvidencePageV1,
     WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1, WorkAttemptEvidenceRowV1,
     WorkAttemptInsertOutcome, WorkAttemptListPageV1, WorkAttemptStorageError,

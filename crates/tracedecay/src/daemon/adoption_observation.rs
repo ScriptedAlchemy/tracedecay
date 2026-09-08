@@ -12,12 +12,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use tracedecay_application::{
+use tracedecay_application::observability::record_adoption_eligibility;
+use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, application_catalog_contributions,
 };
 use tracedecay_domain::{AdoptionEligibilityObservedV1, CoverageStateV1};
 use tracedecay_tool_catalog::{CatalogContributionV1, ProfileId};
-use tracedecay_usecases::observability::record_adoption_eligibility;
 
 use super::log_daemon_event;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -133,11 +133,11 @@ pub(in crate::daemon) async fn record_project_open_adoption_census(
 mod tests {
     use std::collections::BTreeMap;
 
-    use tracedecay_application::{
+    use tracedecay_application::observability::RegisteredObservabilityPortV1;
+    use tracedecay_contracts::{
         ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     };
     use tracedecay_domain::{CoverageStateV1, ObservabilityPayloadV1, ProjectId};
-    use tracedecay_usecases::observability::RegisteredObservabilityPortV1;
 
     use super::*;
 

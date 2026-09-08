@@ -125,6 +125,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    use tracedecay_application::work::{
+        RegisteredWorkApplicationServicesV1, RegisteredWorkflowApplicationServicesV1,
+    };
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_graph_db::{
@@ -137,9 +140,6 @@ mod tests {
     };
     use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
-    use tracedecay_usecases::work::{
-        RegisteredWorkApplicationServicesV1, RegisteredWorkflowApplicationServicesV1,
-    };
 
     use super::bind_verified_project_graph_runtime;
 

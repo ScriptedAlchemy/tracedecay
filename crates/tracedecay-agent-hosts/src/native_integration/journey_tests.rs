@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::registry::DaemonNativeIntegrationServiceRegistry;
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     NativeIntegrationApplyRequestV1, NativeIntegrationEvidenceRevisionsV1,
@@ -126,9 +126,9 @@ fn operation_authority(
 
 fn context(destination: ResolvedScope, request_id: &str) -> RequestContext {
     let (preflight_capability, preflight_use_case) =
-        operation_authority(tracedecay_application::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
+        operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
     let (apply_capability, apply_use_case) =
-        operation_authority(tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION);
+        operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_APPLY_OPERATION);
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.native.journey").expect("grant id"),
         1,
@@ -159,7 +159,7 @@ fn authorized_scope_set(
     request_id: &str,
 ) -> AuthorizedScopeSet {
     let (capability, use_case) =
-        operation_authority(tracedecay_application::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
+        operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
     AuthorizedScopeSetAuthority::authorize(
         ScopeSetId::new(format!("scope-set.native.journey.{request_id}")).expect("scope set id"),
         ScopeSetRevision::new(1).expect("scope set revision"),
@@ -218,7 +218,7 @@ fn approval_for(
     request_id: &str,
 ) -> NativeIntegrationApprovalV1 {
     let (capability, _) =
-        operation_authority(tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION);
+        operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_APPLY_OPERATION);
     NativeIntegrationApprovalV1 {
         approval_id: NativeIntegrationApprovalId::new(format!("approval.native.{request_id}"))
             .expect("approval id"),
@@ -408,7 +408,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         let (restarted_registry, restarted_owner) = mount(database, repository_root).await;
         let durable = tokio::task::spawn_blocking(move || {
             restarted_owner.service().status(
-                tracedecay_application::NativeIntegrationStatusRequestV1 {
+                tracedecay_contracts::NativeIntegrationStatusRequestV1 {
                     transaction_id: status_transaction_id,
                 },
             )

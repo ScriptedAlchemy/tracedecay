@@ -43,7 +43,7 @@
 
 use std::collections::HashSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError, HintOutcomeResolution,
 };
 

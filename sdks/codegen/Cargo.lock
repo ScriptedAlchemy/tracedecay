@@ -465,7 +465,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracedecay-application"
+name = "tracedecay-contracts"
 version = "0.1.0"
 dependencies = [
  "getrandom",
@@ -509,7 +509,7 @@ name = "tracedecay-sdk-codegen"
 version = "0.0.0"
 dependencies = [
  "serde_json",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-tool-catalog",
 ]
 

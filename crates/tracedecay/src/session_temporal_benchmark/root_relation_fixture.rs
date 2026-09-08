@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_session_memory::session::{

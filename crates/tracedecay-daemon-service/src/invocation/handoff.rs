@@ -5,8 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tracedecay_application::feedback::FeedbackFindingReadV1;
-use tracedecay_application::{
+use tracedecay_contracts::feedback::FeedbackFindingReadV1;
+use tracedecay_contracts::{
     HandoffAuthoritySnapshotV1, HandoffOpenBindingV1, HandoffOpenError, HandoffOpenService,
     HandoffOpenTargetError, HandoffOpenTargetPort, HandoffOpenTargetV1,
     investigation_owner_version_digest,
@@ -46,17 +46,17 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
                         context.grant().digest.clone(),
                     )
                     .map_err(|_| HandoffOpenTargetError::Unavailable)?;
-                    match tracedecay_application::WorkStoragePort::projection(
+                    match tracedecay_contracts::WorkStoragePort::projection(
                         &self.work, &authority, task_id,
                     ) {
                         Ok(projection) => Ok(projection.version() == *version),
-                        Err(tracedecay_application::WorkStorageError::NotFoundOrNotAuthorized) => {
+                        Err(tracedecay_contracts::WorkStorageError::NotFoundOrNotAuthorized) => {
                             Ok(false)
                         }
                         Err(
-                            tracedecay_application::WorkStorageError::VersionConflict
-                            | tracedecay_application::WorkStorageError::IdempotencyConflict
-                            | tracedecay_application::WorkStorageError::Unavailable,
+                            tracedecay_contracts::WorkStorageError::VersionConflict
+                            | tracedecay_contracts::WorkStorageError::IdempotencyConflict
+                            | tracedecay_contracts::WorkStorageError::Unavailable,
                         ) => Err(HandoffOpenTargetError::Unavailable),
                     }
                 }
@@ -159,7 +159,7 @@ pub(super) async fn execute_handoff_application(
 ) -> DaemonInvocationResponse {
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) =
-        tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::HANDOFF_APPLICATION_OPERATION_IDS_V1
             .iter()
             .find(|(operation, _, _)| *operation == operation_key)
     else {
@@ -243,7 +243,7 @@ pub(super) async fn execute_handoff_application(
         HandoffApplicationInvocationV1::IssueTaskHandoff(request) => service
             .issue_task(&context, request, authority_snapshot, observed_at)
             .await
-            .and_then(|grant| tracedecay_application::IssueTaskHandoffResultV1::from_grant(&grant))
+            .and_then(|grant| tracedecay_contracts::IssueTaskHandoffResultV1::from_grant(&grant))
             .map(HandoffApplicationResult::IssueTask),
         HandoffApplicationInvocationV1::ListTaskHandoffs(request) => service
             .list_task(&context, request, observed_at)
@@ -357,10 +357,10 @@ fn handoff_request_context(
 }
 
 enum HandoffApplicationResult {
-    IssueTask(tracedecay_application::IssueTaskHandoffResultV1),
-    ListTask(tracedecay_application::ListTaskHandoffsResultV1),
-    Investigation(tracedecay_application::OpenInvestigationHandoffResultV1),
-    Task(tracedecay_application::OpenTaskHandoffResultV1),
+    IssueTask(tracedecay_contracts::IssueTaskHandoffResultV1),
+    ListTask(tracedecay_contracts::ListTaskHandoffsResultV1),
+    Investigation(tracedecay_contracts::OpenInvestigationHandoffResultV1),
+    Task(tracedecay_contracts::OpenTaskHandoffResultV1),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,11 +457,11 @@ fn handoff_evidence(
     context: &RequestContext,
     operation_key: &str,
     use_case: UseCaseId,
-    result: tracedecay_application::ListTaskHandoffsResultV1,
+    result: tracedecay_contracts::ListTaskHandoffsResultV1,
     observed_at: UtcMicros,
     deadline: Deadline,
 ) -> Result<
-    ApplicationOutcome<tracedecay_application::ListTaskHandoffsResultV1>,
+    ApplicationOutcome<tracedecay_contracts::ListTaskHandoffsResultV1>,
     ApplicationContractError,
 > {
     let (authority, execution) = administrative_authority(
@@ -512,7 +512,7 @@ fn handoff_evidence(
                     field: "handoff list sort contract",
                 }
             })?,
-            tracedecay_application::MAX_HANDOFF_LIST_RESULTS_V1,
+            tracedecay_contracts::MAX_HANDOFF_LIST_RESULTS_V1,
             (!result.truncated).then_some(returned),
             returned,
         )?,

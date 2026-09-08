@@ -229,7 +229,7 @@ async fn projectless_tools_call_response_with_connection(
             tool_name,
             "tracedecay_admin_project" | "tracedecay_hook_runtime" | "tracedecay_admin_cli"
         )
-            || tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+            || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
         {
             tool_name
         } else {
@@ -477,7 +477,7 @@ async fn projectless_admin_cli_response(
 async fn projectless_profile_retained_response(
     id: serde_json::Value,
     tool_name: &str,
-    operation: tracedecay_application::RetainedSurfaceOperation,
+    operation: tracedecay_contracts::RetainedSurfaceOperation,
     arguments: serde_json::Value,
     connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,

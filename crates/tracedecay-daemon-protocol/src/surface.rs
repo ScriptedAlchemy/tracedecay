@@ -1,15 +1,15 @@
 //! Wire DTOs that the daemon invocation contract carries but that cannot live
-//! in `tracedecay-application` without inverting the crate DAG.
+//! in `tracedecay-contracts` without inverting the crate DAG.
 //!
 //! `GitReadSurfaceRequest` embeds the application Git-read enum. Context Scout
 //! delivery carries the application crate's scout wire vocabulary.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1,
     ContextScoutFeedbackV1, ContextScoutWorkV1,
 };
-use tracedecay_application::git::GitReadRequestV1;
+use tracedecay_contracts::git::GitReadRequestV1;
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 

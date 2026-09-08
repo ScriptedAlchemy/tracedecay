@@ -4,7 +4,7 @@ use tracedecay_session_memory::memory::MemoryApplication;
 // The shared resolvers live in `tracedecay_session_memory::memory` (the crate that
 // owns `MemoryApplication`/`MemoryApplicationError`) rather than in
 // `tracedecay-runtime-core` — that crate is a *dependency* of
-// `tracedecay-usecases`, so hosting these there would require a circular
+// `tracedecay-application`, so hosting these there would require a circular
 // crate dependency. Both this module and
 // `tracedecay-dashboard-api::tracedecay::facts` delegate to the same
 // functions instead of keeping independent copies.

@@ -403,7 +403,9 @@ fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
     }
 
     for (project_root, runtime) in runtimes {
-        tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(&project_root);
+        tracedecay_application::semantic_runtime::unregister_project_semantic_runtime(
+            &project_root,
+        );
         if let Some(semantic) = runtime.semantic {
             semantic.cancel();
         }

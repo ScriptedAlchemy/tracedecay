@@ -23,11 +23,6 @@ use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-use tracedecay_application::ResolvedScope;
-use tracedecay_application::historical_query::{
-    HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
-    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
-};
 use tracedecay_code_index::chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest};
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
@@ -40,6 +35,11 @@ use tracedecay_code_index::production::{
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
+};
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::historical_query::{
+    HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
+    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
 #[cfg(test)]
 use tracedecay_domain::ScoreDomainId;

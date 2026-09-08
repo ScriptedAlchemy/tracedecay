@@ -1,7 +1,7 @@
 //! Exact admitted controls for the analytics handler entrypoint.
 
 use serde_json::Value;
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};

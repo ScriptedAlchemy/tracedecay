@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracedecay_application::{RequestContext, SourceEditRequest};
+use tracedecay_contracts::{RequestContext, SourceEditRequest};
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::GraphCancellation;
 
@@ -191,10 +191,10 @@ pub(super) async fn run_source_edit(
 mod tests {
     use std::sync::Arc;
 
-    use tracedecay_application::CancellationSignal;
     use tracedecay_code_index::graph_projection::{
         CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
     };
+    use tracedecay_contracts::CancellationSignal;
     use tracedecay_domain::CodeGenerationId;
     use tracedecay_domain::errors::{Result, TraceDecayError};
     use tracedecay_graph_db::NeverCancelled;

@@ -9,8 +9,8 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::doctor::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
-use tracedecay_application::remote::status::{
+use tracedecay_contracts::doctor::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
+use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1, RemoteOperationalStatusV1,
     RemoteSpoolOperationalStatusV1,
 };

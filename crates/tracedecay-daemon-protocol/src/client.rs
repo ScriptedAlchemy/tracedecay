@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
     ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
     ApplicationResponse, CancellationContext, CancellationSignal, CancellationStage, Deadline,
@@ -25,10 +25,10 @@ use tracedecay_tool_catalog::{
     ProfileId, SchemaRef, SurfaceOperationName,
 };
 
-use tracedecay_application::feedback::observations::{
+use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub type ScopeSelector = InvocationTarget;
 
@@ -322,12 +322,12 @@ impl DaemonInvocationError {
         match self {
             Self::Cancelled { stage } => ApplicationProblem::Cancelled {
                 stage,
-                retry: tracedecay_application::RetryDirective::Never,
+                retry: tracedecay_contracts::RetryDirective::Never,
                 legal_actions: Vec::new(),
             },
             Self::TimedOut { stage } => ApplicationProblem::TimedOut {
                 stage,
-                retry: tracedecay_application::RetryDirective::Never,
+                retry: tracedecay_contracts::RetryDirective::Never,
                 legal_actions: Vec::new(),
             },
             Self::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
@@ -1267,8 +1267,8 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
 fn configuration_request_from_surface_payload(
     operation: ApplicationSurfaceOperation,
     payload: serde_json::Value,
-) -> Result<tracedecay_application::ConfigurationWireRequestV1, InvocationError> {
-    tracedecay_application::configuration_wire_request_from_invocation_payload(
+) -> Result<tracedecay_contracts::ConfigurationWireRequestV1, InvocationError> {
+    tracedecay_contracts::configuration_wire_request_from_invocation_payload(
         operation.as_str(),
         payload,
     )
@@ -1277,10 +1277,10 @@ fn configuration_request_from_surface_payload(
 
 fn feedback_handle_from_surface_payload(
     payload: serde_json::Value,
-) -> Result<tracedecay_application::feedback::FeedbackHandleRequestV1, InvocationError> {
-    let request: tracedecay_application::feedback::FeedbackHandleRequestV1 =
+) -> Result<tracedecay_contracts::feedback::FeedbackHandleRequestV1, InvocationError> {
+    let request: tracedecay_contracts::feedback::FeedbackHandleRequestV1 =
         serde_json::from_value(payload).map_err(|_| InvocationError::InvalidRequest)?;
-    tracedecay_application::feedback::FeedbackHandleRequestV1::new(request.request_handle)
+    tracedecay_contracts::feedback::FeedbackHandleRequestV1::new(request.request_handle)
         .map_err(|_| InvocationError::InvalidRequest)
 }
 
@@ -1376,7 +1376,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
 /// would hide it from `src/commands`); the saturating clamp is the one
 /// shared definition.
 pub fn invocation_now_micros() -> UtcMicros {
-    tracedecay_application::clock::now_micros()
+    tracedecay_contracts::clock::now_micros()
 }
 
 pub fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
@@ -1405,7 +1405,7 @@ pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
 
 pub fn application_response(
     request_id: RequestId,
-    result_contract: tracedecay_application::ResultContractRef,
+    result_contract: tracedecay_contracts::ResultContractRef,
     outcome: crate::contract::DaemonInvocationOutcome,
 ) -> Result<ApplicationResponse, InvocationError> {
     let envelope = match outcome {
@@ -1909,7 +1909,7 @@ mod tests {
         feedback_handle_from_surface_payload, semantic_evaluation_application_problem,
         semantic_qualification_application_problem,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemKind, CancellationStage, ConfigurationWireRequestV1,
         InvocationError, RequestId, ResultContractRef,
     };
@@ -2213,11 +2213,11 @@ mod tests {
     #[test]
     fn semantic_evaluation_client_prints_rejection_diagnostic() {
         let error = semantic_evaluation_application_problem(ApplicationProblem::InvalidRequest {
-            diagnostic: tracedecay_application::SafeDiagnostic {
+            diagnostic: tracedecay_contracts::SafeDiagnostic {
                 code: "semantic_evaluation.rejected".to_owned(),
                 message: "exact eligible chunks current expected 2170, measured 2184".to_owned(),
             },
-            retry: tracedecay_application::RetryDirective::Never,
+            retry: tracedecay_contracts::RetryDirective::Never,
             legal_actions: Vec::new(),
         });
         let message = error.to_string();

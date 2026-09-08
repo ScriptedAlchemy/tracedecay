@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext,
 };
 use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256};
@@ -941,9 +941,9 @@ mod tests {
         )
         .expect("project dashboard adapter");
         let control = DashboardHttpRequestControlV1::from_parts_for_test(
-            tracedecay_application::RequestId::new("request.dashboard-lcm-expired")
+            tracedecay_contracts::RequestId::new("request.dashboard-lcm-expired")
                 .expect("request identity"),
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(100))
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(100))
                 .expect("request deadline"),
             CancellationSignal::active("cancel.dashboard-lcm-expired")
                 .expect("request cancellation"),

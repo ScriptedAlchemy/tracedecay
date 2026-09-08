@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, WorkflowFailurePolicy, WorkflowFanOutCensusPersistOutcomeV1,
     WorkflowFanOutCensusStoragePort, WorkflowFanOutInput, WorkflowFanOutRequest,
     WorkflowProviderAdmission, WorkflowRunAppendRequest, WorkflowRunStoragePort,
@@ -284,7 +284,7 @@ fn durable_plan(
         definition: definition.clone(),
         run_id: run_id.clone(),
         step_id: id("prepare"),
-        fence: tracedecay_application::WorkflowExecutionFence {
+        fence: tracedecay_contracts::WorkflowExecutionFence {
             attempt_id: id::<AttemptId>("attempt.workflow.census-storage.fence"),
             lease: WorkLeaseFenceV1::new(
                 id::<WorkLeaseId>("lease.workflow.census-storage.fence"),
@@ -364,7 +364,7 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
     conflict.observed_at = UtcMicros(201);
     assert_eq!(
         WorkflowFanOutCensusStoragePort::persist_census(&authority, &conflict).unwrap_err(),
-        tracedecay_application::WorkflowFanOutCensusError::Conflict
+        tracedecay_contracts::WorkflowFanOutCensusError::Conflict
     );
 
     let projection = WorkflowRunStoragePort::projection(&authority, &run_id).unwrap();
@@ -429,7 +429,7 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
     assert_eq!(
         WorkflowFanOutCensusStoragePort::mark_census_observability_durable(&reopened, &divergent)
             .unwrap_err(),
-        tracedecay_application::WorkflowFanOutCensusError::Conflict
+        tracedecay_contracts::WorkflowFanOutCensusError::Conflict
     );
     assert_eq!(
         WorkflowFanOutCensusStoragePort::census_before(&reopened, &run_id, 3)
@@ -518,7 +518,7 @@ fn census_persist_failure_restarts_and_backfills_the_current_projection() {
     let failed = census(run_id.clone(), 3, 200, 300, true);
     assert_eq!(
         WorkflowFanOutCensusStoragePort::persist_census(&authority, &failed).unwrap_err(),
-        tracedecay_application::WorkflowFanOutCensusError::Unavailable
+        tracedecay_contracts::WorkflowFanOutCensusError::Unavailable
     );
     assert_eq!(store.count("workflow_fan_out_census_journal"), 1);
 

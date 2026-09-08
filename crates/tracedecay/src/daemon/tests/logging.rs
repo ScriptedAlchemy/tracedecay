@@ -18,8 +18,8 @@ fn daemon_log_line_formats_stable_key_value_fields() {
 #[cfg(unix)]
 #[test]
 fn scheduler_application_problem_log_excludes_hostile_payload() {
-    use tracedecay_application::retained_surfaces::AutomationRunProblemV1;
-    use tracedecay_application::{
+    use tracedecay_contracts::retained_surfaces::AutomationRunProblemV1;
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, LegalAction, RequestId, ResolvedScope,
         RetainedSurfaceOperation, RetryDirective, SafeDiagnostic,
         retained_surface_application_operation,

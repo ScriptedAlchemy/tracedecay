@@ -14,7 +14,7 @@ mod work_registered_store;
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptStorageError, WorkAttemptStoragePort, WorkRunControlStorageError,
     WorkRunControlStoragePort,
 };

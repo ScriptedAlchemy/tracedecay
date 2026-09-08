@@ -1,7 +1,7 @@
 //! Exact application scope for the dashboard HTTP surface.
 //!
 //! The dashboard is an entry point: it resolves its project scope ONCE into
-//! the transport-neutral [`tracedecay_application::ResolvedScope`] when the
+//! the transport-neutral [`tracedecay_contracts::ResolvedScope`] when the
 //! state is constructed, and every handler consumes that pinned scope instead
 //! of re-deriving repository/worktree identity from paths per request.
 //!
@@ -24,7 +24,7 @@ use tracedecay_domain::ProjectId;
 pub fn resolve_dashboard_scope(
     project_root: &Path,
     project_id: Option<&str>,
-) -> Option<tracedecay_application::ResolvedScope> {
+) -> Option<tracedecay_contracts::ResolvedScope> {
     let project_id = ProjectId::new(project_id?).ok()?;
     let scope = tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
         project_root,

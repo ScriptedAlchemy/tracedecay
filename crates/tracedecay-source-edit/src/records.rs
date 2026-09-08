@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, EffectReceipt, EffectResult, EffectTermination, OperationBudgetUsage,
     OperationReceipt, OperationTermination, ReconciliationState,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1,
@@ -309,11 +309,11 @@ mod tests {
     use crate::digest::persist_record;
     use std::fs;
     use tempfile::tempdir;
-    use tracedecay_application::source_edit::MoveHint;
-    use tracedecay_application::source_edit::{
+    use tracedecay_contracts::source_edit::MoveHint;
+    use tracedecay_contracts::source_edit::{
         AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationStage, OperationTermination, SourceEditDiagnosticV1, SourceEditRequest,
         SourceEditVerificationV1, source_edit_operation,
     };
@@ -343,7 +343,7 @@ mod tests {
                 verification_state: None,
             },
         );
-        let observation = tracedecay_application::CancellationObservation {
+        let observation = tracedecay_contracts::CancellationObservation {
             stage: CancellationStage::AfterCommit,
             observed_at: UtcMicros(5),
         };

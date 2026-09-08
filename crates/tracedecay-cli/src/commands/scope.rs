@@ -2,7 +2,7 @@
 //!
 //! Query-facing commands resolve their project scope ONCE, through the
 //! daemon-brokered project registry, into the transport-neutral
-//! `tracedecay_application::ResolvedScope`. Every failure state is explicit:
+//! `tracedecay_contracts::ResolvedScope`. Every failure state is explicit:
 //! an unregistered exact root, an unusable selector, a malformed registry
 //! response, or a sibling-root resolution fails closed — the CLI never
 //! substitutes another project (no CWD or sibling fallback).

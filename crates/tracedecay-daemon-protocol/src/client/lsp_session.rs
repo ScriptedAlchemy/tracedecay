@@ -4,7 +4,7 @@
 //! logic, naming, or visibility changes beyond the imports this file needs.
 
 use crate::lsp_wire::{FramePoll, FrameSend};
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 
 use super::{
     ConnectionLocalRequestSequence, DaemonInvocationClient, InvocationCancellationPolicy,

@@ -174,7 +174,7 @@ async fn authorize_lsp_workspace_for_uris(
             return None;
         };
         selectors.push(
-            tracedecay_application::RegisteredRootSelectorV1::new(
+            tracedecay_contracts::RegisteredRootSelectorV1::new(
                 project_id.clone(),
                 requested_path.clone(),
             )
@@ -201,6 +201,6 @@ async fn authorize_lsp_workspace_for_uris(
         })
         .collect::<Option<Vec<_>>>()?;
     service
-        .authorize_lsp_workspace(resolved_roots, tracedecay_application::clock::now_micros())
+        .authorize_lsp_workspace(resolved_roots, tracedecay_contracts::clock::now_micros())
         .await
 }

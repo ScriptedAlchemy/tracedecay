@@ -87,7 +87,7 @@ NORMALIZATION_DIMENSIONS = (
 )
 REQUIRED_CRATE_TAGS = (
     "tracedecay-api",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay-hooks",
     "tracedecay-tool-catalog",
     "tracedecay-capture",
@@ -365,18 +365,18 @@ def _workload(
     )
 
 
-_CLI = ("tracedecay-api", "tracedecay-application", "tracedecay")
+_CLI = ("tracedecay-api", "tracedecay-contracts", "tracedecay")
 _MCP = (
     "tracedecay-api",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay-tool-catalog",
     "tracedecay",
 )
 _HOOK = ("tracedecay-hooks", "tracedecay-capture", "tracedecay")
-_DASHBOARD = ("tracedecay-api", "tracedecay-application", "tracedecay")
+_DASHBOARD = ("tracedecay-api", "tracedecay-contracts", "tracedecay")
 _SDK = (
     "tracedecay-api",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay-capture",
     "tracedecay",
 )

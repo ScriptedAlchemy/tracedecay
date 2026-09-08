@@ -6,7 +6,8 @@ use std::sync::atomic::AtomicBool;
 #[cfg(any(test, feature = "test-helpers"))]
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
-use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_application::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
+use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 #[cfg(any(test, feature = "test-helpers"))]
@@ -16,7 +17,6 @@ use tracedecay_rusqlite_runtime::remote::{
 };
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{ProjectId, StoreShardIdV1, StoreShardScopeV1};
-use tracedecay_usecases::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
 
 use super::remote_recovery::{
     DaemonRemoteRecoveryPhysicalEffectsV1, RemoteRecoveryPublicationContextV1,
@@ -861,9 +861,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         if newly_mounted {
             hotpath::measure_block!(
                 "daemon.session_registry.mount.remote_replay_recovery",
-                storage.recover_interrupted_replay_attempts(
-                    tracedecay_application::clock::now_micros()
-                )
+                storage
+                    .recover_interrupted_replay_attempts(tracedecay_contracts::clock::now_micros())
             )
             .map_err(|error| {
                 session_registry_error("recover interrupted Remote Brain replay", error.to_string())
@@ -959,7 +958,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// authorities.
     pub fn remote_operational_status(
         &self,
-    ) -> tracedecay_application::remote::status::RemoteOperationalStatusReadV1 {
+    ) -> tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1 {
         self.remote_credential_authority.operational_status()
     }
 

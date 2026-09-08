@@ -6,11 +6,11 @@
 use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceExecutionErrorV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
     SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshTemporalModeV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, retained_surface_application_operation,
 };

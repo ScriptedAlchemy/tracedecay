@@ -10,35 +10,35 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use futures_util::stream;
 use tower::ServiceExt;
-use tracedecay_application::remote::auth::{
+use tracedecay_contracts::remote::auth::{
     RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentCommitReceiptV1,
 };
-use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
-use tracedecay_application::remote::capture_protocol::RemoteCaptureRequestV1;
-use tracedecay_application::remote::composition::ExpectedRemoteShardV1;
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::composition::ExpectedRemoteShardV1;
+use tracedecay_contracts::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionErrorV1,
     RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1,
     RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
     RemoteCredentialLookupPortV1, RemoteCredentialUseV1,
 };
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
-use tracedecay_application::remote::query::{
+use tracedecay_contracts::remote::query::{
     REMOTE_QUERY_SCHEMA_REVISION_V1, RemoteQueryOperationV1, RemoteQueryRequestV1,
     RemoteQueryResultV1,
 };
-use tracedecay_application::remote::recovery::{
+use tracedecay_contracts::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     RecoveryAuthorityExpectationV1, StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
-use tracedecay_application::remote::transfer::{
+use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
     PolicyDecisionRef, ResolvedScope,
 };
@@ -109,7 +109,7 @@ impl RemoteEnrollmentProtocolPortV1 for UnreachedProtocolPort {
         _enrollment_credential: OpaqueRemoteCredential,
     ) -> Result<
         RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
-        tracedecay_application::ApplicationContractError,
+        tracedecay_contracts::ApplicationContractError,
     > {
         self.calls.fetch_add(1, Ordering::SeqCst);
         unavailable_response(request)
@@ -127,7 +127,7 @@ macro_rules! unreachable_protocol_port {
                 _credential: OpaqueRemoteCredential,
             ) -> Result<
                 RemoteProtocolResponseV1<Self::Output>,
-                tracedecay_application::ApplicationContractError,
+                tracedecay_contracts::ApplicationContractError,
             > {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 unavailable_response(request)
@@ -140,7 +140,7 @@ macro_rules! unreachable_protocol_port {
                 control: RemoteProtocolExecutionControlV1,
             ) -> Result<
                 RemoteProtocolResponseV1<Self::Output>,
-                tracedecay_application::ApplicationContractError,
+                tracedecay_contracts::ApplicationContractError,
             > {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 if let Some(deadline) = &self.controlled_deadline {
@@ -162,7 +162,7 @@ unreachable_protocol_port!(RemoteFrameTransferRequestV1, RemoteFrameTransferRece
 
 fn unavailable_response<Request, Output>(
     request: RemoteProtocolRequestV1<Request>,
-) -> Result<RemoteProtocolResponseV1<Output>, tracedecay_application::ApplicationContractError> {
+) -> Result<RemoteProtocolResponseV1<Output>, tracedecay_contracts::ApplicationContractError> {
     let request_id = request.request_id;
     RemoteProtocolResponseV1::new(
         request_id.clone(),

@@ -4,7 +4,7 @@ use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
 use super::CodeIndexSchedulerRegistryV1;
 
-impl tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentityPort
+impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
     for CodeIndexSchedulerRegistryV1
 {
     fn current_identity(
@@ -12,7 +12,10 @@ impl tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentityPort
         project_root: PathBuf,
         document_relative_path: Option<String>,
     ) -> LspRuntimeFuture<
-        Result<tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentity, LspRuntimeFailure>,
+        Result<
+            tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentity,
+            LspRuntimeFailure,
+        >,
     > {
         let registry = self.clone();
         Box::pin(async move {
@@ -40,7 +43,7 @@ impl tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 .transpose()?;
             let (document_file_occurrence_id, document_content_digest) = document_identity.unzip();
             Ok(
-                tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentity {
+                tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentity {
                     project: generation.manifest().project_id.clone(),
                     repository: generation.snapshot().repository.clone(),
                     worktree: generation.snapshot().worktree.clone(),

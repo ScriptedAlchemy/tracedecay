@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 
 use serde_json::Value;
-use tracedecay_application::ApplicationResult;
+use tracedecay_contracts::ApplicationResult;
 
 use crate::cli::WorkInvocationArgs;
 
@@ -114,7 +114,7 @@ mod tests {
     use super::work_json_line;
     use super::{WorkOutputSettlement, classify_work_output, write_work_output};
     use std::io::{self, Write};
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
         ResultContractRef, RetryDirective,
     };

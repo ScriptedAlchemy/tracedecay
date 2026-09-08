@@ -18,7 +18,7 @@ hotpath = [
     "hotpath/tokio",
     "tracedecay-agent-hosts/hotpath",
     "tracedecay-api/hotpath",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-code-index-runtime/hotpath",
     "tracedecay-configuration/hotpath",
@@ -38,14 +38,14 @@ hotpath = [
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-tool-catalog/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-application/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-agent-hosts/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-code-index-runtime/hotpath-alloc",
     "tracedecay-configuration/hotpath-alloc",
@@ -65,14 +65,14 @@ hotpath-alloc = [
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-agent-hosts/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-code-index-runtime/hotpath-cpu",
     "tracedecay-configuration/hotpath-cpu",
@@ -92,7 +92,7 @@ hotpath-cpu = [
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
 ]
 # Cross-crate fixture surface for composition-root invocation tests:
 # `DaemonInvocationService::invoke`, publication gates, and test constructors.
@@ -113,7 +113,7 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
 tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
@@ -135,7 +135,7 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 url = "2"
 
 [dev-dependencies]

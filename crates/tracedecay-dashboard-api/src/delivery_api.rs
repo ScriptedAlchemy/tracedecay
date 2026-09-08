@@ -11,16 +11,8 @@ use axum::extract::State;
 use axum::{Extension, Json};
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_application::git::GitReadRequestV1;
-use tracedecay_domain::CommitId;
-use tracedecay_domain::feedback::{
-    CiFailureKindV1, GitHubReviewAuthorClassV1, GitHubReviewCoverageV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1, GitHubReviewReadOperationV1,
-    GitHubReviewStateV1,
-};
-use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
-use tracedecay_usecases::advisory::GitHubReleaseV1;
-use tracedecay_usecases::delivery::{
+use tracedecay_application::advisory::GitHubReleaseV1;
+use tracedecay_application::delivery::{
     MAX_PROJECT_DELIVERY_CI_CHECKS_V1, MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
     MAX_PROJECT_DELIVERY_RELEASES_V1, MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
     ProjectDeliveryCiAnnotationLevelV1, ProjectDeliveryCiAnnotationV1, ProjectDeliveryCiCheckV1,
@@ -35,6 +27,14 @@ use tracedecay_usecases::delivery::{
     ProjectDeliveryReviewObservationKindV1, ProjectDeliveryReviewObservationV1,
     ProjectDeliverySnapshotV1,
 };
+use tracedecay_contracts::git::GitReadRequestV1;
+use tracedecay_domain::CommitId;
+use tracedecay_domain::feedback::{
+    CiFailureKindV1, GitHubReviewAuthorClassV1, GitHubReviewCoverageV1,
+    GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1, GitHubReviewReadOperationV1,
+    GitHubReviewStateV1,
+};
+use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
 
 use crate::application::git_reads::{
     GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1, execute_git_read,
@@ -1239,7 +1239,7 @@ fn release_projection(
 }
 
 fn map_release_page(
-    page: tracedecay_usecases::advisory::ProjectGitHubReleasePageV1,
+    page: tracedecay_application::advisory::ProjectGitHubReleasePageV1,
 ) -> DeliveryReleaseTimelineV1 {
     DeliveryReleaseTimelineV1 {
         items: page.releases.into_iter().map(map_release).collect(),

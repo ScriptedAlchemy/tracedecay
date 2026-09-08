@@ -11,14 +11,14 @@ fn daemon_observability_producer_identity(
     project_id: &ProjectId,
     configuration_revision: &ManifestDigest,
     policy_revision: &ManifestDigest,
-) -> Result<tracedecay_usecases::observability::ObservabilityProducerIdentityV1, &'static str> {
+) -> Result<tracedecay_application::observability::ObservabilityProducerIdentityV1, &'static str> {
     let registration = NEXT_DAEMON_OBSERVABILITY_PRODUCER_REGISTRATION
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(1)
         })
         .map_err(|_| "daemon_observability_producer_registrations_exhausted")?;
     Ok(
-        tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+        tracedecay_application::observability::ObservabilityProducerIdentityV1 {
             authorized_scope_ref: project_id.as_str().to_owned(),
             process_boot_id: format!(
                 "daemon:{}:{registration}",
@@ -41,7 +41,7 @@ impl DaemonInvocationService {
         configuration_revision: ManifestDigest,
         policy_revision: ManifestDigest,
     ) -> Result<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
         TraceDecayError,
     > {
         self.project_runtimes
@@ -104,7 +104,7 @@ impl DaemonInvocationService {
                                     &policy_revision,
                                 )
                                 .map_err(StoreObservabilityMountErrorV1::Unavailable)?;
-                                tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+                                tracedecay_application::observability::BoundedObservabilityProducerV1::start(
                                     database.clone(),
                                     identity,
                                     DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
@@ -143,7 +143,7 @@ impl DaemonInvocationService {
     pub async fn observability_producer(
         &self,
         project_root: Option<&Path>,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>> {
         self.project_runtimes
             .read::<RegisteredObservabilityProducerV1, _, _>(project_root?, |registered| {
                 registered.producer()
@@ -154,7 +154,7 @@ impl DaemonInvocationService {
     pub fn observability_producer_for_project_root(
         &self,
         project_root: &Path,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>> {
         self.project_runtimes
             .read_now::<RegisteredObservabilityProducerV1, _, _>(project_root, |registered| {
                 registered.producer()
@@ -166,7 +166,7 @@ impl DaemonInvocationService {
         brain_id: &tracedecay_domain::BrainId,
         profile_id: &tracedecay_domain::UserProfileId,
         project_id: &ProjectId,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>> {
         self.project_runtimes
             .find_equivalent::<RegisteredObservabilityProducerV1, _, _, _>(|registered| {
                 let database = registered.database();
@@ -198,7 +198,7 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
     ) -> Result<
-        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+        Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
         &'static str,
     > {
         let Some(project_root) = project_root else {
@@ -216,7 +216,8 @@ impl DaemonInvocationService {
     pub async fn delivery_settlement_recorder(
         &self,
         project_root: Option<&Path>,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>
+    {
         self.project_runtimes
             .read::<RegisteredObservabilityProducerV1, _, _>(project_root?, |registered| {
                 registered.delivery_settlement_recorder()
@@ -232,20 +233,18 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
         identity: &tracedecay_domain::WorkAttemptIdentityV1,
-    ) -> Option<tracedecay_application::WorkflowFanOutAttemptBindingV1> {
+    ) -> Option<tracedecay_contracts::WorkflowFanOutAttemptBindingV1> {
         let runtime = self
             .project_runtimes
             .get::<RegisteredWorkRuntime>(project_root?)
             .await?;
-        let workflow = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
-            &runtime.database,
-        )
-        .ok()?;
-        tracedecay_application::WorkflowRunStoragePort::fan_out_binding(
-            workflow.effects(),
-            identity,
-        )
-        .ok()
-        .flatten()
+        let workflow =
+            tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
+                &runtime.database,
+            )
+            .ok()?;
+        tracedecay_contracts::WorkflowRunStoragePort::fan_out_binding(workflow.effects(), identity)
+            .ok()
+            .flatten()
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
+use tracedecay_application::semantic_runtime::SemanticVectorRetentionAuthorizationV1;
 use tracedecay_graph_db::VerifiedGenerationBeginV1;
-use tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1;
 
 impl RetainedCodeGraphRuntimeV1 {
     pub fn semantic_vector_project_stage_census(

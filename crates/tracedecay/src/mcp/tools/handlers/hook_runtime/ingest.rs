@@ -2,6 +2,7 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
@@ -15,7 +16,6 @@ use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
 use tracedecay_sessions::runtime::source::TranscriptSource;
-use tracedecay_usecases::observation::ObservationCancellation;
 
 use super::super::SessionAuthorities;
 
@@ -695,7 +695,9 @@ pub(crate) async fn ingest_transcript_with_cancellation(
             tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
                 accounting_db,
                 session_authorities.project.map(std::convert::AsRef::as_ref),
-                tracedecay_usecases::analytics_bridge::hook_import_sources(Some(cg.project_root())),
+                tracedecay_application::analytics_bridge::hook_import_sources(Some(
+                    cg.project_root()
+                )),
                 cg.project_root(),
                 crate::tracedecay::current_timestamp()
             ),

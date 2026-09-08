@@ -60,7 +60,7 @@ pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> 
 /// original one.
 fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain::UtcMicros {
     let remaining = request_deadline.saturating_duration_since(Instant::now());
-    let now = tracedecay_application::clock::now_micros();
+    let now = tracedecay_contracts::clock::now_micros();
     tracedecay_domain::UtcMicros(
         now.0
             .saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),

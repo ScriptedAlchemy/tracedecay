@@ -183,7 +183,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
     // the future first so suite load cannot race the real backoff clock (the
     // reopened mount must clear even a distant deadline).
     let pin_deadline = |conn: &rusqlite::Connection| {
-        let far_future = tracedecay_application::clock::now_micros()
+        let far_future = tracedecay_contracts::clock::now_micros()
             .0
             .saturating_add(3_600_000_000);
         assert_eq!(
@@ -249,7 +249,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
 
     // The injected trigger is durable, so the recovery attempt fails again and
     // resumes the escalating backoff from the recorded attempt history.
-    let recovery_attempted_at = tracedecay_application::clock::now_micros().0;
+    let recovery_attempted_at = tracedecay_contracts::clock::now_micros().0;
     let recovery_error = reopened_store
         .project_observation(candidate.observation_id())
         .await
@@ -314,12 +314,12 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
                 [candidate.observation_id().as_str()],
             )
             .unwrap();
-        let before = tracedecay_application::clock::now_micros().0;
+        let before = tracedecay_contracts::clock::now_micros().0;
         let retry_error = reopened_store
             .project_observation(candidate.observation_id())
             .await
             .expect_err("injected projection failure must remain retryable");
-        let after = tracedecay_application::clock::now_micros().0;
+        let after = tracedecay_contracts::clock::now_micros().0;
         assert_eq!(retry_error.durable_detail(), exact_error);
         let state = retry_conn
             .query_row(

@@ -7,11 +7,11 @@ use std::sync::Arc;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunRequestV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceOperation,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, ApplicationProblemEnvelope, CancellationSignal, CapabilityGrantId,
     DisclosureClass, EffectReceipt, ProblemOwningLayer, RequestId, ResolvedScope,
     retained_surface_application_operation, retained_surface_execution_problem,
@@ -210,7 +210,7 @@ async fn reconcile_indexed_retirement_transition(
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
     project_id: &ProjectId,
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     indexed: &IndexedRetirementTransition,
 ) -> Result<()> {
     if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
@@ -292,7 +292,7 @@ async fn reconcile_indexed_automation_effect(
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
     project_id: &ProjectId,
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     indexed: &IndexedJournal,
 ) -> Result<EntryRecoveryOutcome> {
     if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
@@ -567,7 +567,7 @@ pub(super) fn special_recovery_defer_reason(
 
 pub(super) fn admission_has_exact_authority(
     admission: &DurableAutomationAdmission,
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
 ) -> Result<bool> {
     Ok(effect_authority_digest(
         admission.schema_version,
@@ -593,7 +593,7 @@ struct EffectAuthorityDigestInput<'a> {
     schema_version: u32,
     capability_id: &'a tracedecay_tool_catalog::CapabilityId,
     use_case_id: &'a tracedecay_tool_catalog::UseCaseId,
-    result_contract: &'a tracedecay_application::ResultContractRef,
+    result_contract: &'a tracedecay_contracts::ResultContractRef,
     resource_addressed: bool,
     request: &'a AutomationRunRequestV1,
     input_digest: &'a ManifestDigest,
@@ -650,8 +650,8 @@ pub(super) fn effect_authority_digest(
 
 pub(super) fn recovered_partial_terminal(
     admission: &DurableAutomationAdmission,
-    committed: Vec<tracedecay_application::retained_surfaces::AutomationCommittedReceiptV1>,
-    operation: &tracedecay_application::ApplicationOperation,
+    committed: Vec<tracedecay_contracts::retained_surfaces::AutomationCommittedReceiptV1>,
+    operation: &tracedecay_contracts::ApplicationOperation,
 ) -> Result<AutomationSettledTerminal> {
     let state = digest(&(
         "tracedecay.automation-run.partial-state.v1",

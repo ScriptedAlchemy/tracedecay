@@ -10,9 +10,7 @@ use tracedecay::application_surface::{
     execute_application_surface, observe_surface_argument_rejection,
     resolve_application_surface_dispatch_with_controls,
 };
-use tracedecay_application::{
-    CancellationSignal, Deadline, PageRequest, RequestId, RetryDirective,
-};
+use tracedecay_contracts::{CancellationSignal, Deadline, PageRequest, RequestId, RetryDirective};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 

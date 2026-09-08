@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
-use tracedecay_application::{
+use tracedecay_contracts::{
     GitIndexApplyRequestV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt, OperationTermination,
 };
@@ -29,7 +29,7 @@ use crate::git_index_transactions::{
     FixedGitIndexRunner, GIT_INDEX_ADAPTER_REVISION, NativeGitIndexError, NativeIndexLock,
     ValidatedIndexPatch,
 };
-use tracedecay_usecases::git_intelligence::NativeGitIntelligence;
+use tracedecay_application::git_intelligence::NativeGitIntelligence;
 
 use super::service::NativeGitIndexApplyOutcomeV1;
 use super::{
@@ -1633,7 +1633,7 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
         Deadline, DisclosureClass, GitIndexEffectProofV1, IdempotencyKey, PolicyDecisionRef,
         RequestContext, RequestId, ResolvedScope,
@@ -1845,7 +1845,7 @@ mod tests {
         GitIndexPreviewRequestV1 {
             context,
             authority,
-            binding: tracedecay_application::GitIndexOperationBindingV1 {
+            binding: tracedecay_contracts::GitIndexOperationBindingV1 {
                 capability_id,
                 use_case_id,
                 operation: GitIndexTransactionOperationV1::CommitIndex,

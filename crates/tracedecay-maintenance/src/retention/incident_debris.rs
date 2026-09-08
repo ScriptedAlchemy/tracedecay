@@ -14,7 +14,7 @@ use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use cap_std::fs::{DirBuilderExt, OpenOptionsExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::storage::{
+use tracedecay_contracts::storage::{
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, RelativeArtifactPathV1,
     StorageByteSizeV1, StoreKeyV1,
 };
@@ -853,7 +853,7 @@ fn sync_dir(directory: &Dir) -> io::Result<()> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use tracedecay_application::storage::IncidentDebrisKindV1;
+    use tracedecay_contracts::storage::IncidentDebrisKindV1;
 
     use super::*;
     use crate::retention::orphan_stores::{

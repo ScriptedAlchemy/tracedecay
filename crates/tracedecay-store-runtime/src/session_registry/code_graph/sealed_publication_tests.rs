@@ -86,7 +86,7 @@ fn with_publication_context<T>(
         deadline_warned: AtomicBool::new(false),
     };
     let control = RuntimeRequestControlV1 {
-        requested_at: tracedecay_application::clock::now_micros(),
+        requested_at: tracedecay_contracts::clock::now_micros(),
         deadline,
         cancellation,
     };

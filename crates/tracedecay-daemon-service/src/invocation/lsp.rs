@@ -42,7 +42,7 @@ pub fn canonicalize_lsp_roots(
         PathBuf,
         String,
         ResolvedScope,
-        tracedecay_application::RegisteredRootLocatorV1,
+        tracedecay_contracts::RegisteredRootLocatorV1,
     )],
 ) -> bool {
     roots.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
@@ -163,7 +163,7 @@ impl DaemonInvocationService {
         mut roots: Vec<(
             PathBuf,
             ResolvedScope,
-            tracedecay_application::RegisteredRootLocatorV1,
+            tracedecay_contracts::RegisteredRootLocatorV1,
         )>,
         observed_at: UtcMicros,
         deadline: &Deadline,
@@ -220,7 +220,7 @@ impl DaemonInvocationService {
             )
             .ok()?;
             admissions.push(
-                tracedecay_application::AuthorizedRootAdmission::new(context, locator.clone())
+                tracedecay_contracts::AuthorizedRootAdmission::new(context, locator.clone())
                     .ok()?,
             );
         }

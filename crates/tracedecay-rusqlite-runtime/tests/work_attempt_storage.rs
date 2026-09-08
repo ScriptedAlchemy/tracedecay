@@ -12,7 +12,7 @@ use std::{
     thread,
 };
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     VerifiedWorkRetryFailureV1, WorkAttemptAdmissionKind, WorkAttemptCapacityScopeV1,
     WorkAttemptCapacityVerdictV1, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
     WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
@@ -911,7 +911,7 @@ fn retry_write(original: &WorkAttemptV1) -> WorkRetryWriteV1 {
         cause: WorkRetryCauseV1::RuntimeFailure,
         evidence_ref: format!("runtime-terminal:{}", evidence_digest.as_str()),
     };
-    let command = tracedecay_application::RetryWorkAttemptCommandV1 {
+    let command = tracedecay_contracts::RetryWorkAttemptCommandV1 {
         original_attempt: original.identity().clone(),
         new_attempt_id: new_identity.attempt_id().clone(),
         failure: failure.clone(),

@@ -38,7 +38,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::CostsReadModelV1;
+use tracedecay_contracts::CostsReadModelV1;
 use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
 use tracedecay_session_memory::provider_usage::{
     AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,

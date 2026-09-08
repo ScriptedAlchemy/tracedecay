@@ -94,7 +94,7 @@ mod tests {
     use axum::response::IntoResponse;
     use tower::ServiceExt;
     use tracedecay_api::{WorkHttpRequest, WorkOperation};
-    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
 
     fn dashboard_router() -> Router {
@@ -172,7 +172,7 @@ mod tests {
     fn the_route_document_covers_every_canonical_core_work_binding() {
         use std::collections::BTreeSet;
 
-        let registry = tracedecay_application::work_executable_binding_registry()
+        let registry = tracedecay_contracts::work_executable_binding_registry()
             .expect("canonical Work registry");
         let routes = super::registered_route_contracts();
         let actual_ids = routes

@@ -3,11 +3,11 @@ use std::fs;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     RetrievalOrder, RetrievalRequestMeta, SourceReadModeV1, SourceReadPortContext,
     SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationContext, CancellationSignal, CapabilityGrantId,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, PageRequest, RequestAdmission,
     RequestContext, RequestId, ResolvedScope, ResultContractRef, ResultProjection,
@@ -25,7 +25,7 @@ use tracedecay_graph_query::{
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
 use super::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_usecases::primitives::SourceReadAdapter;
+use tracedecay_application::primitives::SourceReadAdapter;
 
 const NOW: UtcMicros = UtcMicros(1_000);
 

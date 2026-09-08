@@ -14,13 +14,13 @@ pub struct OperationRequestOptions {
     pub deadline_micros: Option<i64>,
     /// Stable caller-owned replay identity required by operations whose
     /// generated request-ID control is `Required`.
-    pub request_id: Option<tracedecay_application::RequestId>,
+    pub request_id: Option<tracedecay_contracts::RequestId>,
 }
 
 pub(crate) fn admit<Operation: TypedOperation>(
     options: &OperationRequestOptions,
-) -> Result<Option<tracedecay_application::RequestId>, ClientError> {
-    use tracedecay_application::retained_surfaces::SdkRequestIdControlV1;
+) -> Result<Option<tracedecay_contracts::RequestId>, ClientError> {
+    use tracedecay_contracts::retained_surfaces::SdkRequestIdControlV1;
 
     match (Operation::REQUEST_ID_CONTROL, options.request_id.as_ref()) {
         (SdkRequestIdControlV1::Required, None) => Err(ClientError::InvalidRequest(format!(

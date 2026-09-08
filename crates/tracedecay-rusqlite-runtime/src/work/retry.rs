@@ -1,7 +1,7 @@
 //! Atomic persistence of a new retry attempt and its durable lineage receipt.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptStorageError, WorkRetryAttemptOutcomeV1, WorkRetryReceiptV1, WorkRetryStoragePortV1,
     WorkRetryWriteV1,
 };
@@ -185,7 +185,7 @@ fn replay(
     )
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let expected_receipt_digest = canonical_sha256(
-        &tracedecay_application::WorkOwnerObservationReceiptV1::Retry(receipt.clone()),
+        &tracedecay_contracts::WorkOwnerObservationReceiptV1::Retry(receipt.clone()),
     )
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     if !receipt.validate_for_observation()
@@ -411,7 +411,7 @@ fn insert_receipt(
     let payload =
         serde_json::to_string(&write.receipt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let receipt_digest = canonical_sha256(
-        &tracedecay_application::WorkOwnerObservationReceiptV1::Retry(write.receipt.clone()),
+        &tracedecay_contracts::WorkOwnerObservationReceiptV1::Retry(write.receipt.clone()),
     )
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     transaction

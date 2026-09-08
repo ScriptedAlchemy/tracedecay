@@ -49,8 +49,8 @@ pub struct CodeIndexSearchRequestV1 {
     /// [`CodeIndexSearchExecutor`] authenticates this value; keep it on the
     /// request even when local analysis cannot see through `Arc<dyn Fn…>`.
     pub authority: Option<CodeIndexSearchAuthorityV1>,
-    pub deadline: Option<tracedecay_application::Deadline>,
-    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub deadline: Option<tracedecay_contracts::Deadline>,
+    pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -422,8 +422,8 @@ pub struct CodeIndexBranchDiffRequestV1 {
     pub limit: usize,
     pub cursor: Option<String>,
     pub authority: Option<CodeIndexSearchAuthorityV1>,
-    pub deadline: Option<tracedecay_application::Deadline>,
-    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub deadline: Option<tracedecay_contracts::Deadline>,
+    pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

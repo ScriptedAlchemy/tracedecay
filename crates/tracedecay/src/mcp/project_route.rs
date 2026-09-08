@@ -19,7 +19,7 @@ pub(crate) struct ResolvedProjectRoute {
     /// route (plan: `docs/superpowers/plans/v2/01-domain-request-context.md`).
     /// Query-facing handlers consume the routed server; the scope names the
     /// exact project/repository/worktree that server answers for.
-    pub(crate) scope: tracedecay_application::ResolvedScope,
+    pub(crate) scope: tracedecay_contracts::ResolvedScope,
 }
 
 impl ResolvedProjectRoute {

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retrieval::{MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_DEPTH};
+use tracedecay_contracts::retrieval::{MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_DEPTH};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EdgeAuthorityV1, RelationEdgeKindV1,
     RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrieverBatch, RetrieverContinuation,

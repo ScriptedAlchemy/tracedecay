@@ -1,6 +1,6 @@
 //! Runtime pin surfaces and control-plane config helpers.
 //!
-//! Retrieval-profile evaluation stays in `tracedecay-usecases::config::retrieval`.
+//! Retrieval-profile evaluation stays in `tracedecay-application::config::retrieval`.
 //! The re-export rows below are surfaces `tracedecay-global-db` and
 //! `tracedecay-domain` already own, kept under the `crate::config::…`
 //! spelling so call sites share one import path.

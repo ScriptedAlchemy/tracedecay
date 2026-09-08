@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };

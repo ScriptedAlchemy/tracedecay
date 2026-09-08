@@ -352,7 +352,7 @@ where
 async fn drain_hook_delivery_receipts(
     data_root: &Path,
     host: HookHostV1,
-    authority: &tracedecay_usecases::observability::DeliverySettlementAuthorityV1,
+    authority: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
 ) {
     let root = tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host);
     if !root.is_dir() {
@@ -421,7 +421,7 @@ impl Drop for HookReplaySweepObservation {
 async fn drain_all_hosts(
     graph: &crate::tracedecay::TraceDecay,
     data_root: &Path,
-    delivery_settlements: &tracedecay_usecases::observability::DeliverySettlementAuthorityV1,
+    delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
 ) {
     let _sweep = HookReplaySweepObservation::begin();
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
@@ -493,7 +493,8 @@ fn hook_replay_now() -> UtcMicros {
 
 struct RegisteredReplayConsumer {
     graph: Weak<crate::tracedecay::TraceDecay>,
-    delivery_settlements: Weak<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+    delivery_settlements:
+        Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -515,7 +516,7 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
 /// Returns `false` when one is already running for this root.
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<crate::tracedecay::TraceDecay>,
-    delivery_settlements: Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+    delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
 ) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
     let graph = Arc::downgrade(&graph);

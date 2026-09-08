@@ -24,10 +24,10 @@ use tracedecay::application_surface::{
     resolve_application_surface_dispatch, resolve_catalog_tool_binding,
 };
 use tracedecay_api::is_http_application_operation_exposed;
-use tracedecay_application::{
+use tracedecay_contracts::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     RequestId, native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };

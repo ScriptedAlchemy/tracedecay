@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_runtime_core::db::Database;

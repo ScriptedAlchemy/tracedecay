@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Duration;
 
-use tracedecay_application::RequestId;
-use tracedecay_application::remote::recovery::{
+use tracedecay_contracts::RequestId;
+use tracedecay_contracts::remote::recovery::{
     BackupOperationStateV1, PromotionCasReceiptV1, RecoveryAuthorityExpectationV1,
     RemoteRecoveryCallerV1, RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
@@ -338,7 +338,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             destination_bytes: receipt.destination_bytes,
             destination_sha256: receipt.destination_sha256.0,
         };
-        let committed_at = tracedecay_application::clock::now_micros();
+        let committed_at = tracedecay_contracts::clock::now_micros();
         let manifest = RemoteBackupManifestV1 {
             version: BACKUP_MANIFEST_VERSION.to_owned(),
             backup_id: backup_id.clone(),
@@ -648,7 +648,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let authority_key = authority_key(expected)?;
         let current = remote_fence(expected)?;
-        let installed_at = tracedecay_application::clock::now_micros();
+        let installed_at = tracedecay_contracts::clock::now_micros();
         let (binding, _) = self
             .replay
             .target_descriptor(&project_id)

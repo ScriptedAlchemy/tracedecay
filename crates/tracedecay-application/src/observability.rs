@@ -1,490 +1,707 @@
-//! Transport-neutral observability record/query boundary and dashboard read models.
+//! Production Plan 26 read-model composition over the canonical accounting store.
 
-mod share;
+mod cost_latency;
+mod costs;
+mod delivery_recorder;
+mod delivery_settlement;
+mod delivery_spool;
+mod emit;
+mod execution_emit;
+mod export;
+mod github_stack_emit;
+mod no_progress_emit;
+mod producer;
+mod product_view_emit;
+mod read;
+mod read_model;
+#[cfg(test)]
+mod read_model_tests;
+mod retrieval_emit;
+mod work_blocked_interval_emit;
+mod work_conflict_emit;
+mod work_duplicate_emit;
+mod work_operation_resource_emit;
+mod work_owner_observation_recovery;
+mod work_retry_leak_emit;
+mod workflow_emit;
 
-use std::future::Future;
-use std::pin::Pin;
-
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use tracedecay_domain::{
-    AnalyticsModeV1, CoverageStateV1, ObservabilityEnvelopeV1, RejectedArgumentErrorClassV1,
-    RejectedArgumentNameV1, RejectedArgumentSurfaceV1,
+pub use cost_latency::{provider_latency_read_model, unavailable_provider_latency};
+pub use costs::{
+    costs_cli_value, costs_export_bytes, costs_mcp_value, costs_read_model,
+    costs_read_model_with_provider_usage, costs_read_model_with_provider_usage_and_observability,
+    costs_unavailable_read_model,
 };
+pub use delivery_recorder::{
+    BoundedDeliverySettlementRecorderV1, DeliverySettlementRecordOutcomeV1,
+    DeliverySettlementRecorderSummaryV1,
+};
+pub use delivery_settlement::{DeliverySettlementAuthorityV1, DeliverySettlementEmissionV1};
+pub use emit::{
+    emit_index, record_adoption_eligibility, record_adoption_outcome, record_index, record_latency,
+    record_operation_resource, record_retrieval_query, record_storage,
+};
+pub use execution_emit::{
+    ExecutionOwnerFactInputV1, ExecutionTopologyObservationUnavailableV1,
+    NativeIntegrationObservationResultV1, execution_owner_fact_envelope,
+    record_native_integration_transition,
+};
+pub use export::RegisteredAggregateShareExporterV1;
+pub use github_stack_emit::{
+    GitHubStackCapabilityObservationResultV1, GitHubStackCapabilityObservationUnavailableV1,
+    GitHubStackDriftObservationResultV1, GitHubStackDriftObservationUnavailableV1,
+    GitHubStackDriftRecoveryErrorV1, GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1,
+    record_github_stack_capability, record_github_stack_drifts, recover_open_github_stack_drifts,
+};
+pub use no_progress_emit::{WorkNoProgressObservationV1, record_no_progress_observation};
+pub use producer::{
+    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
+    ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
+    ObservabilityProducerIdentityV1, ObservabilityProducerSummaryV1,
+};
+pub use product_view_emit::{
+    record_automation_funnel_observation, record_reliance_decision,
+    record_remote_coverage_observation, record_task_intelligence_decision,
+    record_terminal_attempt_product_views,
+};
+pub use read::{observatory_read_model, observatory_unavailable_read_model};
+pub use retrieval_emit::{
+    AblationDimensionV1, RetrievalEmissionSummaryV1, emit_retrieval_pipeline,
+    observe_stage_ablation, record_analytics_consent, record_context_outcome,
+    record_retrieval_ablation, record_retrieval_planner, record_retrieval_source,
+    record_retrieval_synthesis, record_retriever,
+};
+pub use tracedecay_global_db::{
+    DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
+    PendingDeliverySourceReceiptV1,
+};
+pub use tracedecay_session_memory::observability_store::RegisteredObservabilityPortV1;
+pub use work_blocked_interval_emit::{
+    record_work_blocked_interval_observation, work_blocked_interval_observation_envelope,
+};
+pub use work_conflict_emit::{
+    WorkConflictObservationResultV1, WorkConflictObservationUnavailableV1,
+    record_work_conflict_observation,
+};
+pub use work_duplicate_emit::record_work_duplicate_observation;
+pub use work_operation_resource_emit::record_work_operation_resource;
+pub use work_owner_observation_recovery::{
+    WorkOwnerObservationRecoverySummaryV1, WorkOwnerObservationRecoveryV1,
+};
+pub use work_retry_leak_emit::{
+    WorkOwnerObservationResultV1, record_work_leak_observation, record_work_retry_observation,
+};
+pub use workflow_emit::record_workflow_settlement;
 
-use crate::ApplicationContractError;
+use tracedecay_contracts::{
+    MetricCohortV1, MetricCoverageV1, MetricEvidenceClassV1, MetricProvenanceV1, MetricSourceV1,
+    MetricTemporalV1, MetricUncertaintyV1, MetricValueV1, ObservabilityHorizonV1,
+    ObservatoryReadModelV1,
+};
+use tracedecay_domain::CoverageStateV1;
 
-pub use share::*;
+use crate::feedback::observations::{
+    FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1, FeedbackSystemMetricKindV1,
+    FeedbackSystemMetricUnavailableReasonV1, FeedbackSystemMetricUnitV1,
+};
+use tracedecay_contracts::feedback::observations::FeedbackCoverageV1;
 
-pub type ObservabilityFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, ApplicationContractError>> + Send + 'a>>;
+const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
+pub(super) const COST_DESCRIPTOR: &str = "provider-costs.v1";
+const FEEDBACK_DESCRIPTOR: &str = "feedback-system-quality.v1";
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-pub struct ObservabilityHorizonV1 {
-    pub since_micros: i64,
-    pub until_micros: i64,
+/// Canonical wire projection used by every dashboard wire surface. Adapters may wrap the
+/// value in their transport framing but may not recompute metrics or coverage.
+fn canonical_observatory_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(model)
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ObservabilityQueryV1 {
-    pub authorized_scope_ref: String,
-    pub event_kinds: Vec<String>,
-    pub horizon: ObservabilityHorizonV1,
-    pub after_watermark: Option<String>,
-    pub limit: u32,
+pub fn observatory_cli_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_observatory_value(model)
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ObservabilityPageV1 {
-    pub events: Vec<ObservabilityEnvelopeV1>,
-    /// Registered authority cursor corresponding to each event at the same
-    /// index. Consumers must not derive storage identity from event payloads.
-    pub event_cursors: Vec<String>,
-    pub watermark: String,
-    pub coverage: CoverageStateV1,
-    pub next_watermark: Option<String>,
+pub fn observatory_mcp_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_observatory_value(model)
 }
 
-pub trait ObservabilityRecordPort: Send + Sync {
-    fn record<'a>(&'a self, envelope: ObservabilityEnvelopeV1) -> ObservabilityFuture<'a, String>;
+pub fn observatory_http_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_observatory_value(model)
 }
 
-pub trait ObservabilityQueryPort: Send + Sync {
-    fn query<'a>(
-        &'a self,
-        query: ObservabilityQueryV1,
-    ) -> ObservabilityFuture<'a, ObservabilityPageV1>;
+/// Bounded public JSON export. It is the same canonical model as interactive
+/// surfaces, including absent values, exact denominator, and coverage state.
+pub fn observatory_export_bytes(
+    model: &ObservatoryReadModelV1,
+) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(model)
 }
 
-pub struct ObservabilityApplicationV1<R, Q> {
-    recorder: R,
-    query: Q,
-}
-
-impl<R, Q> ObservabilityApplicationV1<R, Q>
-where
-    R: ObservabilityRecordPort,
-    Q: ObservabilityQueryPort,
-{
-    #[hotpath::skip]
-    pub const fn new(recorder: R, query: Q) -> Self {
-        Self { recorder, query }
+fn coverage(
+    eligible: Option<u64>,
+    observed: u64,
+    unknown: u64,
+    state: CoverageStateV1,
+) -> MetricCoverageV1 {
+    MetricCoverageV1 {
+        eligible,
+        observed,
+        completed: observed,
+        censored: 0,
+        unknown,
+        excluded: 0,
+        state,
     }
+}
 
-    pub async fn record(
-        &self,
-        envelope: ObservabilityEnvelopeV1,
-    ) -> Result<String, ApplicationContractError> {
-        self.recorder.record(envelope).await
-    }
-
-    pub async fn query(
-        &self,
-        query: ObservabilityQueryV1,
-    ) -> Result<ObservabilityPageV1, ApplicationContractError> {
-        self.query.query(query).await
+fn horizon(since_seconds: i64, observed_at_micros: i64) -> ObservabilityHorizonV1 {
+    ObservabilityHorizonV1 {
+        since_micros: since_seconds.saturating_mul(1_000_000),
+        until_micros: observed_at_micros,
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-pub struct MetricCoverageV1 {
-    /// Exact denominator cardinality. `None` means the denominator is unknown.
-    pub eligible: Option<u64>,
-    pub observed: u64,
-    pub completed: u64,
-    pub censored: u64,
-    pub unknown: u64,
-    pub excluded: u64,
-    pub state: CoverageStateV1,
+struct MeasurementDescriptor<'a> {
+    revision: &'a str,
+    metric: &'a str,
+    unit: &'a str,
+    denominator: &'a str,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MetricEvidenceClassV1 {
-    Measurement,
-    Association,
-    CalibratedPrediction,
+impl<'a> MeasurementDescriptor<'a> {
+    const fn new(revision: &'a str, metric: &'a str, unit: &'a str, denominator: &'a str) -> Self {
+        Self {
+            revision,
+            metric,
+            unit,
+            denominator,
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MetricSourceV1 {
-    ObservabilityEnvelope,
-    FeedbackObservations,
-    ProviderUsageObservation,
-    SavingsLedger,
+struct MeasurementProvenance<'a> {
+    source: MetricSourceV1,
+    source_revision: &'a str,
+    projector_revision: &'a str,
+    watermark: &'a str,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-pub struct MetricProvenanceV1 {
-    pub source: MetricSourceV1,
-    pub source_revision: String,
-    pub projector_revision: String,
-    pub watermark: String,
+impl<'a> MeasurementProvenance<'a> {
+    const fn new(
+        source: MetricSourceV1,
+        source_revision: &'a str,
+        projector_revision: &'a str,
+        watermark: &'a str,
+    ) -> Self {
+        Self {
+            source,
+            source_revision,
+            projector_revision,
+            watermark,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-pub struct MetricCohortV1 {
-    pub descriptor_revision: String,
-    pub eligible_population: String,
+struct MeasurementSpec<'a> {
+    descriptor: MeasurementDescriptor<'a>,
+    provenance: MeasurementProvenance<'a>,
+    horizon: &'a ObservabilityHorizonV1,
+    coverage: MetricCoverageV1,
+    value: Option<f64>,
+    unavailable_reason: Option<&'a str>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct MetricTemporalV1 {
-    pub horizon: ObservabilityHorizonV1,
-    pub baseline_watermark: Option<String>,
-    pub delta: Option<f64>,
+fn measurement(spec: MeasurementSpec<'_>) -> MetricValueV1 {
+    let MeasurementSpec {
+        descriptor,
+        provenance,
+        horizon,
+        coverage,
+        value,
+        unavailable_reason,
+    } = spec;
+    let uncertainty = match value {
+        Some(value) => MetricUncertaintyV1 {
+            lower: Some(value),
+            upper: Some(value),
+            reason: None,
+        },
+        None => MetricUncertaintyV1 {
+            lower: None,
+            upper: None,
+            reason: unavailable_reason.map(str::to_owned),
+        },
+    };
+    MetricValueV1 {
+        descriptor_revision: descriptor.revision.to_string(),
+        metric: descriptor.metric.to_string(),
+        value,
+        unit: descriptor.unit.to_string(),
+        denominator: descriptor.denominator.to_string(),
+        denominator_value: coverage.eligible,
+        coverage,
+        evidence_class: MetricEvidenceClassV1::Measurement,
+        provenance: MetricProvenanceV1 {
+            source: provenance.source,
+            source_revision: provenance.source_revision.to_string(),
+            projector_revision: provenance.projector_revision.to_string(),
+            watermark: provenance.watermark.to_string(),
+        },
+        cohort: MetricCohortV1 {
+            descriptor_revision: format!("{}.v1", descriptor.denominator),
+            eligible_population: descriptor.denominator.to_string(),
+        },
+        temporal: MetricTemporalV1 {
+            horizon: horizon.clone(),
+            baseline_watermark: None,
+            delta: None,
+        },
+        uncertainty,
+        calibration: None,
+        unavailable_reason: unavailable_reason.map(str::to_owned),
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct MetricUncertaintyV1 {
-    pub lower: Option<f64>,
-    pub upper: Option<f64>,
-    pub reason: Option<String>,
+/// Adds Plan 37 feedback-system quality measurements to the canonical
+/// Observatory model. Adapters call this composer instead of re-deriving
+/// values, denominators, coverage, or unavailable states.
+pub fn attach_feedback_system_quality(
+    read_model: &mut ObservatoryReadModelV1,
+    feedback: Option<&FeedbackObservationReadModelV1>,
+    unavailable_reason: Option<&str>,
+) {
+    let Some(feedback) = feedback else {
+        let coverage = coverage(None, 0, 1, CoverageStateV1::Unknown);
+        for (kind, unit, denominator) in feedback_metric_descriptors() {
+            read_model.metrics.push(measurement(MeasurementSpec {
+                descriptor: MeasurementDescriptor::new(
+                    FEEDBACK_DESCRIPTOR,
+                    kind,
+                    unit,
+                    denominator,
+                ),
+                provenance: MeasurementProvenance::new(
+                    MetricSourceV1::FeedbackObservations,
+                    "feedback-observations.v1",
+                    "feedback-system-quality-projector.v1",
+                    "feedback:unavailable",
+                ),
+                horizon: &read_model.horizon,
+                coverage: coverage.clone(),
+                value: None,
+                unavailable_reason: unavailable_reason
+                    .or(Some("feedback_observations_unavailable")),
+            }));
+        }
+        read_model.current = false;
+        return;
+    };
+
+    let watermark = feedback.watermark.producer_sequence.map_or_else(
+        || "feedback:empty".to_string(),
+        |value| format!("feedback:{value}"),
+    );
+    let unknown = feedback
+        .denominators
+        .delayed
+        .saturating_add(feedback.denominators.dropped)
+        .saturating_add(feedback.denominators.retention_dropped)
+        .saturating_add(feedback.denominators.incomplete_boots);
+    for metric in &feedback.system_quality.metrics {
+        let state = feedback_coverage_state(metric.coverage);
+        let complete = state == CoverageStateV1::Known;
+        let observed = metric.denominator.unwrap_or(0);
+        let coverage = coverage(
+            complete.then_some(observed),
+            observed,
+            if complete { 0 } else { unknown.max(1) },
+            state,
+        );
+        let unavailable = metric
+            .unavailable_reason
+            .map(feedback_unavailable_reason)
+            .or((!complete).then_some("incomplete_feedback_coverage"));
+        read_model.metrics.push(measurement(MeasurementSpec {
+            descriptor: MeasurementDescriptor::new(
+                FEEDBACK_DESCRIPTOR,
+                feedback_metric_name(metric.metric),
+                feedback_metric_unit(metric.unit),
+                feedback_denominator_name(metric.denominator_population),
+            ),
+            provenance: MeasurementProvenance::new(
+                MetricSourceV1::FeedbackObservations,
+                "feedback-observations.v1",
+                "feedback-system-quality-projector.v1",
+                &watermark,
+            ),
+            horizon: &read_model.horizon,
+            coverage,
+            value: complete.then_some(metric.value).flatten(),
+            unavailable_reason: unavailable,
+        }));
+    }
+    if read_model.rejected_arguments.rejected_total.is_none() {
+        read_model.rejected_arguments =
+            read_model::project_rejected_arguments_from_feedback(feedback, &watermark);
+    }
+    read_model.current &= feedback.coverage == FeedbackCoverageV1::Known;
+    read_model.watermark = format!("{};{watermark}", read_model.watermark);
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-pub struct MetricCalibrationV1 {
-    pub estimator_revision: String,
-    pub calibration_revision: String,
-    pub cohort_revision: String,
-    pub support: u64,
-    pub drift_valid: bool,
+fn feedback_metric_descriptors() -> [(&'static str, &'static str, &'static str); 9] {
+    [
+        ("feedback_coverage", "ratio", "eligible_observations"),
+        ("feedback_relevance", "ratio", "relevance_labels"),
+        ("feedback_diversity", "ratio", "eligible_source_families"),
+        ("feedback_latency_p95", "microseconds", "latency_samples"),
+        (
+            "feedback_omission_rate",
+            "ratio",
+            "returned_and_omitted_items",
+        ),
+        ("feedback_denial_rate", "ratio", "outcome_observations"),
+        ("feedback_staleness_rate", "ratio", "outcome_observations"),
+        (
+            "feedback_revocation_propagation_p95",
+            "microseconds",
+            "revocation_observations",
+        ),
+        (
+            "feedback_stack_transitions",
+            "transitions",
+            "stack_transition_observations",
+        ),
+    ]
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct MetricValueV1 {
-    pub descriptor_revision: String,
-    pub metric: String,
-    /// Aggregate value. It is absent whenever its denominator or coverage is
-    /// insufficient; observed lower bounds remain available in `coverage`.
-    pub value: Option<f64>,
-    pub unit: String,
-    pub denominator: String,
-    pub denominator_value: Option<u64>,
-    pub coverage: MetricCoverageV1,
-    pub evidence_class: MetricEvidenceClassV1,
-    pub provenance: MetricProvenanceV1,
-    pub cohort: MetricCohortV1,
-    pub temporal: MetricTemporalV1,
-    pub uncertainty: MetricUncertaintyV1,
-    pub calibration: Option<MetricCalibrationV1>,
-    pub unavailable_reason: Option<String>,
+const fn feedback_metric_name(kind: FeedbackSystemMetricKindV1) -> &'static str {
+    match kind {
+        FeedbackSystemMetricKindV1::Coverage => "feedback_coverage",
+        FeedbackSystemMetricKindV1::Relevance => "feedback_relevance",
+        FeedbackSystemMetricKindV1::Diversity => "feedback_diversity",
+        FeedbackSystemMetricKindV1::Latency => "feedback_latency_p95",
+        FeedbackSystemMetricKindV1::Omission => "feedback_omission_rate",
+        FeedbackSystemMetricKindV1::Denial => "feedback_denial_rate",
+        FeedbackSystemMetricKindV1::Staleness => "feedback_staleness_rate",
+        FeedbackSystemMetricKindV1::RevocationPropagation => "feedback_revocation_propagation_p95",
+        FeedbackSystemMetricKindV1::StackTransitions => "feedback_stack_transitions",
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct AnalyticsModeReadModelV1 {
-    pub current: Option<AnalyticsModeV1>,
-    pub transition_watermark: Option<String>,
-    pub coverage: MetricCoverageV1,
-    pub unavailable_reason: Option<String>,
+const fn feedback_metric_unit(unit: FeedbackSystemMetricUnitV1) -> &'static str {
+    match unit {
+        FeedbackSystemMetricUnitV1::Ratio => "ratio",
+        FeedbackSystemMetricUnitV1::Microseconds => "microseconds",
+        FeedbackSystemMetricUnitV1::Transitions => "transitions",
+    }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ComparisonDispositionV1 {
-    Promote,
-    Reject,
-    InsufficientEvidence,
+const fn feedback_denominator_name(denominator: FeedbackSystemMetricDenominatorV1) -> &'static str {
+    match denominator {
+        FeedbackSystemMetricDenominatorV1::EligibleObservations => "eligible_observations",
+        FeedbackSystemMetricDenominatorV1::RelevanceLabels => "relevance_labels",
+        FeedbackSystemMetricDenominatorV1::EligibleSourceFamilies => "eligible_source_families",
+        FeedbackSystemMetricDenominatorV1::LatencySamples => "latency_samples",
+        FeedbackSystemMetricDenominatorV1::ReturnedAndOmittedItems => "returned_and_omitted_items",
+        FeedbackSystemMetricDenominatorV1::OutcomeObservations => "outcome_observations",
+        FeedbackSystemMetricDenominatorV1::RevocationObservations => "revocation_observations",
+        FeedbackSystemMetricDenominatorV1::StackTransitionObservations => {
+            "stack_transition_observations"
+        }
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct PerformanceComparisonReadModelV1 {
-    pub baseline_build: Option<String>,
-    pub candidate_build: Option<String>,
-    pub workload: Option<String>,
-    pub corpus: Option<String>,
-    pub environment: Option<String>,
-    pub oracle: Option<String>,
-    pub configuration: Option<String>,
-    pub platform: Option<String>,
-    pub rollback_profile: Option<String>,
-    pub eligible_outcomes: Option<u64>,
-    pub paired_outcomes: Option<u64>,
-    pub regression_observed: Option<bool>,
-    pub disposition: ComparisonDispositionV1,
-    pub coverage: MetricCoverageV1,
-    pub unavailable_reason: Option<String>,
+const fn feedback_coverage_state(coverage: FeedbackCoverageV1) -> CoverageStateV1 {
+    match coverage {
+        FeedbackCoverageV1::Known => CoverageStateV1::Known,
+        FeedbackCoverageV1::Partial => CoverageStateV1::Partial,
+        FeedbackCoverageV1::Stale => CoverageStateV1::Stale,
+        FeedbackCoverageV1::Unknown => CoverageStateV1::Unknown,
+        FeedbackCoverageV1::Sampled => CoverageStateV1::Sampled,
+        FeedbackCoverageV1::Capped => CoverageStateV1::Capped,
+    }
 }
 
-/// One surface × operation × argument × error-class cell in the rejected-argument view.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct RejectedArgumentGroupV1 {
-    pub surface: RejectedArgumentSurfaceV1,
-    pub operation: String,
-    pub argument: RejectedArgumentNameV1,
-    pub error_class: RejectedArgumentErrorClassV1,
-    pub count: u64,
-    /// Eligible-attempt rate for this cell. Absent when the attempt
-    /// denominator or coverage is insufficient.
-    pub rate: Option<f64>,
-}
-
-/// Frequency and rate projection for dispatcher rejected-argument observations.
-///
-/// Counts may be known while `rejection_rate` stays absent: Plan 26 forbids
-/// fabricating a rate when the eligible-attempt denominator is unknown.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct RejectedArgumentAnalyticsV1 {
-    pub coverage: MetricCoverageV1,
-    pub projector_revision: String,
-    pub watermark: String,
-    pub eligible_attempts: Option<u64>,
-    pub rejected_total: Option<u64>,
-    pub rejection_rate: Option<f64>,
-    pub redacted_name_count: u64,
-    pub groups: Vec<RejectedArgumentGroupV1>,
-    pub unavailable_reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct ObservatoryReadModelV1 {
-    pub authorized_scope_ref: String,
-    pub horizon: ObservabilityHorizonV1,
-    pub watermark: String,
-    pub observed_at_micros: i64,
-    pub current: bool,
-    pub metrics: Vec<MetricValueV1>,
-    pub analytics_mode: AnalyticsModeReadModelV1,
-    pub comparison: PerformanceComparisonReadModelV1,
-    pub rejected_arguments: RejectedArgumentAnalyticsV1,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct CostsReadModelV1 {
-    pub authorized_scope_ref: String,
-    pub horizon: ObservabilityHorizonV1,
-    pub watermark: String,
-    pub observed_at_micros: i64,
-    pub current: bool,
-    pub usage: Vec<MetricValueV1>,
-    pub estimated_cost: Vec<MetricValueV1>,
-    /// Provider-backed operation latency, projected from the same retained
-    /// Plan 26 operation-resource events as Observatory. Each entry keeps
-    /// provider/model identity explicit; `None` is a real uncorrelated state,
-    /// never a client-side guess.
-    pub latency: Vec<ProviderLatencyReadModelV1>,
-    pub pricing_revision: Option<String>,
-}
-
-/// One provider/model cohort in the Costs latency read model.
-///
-/// The percentile cells are ordinary canonical metrics so every value carries
-/// its exact unit, horizon, denominator, coverage/censoring, and projector
-/// provenance. Identity provenance is kept separately because latency is
-/// measured by `OperationResourceObservedV1`, while provider/model identity
-/// may be joined from an exact `ProviderUsageObservationV1` request/session.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct ProviderLatencyReadModelV1 {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub identity_provenance: MetricProvenanceV1,
-    pub identity_unavailable_reason: Option<String>,
-    pub queue: LatencyDistributionReadModelV1,
-    pub start: LatencyDistributionReadModelV1,
-    pub first_progress: LatencyDistributionReadModelV1,
-    pub service: LatencyDistributionReadModelV1,
-    pub terminal: LatencyDistributionReadModelV1,
-}
-
-/// p50/p95/p99 for one provider operation latency stage.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct LatencyDistributionReadModelV1 {
-    pub p50: MetricValueV1,
-    pub p95: MetricValueV1,
-    pub p99: MetricValueV1,
+const fn feedback_unavailable_reason(
+    reason: crate::feedback::observations::FeedbackSystemMetricUnavailableReasonV1,
+) -> &'static str {
+    match reason {
+        FeedbackSystemMetricUnavailableReasonV1::NoEligibleObservations => {
+            "no_eligible_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoRelevanceLabels => "no_relevance_labels",
+        FeedbackSystemMetricUnavailableReasonV1::NoDiversityObservations => {
+            "no_diversity_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoLatencySamples => "no_latency_samples",
+        FeedbackSystemMetricUnavailableReasonV1::NoTruncationObservations => {
+            "no_truncation_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoOutcomeObservations => "no_outcome_observations",
+        FeedbackSystemMetricUnavailableReasonV1::NoRevocationObservations => {
+            "no_revocation_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoStackTransitionObservations => {
+            "no_stack_transition_observations"
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_contracts::{
+        ObservabilityQueryPort, ObservabilityQueryV1, ObservabilityRecordPort,
+    };
+    use tracedecay_domain::{
+        ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
+        ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
+    };
 
-    fn fixture() -> ObservatoryReadModelV1 {
-        ObservatoryReadModelV1 {
-            authorized_scope_ref: "scope:fixture".into(),
-            horizon: ObservabilityHorizonV1 {
-                since_micros: 10,
-                until_micros: 20,
-            },
-            watermark: "watermark:7".into(),
-            observed_at_micros: 20,
-            current: true,
-            metrics: vec![MetricValueV1 {
-                descriptor_revision: "calls.v1".into(),
-                metric: "calls".into(),
-                value: Some(3.0),
-                unit: "events".into(),
-                denominator: "eligible_calls".into(),
-                denominator_value: Some(3),
-                coverage: MetricCoverageV1 {
-                    eligible: Some(3),
-                    observed: 3,
-                    completed: 3,
-                    censored: 0,
-                    unknown: 0,
-                    excluded: 0,
-                    state: CoverageStateV1::Known,
-                },
-                evidence_class: MetricEvidenceClassV1::Measurement,
-                provenance: MetricProvenanceV1 {
-                    source: MetricSourceV1::ObservabilityEnvelope,
-                    source_revision: "observability-envelope.v1".into(),
-                    projector_revision: "observatory.v1".into(),
-                    watermark: "watermark:7".into(),
-                },
-                cohort: MetricCohortV1 {
-                    descriptor_revision: "eligible-calls.v1".into(),
-                    eligible_population: "eligible_calls".into(),
-                },
-                temporal: MetricTemporalV1 {
-                    horizon: ObservabilityHorizonV1 {
-                        since_micros: 10,
-                        until_micros: 20,
-                    },
-                    baseline_watermark: None,
-                    delta: None,
-                },
-                uncertainty: MetricUncertaintyV1 {
-                    lower: Some(3.0),
-                    upper: Some(3.0),
-                    reason: None,
-                },
-                calibration: None,
-                unavailable_reason: None,
-            }],
-            analytics_mode: AnalyticsModeReadModelV1 {
-                current: None,
-                transition_watermark: None,
-                coverage: MetricCoverageV1 {
-                    eligible: None,
-                    observed: 0,
-                    completed: 0,
-                    censored: 0,
-                    unknown: 1,
-                    excluded: 0,
-                    state: CoverageStateV1::Unknown,
-                },
-                unavailable_reason: Some("analytics_consent_not_observed".into()),
-            },
-            comparison: PerformanceComparisonReadModelV1 {
-                baseline_build: None,
-                candidate_build: None,
-                workload: None,
-                corpus: None,
-                environment: None,
-                oracle: None,
-                configuration: None,
-                platform: None,
-                rollback_profile: None,
-                eligible_outcomes: None,
-                paired_outcomes: None,
-                regression_observed: None,
-                disposition: ComparisonDispositionV1::InsufficientEvidence,
-                coverage: MetricCoverageV1 {
-                    eligible: None,
-                    observed: 0,
-                    completed: 0,
-                    censored: 0,
-                    unknown: 1,
-                    excluded: 0,
-                    state: CoverageStateV1::Unknown,
-                },
-                unavailable_reason: Some("comparison_evidence_not_recorded".into()),
-            },
-            rejected_arguments: RejectedArgumentAnalyticsV1 {
-                coverage: MetricCoverageV1 {
-                    eligible: None,
-                    observed: 0,
-                    completed: 0,
-                    censored: 0,
-                    unknown: 1,
-                    excluded: 0,
-                    state: CoverageStateV1::Unknown,
-                },
-                projector_revision: "observatory-rejected-argument-projector.v1".into(),
-                watermark: "watermark:7".into(),
-                eligible_attempts: None,
-                rejected_total: None,
-                rejection_rate: None,
-                redacted_name_count: 0,
-                groups: Vec::new(),
-                unavailable_reason: Some("rejected_argument_observations_not_recorded".into()),
-            },
+    fn envelope(event_id: &str, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
+        ObservabilityEnvelopeV1 {
+            event_id: event_id.to_string(),
+            event_kind: "retrieval.query.completed.v1".to_string(),
+            schema_revision: 1,
+            idempotency_key: format!("idempotency:{event_id}"),
+            trace_id: format!("trace:{event_id}"),
+            scope_ref: "scope:boundary".to_string(),
+            capability: "retrieval".to_string(),
+            operation: "query".to_string(),
+            event_time_micros,
+            observation_time_micros: event_time_micros,
+            valid_from_micros: None,
+            valid_until_micros: None,
+            quantity: None,
+            unit: None,
+            terminal_result: Some(ObservabilityTerminalResultV1::Succeeded),
+            producer_revision: "producer.v1".to_string(),
+            configuration_revision: "configuration.v1".to_string(),
+            policy_revision: "policy.v1".to_string(),
+            watermark: format!("watermark:{event_id}"),
+            coverage: CoverageStateV1::Known,
+            sampling_probability: None,
+            retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+            emitted_count: 1,
+            delayed_count: 0,
+            dropped_count: 0,
+            process_boot_id: "boot:boundary".to_string(),
+            producer_sequence: 1,
+            payload: ObservabilityPayloadV1::RetrievalQuery(RetrievalQueryObservedV1 {
+                query_family: "exact_technical".to_string(),
+                enabled_lanes: vec!["exact_literal".to_string()],
+                candidate_budget: 1,
+                context_budget: 1,
+                token_budget: 1,
+                answered: true,
+                source_coverage: CoverageStateV1::Known,
+                lane_coverage: CoverageStateV1::Known,
+            }),
         }
     }
 
     #[test]
-    fn observatory_contract_carries_controls_and_comparison_truth() {
-        let model = fixture();
-        assert_eq!(model.analytics_mode.current, None);
-        assert_eq!(
-            model.analytics_mode.coverage.state,
-            CoverageStateV1::Unknown
-        );
-        assert_eq!(model.comparison.baseline_build, None);
-        assert_eq!(
-            model.comparison.disposition,
-            ComparisonDispositionV1::InsufficientEvidence
-        );
-        assert_eq!(model.comparison.coverage.state, CoverageStateV1::Unknown);
+    fn partial_coverage_never_claims_current() {
+        let value = coverage(None, 8, 2, CoverageStateV1::Partial);
+        assert_eq!(value.state, CoverageStateV1::Partial);
+        assert_eq!(value.unknown, 2);
+        assert_eq!(value.eligible, None);
     }
 
     #[test]
-    fn missing_denominator_remains_unknown_not_zero() {
-        let metric = MetricValueV1 {
-            descriptor_revision: "analytics.calls.v1".into(),
-            metric: "calls".into(),
-            value: None,
-            unit: "events".into(),
-            denominator: "eligible_calls".into(),
-            denominator_value: None,
-            coverage: MetricCoverageV1 {
-                eligible: None,
-                observed: 0,
-                completed: 0,
-                censored: 0,
-                unknown: 1,
-                excluded: 0,
-                state: CoverageStateV1::Unknown,
-            },
-            evidence_class: MetricEvidenceClassV1::Measurement,
-            provenance: MetricProvenanceV1 {
-                source: MetricSourceV1::ObservabilityEnvelope,
-                source_revision: "observability-envelope.v1".into(),
-                projector_revision: "observatory.v1".into(),
-                watermark: "watermark:unknown".into(),
-            },
-            cohort: MetricCohortV1 {
-                descriptor_revision: "eligible-calls.v1".into(),
-                eligible_population: "eligible_calls".into(),
-            },
-            temporal: MetricTemporalV1 {
-                horizon: ObservabilityHorizonV1 {
-                    since_micros: 10,
-                    until_micros: 20,
-                },
-                baseline_watermark: None,
-                delta: None,
-            },
-            uncertainty: MetricUncertaintyV1 {
-                lower: None,
-                upper: None,
-                reason: Some("unknown_denominator".into()),
-            },
-            calibration: None,
-            unavailable_reason: Some("unknown_denominator".into()),
-        };
-        assert_eq!(metric.value, None);
-        assert_eq!(metric.coverage.state, CoverageStateV1::Unknown);
+    fn feedback_quality_metrics_are_typed_and_never_fabricate_empty_zeroes() {
+        let mut observatory =
+            observatory_unavailable_read_model(Some("scope:test"), 1, "store_unavailable");
+        let feedback = FeedbackObservationReadModelV1::project(&[]).unwrap();
+        attach_feedback_system_quality(&mut observatory, Some(&feedback), None);
+
+        let feedback_metrics = observatory
+            .metrics
+            .iter()
+            .filter(|metric| metric.descriptor_revision == FEEDBACK_DESCRIPTOR)
+            .collect::<Vec<_>>();
+        assert_eq!(feedback_metrics.len(), 9);
+        assert!(
+            feedback_metrics.iter().all(|metric| {
+                metric.value.is_none()
+                    && metric.denominator_value.is_none()
+                    && metric.coverage.state == CoverageStateV1::Unknown
+                    && metric.unavailable_reason.is_some()
+            }),
+            "unsupported feedback measurements remain explicitly unknown"
+        );
     }
 
     #[test]
-    fn cli_mcp_and_http_share_identical_read_model_bytes() {
-        let model = fixture();
-        let cli = serde_json::to_vec(&model).unwrap();
-        let mcp = serde_json::to_vec(&model).unwrap();
-        let http = serde_json::to_vec(&model).unwrap();
+    fn surface_serializers_preserve_values_denominators_and_coverage() {
+        let observatory = observatory_unavailable_read_model(
+            Some("scope:parity"),
+            10,
+            "fixture_source_unavailable",
+        );
+        let cli = observatory_cli_value(&observatory).expect("CLI JSON");
+        let mcp = observatory_mcp_value(&observatory).expect("MCP JSON");
+        let http = observatory_http_value(&observatory).expect("HTTP JSON");
+        let dashboard = serde_json::to_value(&observatory).expect("dashboard payload");
+        let export: serde_json::Value =
+            serde_json::from_slice(&observatory_export_bytes(&observatory).expect("export JSON"))
+                .expect("decode export JSON");
         assert_eq!(cli, mcp);
-        assert_eq!(mcp, http);
+        assert_eq!(cli, http);
+        assert_eq!(cli, dashboard);
+        assert_eq!(cli, export);
+        assert_eq!(cli["metrics"][0]["value"], serde_json::Value::Null);
+        assert_eq!(
+            cli["metrics"][0]["denominator_value"],
+            serde_json::Value::Null
+        );
+        assert_eq!(cli["metrics"][0]["coverage"]["state"], "unknown");
+        assert_eq!(
+            cli["metrics"][0]["unavailable_reason"],
+            "fixture_source_unavailable"
+        );
+
+        let costs =
+            costs_unavailable_read_model(Some("scope:parity"), 10, "fixture_cost_unavailable");
+        let cli = costs_cli_value(&costs).expect("CLI costs JSON");
+        let mcp = costs_mcp_value(&costs).expect("MCP costs JSON");
+        let dashboard = serde_json::to_value(&costs).expect("dashboard costs payload");
+        let export: serde_json::Value =
+            serde_json::from_slice(&costs_export_bytes(&costs).expect("costs export JSON"))
+                .expect("decode costs export JSON");
+        assert_eq!(cli, mcp);
+        assert_eq!(cli, dashboard);
+        assert_eq!(cli, export);
+        assert_eq!(cli["usage"][0]["coverage"]["state"], "unknown");
+        assert_eq!(
+            cli["usage"][0]["denominator_value"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            cli["usage"][0]["unavailable_reason"],
+            "fixture_cost_unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_horizon_scans_past_dense_coarse_boundary_rows() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "observability-exact-horizon",
+        )
+        .await;
+        let port = RegisteredObservabilityPortV1::new(&harness.registered);
+        for (index, event_time_micros) in [1_510_000, 1_520_000, 1_530_000].into_iter().enumerate()
+        {
+            port.record(envelope(&format!("eligible:{index}"), event_time_micros))
+                .await
+                .expect("record eligible event");
+        }
+        for index in 0..70 {
+            let event_time_micros = if index % 2 == 0 {
+                1_100_000 + index
+            } else {
+                1_900_000 + index
+            };
+            port.record(envelope(&format!("boundary:{index}"), event_time_micros))
+                .await
+                .expect("record coarse boundary event");
+        }
+
+        let first = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: "scope:boundary".to_string(),
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 1_500_000,
+                    until_micros: 1_600_000,
+                },
+                after_watermark: None,
+                limit: 2,
+            })
+            .await
+            .expect("first exact page");
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eligible:1", "eligible:2"]
+        );
+        assert_eq!(first.coverage, CoverageStateV1::Capped);
+        let second = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: "scope:boundary".to_string(),
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 1_500_000,
+                    until_micros: 1_600_000,
+                },
+                after_watermark: first.next_watermark,
+                limit: 2,
+            })
+            .await
+            .expect("second exact page");
+        assert_eq!(
+            second
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eligible:0"]
+        );
+        assert_eq!(second.coverage, CoverageStateV1::Known);
+        assert_eq!(second.next_watermark, None);
+    }
+
+    #[tokio::test]
+    async fn sparse_exact_horizon_does_not_repeat_rows_across_dense_coarse_pages() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "observability-sparse-exact-horizon",
+        )
+        .await;
+        let port = RegisteredObservabilityPortV1::new(&harness.registered);
+        port.record(envelope("eligible:only", 1_550_000))
+            .await
+            .expect("record eligible event");
+        for index in 0..70 {
+            let event_time_micros = if index % 2 == 0 {
+                1_100_000 + index
+            } else {
+                1_900_000 + index
+            };
+            port.record(envelope(&format!("boundary:{index}"), event_time_micros))
+                .await
+                .expect("record coarse boundary event");
+        }
+
+        let page = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: "scope:boundary".to_string(),
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 1_500_000,
+                    until_micros: 1_600_000,
+                },
+                after_watermark: None,
+                limit: 2,
+            })
+            .await
+            .expect("sparse exact page");
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eligible:only"]
+        );
+        assert_eq!(page.coverage, CoverageStateV1::Known);
+        assert_eq!(page.next_watermark, None);
     }
 }

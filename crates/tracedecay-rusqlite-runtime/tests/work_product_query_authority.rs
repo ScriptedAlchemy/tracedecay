@@ -25,7 +25,7 @@ mod work_registered_store;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AcceptWorkTaskRequestV1, AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot,
     CreateWorkProductRequestV1, Deadline, DisclosureClass, OpaqueCursor, RequestContext, RequestId,
     ResolvedScope, SelectedWorkEvidenceV1, VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1,

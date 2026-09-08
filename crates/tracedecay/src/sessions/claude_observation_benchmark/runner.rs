@@ -10,6 +10,7 @@ use tracedecay_store::{
 };
 
 use crate::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
@@ -23,7 +24,6 @@ use tracedecay_sessions::runtime::cline_like::{
     ClineLikeSource, capture_cline_like_snapshot_observations,
 };
 use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
-use tracedecay_usecases::observation::ObservationCancellation;
 
 /// Installs the process-wide background CPU authority these benchmarks need.
 ///

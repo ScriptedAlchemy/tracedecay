@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
 use serde_json::Value;
-use tracedecay_application::ResolvedScope;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::{
@@ -15,6 +14,7 @@ use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
     MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
 };
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1, canonical_sha256};
 use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 

@@ -9,8 +9,8 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
-use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
-use tracedecay_application::{
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::{
     APPLICATION_REQUEST_ID_HEADER, CancellationContext, CancellationObservation, CancellationStage,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage,
     OperationReceipt, OperationTermination, RemoteListenerReadV1, RequestContext, RequestId,
@@ -23,10 +23,10 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::http_application::{DaemonHttpApplicationRegistry, DaemonHttpApplicationService};
-use tracedecay_daemon_service::DaemonInvocationService;
-use tracedecay_usecases::operation_stream::{
+use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationId, OperationKind, OperationStreamConfig,
 };
+use tracedecay_daemon_service::DaemonInvocationService;
 
 const AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const PROJECT_ID: &str = "project.http-lifecycle";

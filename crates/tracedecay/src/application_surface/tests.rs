@@ -6,13 +6,13 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use tracedecay_api::{WorkOperation, WorkflowOperation, is_http_application_operation_exposed};
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
     CancellationSignal, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest,
     RequestContext, RequestId, ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
 };
-use tracedecay_application::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
+use tracedecay_contracts::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
@@ -38,17 +38,17 @@ use super::{
     resolve_application_binding, resolve_application_surface_dispatch,
     resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
-use tracedecay_application::context_scout::ContextScoutAddressV1;
-use tracedecay_application::feedback::observations::{
+use tracedecay_application::operation_stream::{
+    OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
+};
+use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
+use tracedecay_contracts::context_scout::ContextScoutAddressV1;
+use tracedecay_contracts::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
     FeedbackSseLifecycleV1,
 };
-use tracedecay_application::retrieval::PrimitiveRequest;
+use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_daemon_protocol::RequestedOutputFormat;
-use tracedecay_usecases::operation_stream::{
-    OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
-};
-use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn operation_context(project_id: &ProjectId) -> RequestContext {
     let observed_at = current_micros().expect("current time");
@@ -117,10 +117,10 @@ fn daemon_reset_problem_preserves_reset_terminal_contract() {
         panic!("application surface must preserve reset-required");
     };
 
-    assert_eq!(retry, tracedecay_application::RetryDirective::Never);
+    assert_eq!(retry, tracedecay_contracts::RetryDirective::Never);
     assert_eq!(
         legal_actions,
-        vec![tracedecay_application::LegalAction::Reset]
+        vec![tracedecay_contracts::LegalAction::Reset]
     );
 }
 
@@ -306,10 +306,10 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
     let catalog = super::application_surface_catalog().expect("application catalog");
     let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+        tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
-    for name in tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for name in tracedecay_contracts::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
         let operation = ApplicationSurfaceOperation::from_tool_name(name)
             .unwrap_or_else(|| panic!("{name} must be a canonical surface operation"));
         assert_eq!(operation.as_str(), name);
@@ -391,7 +391,7 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     let catalog = super::application_surface_catalog().expect("application catalog");
     let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+        tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
     for operation in ApplicationSurfaceOperation::ALL {
@@ -456,7 +456,7 @@ fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
     let catalog = super::application_surface_catalog().expect("application catalog");
     let resolver = tracedecay_daemon_protocol::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+        tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
     for (surface, name) in [
@@ -974,8 +974,8 @@ fn callable_code_operations_parse_distinct_application_requests() {
     assert_eq!(phrase.fuzzy_budget, 7);
     assert_eq!(
         phrase.field_filters,
-        [tracedecay_application::retrieval::CodeLexicalFieldFilter {
-            field: tracedecay_application::retrieval::CodeLexicalField::Path,
+        [tracedecay_contracts::retrieval::CodeLexicalFieldFilter {
+            field: tracedecay_contracts::retrieval::CodeLexicalField::Path,
             include: true,
         }]
     );
@@ -1003,7 +1003,7 @@ fn callable_code_operations_parse_distinct_application_requests() {
     assert!(matches!(
         facets,
         ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Facets(request))
-            if request.dimension == tracedecay_application::retrieval::CodeFacetDimension::Language
+            if request.dimension == tracedecay_contracts::retrieval::CodeFacetDimension::Language
     ));
 
     let timeline = parse_application_surface_request(
@@ -1057,7 +1057,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
         QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
             .expect("normalization revision");
     let PrimitiveRequest::SymbolSearch(symbol_search) =
-        tracedecay_application::primitive_code_into_primitive(
+        tracedecay_contracts::primitive_code_into_primitive(
             symbol_search,
             sanitizer_revision.clone(),
             normalization_revision.clone(),
@@ -1681,19 +1681,19 @@ fn storage_status_empty_request_uses_typed_default() {
 async fn dead_daemon_surface_dispatch_fails_fast_with_typed_unreachable() {
     struct UnreachableExecutor;
 
-    impl tracedecay_application::ApplicationInvocationExecutor for UnreachableExecutor {
+    impl tracedecay_contracts::ApplicationInvocationExecutor for UnreachableExecutor {
         fn invoke(
             &self,
-            _invocation: tracedecay_application::ApplicationInvocation,
-        ) -> tracedecay_application::ApplicationInvocationFuture<
+            _invocation: tracedecay_contracts::ApplicationInvocation,
+        ) -> tracedecay_contracts::ApplicationInvocationFuture<
             '_,
             Result<
-                tracedecay_application::ApplicationResponse,
-                tracedecay_application::InvocationError,
+                tracedecay_contracts::ApplicationResponse,
+                tracedecay_contracts::InvocationError,
             >,
         > {
             Box::pin(async {
-                Err(tracedecay_application::InvocationError::Unreachable {
+                Err(tracedecay_contracts::InvocationError::Unreachable {
                     reason_code: "daemon_connect_down".to_owned(),
                     detail: "could not connect to TraceDecay daemon endpoint 'unix:///dead.sock'"
                         .to_owned(),
@@ -1732,7 +1732,7 @@ async fn dead_daemon_surface_dispatch_fails_fast_with_typed_unreachable() {
             &self,
             _subject_digest: ManifestDigest,
             _observed_at: UtcMicros,
-            _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
         ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
             '_,
             tracedecay_domain::errors::Result<()>,
