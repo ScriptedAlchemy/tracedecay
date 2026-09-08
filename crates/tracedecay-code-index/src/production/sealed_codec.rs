@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, OnceLock};
@@ -6,7 +7,17 @@ use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
+    CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, ExactTechnicalTermV1,
+    LanguageDescriptorRevision, SensitivityDecision, SourceSpan,
+};
 
+use crate::chunks::{
+    CodeFileChunksV1, CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1, CodeSearchEligibilityV1,
+};
+use crate::extract::ExtractionBatchV1;
+use crate::lineage::LineageSymbolRecordV1;
 use crate::parallelism;
 
 use super::lexical_page_source::scan_layout;
@@ -86,6 +97,352 @@ pub(super) struct PersistedFileGenerationArtifactsRefV1<'a> {
     pub(super) authority: &'a ReceiptBoundCodeFileAuthorityV1,
     pub(super) extraction: &'a ExtractionBatchV1,
     pub(super) artifacts: &'a CodeFileIndexArtifactsV1,
+}
+
+/// The revision-2 file segment payload: the same file record with its chunk
+/// rows reduced to what the file does not already say.
+///
+/// Every chunk of one file shares the file's generation and occurrence
+/// (enforced by [`CodeFileChunksV1::validate`]) and, in production, its
+/// descriptor, chunker, sanitizer, and sensitivity decision. The row form
+/// therefore drops the two anchors, hoists the per-file constants into
+/// `chunk_defaults` (a row still carries its own value when it differs, so
+/// the form is lossless), names a same-file parent by chunk index, and omits
+/// the document's chunk-id roster, which is exactly the rows' ids in order.
+/// Decoding expands back into [`PersistedFileGenerationArtifactsV1`], and
+/// every restored row then passes the same chunk validation as a revision-1
+/// row before it can be served.
+#[derive(Serialize)]
+pub(super) struct PersistedFileGenerationArtifactsRefV2<'a> {
+    authority: &'a ReceiptBoundCodeFileAuthorityV1,
+    extraction: &'a ExtractionBatchV1,
+    artifacts: PersistedFileIndexArtifactsRefV2<'a>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PersistedFileGenerationArtifactsV2 {
+    authority: ReceiptBoundCodeFileAuthorityV1,
+    extraction: ExtractionBatchV1,
+    artifacts: PersistedFileIndexArtifactsV2,
+}
+
+#[derive(Serialize)]
+struct PersistedFileIndexArtifactsRefV2<'a> {
+    chunks: PersistedFileChunksRefV2<'a>,
+    symbols: &'a [Arc<LineageSymbolRecordV1>],
+    edges: &'a [CanonicalRelationEdgeV1],
+    edge_abstentions: &'a [CodeIndexEdgeAbstentionV1],
+    imports: &'a [CodeIndexImportEvidenceV1],
+    unresolved_references: &'a [CodeIndexUnresolvedReferenceV1],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedFileIndexArtifactsV2 {
+    chunks: PersistedFileChunksV2,
+    symbols: Vec<Arc<LineageSymbolRecordV1>>,
+    edges: Vec<CanonicalRelationEdgeV1>,
+    edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
+    imports: Vec<CodeIndexImportEvidenceV1>,
+    #[serde(default)]
+    unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
+}
+
+#[derive(Serialize)]
+struct PersistedFileChunksRefV2<'a> {
+    generation_id: &'a CodeGenerationId,
+    file_occurrence_id: &'a FileOccurrenceId,
+    content_digest: &'a ContentDigest,
+    eligibility: &'a CodeSearchEligibilityV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunk_defaults: Option<PersistedChunkDefaultsRefV2<'a>>,
+    chunks: Vec<PersistedChunkRefV2<'a>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedFileChunksV2 {
+    generation_id: CodeGenerationId,
+    file_occurrence_id: FileOccurrenceId,
+    content_digest: ContentDigest,
+    eligibility: CodeSearchEligibilityV1,
+    #[serde(default)]
+    chunk_defaults: Option<PersistedChunkDefaultsV2>,
+    chunks: Vec<PersistedChunkV2>,
+}
+
+#[derive(Serialize)]
+struct PersistedChunkDefaultsRefV2<'a> {
+    language_descriptor_revision: &'a LanguageDescriptorRevision,
+    chunker_revision: &'a ChunkerRevision,
+    sanitizer_revision: &'a SanitizerRevision,
+    sensitivity: &'a SensitivityDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedChunkDefaultsV2 {
+    language_descriptor_revision: LanguageDescriptorRevision,
+    chunker_revision: ChunkerRevision,
+    sanitizer_revision: SanitizerRevision,
+    sensitivity: SensitivityDecision,
+}
+
+#[derive(Serialize)]
+struct PersistedChunkRefV2<'a> {
+    id: &'a CodeSearchChunkId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_occurrence_id: Option<&'a SymbolOccurrenceId>,
+    /// Index of the parent row within this file; a parent outside the file
+    /// (never produced by the chunker, but representable) stays explicit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_chunk_id: Option<&'a CodeSearchChunkId>,
+    source_span: SourceSpan,
+    grain: CodeSearchChunkGrainV1,
+    ordinal: u32,
+    content_digest: &'a ContentDigest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language_descriptor_revision: Option<&'a LanguageDescriptorRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunker_revision: Option<&'a ChunkerRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sanitizer_revision: Option<&'a SanitizerRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sensitivity: Option<&'a SensitivityDecision>,
+    exact_terms: &'a [ExactTechnicalTermV1],
+    subtokens: &'a [String],
+    sanitized_text: &'a BoundedSanitizedText,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedChunkV2 {
+    id: CodeSearchChunkId,
+    #[serde(default)]
+    symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    #[serde(default)]
+    parent: Option<u32>,
+    #[serde(default)]
+    parent_chunk_id: Option<CodeSearchChunkId>,
+    source_span: SourceSpan,
+    grain: CodeSearchChunkGrainV1,
+    ordinal: u32,
+    content_digest: ContentDigest,
+    #[serde(default)]
+    language_descriptor_revision: Option<LanguageDescriptorRevision>,
+    #[serde(default)]
+    chunker_revision: Option<ChunkerRevision>,
+    #[serde(default)]
+    sanitizer_revision: Option<SanitizerRevision>,
+    #[serde(default)]
+    sensitivity: Option<SensitivityDecision>,
+    exact_terms: Vec<ExactTechnicalTermV1>,
+    subtokens: Vec<String>,
+    sanitized_text: BoundedSanitizedText,
+}
+
+impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
+    pub(super) fn new(
+        authority: &'a ReceiptBoundCodeFileAuthorityV1,
+        extraction: &'a ExtractionBatchV1,
+        artifacts: &'a CodeFileIndexArtifactsV1,
+    ) -> Self {
+        let rows = &artifacts.chunks.chunks;
+        let defaults = rows.first().map(|first| PersistedChunkDefaultsRefV2 {
+            language_descriptor_revision: &first.language_descriptor_revision,
+            chunker_revision: &first.chunker_revision,
+            sanitizer_revision: &first.sanitizer_revision,
+            sensitivity: &first.sensitivity,
+        });
+        let row_index = rows
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| (&chunk.id, index))
+            .collect::<HashMap<_, _>>();
+        let chunks = rows
+            .iter()
+            .map(|chunk| {
+                let parent = chunk
+                    .anchor
+                    .parent_chunk_id
+                    .as_ref()
+                    .and_then(|parent| row_index.get(parent))
+                    .and_then(|index| u32::try_from(*index).ok());
+                PersistedChunkRefV2 {
+                    id: &chunk.id,
+                    symbol_occurrence_id: chunk.anchor.symbol_occurrence_id.as_ref(),
+                    parent,
+                    parent_chunk_id: if parent.is_none() {
+                        chunk.anchor.parent_chunk_id.as_ref()
+                    } else {
+                        None
+                    },
+                    source_span: chunk.anchor.source_span,
+                    grain: chunk.anchor.grain,
+                    ordinal: chunk.anchor.ordinal,
+                    content_digest: &chunk.content_digest,
+                    language_descriptor_revision: own_unless_default(
+                        &chunk.language_descriptor_revision,
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.language_descriptor_revision),
+                    ),
+                    chunker_revision: own_unless_default(
+                        &chunk.chunker_revision,
+                        defaults.as_ref().map(|defaults| defaults.chunker_revision),
+                    ),
+                    sanitizer_revision: own_unless_default(
+                        &chunk.sanitizer_revision,
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.sanitizer_revision),
+                    ),
+                    sensitivity: own_unless_default(
+                        &chunk.sensitivity,
+                        defaults.as_ref().map(|defaults| defaults.sensitivity),
+                    ),
+                    exact_terms: &chunk.exact_terms,
+                    subtokens: &chunk.subtokens,
+                    sanitized_text: &chunk.sanitized_text,
+                }
+            })
+            .collect();
+        Self {
+            authority,
+            extraction,
+            artifacts: PersistedFileIndexArtifactsRefV2 {
+                chunks: PersistedFileChunksRefV2 {
+                    generation_id: &artifacts.chunks.document.generation_id,
+                    file_occurrence_id: &artifacts.chunks.document.file_occurrence_id,
+                    content_digest: &artifacts.chunks.document.content_digest,
+                    eligibility: &artifacts.chunks.document.eligibility,
+                    chunk_defaults: defaults,
+                    chunks,
+                },
+                symbols: &artifacts.symbols,
+                edges: &artifacts.edges,
+                edge_abstentions: &artifacts.edge_abstentions,
+                imports: &artifacts.imports,
+                unresolved_references: &artifacts.unresolved_references,
+            },
+        }
+    }
+}
+
+/// A row carries its own value only where it differs from the file default.
+fn own_unless_default<'a, T: PartialEq>(value: &'a T, default: Option<&'a T>) -> Option<&'a T> {
+    (default != Some(value)).then_some(value)
+}
+
+impl PersistedFileGenerationArtifactsV2 {
+    /// Expand the row form back into the full file record. Rows are rebuilt
+    /// exactly as the chunker emitted them; the caller's chunk validation
+    /// then decides whether the expanded file is admissible.
+    pub(super) fn expand(
+        self,
+    ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
+        let artifacts = self.artifacts;
+        let file = artifacts.chunks;
+        let defaults = file.chunk_defaults;
+        let ids = file
+            .chunks
+            .iter()
+            .map(|chunk| chunk.id.clone())
+            .collect::<Vec<_>>();
+        let missing_default = |field: &str| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed file segment chunk omits {field} without a file default"
+            ))
+        };
+        let mut chunks = Vec::with_capacity(file.chunks.len());
+        for chunk in file.chunks {
+            let parent_chunk_id = match (chunk.parent, chunk.parent_chunk_id) {
+                (Some(index), None) => Some(ids.get(index as usize).cloned().ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed file segment chunk names a parent row outside its file".to_owned(),
+                    )
+                })?),
+                (None, explicit) => explicit,
+                (Some(_), Some(_)) => {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed file segment chunk names its parent twice".to_owned(),
+                    ));
+                }
+            };
+            chunks.push(Arc::new(CodeSearchChunkV1 {
+                id: chunk.id,
+                anchor: CodeSearchChunkAnchorV1 {
+                    generation_id: file.generation_id.clone(),
+                    file_occurrence_id: file.file_occurrence_id.clone(),
+                    symbol_occurrence_id: chunk.symbol_occurrence_id,
+                    parent_chunk_id,
+                    source_span: chunk.source_span,
+                    grain: chunk.grain,
+                    ordinal: chunk.ordinal,
+                },
+                content_digest: chunk.content_digest,
+                language_descriptor_revision: chunk
+                    .language_descriptor_revision
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.language_descriptor_revision.clone())
+                    })
+                    .ok_or_else(|| missing_default("language_descriptor_revision"))?,
+                chunker_revision: chunk
+                    .chunker_revision
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.chunker_revision.clone())
+                    })
+                    .ok_or_else(|| missing_default("chunker_revision"))?,
+                sanitizer_revision: chunk
+                    .sanitizer_revision
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.sanitizer_revision.clone())
+                    })
+                    .ok_or_else(|| missing_default("sanitizer_revision"))?,
+                sensitivity: chunk
+                    .sensitivity
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.sensitivity.clone())
+                    })
+                    .ok_or_else(|| missing_default("sensitivity"))?,
+                exact_terms: chunk.exact_terms,
+                subtokens: chunk.subtokens,
+                sanitized_text: chunk.sanitized_text,
+            }));
+        }
+        Ok(PersistedFileGenerationArtifactsV1 {
+            authority: self.authority,
+            extraction: self.extraction,
+            artifacts: CodeFileIndexArtifactsV1 {
+                chunks: CodeFileChunksV1 {
+                    document: CodeSearchDocumentV1 {
+                        generation_id: file.generation_id,
+                        file_occurrence_id: file.file_occurrence_id,
+                        content_digest: file.content_digest,
+                        eligibility: file.eligibility,
+                        chunk_ids: ids,
+                    },
+                    chunks,
+                },
+                symbols: artifacts.symbols,
+                edges: artifacts.edges,
+                edge_abstentions: artifacts.edge_abstentions,
+                imports: artifacts.imports,
+                unresolved_references: artifacts.unresolved_references,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
