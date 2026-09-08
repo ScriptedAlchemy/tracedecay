@@ -1,9 +1,11 @@
-//! Durable source-edit preview, apply, rollback, and reconciliation.
+//! The source-edit vertical slice: planning, preview capture, execute, the
+//! durable journal, rollback, crash recovery, and reconciliation.
 //!
-//! This crate sits beside the usecases spine: only the composition root
-//! consumes it. Plan capture and apply still go through
-//! `tracedecay_usecases::tracedecay`; graph reads go through
-//! `tracedecay_graph_query`.
+//! Request, result, and authorization contracts come from
+//! `tracedecay-application`. Graph evidence is admitted through
+//! `tracedecay_graph_query`. The composition root injects the edit
+//! primitives and diagnostics through [`SourceEditRuntimePort`] and is this
+//! crate's only consumer; nothing here depends on the use-case spine.
 //!
 //! Hotpath labels stay `usecases.edit.*` for dashboard continuity. A later
 //! dual-rename to `source_edit.*` can land with the dashboard cutover.
@@ -15,7 +17,6 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 const JOURNAL_VERSION: u8 = 1;
 const MAX_DURABLE_RECORD_BYTES: usize = 4 * 1024 * 1024;
@@ -30,6 +31,7 @@ mod file_authority;
 mod journal;
 mod outcome;
 mod plan;
+mod port;
 mod reconcile;
 mod records;
 mod rollback;
@@ -41,7 +43,14 @@ mod test_support;
 pub use control::SourceEditEffectControlV1;
 pub use file_authority::SourceEditFileAuthority;
 pub use outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
-pub use plan::{publish_planned_source_edit, rollback_planned_source_edit_files};
+pub use plan::{
+    PlannedSourceEditFile, capture_planned_source_edit, publish_planned_source_edit,
+    rollback_planned_source_edit_files, validate_planned_source_edit,
+};
+pub use port::{
+    EditDiagnosticRecord, SourceEditFuture, SourceEditGraphReadV1, SourceEditRuntime,
+    SourceEditRuntimePort,
+};
 
 use execute::{execute_source_edit_inner, resolve_source_edit_preview};
 use reconcile::reconcile_source_edit_effect_unknown_inner;

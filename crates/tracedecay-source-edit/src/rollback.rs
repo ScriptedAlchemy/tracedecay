@@ -6,7 +6,6 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -18,7 +17,8 @@ use super::journal::{
     SourceEditJournalV1, same_source_edit_authority,
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
-use super::plan::rollback_planned_source_edit_files;
+use super::plan::{PlannedSourceEditFile, rollback_planned_source_edit_files};
+use super::port::SourceEditRuntime;
 use super::reconcile::recover_source_edit_transaction;
 use super::records::{applied_record, durable_record, interrupted_record, unknown_record};
 use super::verify::{application_contract_error, application_problem, config_error};
@@ -50,7 +50,7 @@ fn rollback_journal(
     input_digest: &ManifestDigest,
     predicted_state: Option<ManifestDigest>,
     candidate_files: Vec<String>,
-    recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    recovery_files: Vec<PlannedSourceEditFile>,
 ) -> Result<SourceEditJournalV1> {
     let recovery_digest = (!recovery_files.is_empty())
         .then(|| source_edit_recovery_digest(&recovery_files))
@@ -288,13 +288,11 @@ where
     let recovery_files = retained
         .recovery_files
         .iter()
-        .map(
-            |file| tracedecay_usecases::tracedecay::PlannedSourceEditFile {
-                relative_path: file.relative_path.clone(),
-                expected: file.intended.clone(),
-                intended: file.expected.clone(),
-            },
-        )
+        .map(|file| PlannedSourceEditFile {
+            relative_path: file.relative_path.clone(),
+            expected: file.intended.clone(),
+            intended: file.expected.clone(),
+        })
         .collect::<Vec<_>>();
     let mut journal = rollback_journal(
         operation,

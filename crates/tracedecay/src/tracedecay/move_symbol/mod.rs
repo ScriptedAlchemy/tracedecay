@@ -20,10 +20,9 @@ use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::Visibility;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
-use tracedecay_source_edit::{publish_planned_source_edit, rollback_planned_source_edit_files};
-use tracedecay_usecases::tracedecay::{
+use tracedecay_source_edit::{
     PlannedSourceEditFile, SourceEditGraphReadV1, capture_planned_source_edit,
-    validate_planned_source_edit,
+    publish_planned_source_edit, rollback_planned_source_edit_files, validate_planned_source_edit,
 };
 
 use super::TraceDecay;

@@ -12,7 +12,7 @@ use tracedecay_domain::{
     SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
-use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
+use tracedecay_source_edit::SourceEditGraphReadV1;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 

@@ -17,8 +17,8 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::SourceReadRuntimePort;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::StoreLayout;
-use tracedecay_usecases::tracedecay::{
-    EditDiagnosticRecord, GraphFuture, SourceEditGraphReadV1, SourceEditRuntimePort,
+use tracedecay_source_edit::{
+    EditDiagnosticRecord, SourceEditFuture, SourceEditGraphReadV1, SourceEditRuntimePort,
 };
 
 use super::TraceDecay;
@@ -118,7 +118,10 @@ impl SourceEditRuntimePort for TraceDecay {
         TraceDecay::store_layout(self)
     }
 
-    fn run_diagnostics<'a>(&'a self, _file: &'a str) -> GraphFuture<'a, Vec<EditDiagnosticRecord>> {
+    fn run_diagnostics<'a>(
+        &'a self,
+        _file: &'a str,
+    ) -> SourceEditFuture<'a, Vec<EditDiagnosticRecord>> {
         Box::pin(async {
             Err(TraceDecayError::project_route(
                 "source_edit_diagnostics_unavailable",
@@ -134,7 +137,7 @@ impl SourceEditRuntimePort for TraceDecay {
         symbol: &'a str,
         new_source: &'a str,
         dry_run: bool,
-    ) -> GraphFuture<'a, EditResult> {
+    ) -> SourceEditFuture<'a, EditResult> {
         Box::pin(TraceDecay::replace_symbol(
             self, graph, symbol, new_source, dry_run,
         ))
@@ -146,7 +149,7 @@ impl SourceEditRuntimePort for TraceDecay {
         old_str: &'a str,
         new_str: &'a str,
         dry_run: bool,
-    ) -> GraphFuture<'a, EditResult> {
+    ) -> SourceEditFuture<'a, EditResult> {
         Box::pin(TraceDecay::str_replace(
             self, path, old_str, new_str, dry_run,
         ))
@@ -157,7 +160,7 @@ impl SourceEditRuntimePort for TraceDecay {
         path: &'a str,
         replacements: &'a [(&'a str, &'a str)],
         dry_run: bool,
-    ) -> GraphFuture<'a, MultiEditResult> {
+    ) -> SourceEditFuture<'a, MultiEditResult> {
         Box::pin(TraceDecay::multi_str_replace(
             self,
             path,
@@ -173,7 +176,7 @@ impl SourceEditRuntimePort for TraceDecay {
         content: &'a str,
         before: bool,
         dry_run: bool,
-    ) -> GraphFuture<'a, InsertResult> {
+    ) -> SourceEditFuture<'a, InsertResult> {
         Box::pin(TraceDecay::insert_at(
             self, path, anchor, content, before, dry_run,
         ))
@@ -186,7 +189,7 @@ impl SourceEditRuntimePort for TraceDecay {
         content: &'a str,
         position: &'a str,
         dry_run: bool,
-    ) -> GraphFuture<'a, InsertResult> {
+    ) -> SourceEditFuture<'a, InsertResult> {
         Box::pin(TraceDecay::insert_at_symbol(
             self, graph, symbol, content, position, dry_run,
         ))
@@ -198,7 +201,7 @@ impl SourceEditRuntimePort for TraceDecay {
         pattern: &'a str,
         rewrite: &'a str,
         dry_run: bool,
-    ) -> GraphFuture<'a, AstGrepResult> {
+    ) -> SourceEditFuture<'a, AstGrepResult> {
         Box::pin(TraceDecay::ast_grep_rewrite(
             self, path, pattern, rewrite, dry_run,
         ))
@@ -211,7 +214,7 @@ impl SourceEditRuntimePort for TraceDecay {
         dest_file: &'a str,
         dry_run: bool,
         update_references: bool,
-    ) -> GraphFuture<'a, MoveResult> {
+    ) -> SourceEditFuture<'a, MoveResult> {
         Box::pin(TraceDecay::move_symbol(
             self,
             graph,
@@ -228,7 +231,7 @@ impl SourceEditRuntimePort for TraceDecay {
         binding: &'a RenameSymbolBindingV1,
         new_name: &'a str,
         dry_run: bool,
-    ) -> GraphFuture<'a, RenameResult> {
+    ) -> SourceEditFuture<'a, RenameResult> {
         Box::pin(TraceDecay::rename_symbol(
             self, graph, binding, new_name, dry_run,
         ))

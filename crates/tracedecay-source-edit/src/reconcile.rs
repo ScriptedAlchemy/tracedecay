@@ -9,7 +9,6 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -19,6 +18,7 @@ use super::journal::{
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
 use super::plan::{commit_source_edit_postimages, rollback_planned_source_edit_files};
+use super::port::SourceEditRuntime;
 use super::records::{
     applied_durable_record, applied_record, durable_record,
     persist_interrupted_reconciliation_attempt, reconciliation_attempt_record, unknown_record,
@@ -525,6 +525,7 @@ mod tests {
     use crate::test_support::*;
 
     use crate::digest::{planned_source_edit_state_digest, source_edit_recovery_digest};
+    use crate::plan::PlannedSourceEditFile;
     use std::fs;
     use tempfile::tempdir;
     use tracedecay_application::source_edit::EditResult;
@@ -567,7 +568,7 @@ mod tests {
         };
         let request = fixture_request();
         let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
-        journal.recovery_files = vec![tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+        journal.recovery_files = vec![PlannedSourceEditFile {
             relative_path: "src/lib.rs".to_owned(),
             expected: Some("old".to_owned()),
             intended: Some("new".to_owned()),
@@ -864,7 +865,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                &[PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("after".to_owned()),
@@ -929,7 +930,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                &[PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("intended".to_owned()),

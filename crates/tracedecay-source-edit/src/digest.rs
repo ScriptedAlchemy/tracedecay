@@ -13,6 +13,7 @@ use tracedecay_private_fs::framed_log::{
 use tracedecay_domain::errors::Result;
 
 use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
+use super::plan::PlannedSourceEditFile;
 use super::verify::{application_contract_error, config_error, domain_error, io_error};
 use super::{
     MAX_DURABLE_RECORD_BYTES, SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1,
@@ -87,7 +88,7 @@ pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<
 }
 
 pub(super) fn source_edit_recovery_digest(
-    files: &[tracedecay_usecases::tracedecay::PlannedSourceEditFile],
+    files: &[PlannedSourceEditFile],
 ) -> Result<ManifestDigest> {
     canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
 }
@@ -95,7 +96,7 @@ pub(super) fn source_edit_recovery_digest(
 #[hotpath::measure(label = "usecases.edit.planned_state_digest")]
 pub(super) fn planned_source_edit_state_digest(
     files: &[String],
-    planned_files: &[tracedecay_usecases::tracedecay::PlannedSourceEditFile],
+    planned_files: &[PlannedSourceEditFile],
     intended: bool,
 ) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());

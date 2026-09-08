@@ -10,9 +10,9 @@ use std::path::Path;
 
 use same_file::Handle;
 use tracedecay_runtime_core::path_safety::normalize_source_edit_relative_path;
-use tracedecay_source_edit::SourceEditFileAuthority;
-use tracedecay_usecases::tracedecay::{
-    SourceEditGraphReadV1, capture_planned_source_edit, validate_planned_source_edit,
+use tracedecay_source_edit::{
+    SourceEditFileAuthority, SourceEditGraphReadV1, capture_planned_source_edit,
+    validate_planned_source_edit,
 };
 
 use tracedecay_application::source_edit::{EditResult, InsertResult, MultiEditResult};
