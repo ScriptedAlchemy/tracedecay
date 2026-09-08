@@ -1,9 +1,10 @@
 //! End-to-end hook replay: drives response and capture hook subcommands through
 //! the real binary with representative event payloads, then asserts the full
-//! telemetry wiring — synchronous response handlers record attributed
-//! `hook_analytics.jsonl` rows, and `tracedecay analytics sync` bridges those
-//! rows into durable analytics events. Capture-only callbacks use delivery
-//! receipts instead; their durable spool journey is covered by the lifecycle suite.
+//! telemetry wiring — every native callback, response-capable or capture-only,
+//! records one attributed `hook_analytics.jsonl` row, and `tracedecay analytics
+//! sync` bridges those rows into durable analytics events. Capture-only
+//! callbacks additionally persist delivery receipts; that durable spool journey
+//! is covered by the lifecycle suite.
 //!
 //! Uses only child-process env (no process-global mutation), so it does not
 //! need `GLOBAL_DB_ENV_LOCK`.
@@ -38,19 +39,6 @@ struct Replay {
     /// which reads `TOOL_INPUT` from the environment instead.
     stdin: Option<Value>,
     tool_input_env: Option<Value>,
-}
-
-impl Replay {
-    fn emits_timing_rows(&self) -> bool {
-        !matches!(
-            self.subcommand,
-            "hook-pre-tool-use"
-                | "hook-codex-stop"
-                | "hook-cursor-stop"
-                | "hook-kiro-pre-tool-use"
-                | "hook-kiro-post-tool-use"
-        )
-    }
 }
 
 fn replays(root: &str) -> Vec<Replay> {
@@ -351,13 +339,15 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
                     && str_field(row, "hook_name") == replay.hook_name
             })
             .collect();
-        // Fast native capture persists canonical delivery receipts, while the
-        // retired pre-tool callback returns without opening any telemetry file.
-        let expected_rows = usize::from(replay.emits_timing_rows());
+        // The capture-only fast path and the retired Claude pre-tool callback
+        // never reach a response handler, so they record the invocation
+        // themselves: a host firing a hook is adoption evidence whatever the
+        // capture outcome, and a silent callback is indistinguishable from a
+        // broken install.
         assert_eq!(
             matched.len(),
-            expected_rows,
-            "expected {expected_rows} {}/{} rows, got {} (all rows: {:?})",
+            1,
+            "expected exactly one {}/{} row, got {} (all rows: {:?})",
             replay.agent,
             replay.hook_name,
             matched.len(),
@@ -446,14 +436,11 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         .collect();
     assert_eq!(
         events.len(),
-        replays
-            .iter()
-            .filter(|replay| replay.emits_timing_rows())
-            .count(),
-        "every response handler timing row must bridge into analytics_events"
+        replays.len(),
+        "every native callback's timing row must bridge into analytics_events"
     );
     let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_root);
-    for replay in replays.iter().filter(|replay| replay.emits_timing_rows()) {
+    for replay in &replays {
         let provider = format!("hook_{}", replay.agent);
         let event = events
             .iter()
