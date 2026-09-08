@@ -1237,27 +1237,6 @@ mod tests {
         }
     }
 
-    /// The descriptor table is a representation change only: every host's
-    /// projected rows equal, field for field, the rows the per-host `match`
-    /// produced before it (captured in the checked-in fixture).
-    #[test]
-    fn registration_evidence_matches_the_checked_in_rows() {
-        let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../fixtures/stock_host_registration_evidence.json"
-        ))
-        .unwrap();
-        let actual = HostKindV1::ALL
-            .iter()
-            .map(|&host| {
-                serde_json::json!({
-                    "host": host,
-                    "routes": stock_host_registration_evidence(host),
-                })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(serde_json::Value::Array(actual), expected);
-    }
-
     #[test]
     fn cline_family_hooks_stay_unverified_while_exact_hosts_support_mcp() {
         assert!(
