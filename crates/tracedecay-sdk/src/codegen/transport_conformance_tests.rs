@@ -78,8 +78,10 @@ fn generated_feedback_and_non_session_primitive_operations_use_live_http_routes(
         .iter()
         .find(|operation| operation.operation_id == "operation.application.session_lookup")
         .expect("session lookup SDK operation");
+    assert_eq!(session_lookup.name, "session_lookup");
     assert!(matches!(
         &session_lookup.transport,
-        OperationTransport::McpTool { .. }
+        OperationTransport::McpTool { tool_name }
+            if tool_name == "tracedecay_session_lookup"
     ));
 }

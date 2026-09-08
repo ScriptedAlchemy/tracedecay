@@ -218,6 +218,9 @@ pub fn sdk_executable_binding_registry()
     let mut bindings = mounted
         .iter()
         .flat_map(|registry| registry.as_ref().iter())
+        .filter(|availability| {
+            !preserves_shipped_mcp_sdk_transport(availability.operation_id(), mcp_registry)
+        })
         .map(project_http_binding)
         .collect::<Result<Vec<_>, _>>()?;
     let http_operations = bindings
@@ -241,6 +244,25 @@ pub fn sdk_executable_binding_registry()
         );
     }
     Ok(SdkExecutableBindingRegistryV1::new(bindings)?)
+}
+
+/// Session lookup shipped through `tracedecay_session_lookup` and the
+/// `session_lookup` SDK method. Prefer that mounted MCP binding when present;
+/// every other application operation continues to select its mounted HTTP
+/// binding first.
+fn preserves_shipped_mcp_sdk_transport(
+    operation_id: &OperationId,
+    mcp_registry: &ExecutableBindingRegistryV1,
+) -> bool {
+    let operation = operation_id
+        .as_str()
+        .strip_prefix("operation.application.")
+        .and_then(ApplicationSurfaceOperation::from_catalog_name);
+    operation == Some(ApplicationSurfaceOperation::SessionLookup)
+        && mcp_registry
+            .get(operation_id)
+            .and_then(ExecutableBindingAvailabilityV1::binding)
+            .is_some()
 }
 
 fn project_http_binding(
@@ -581,7 +603,6 @@ mod tests {
             ),
             ("affected_tests", "/application/tests/affected"),
             ("test_results", "/application/tests/results"),
-            ("session_lookup", "/application/primitives/session_lookup"),
             ("qualified_name", "/application/primitives/qualified_name"),
             ("call_chain", "/application/primitives/call_chain"),
             ("file_dependents", "/application/primitives/file_dependents"),
@@ -624,6 +645,17 @@ mod tests {
                     if service_id.as_str() == expected_service
             ));
         }
+
+        let session_lookup = registry
+            .get(&OperationId::new("operation.application.session_lookup").expect("operation ID"))
+            .and_then(|availability| availability.binding())
+            .expect("session lookup must remain SDK-callable");
+        assert_eq!(session_lookup.sdk_method().as_str(), "session_lookup");
+        assert!(matches!(
+            session_lookup.transport(),
+            SdkTransportBindingV1::McpTool { tool_name }
+                if tool_name == "tracedecay_session_lookup"
+        ));
     }
 
     #[test]
