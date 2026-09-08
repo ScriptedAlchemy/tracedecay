@@ -4,8 +4,7 @@
 //! an ambient Kiro or Codex install, and the provisioned file must be a native
 //! executable rather than a renamed script.
 
-#[path = "../build-support/provision_host_cli_fixture.rs"]
-mod provision_host_cli_fixture;
+use crate::provision_host_cli_fixture;
 
 use std::fs;
 use std::path::Path;

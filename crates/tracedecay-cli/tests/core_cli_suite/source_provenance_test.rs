@@ -9,7 +9,7 @@
 
 use source_provenance::{ProvenanceOrigin, ResolvedSourceProvenance, resolve, watch_paths};
 
-#[path = "../build-support/source_provenance.rs"]
+#[path = "../../build-support/source_provenance.rs"]
 mod source_provenance;
 
 const ENV_SHA: &str = "0123456789abcdef0123456789abcdef01234567";

@@ -28,18 +28,12 @@ path = "src/main.rs"
 name = "tracedecay-host-cli-fixture"
 path = "build-support/host_cli_fixture.rs"
 
+# The host-lifecycle and opencode journeys share this one test-transport
+# binary (tests/host_journeys_suite/); work_loop_journey stays separate
+# because it mutates process environment variables in-process.
 [[test]]
-name = "cli_boundary"
-path = "tests/cli_boundary.rs"
-
-[[test]]
-name = "host_lifecycle_cli_acceptance"
-path = "tests/host_lifecycle_cli_acceptance.rs"
-required-features = ["test-transport"]
-
-[[test]]
-name = "opencode_one_analyzer_journey"
-path = "tests/opencode_one_analyzer_journey.rs"
+name = "host_journeys_suite"
+path = "tests/host_journeys_suite/main.rs"
 required-features = ["test-transport"]
 
 [[test]]

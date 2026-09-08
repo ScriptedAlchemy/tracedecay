@@ -6,8 +6,7 @@ use crate::common::{
     MessageRecordBuilder, canonical_existing_path as canonical_temp_path, create_runtime,
     global_session,
 };
-#[path = "../../build-support/provision_host_cli_fixture.rs"]
-mod provision_host_cli_fixture;
+use crate::provision_host_cli_fixture;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;

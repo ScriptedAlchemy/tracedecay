@@ -1,3 +1,5 @@
+// Its own test-transport binary, not a host_journeys_suite module: the journey
+// sets and restores process environment variables in-process.
 //! The production Work-loop journey, end to end, through the real daemon.
 //!
 //! Plans 09 and 24 both name one direct acceptance journey — seven steps that

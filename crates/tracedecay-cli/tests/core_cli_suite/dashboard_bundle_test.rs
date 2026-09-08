@@ -15,9 +15,9 @@ use dashboard_bundle::{
 };
 use sha2::{Digest, Sha256};
 
-#[path = "../build-support/dashboard_bundle.rs"]
+#[path = "../../build-support/dashboard_bundle.rs"]
 mod dashboard_bundle;
-#[path = "../build-support/dashboard_manifest.rs"]
+#[path = "../../build-support/dashboard_manifest.rs"]
 mod dashboard_manifest;
 
 const INDEX_HTML: &[u8] = b"<!doctype html><script src=\"/static/js/index.js\"></script>";

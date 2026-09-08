@@ -553,19 +553,19 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
                 "edit",
                 "hook-claude-post-tool-use",
                 include_bytes!(
-                    "../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
+                    "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
                 )
                 .to_vec(),
             ),
             (
                 "stop",
                 "hook-stop",
-                include_bytes!("../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json")
+                include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json")
                     .to_vec(),
             ),
         ],
         HostKindV1::CursorDesktop => {
-            let packet = include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/cursor.json");
+            let packet = include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/cursor.json");
             vec![(
                 "edit",
                 "hook-cursor-after-file-edit",
@@ -576,7 +576,7 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
             vec![(
                 "stop",
                 "hook-codex-stop",
-                include_bytes!("../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json")
+                include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json")
                     .to_vec(),
             )]
         }
@@ -585,14 +585,14 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
                 "edit",
                 "hook-hermes-terminal-receipt",
                 include_bytes!(
-                    "../../../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
+                    "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
                 )
                 .to_vec(),
             ),
             (
                 "stop",
                 "hook-hermes-terminal-receipt",
-                include_bytes!("../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json")
+                include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json")
                     .to_vec(),
             ),
         ],
@@ -601,20 +601,20 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
                 "edit",
                 "hook-kimi-event",
                 include_bytes!(
-                    "../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
+                    "../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
                 )
                 .to_vec(),
             ),
             (
                 "stop",
                 "hook-kimi-event",
-                include_bytes!("../../../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json")
+                include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json")
                     .to_vec(),
             ),
         ],
         HostKindV1::OpenCode => {
             let packet =
-                include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json");
+                include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json");
             vec![
                 (
                     "edit",
