@@ -1206,6 +1206,51 @@ struct NgramSelectivityV1 {
     cardinality: u64,
 }
 
+/// One query's ngram shard budget: the shard and encoded-byte allowances every
+/// intersection pass charges against, plus (under `hotpath`) the totals each
+/// pass adds to so the query reports what it actually consumed.
+struct NgramShardBudgetV1 {
+    remaining_shards: usize,
+    remaining_encoded_bytes: usize,
+    #[cfg(feature = "hotpath")]
+    observed_shards: u64,
+    #[cfg(feature = "hotpath")]
+    observed_bytes: u64,
+}
+
+impl NgramShardBudgetV1 {
+    fn for_query() -> Self {
+        Self {
+            remaining_shards: ARTIFACT_NGRAM_QUERY_MAX_SHARDS_V1,
+            remaining_encoded_bytes: ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1,
+            #[cfg(feature = "hotpath")]
+            observed_shards: 0,
+            #[cfg(feature = "hotpath")]
+            observed_bytes: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn observe_shard(&mut self, encoded_bytes: usize) {
+        #[cfg(feature = "hotpath")]
+        {
+            self.observed_shards = self.observed_shards.saturating_add(1);
+            self.observed_bytes = self.observed_bytes.saturating_add(encoded_bytes as u64);
+        }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = encoded_bytes;
+    }
+
+    #[inline(always)]
+    fn report(&self) {
+        #[cfg(feature = "hotpath")]
+        {
+            hotpath::gauge!("query.artifact.ngram.query_shards_total").inc(self.observed_shards);
+            hotpath::gauge!("query.artifact.ngram.query_bytes_total").inc(self.observed_bytes);
+        }
+    }
+}
+
 fn ngram_bitmap_candidates(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -1213,8 +1258,7 @@ fn ngram_bitmap_candidates(
     ngrams: &[u32],
     _metrics: &ArtifactQueryMetricsV1,
 ) -> Result<RoaringBitmap, RetrievalPortError> {
-    let mut remaining_shards = ARTIFACT_NGRAM_QUERY_MAX_SHARDS_V1;
-    let mut remaining_encoded_bytes = ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1;
+    let mut budget = NgramShardBudgetV1::for_query();
     let mut selectivities = Vec::with_capacity(ngrams.len());
     let mut selectivity_statement = connection
         .prepare_cached(
@@ -1243,10 +1287,6 @@ fn ngram_bitmap_candidates(
     }
 
     let mut candidates = None::<BTreeMap<i64, RoaringBitmap>>;
-    #[cfg(feature = "hotpath")]
-    let mut observed_shards = 0u64;
-    #[cfg(feature = "hotpath")]
-    let mut observed_bytes = 0u64;
     let mut all_pages_statement = connection
         .prepare_cached(
             "SELECT page_ordinal, documents, cardinality FROM ngram_postings INDEXED BY ngram_postings_by_ngram WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal",
@@ -1268,18 +1308,8 @@ fn ngram_bitmap_candidates(
             let mut rows = candidate_pages_statement
                 .query((kind, i64::from(selectivity.ngram), candidate_pages))
                 .map_err(map_query_sql_error)?;
-            let next = intersect_ngram_shards(
-                &mut rows,
-                Some(current),
-                layout,
-                &mut remaining_shards,
-                &mut remaining_encoded_bytes,
-                _metrics,
-                #[cfg(feature = "hotpath")]
-                &mut observed_shards,
-                #[cfg(feature = "hotpath")]
-                &mut observed_bytes,
-            )?;
+            let next =
+                intersect_ngram_shards(&mut rows, Some(current), layout, &mut budget, _metrics)?;
             drop(rows);
             _metrics.observe_statement(&candidate_pages_statement)?;
             next
@@ -1287,18 +1317,7 @@ fn ngram_bitmap_candidates(
             let mut rows = all_pages_statement
                 .query([kind, i64::from(selectivity.ngram)])
                 .map_err(map_query_sql_error)?;
-            let next = intersect_ngram_shards(
-                &mut rows,
-                None,
-                layout,
-                &mut remaining_shards,
-                &mut remaining_encoded_bytes,
-                _metrics,
-                #[cfg(feature = "hotpath")]
-                &mut observed_shards,
-                #[cfg(feature = "hotpath")]
-                &mut observed_bytes,
-            )?;
+            let next = intersect_ngram_shards(&mut rows, None, layout, &mut budget, _metrics)?;
             drop(rows);
             _metrics.observe_statement(&all_pages_statement)?;
             next
@@ -1315,11 +1334,7 @@ fn ngram_bitmap_candidates(
             all
         },
     );
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("query.artifact.ngram.query_shards_total").inc(observed_shards);
-        hotpath::gauge!("query.artifact.ngram.query_bytes_total").inc(observed_bytes);
-    }
+    budget.report();
     Ok(candidates)
 }
 
@@ -1327,27 +1342,25 @@ fn intersect_ngram_shards(
     rows: &mut rusqlite::Rows<'_>,
     current: Option<&BTreeMap<i64, RoaringBitmap>>,
     layout: LexicalArtifactLayoutV1,
-    remaining_shards: &mut usize,
-    remaining_encoded_bytes: &mut usize,
+    budget: &mut NgramShardBudgetV1,
     _metrics: &ArtifactQueryMetricsV1,
-    #[cfg(feature = "hotpath")] observed_shards: &mut u64,
-    #[cfg(feature = "hotpath")] observed_bytes: &mut u64,
 ) -> Result<BTreeMap<i64, RoaringBitmap>, RetrievalPortError> {
     let mut next = BTreeMap::new();
     let mut candidate_count = 0u64;
     while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-        if *remaining_shards == 0 {
+        if budget.remaining_shards == 0 {
             return Err(RetrievalPortError::BudgetExceeded);
         }
         let page_ordinal: i64 = row.get(0).map_err(map_query_sql_error)?;
         let encoded: Vec<u8> = row.get(1).map_err(map_query_sql_error)?;
         let cardinality: i64 = row.get(2).map_err(map_query_sql_error)?;
         charge_ngram_encoded_shard_bytes(
-            remaining_encoded_bytes,
+            &mut budget.remaining_encoded_bytes,
             encoded.len(),
             ARTIFACT_NGRAM_MAX_ENCODED_SHARD_BYTES_V1,
         )?;
-        *remaining_shards = remaining_shards
+        budget.remaining_shards = budget
+            .remaining_shards
             .checked_sub(1)
             .ok_or(RetrievalPortError::BudgetExceeded)?;
         let mut shard = decode_ngram_bitmap(layout, &encoded).map_err(map_query_artifact_error)?;
@@ -1376,11 +1389,7 @@ fn intersect_ngram_shards(
         }
         #[cfg(test)]
         _metrics.observe_ngram_shard();
-        #[cfg(feature = "hotpath")]
-        {
-            *observed_shards = observed_shards.saturating_add(1);
-            *observed_bytes = observed_bytes.saturating_add(encoded.len() as u64);
-        }
+        budget.observe_shard(encoded.len());
     }
     Ok(next)
 }
