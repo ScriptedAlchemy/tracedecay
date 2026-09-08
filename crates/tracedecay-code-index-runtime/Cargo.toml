@@ -15,7 +15,11 @@ doctest = false
 # `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
 # feature exists only for the `cfg(feature = "hotpath")` sites in this crate
 # that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath", "hotpath/tokio"]
+# Type-coupled: `git_index_transactions::ProfiledFile` names the on-mode
+# `hotpath::io::InstrumentedIo` (hotpath 0.24 has no mode-agnostic `wrap`
+# alias for I/O), so any build that selects the backend with this crate in
+# its graph must select this feature too.
+hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 lite = [
     "tracedecay-code-extraction/lite",
@@ -54,7 +58,9 @@ gix = { version = "=0.86.0", default-features = false, features = [
     "status",
 ] }
 hex = "0.4"
-hotpath.workspace = true
+# `tokio` always: `hotpath::wrap::tokio::sync::Mutex` names the lock type in
+# both modes (the plain tokio mutex until a binary selects the backend).
+hotpath = { workspace = true, features = ["tokio"] }
 rayon = "1"
 same-file = "1"
 serde = { version = "1", features = ["derive"] }

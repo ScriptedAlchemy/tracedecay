@@ -34,19 +34,11 @@ mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
 
-#[cfg(all(unix, feature = "hotpath"))]
+#[cfg(unix)]
 type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(all(unix, not(feature = "hotpath")))]
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
-#[cfg(all(unix, feature = "hotpath"))]
+#[cfg(unix)]
 type ProfiledStdMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
-#[cfg(all(unix, not(feature = "hotpath")))]
-type ProfiledStdMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
-
-#[cfg(feature = "hotpath")]
 type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
 type HostAdmissionBrokers =
     Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;

@@ -14,7 +14,11 @@ doctest = false
 # Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
 # `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
 # feature only selects the on-mode hotpath test/bench targets of this crate.
-hotpath = ["hotpath/hotpath", "hotpath/tokio"]
+hotpath = [
+    "hotpath/hotpath",
+    # Type-coupled owner in this crate's graph (see its manifest).
+    "tracedecay-code-index-runtime/hotpath",
+]
 # Cross-crate fixture surface for composition-root session-runtime tests:
 # worker pass internals and scheduler test hooks exercised by the root
 # crate's host-admission integration tests. Production code is never gated

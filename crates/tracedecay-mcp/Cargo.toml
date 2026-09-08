@@ -15,7 +15,11 @@ doctest = false
 # `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
 # feature exists only for the `cfg(feature = "hotpath")` sites in this crate
 # that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath", "hotpath/tokio"]
+# Type-coupled: `transport::ProfiledStdin`/`ProfiledStdout` name the on-mode
+# `hotpath::io::InstrumentedIo` (hotpath 0.24 has no mode-agnostic `wrap`
+# alias for I/O), so any build that selects the backend with this crate in
+# its graph must select this feature too.
+hotpath = ["hotpath/hotpath"]
 # Gates in-memory ChannelTransport. ReplayTransport stays on the default
 # graph because production initialize-root replay uses it.
 test-transport = []

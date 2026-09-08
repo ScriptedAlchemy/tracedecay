@@ -304,7 +304,9 @@ path = "../../tests/storage_runtime_rusqlite_suite/main.rs"
 
 [dependencies]
 axum = "0.8"
-hotpath.workspace = true
+# `tokio` always: `hotpath::wrap::tokio::sync::Mutex` names the lock type in
+# both modes (the plain tokio mutex until a binary selects the backend).
+hotpath = { workspace = true, features = ["tokio"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 tower = "0.5"

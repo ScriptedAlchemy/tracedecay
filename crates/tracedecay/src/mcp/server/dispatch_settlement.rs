@@ -10,10 +10,7 @@ const SETTLEMENT_NOT_STARTED: u8 = 0;
 const SETTLEMENT_SETTLING: u8 = 1;
 const SETTLEMENT_JOINED: u8 = 2;
 
-#[cfg(feature = "hotpath")]
 type RetainedDispatchStateMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type RetainedDispatchStateMutex<T> = tokio::sync::Mutex<T>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DispatchSettlement {
