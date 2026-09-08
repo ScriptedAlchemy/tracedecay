@@ -646,16 +646,23 @@ async fn lsp_detach_after_unacknowledged_outbound_records_disconnected_drop() {
     assert_one_lsp_delivery_drop(fixture).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn lsp_disconnect_expiry_settles_unacknowledged_outbound_as_dropped() {
     let fixture = lsp_delivery_fixture().await;
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
     let session = open_polled_lsp_delivery(&fixture, &service, &registry, "expiry").await;
 
+    // Virtual time is scoped to the TTL expiry alone. The durable settlement
+    // drain below awaits the SQLite writer thread's acknowledgement, which a
+    // paused clock does not see as pending work: the runtime would auto-advance
+    // straight through the recorder's shutdown deadline while the write is
+    // still in flight.
     service.disconnect_lsp_session(&registry, session).await;
     tokio::task::yield_now().await;
+    tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
+    tokio::time::resume();
     tokio::task::yield_now().await;
 
     assert!(service.lsp_sessions.lock().await.is_empty());
