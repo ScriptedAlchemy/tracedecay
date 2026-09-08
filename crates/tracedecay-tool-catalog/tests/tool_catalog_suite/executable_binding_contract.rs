@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{

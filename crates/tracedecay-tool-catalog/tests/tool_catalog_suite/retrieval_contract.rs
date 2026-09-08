@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use tracedecay_tool_catalog::{
     CancellationPoint, CatalogContributionInputV1, CatalogContributionV1, CatalogSnapshotBuilderV1,
