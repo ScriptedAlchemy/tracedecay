@@ -16,11 +16,12 @@ use tracedecay_query::code_search;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
+use super::AutomationSchedulerHandle;
+use super::DaemonEngine;
+#[cfg(unix)]
 use super::explicit_git_state;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
-#[cfg(unix)]
-use super::{AutomationSchedulerHandle, DaemonEngine};
 use super::{
     DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
