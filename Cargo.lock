@@ -6367,6 +6367,8 @@ dependencies = [
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-runtime-core",
+ "tracing",
+ "tracing-subscriber",
  "windows 0.62.2",
 ]
 

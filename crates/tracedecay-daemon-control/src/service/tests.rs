@@ -1,10 +1,12 @@
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -12,14 +14,13 @@ use std::os::unix::net::UnixListener;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 #[cfg(unix)]
-use std::sync::Arc;
-#[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
+use tracing_subscriber::fmt::MakeWriter;
 
 use super::runner::ServiceRunner;
 use super::runner::{LaunchctlFailureMode, LaunchdCommand};
-use super::{DaemonServiceSpec, DaemonServiceState};
+use super::{DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, RestoreSettlement};
 use tracedecay_daemon_protocol::SOCKET_ENV;
 use tracedecay_runtime_core::config::{
     USER_DATA_DIR_ENV, lock_user_data_dir_test_env, user_data_dir,
@@ -98,12 +99,12 @@ impl Drop for CurrentDirGuard {
 #[test]
 fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
     let profile = TempDir::new().expect("profile");
-    let mut guard = super::QuiescedDaemonLifecycle {
+    let mut guard = QuiescedDaemonLifecycle {
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: TEST_BUILD_VERSION.to_owned(),
         runner: ServiceRunner::WindowsTask,
-        restored: false,
+        settlement: RestoreSettlement::Owed,
     };
 
     guard
@@ -121,7 +122,244 @@ fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
             .as_ref()
             .is_some_and(|lease| !lease.is_exclusive())
     );
-    guard.restored = true;
+    guard.settlement = RestoreSettlement::Complete;
+}
+
+#[derive(Clone)]
+struct CapturedWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+struct CapturedGuard {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for CapturedGuard {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for CapturedWriter {
+    type Writer = CapturedGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedGuard {
+            bytes: Arc::clone(&self.bytes),
+        }
+    }
+}
+
+/// Runs `scope` under a capturing `tracing` subscriber and returns everything
+/// it logged.
+fn captured_tracing(scope: impl FnOnce()) -> String {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(CapturedWriter {
+            bytes: Arc::clone(&bytes),
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, scope);
+    let bytes = bytes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    String::from_utf8(bytes).expect("captured tracing is UTF-8")
+}
+
+const FALLBACK_RESTORE_FAILED: &str = "quiesced daemon lifecycle fallback restore failed";
+
+/// A quiesced `RunningEnabled` daemon whose systemd `start` always fails, so
+/// every restore attempt fails after `daemon-reload` and `enable`. The
+/// systemctl log counts restore attempts.
+#[cfg(target_os = "linux")]
+struct FailingRestoreFixture {
+    _dir: TempDir,
+    _env: Vec<EnvVarGuard>,
+    runner: ServiceRunner,
+    profile: PathBuf,
+    log: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl FailingRestoreFixture {
+    fn new() -> Self {
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&profile).expect("profile dir");
+
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = start ] && exit 7\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+        let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+
+        let env = vec![
+            EnvVarGuard::set("XDG_CONFIG_HOME", &config_home),
+            EnvVarGuard::set("HOME", &home),
+            EnvVarGuard::set(USER_DATA_DIR_ENV, &profile),
+            EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log),
+        ];
+        let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+        std::fs::create_dir_all(service_path.parent().expect("service parent"))
+            .expect("service dir");
+        std::fs::write(
+            &service_path,
+            format!(
+                "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+                dir.path().join("tracedecay.sock").display()
+            ),
+        )
+        .expect("existing service unit");
+        Self {
+            _dir: dir,
+            _env: env,
+            runner,
+            profile,
+            log,
+        }
+    }
+
+    /// The guard as it exists inside a maintenance window: exclusive lease
+    /// held, restore still owed.
+    fn quiesced_guard(&self) -> QuiescedDaemonLifecycle {
+        let lifecycle_lease =
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+                &self.profile,
+                "fallback restore fixture",
+            )
+            .expect("exclusive maintenance lease");
+        QuiescedDaemonLifecycle {
+            previous_state: DaemonServiceState::RunningEnabled,
+            lifecycle_lease: Some(lifecycle_lease),
+            expected_version: TEST_BUILD_VERSION.to_owned(),
+            runner: self.runner.clone(),
+            settlement: RestoreSettlement::Owed,
+        }
+    }
+
+    fn start_attempts(&self) -> usize {
+        std::fs::read_to_string(&self.log)
+            .expect("systemctl log")
+            .lines()
+            .filter(|line| *line == "--user start tracedecay.service")
+            .count()
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unwinding_before_finish_reports_the_failed_fallback_restore_once() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let fixture = FailingRestoreFixture::new();
+    let guard = fixture.quiesced_guard();
+
+    let output = captured_tracing(|| {
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = guard;
+            panic!("maintenance action unwound before finishing");
+        }));
+        assert!(
+            unwound.is_err(),
+            "the maintenance panic must propagate; Drop must not mask it"
+        );
+    });
+
+    assert_eq!(
+        fixture.start_attempts(),
+        1,
+        "the unwind path must attempt the restore exactly once"
+    );
+    assert_eq!(
+        output.matches(FALLBACK_RESTORE_FAILED).count(),
+        1,
+        "one structured error per failed fallback restore, got:\n{output}"
+    );
+    let expected_version_field = format!("expected_version={TEST_BUILD_VERSION}");
+    for field in [
+        "previous_state=RunningEnabled",
+        expected_version_field.as_str(),
+        "lease_owned=true",
+        "systemctl --user start tracedecay.service failed",
+    ] {
+        assert!(
+            output.contains(field),
+            "the fallback report must carry `{field}`, got:\n{output}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_finish_returns_the_restore_failure_without_a_drop_report() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let fixture = FailingRestoreFixture::new();
+    let guard = fixture.quiesced_guard();
+
+    let output = captured_tracing(|| {
+        let error = guard
+            .finish()
+            .expect_err("a failed systemd start must fail the explicit finish");
+        assert!(
+            error
+                .to_string()
+                .contains("systemctl --user start tracedecay.service failed"),
+            "the explicit finish must return the typed restore error: {error}"
+        );
+    });
+
+    assert_eq!(
+        fixture.start_attempts(),
+        1,
+        "Drop must not retry a restore whose failure the caller already owns"
+    );
+    assert!(
+        output.is_empty(),
+        "a failure returned by an explicit finish must not be logged again by Drop, got:\n{output}"
+    );
+}
+
+#[test]
+fn completed_finish_leaves_drop_silent() {
+    let guard = QuiescedDaemonLifecycle {
+        previous_state: DaemonServiceState::StoppedDisabled,
+        lifecycle_lease: None,
+        expected_version: TEST_BUILD_VERSION.to_owned(),
+        runner: ServiceRunner::WindowsTask,
+        settlement: RestoreSettlement::Owed,
+    };
+
+    let output = captured_tracing(|| {
+        guard
+            .finish()
+            .expect("restoring a stopped daemon releases the lease without a service manager");
+    });
+
+    assert!(
+        output.is_empty(),
+        "a completed finish leaves nothing for Drop to report, got:\n{output}"
+    );
 }
 
 #[cfg(target_os = "linux")]
