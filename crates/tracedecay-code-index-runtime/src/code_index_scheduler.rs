@@ -3929,7 +3929,7 @@ enum CodeGraphServingAuthorityV1 {
         /// Retained solely to keep the canonical graph store lease alive for
         /// the lifetime of the serving owners; never read.
         _lease:
-            Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
+            Arc<tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
     },
     #[cfg(any(test, feature = "test-helpers"))]
     Memory,

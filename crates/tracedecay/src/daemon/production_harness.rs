@@ -984,21 +984,6 @@ async fn wait_for_production_composition_code_index(
         return Ok(());
     }
     let wait_started = Instant::now();
-    // A linked worktree under the default `sync.watch_linked_worktrees = false`
-    // carries the typed `LinkedWorktreeDisabled` admission: the route serves
-    // but never indexes, so no generation will ever publish for it. That is
-    // the same terminal state the project-open deferred owners answer with
-    // (`code_index_disabled_for_scope`); waiting for a publication here would
-    // always exhaust the bound and fail the composition open.
-    if invocation
-        .code_index_schedulers
-        .automatic_admission_for_scope(scope)
-        == Some(
-            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
-        )
-    {
-        return Ok(());
-    }
     let publication = timeout(Duration::from_secs(20), async {
         loop {
             // Scope-aware readiness is the authenticated demand boundary that

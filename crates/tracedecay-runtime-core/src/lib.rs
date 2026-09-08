@@ -107,16 +107,6 @@ pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store;
-// #1074: forwarding kept only for lane #1103's fenced files
-// crates/tracedecay-code-index-runtime/src/code_graph_seat.rs and
-// crates/tracedecay-code-index-runtime/src/code_index_scheduler.rs, which must
-// migrate to `shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1`; delete
-// this module with that migration.
-pub mod store_runtime {
-    pub mod registry {
-        pub use crate::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
-    }
-}
 pub mod sync;
 pub mod text;
 pub mod timeutil;
