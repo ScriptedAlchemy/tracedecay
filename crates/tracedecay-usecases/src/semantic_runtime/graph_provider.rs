@@ -96,7 +96,7 @@ impl std::error::Error for SemanticVectorGraphErrorV1 {}
 pub struct SemanticVectorRetentionAuthorizationV1 {
     candidate: VectorGenerationIdV1,
     stage_revision: SemanticVectorStageCensusRevision,
-    configuration_revision: u64,
+    configuration_revision: Option<u64>,
     configuration_inventory_digest: ManifestDigest,
     configured_root_digest: ManifestDigest,
     configured_root_count: u64,
@@ -142,7 +142,7 @@ impl SemanticVectorRetentionAuthorizationV1 {
         self.stage_revision
     }
 
-    pub fn configuration_revision(&self) -> u64 {
+    pub fn configuration_revision(&self) -> Option<u64> {
         self.configuration_revision
     }
 
@@ -293,6 +293,12 @@ pub trait VerifiedSemanticVectorGraphRuntimeV1: Send + Sync {
         settlement: &SemanticVectorStagePublishSettlement,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<SemanticVectorStagePublishOutcome, GraphDbError>;
+
+    /// One read-only project-wide page suffices to prove an empty vector store.
+    fn project_stage_census(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorStageCensusPage, GraphDbError>;
 
     fn reserve_one_generation(
         &self,

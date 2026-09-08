@@ -1,7 +1,9 @@
 use tracedecay_capture::normalize_timestamp_secs;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use super::attribution::{publish_graph_evidence_controlled, stable_backfill_span};
+use super::attribution::{
+    publish_graph_evidence, publish_graph_evidence_controlled, stable_backfill_span,
+};
 use super::store::GitCorrelationSessionStore;
 
 use super::{
@@ -68,6 +70,15 @@ impl SessionActivityRow {
             (Some(lo), Some(hi)) => Some((lo, hi)),
             _ => None,
         }
+    }
+
+    /// The activity timestamp the incremental backfill orders and watermarks by:
+    /// the newest message time, else the declared end, else the start. Mirrors
+    /// the `COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)` key used by
+    /// [`session_activity_page_after`], so the returned value compares directly
+    /// against the persisted watermark (both are raw, un-normalized bounds).
+    pub fn activity_sort_key(&self) -> Option<i64> {
+        self.message_max_ts.or(self.ended_at).or(self.started_at)
     }
 }
 
@@ -198,11 +209,6 @@ pub enum BackfillSkipReason {
     NoActivityWindow,
     /// `project_path` was empty or not a resolvable git worktree.
     NotAWorktree,
-    /// The worktree is a real repository with no commits reachable from
-    /// `HEAD`. Permanent for this pass: there is no history to walk, so no
-    /// retry can produce evidence and the session settles like any other
-    /// deterministic exclusion.
-    NoGitHistory,
     /// A git command for this session's repo failed; failed open.
     GitError,
 }
@@ -243,10 +249,6 @@ pub struct BackfillStats {
     pub commits_attributed: usize,
     pub skipped_no_window: usize,
     pub skipped_not_worktree: usize,
-    /// Sessions whose worktree had no commit history. A permanent exclusion,
-    /// counted apart from [`Self::skipped_git_error`] so an unborn repository
-    /// never reads as a retryable Git failure.
-    pub skipped_no_history: usize,
     pub skipped_git_error: usize,
     /// Whether this pass durably advanced the incremental session tuple.
     pub frontier_advanced: bool,
@@ -257,17 +259,13 @@ impl BackfillStats {
         match reason {
             BackfillSkipReason::NoActivityWindow => self.skipped_no_window += 1,
             BackfillSkipReason::NotAWorktree => self.skipped_not_worktree += 1,
-            BackfillSkipReason::NoGitHistory => self.skipped_no_history += 1,
             BackfillSkipReason::GitError => self.skipped_git_error += 1,
         }
     }
 
     #[hotpath::skip]
     pub const fn skipped_total(&self) -> usize {
-        self.skipped_no_window
-            + self.skipped_not_worktree
-            + self.skipped_no_history
-            + self.skipped_git_error
+        self.skipped_no_window + self.skipped_not_worktree + self.skipped_git_error
     }
 
     /// Whether this pass durably published evidence or advanced its source
@@ -304,6 +302,14 @@ fn incremental_backfill_failure(
 /// `Send + Sync` so a `&dyn GitReflogSource` can be held across an `.await`
 /// inside a spawned task (the startup auto-backfill runs on a tokio worker).
 pub trait GitReflogSource: Send + Sync {
+    /// Proves that this source has no history to publish. Sources without an
+    /// unborn-repository authority retain normal reflog reads and error handling.
+    fn has_verified_empty_history(
+        &self,
+        _worktree: &std::path::Path,
+    ) -> Result<bool, GitCorrelationError> {
+        Ok(false)
+    }
     /// `git reflog --date=unix HEAD` text for `worktree`, or `None` on error.
     fn reflog(&self, worktree: &std::path::Path) -> Option<String>;
     /// The branch `HEAD` currently points at in `worktree` (`None` = detached
@@ -312,17 +318,6 @@ pub trait GitReflogSource: Send + Sync {
     /// `git log <branch> --pretty=%H %ct --since=<since>` text for `worktree`,
     /// newest-first. `None` on error.
     fn commit_log(&self, worktree: &std::path::Path, branch: &str, since: i64) -> Option<String>;
-    /// Whether `worktree` has any commit reachable from `HEAD`.
-    ///
-    /// `Some(false)` is the unborn-repository verdict: a real worktree whose
-    /// `HEAD` names a branch that does not exist yet. Every history read there
-    /// fails deterministically, so callers must treat it as a permanent
-    /// exclusion instead of a retryable Git failure. `None` (the default) means
-    /// the implementation cannot tell, which keeps existing sources on the
-    /// conservative retry path.
-    fn has_commits(&self, _worktree: &std::path::Path) -> Option<bool> {
-        None
-    }
 }
 
 /// Real git-subprocess implementation of [`GitReflogSource`].
@@ -336,6 +331,17 @@ impl SystemGit {
 }
 
 impl GitReflogSource for SystemGit {
+    fn has_verified_empty_history(
+        &self,
+        worktree: &std::path::Path,
+    ) -> Result<bool, GitCorrelationError> {
+        bounded::verified_empty_history(worktree).map_err(|interruption| {
+            GitCorrelationError::Unavailable(format!(
+                "Git history source verification failed: {interruption:?}"
+            ))
+        })
+    }
+
     fn reflog(&self, worktree: &std::path::Path) -> Option<String> {
         Self::output(worktree, &["reflog", "--date=unix", "HEAD"])
     }
@@ -360,23 +366,6 @@ impl GitReflogSource for SystemGit {
                 &format!("--since={since}"),
             ],
         )
-    }
-
-    fn has_commits(&self, worktree: &std::path::Path) -> Option<bool> {
-        let output = tracedecay_runtime_core::git::bounded_git_output(
-            worktree,
-            &["rev-parse", "--verify", "--quiet", "HEAD"],
-            &tracedecay_runtime_core::git::GitCommandBounds::default(),
-        )
-        .ok()?;
-        match output.status.code() {
-            Some(0) => Some(true),
-            // `--verify --quiet` reserves exit 1 with no output for a HEAD that
-            // resolves to nothing. Any other status (128 for a broken or absent
-            // repository, a signal) stays "unknown" so it keeps retrying.
-            Some(1) if output.stdout.is_empty() => Some(false),
-            _ => None,
-        }
     }
 }
 
@@ -743,18 +732,16 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
         .ok_or(BackfillSkipReason::NotAWorktree)?;
     let worktree = normalize_worktree(&worktree_root.to_string_lossy());
 
-    let Some(reflog_text) = git.reflog(&worktree_root) else {
-        // A repository with no commits has no `HEAD` to walk, so the reflog
-        // read fails on every pass. Counting that as a retryable Git failure
-        // pinned the incremental watermark behind the session forever, and the
-        // permanently non-zero `skipped_git_error` made host projection drains
-        // report `deferred` even after a transcript reached raw EOF.
-        return Err(if git.has_commits(&worktree_root) == Some(false) {
-            BackfillSkipReason::NoGitHistory
-        } else {
-            BackfillSkipReason::GitError
-        });
-    };
+    if git
+        .has_verified_empty_history(&worktree_root)
+        .map_err(|_| BackfillSkipReason::GitError)?
+    {
+        return Ok(());
+    }
+
+    let reflog_text = git
+        .reflog(&worktree_root)
+        .ok_or(BackfillSkipReason::GitError)?;
     let timeline = branch_timeline_from_reflog(&reflog_text);
     let current_branch = git.current_branch(&worktree_root);
 
@@ -833,14 +820,13 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
         }
     }
     if !opts.dry_run && (!published_spans.is_empty() || !published_commits.is_empty()) {
-        let (spans_written, commits_attributed) = session_store
-            .publish_graph_evidence_owned(
-                "git-backfill".to_owned(),
-                published_spans,
-                published_commits,
-            )
-            .await
-            .map_err(|_| BackfillSkipReason::GitError)?;
+        let (spans_written, commits_attributed) = publish_graph_evidence(
+            session_store,
+            "git-backfill",
+            &published_spans,
+            &published_commits,
+        )
+        .map_err(|_| BackfillSkipReason::GitError)?;
         stats.spans_written = stats.spans_written.saturating_add(spans_written);
         stats.commits_attributed = stats.commits_attributed.saturating_add(commits_attributed);
     }
@@ -962,50 +948,4 @@ fn decode_session_activity_row(row: &Row) -> Result<SessionActivityRow, String> 
             .get(6)
             .map_err(|e| format!("failed to decode message_max_ts: {e}"))?,
     })
-}
-
-#[cfg(test)]
-mod unborn_history_tests {
-    use super::{GitReflogSource, SystemGit};
-
-    fn git(worktree: &std::path::Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(worktree)
-            .output()
-            .expect("git runs in the test environment");
-        assert!(
-            status.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-    }
-
-    #[test]
-    fn unborn_worktree_reports_absent_history_without_a_git_failure() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        git(tmp.path(), &["init", "-q", "."]);
-
-        // The repository is real, so it resolves as a worktree, but every
-        // history read fails until the first commit exists.
-        assert_eq!(SystemGit.reflog(tmp.path()), None);
-        assert_eq!(SystemGit.has_commits(tmp.path()), Some(false));
-
-        git(
-            tmp.path(),
-            &[
-                "-c",
-                "user.name=TraceDecay Tests",
-                "-c",
-                "user.email=tests@example.invalid",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "first",
-            ],
-        );
-        assert_eq!(SystemGit.has_commits(tmp.path()), Some(true));
-        assert!(SystemGit.reflog(tmp.path()).is_some());
-    }
 }

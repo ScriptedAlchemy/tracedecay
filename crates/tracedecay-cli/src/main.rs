@@ -819,7 +819,7 @@ async fn run_startup_preamble(command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
 
     // Check first-run before any config save creates the file.
-    let is_first_run = tracedecay_session_memory::user_config::UserConfig::is_fresh();
+    let is_first_run = !tracedecay_session_memory::user_config::UserConfig::exists();
 
     let is_force_flush = matches!(
         command,

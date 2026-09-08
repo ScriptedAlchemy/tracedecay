@@ -69,6 +69,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1,
 };
@@ -100,12 +101,6 @@ use crate::runtime::source::{
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use observation::codex_observation_source_v2;
-/// The canonical Codex observation source identity. Codex observations commit
-/// under this v2 identity; `for_provider` names only the pre-v2 legacy source
-/// that replay reconciles.
-#[cfg(feature = "test-helpers")]
 pub use observation::codex_observation_source_v2;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
@@ -345,11 +340,16 @@ pub(crate) enum CodexDiscoveryDelivery {
 }
 
 impl CodexDiscoveryHub {
+    /// Mount the process resources shared JSONL preparation meters against:
+    /// the resident-memory authority page reservations charge and the
+    /// background CPU authority parse workers are admitted through. The
+    /// composition root calls this once the process worker plan exists.
     pub fn configure_preparation_resources(
         &self,
         memory: std::sync::Arc<ProcessResidentMemoryV1>,
+        background_cpu: std::sync::Arc<ProcessBackgroundCpuV1>,
     ) -> TranscriptIngestResult<()> {
-        install_shared_jsonl_preparation_authority(memory)
+        install_shared_jsonl_preparation_authority(memory, background_cpu)
     }
 
     pub fn register(&self, consumer: &str, source_home: Option<&Path>) {
@@ -2588,6 +2588,17 @@ fn hash_path(hasher: &mut Sha256, path: &Path) {
     hasher.update([0]);
 }
 
+/// The checkpoint identity is independent of the transcript's display location.
+pub(crate) fn codex_cursor_key(transcript_path: &Path) -> TranscriptCursorKey {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
+    hash_path(&mut hasher, transcript_path);
+    TranscriptCursorKey::opaque(format!(
+        "codex-v2:{}",
+        encode_lowercase_hex(&hasher.finalize())
+    ))
+}
+
 impl TranscriptSource for CodexSource {
     fn provider(&self) -> &'static str {
         PROVIDER
@@ -2599,13 +2610,7 @@ impl TranscriptSource for CodexSource {
     }
 
     fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
-        hash_path(&mut hasher, transcript_path);
-        TranscriptCursorKey::opaque(format!(
-            "codex-v2:{}",
-            encode_lowercase_hex(&hasher.finalize())
-        ))
+        codex_cursor_key(transcript_path)
     }
 
     fn discover_transcript_paths(

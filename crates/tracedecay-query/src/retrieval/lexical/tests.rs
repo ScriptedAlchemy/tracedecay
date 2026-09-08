@@ -22,9 +22,40 @@ use super::{
     LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, admit_candidate_sources,
     lexical_query_parts,
 };
+use crate::retrieval::graph::GraphExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, LexicalPostingReadPort, RetrievalPortError,
 };
+
+/// A request authority that never cancels: the lane must not observe it.
+struct ActiveControl;
+
+impl GraphExecutionControl for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
+static ACTIVE_CONTROL: ActiveControl = ActiveControl;
+
+/// A request authority that is already cancelled when the lane consults it.
+struct CancelledControl;
+
+impl GraphExecutionControl for CancelledControl {
+    fn is_cancelled(&self) -> bool {
+        true
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
+static CANCELLED_CONTROL: CancelledControl = CancelledControl;
 
 fn id<T>(value: &str) -> T
 where
@@ -68,6 +99,17 @@ fn candidate_sources_always_admit_the_most_selective_term() {
         ["tracedecay"]
     );
     assert!(admit_candidate_sources(Vec::<(usize, &str)>::new()).is_empty());
+}
+
+#[test]
+fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    assert_eq!(
+        admit_candidate_sources(vec![(0, "missing"), (budget + 1, "common"), (0, "absent")]),
+        ["common"],
+        "empty sources must not consume the first nonempty source exception"
+    );
+    assert!(admit_candidate_sources(vec![(0, "missing"), (0, "absent")]).is_empty());
 }
 
 #[test]
@@ -213,6 +255,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
         budget: budget(max_candidates),
+        control: &ACTIVE_CONTROL,
     }
 }
 
@@ -635,6 +678,20 @@ fn lexical_lane_reports_unavailable_when_authority_is_missing() {
             tracedecay_domain::RetrievalFailure::AuthorityUnavailable { .. }
         )
     ));
+}
+
+/// A settled request never reaches the posting port: the lane unwinds with the
+/// typed cancellation error even when the port would have answered completely.
+#[test]
+fn lexical_lane_unwinds_a_cancelled_request_before_reading_postings() {
+    let mut request = lexical_request(8);
+    request.control = &CANCELLED_CONTROL;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
+
+    assert_eq!(
+        lane.retrieve_lexical(&request),
+        Err(RetrievalPortError::Cancelled)
+    );
 }
 
 #[test]

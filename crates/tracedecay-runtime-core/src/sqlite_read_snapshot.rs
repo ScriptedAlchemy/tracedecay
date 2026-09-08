@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 #[cfg(test)]
-use std::cell::Cell;
+use std::cell::RefCell;
 
 use fs2::FileExt;
 use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_private_fs::framed_log::rename_noreplace;
 
 #[path = "sqlite_snapshot_connection.rs"]
 mod connection;
@@ -26,13 +27,34 @@ mod materialize;
 
 pub use connection::SnapshotConnection;
 pub use control::SnapshotReadControl;
+pub use materialize::materialize;
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 static NEXT_BACKUP_STAGING: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
+type BeforePublishHook = Box<dyn FnOnce() -> io::Result<()>>;
+#[cfg(test)]
+type AfterPublishHook = Box<dyn FnOnce()>;
+
+#[cfg(test)]
 thread_local! {
-    static FAIL_NEXT_BACKUP_PUBLISH: Cell<bool> = const { Cell::new(false) };
+    static BEFORE_PUBLISH: RefCell<Option<BeforePublishHook>> = const { RefCell::new(None) };
+    static AFTER_PUBLISH: RefCell<Option<AfterPublishHook>> = const { RefCell::new(None) };
+}
+
+/// Test seam between the destination-family check and the no-replace rename,
+/// where a concurrent opener can bring a destination family into existence.
+#[cfg(test)]
+fn before_next_publish(hook: impl FnOnce() -> io::Result<()> + 'static) {
+    BEFORE_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+/// Test seam immediately after the destination name is published, where a
+/// legitimate opener of the new file can create its own WAL/SHM.
+#[cfg(test)]
+fn after_next_publish(hook: impl FnOnce() + 'static) {
+    AFTER_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> io::Result<()> {
@@ -51,13 +73,21 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
 /// URI skips locking and ignores WAL/SHM; it is illegal on a changing family.
 /// Each attempt exclusively creates an owned staging file beside
 /// `destination` (`create_new`) and retires only that scratch. A colliding
-/// name is refused, not deleted. On Unix, `rename` atomically replaces an
-/// existing destination only when that path has no `-wal`/`-shm`/`-journal`
-/// sidecars; leftover dest journals stay with the old main and would be
-/// replayed against the new file. Elsewhere the public helper rejects an
-/// existing destination because displace/restore is not atomic and cannot
-/// keep the documented promise that the old file stays at its path until
-/// replace succeeds. Scratch callers always publish to a new path.
+/// name is refused, not deleted.
+///
+/// `destination` is a fresh name the caller owns; this helper never replaces
+/// a destination and never removes anything found there. An existing main,
+/// `-wal`, `-shm`, or `-journal` at the destination is refused with
+/// `AlreadyExists` before the source is opened, and publication is a
+/// kernel-atomic no-replace rename, so a main created concurrently keeps its
+/// own family and fails the backup instead. `SQLite` durability is a
+/// family-level invariant: pathname existence cannot prove which main a later
+/// sidecar belongs to, so a displaced family can only be handled by an owner
+/// with lifecycle exclusion (see
+/// [`crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically`]).
+/// Production callers publish into a directory they exclusively created and
+/// swap that directory themselves.
+///
 /// A WAL family whose transient `-shm` is absent is copied as an offline
 /// unlocked family and folded in staging — opening it as a reader would
 /// reconstruct SHM in the source directory.
@@ -124,17 +154,36 @@ fn reject_aliased_backup_paths(source: &Path, destination: &Path) -> io::Result<
             "SQLite backup source and destination are the same path",
         ));
     }
-    if destination.exists()
-        && crate::db::sqlite_generation_identity(source)
-            .ok()
-            .is_some_and(|source_id| {
-                crate::db::sqlite_generation_identity(destination).ok() == Some(source_id)
-            })
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "SQLite backup source and destination are the same file",
-        ));
+    Ok(())
+}
+
+fn occupied_destination_member(member: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "SQLite backup publishes only to an absent destination family; '{}' already exists and is never replaced or removed",
+            member.display()
+        ),
+    )
+}
+
+/// The whole destination family must be absent, not just the main. A stray
+/// `-wal` or `-journal` beside a freshly published main would be replayed
+/// into it on first open, and nothing found here is owned by this attempt.
+/// Refusing before the source is opened also keeps this attempt's staging
+/// out of a directory whose destination name someone else already holds.
+fn reject_occupied_destination_family(destination: &Path) -> io::Result<()> {
+    for member in [
+        destination.to_path_buf(),
+        with_suffix(destination, "-wal"),
+        with_suffix(destination, "-shm"),
+        with_suffix(destination, "-journal"),
+    ] {
+        match fs::symlink_metadata(&member) {
+            Ok(_) => return Err(occupied_destination_member(&member)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(())
 }
@@ -145,6 +194,7 @@ fn backup_live_sqlite_database_with(
     checkpoint: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
     reject_aliased_backup_paths(source, destination)?;
+    reject_occupied_destination_family(destination)?;
     // Cancel/deadline before any exclusive create so an early failure cannot
     // treat a colliding name as this attempt's deletable scratch.
     checkpoint()?;
@@ -157,11 +207,6 @@ fn backup_live_sqlite_database_with(
         },
         Err(error) => Err(retire_failed_backup(error, &[staging.as_path()])),
     }
-}
-
-#[cfg(test)]
-fn fail_next_backup_publish() {
-    FAIL_NEXT_BACKUP_PUBLISH.with(|flag| flag.set(true));
 }
 
 #[cfg(test)]
@@ -293,85 +338,30 @@ fn fold_staging_to_standalone(
 
 fn publish_complete_backup(staging: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(test)]
-    if FAIL_NEXT_BACKUP_PUBLISH.with(Cell::get) {
-        FAIL_NEXT_BACKUP_PUBLISH.with(|flag| flag.set(false));
-        return Err(retire_failed_backup(
-            io::Error::other("forced backup publish failure"),
-            &[staging],
-        ));
+    if let Some(hook) = BEFORE_PUBLISH.with(|slot| slot.borrow_mut().take())
+        && let Err(error) = hook()
+    {
+        return Err(retire_failed_backup(error, &[staging]));
     }
-    if destination.exists() {
-        return replace_existing_destination(staging, destination);
+    // The destination name is claimed by a kernel-atomic no-replace rename.
+    // A main that appeared since the family check keeps its own WAL/SHM/
+    // journal and fails this attempt; only this attempt's staging is retired.
+    // Nothing at the destination is ever removed after publication: a sidecar
+    // there belongs to whoever opened the new file, and pathname existence
+    // cannot tell that family apart from a displaced one.
+    if let Err(error) = rename_noreplace(staging, destination) {
+        let error = if error.kind() == io::ErrorKind::AlreadyExists {
+            occupied_destination_member(destination)
+        } else {
+            error
+        };
+        return Err(retire_failed_backup(error, &[staging]));
     }
-    match fs::rename(staging, destination) {
-        Ok(()) => Ok(()),
-        Err(error) => Err(retire_failed_backup(error, &[staging])),
-    }
-}
-
-#[cfg(unix)]
-fn destination_has_sqlite_sidecars(destination: &Path) -> io::Result<bool> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        match fs::symlink_metadata(with_suffix(destination, suffix)) {
-            Ok(metadata) if metadata.is_file() => return Ok(true),
-            Ok(_) => {
-                return Err(io::Error::other(format!(
-                    "SQLite destination sidecar '{}' is not a file",
-                    with_suffix(destination, suffix).display()
-                )));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(unix)]
-fn retire_published_destination_sidecars(destination: &Path) -> io::Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        match fs::remove_file(with_suffix(destination, suffix)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+    #[cfg(test)]
+    if let Some(hook) = AFTER_PUBLISH.with(|slot| slot.borrow_mut().take()) {
+        hook();
     }
     Ok(())
-}
-
-fn replace_existing_destination(staging: &Path, destination: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        // rename(2) replaces the directory entry atomically. Failure leaves
-        // destination untouched; only this attempt's staging is retired.
-        // Dest sidecars stay bound to the old main: refuse rather than publish
-        // a new file that an ordinary open would journal-replay into the old
-        // contents.
-        if destination_has_sqlite_sidecars(destination)? {
-            return Err(retire_failed_backup(
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "SQLite backup cannot replace a destination that still has WAL, SHM, or rollback-journal sidecars",
-                ),
-                &[staging],
-            ));
-        }
-        match fs::rename(staging, destination) {
-            Ok(()) => retire_published_destination_sidecars(destination),
-            Err(error) => Err(retire_failed_backup(error, &[staging])),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = destination;
-        Err(retire_failed_backup(
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "SQLite backup cannot atomically replace an existing destination",
-            ),
-            &[staging],
-        ))
-    }
 }
 
 fn retire_failed_backup(error: io::Error, paths: &[&Path]) -> io::Error {
@@ -496,6 +486,22 @@ pub struct SourceGeneration {
 }
 
 impl SourceGeneration {
+    /// Capture the existing durable family identity before an external read or
+    /// copy. Validate after that operation to refuse a changing source.
+    pub fn capture(source: &Path) -> io::Result<Self> {
+        let states = family_state(source)?;
+        if !states.iter().any(|state| state.path == source) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("SQLite database '{}' does not exist", source.display()),
+            ));
+        }
+        Ok(Self {
+            source: source.to_path_buf(),
+            states,
+        })
+    }
+
     pub fn validate(&self) -> io::Result<()> {
         let current = family_state(&self.source)?;
         if durable_family_state(&self.source, &current)
@@ -1417,6 +1423,42 @@ mod backup_tests;
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn captured_source_generation_refuses_durable_main_and_wal_changes() {
+        for journal_mode in ["DELETE", "WAL"] {
+            let temp = TempDir::new().unwrap();
+            let source = temp.path().join("source.db");
+            let writer = Connection::open(&source).unwrap();
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA journal_mode={journal_mode};
+                     PRAGMA wal_autocheckpoint=0;
+                     CREATE TABLE durable(value BLOB);"
+                ))
+                .unwrap();
+            let generation = SourceGeneration::capture(&source).unwrap();
+            generation.validate().unwrap();
+            writer
+                .execute("INSERT INTO durable VALUES (zeroblob(65536))", [])
+                .unwrap();
+            assert!(
+                generation.validate().is_err(),
+                "the copied family must be refused after a {journal_mode} write"
+            );
+            SourceGeneration::capture(&source)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        let temp = TempDir::new().unwrap();
+        assert_eq!(
+            SourceGeneration::capture(&temp.path().join("missing.db"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn copy_mode_admission_excludes_shm_and_charges_main_plus_wal() {

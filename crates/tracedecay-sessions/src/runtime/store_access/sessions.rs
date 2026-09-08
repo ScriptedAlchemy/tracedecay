@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde_json::Value as JsonValue;
 
@@ -8,6 +9,7 @@ use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
+use crate::runtime::codex::codex_cursor_key;
 use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
@@ -220,22 +222,15 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         loop {
             let mut rows = reader
                 .query(
-                    "SELECT paths.transcript_path,
-                            COALESCE(offsets.byte_offset, 0),
-                            COALESCE(offsets.mtime, 0)
-                     FROM (
-                         SELECT DISTINCT transcript_path
-                         FROM sessions
-                         WHERE (?1 IS NULL OR provider = ?1)
-                           AND transcript_path IS NOT NULL
-                           AND transcript_path != ''
-                           AND transcript_path > ?2
-                         ORDER BY transcript_path
-                         LIMIT ?3
-                     ) AS paths
-                     LEFT JOIN parse_offsets AS offsets
-                       ON offsets.file_path = paths.transcript_path
-                     ORDER BY paths.transcript_path",
+                    "SELECT transcript_path, json_group_array(DISTINCT provider)
+                     FROM sessions
+                     WHERE (?1 IS NULL OR provider = ?1)
+                       AND transcript_path IS NOT NULL
+                       AND transcript_path != ''
+                       AND transcript_path > ?2
+                     GROUP BY transcript_path
+                     ORDER BY transcript_path
+                     LIMIT ?3",
                     tracedecay_runtime_core::db::engine::params![
                         provider,
                         after_path.as_str(),
@@ -253,6 +248,57 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 let path = row
                     .get::<String>(0)
                     .map_err(|error| format!("failed to decode transcript path: {error}"))?;
+                let providers_json = row
+                    .get::<String>(1)
+                    .map_err(|error| format!("failed to decode transcript providers: {error}"))?;
+                let providers: Vec<String> = serde_json::from_str(&providers_json)
+                    .map_err(|error| format!("invalid transcript providers: {error}"))?;
+                page.push((path, providers));
+            }
+            drop(rows);
+            if page.is_empty() {
+                break;
+            }
+            // Locations identify files to stat; provider cursor keys identify
+            // checkpoints. Resolve the page in one query without treating an
+            // opaque checkpoint as a filesystem path or reimplementing its hash.
+            let keys: Vec<JsonValue> = page
+                .iter()
+                .flat_map(|(path, providers)| {
+                    providers.iter().map(move |provider| {
+                        let key = if provider == "codex" {
+                            codex_cursor_key(Path::new(path)).durable_text()
+                        } else {
+                            path.clone()
+                        };
+                        serde_json::json!({ "path": path, "key": key })
+                    })
+                })
+                .collect();
+            let keys_json = serde_json::to_string(&keys)
+                .map_err(|error| format!("failed to encode transcript checkpoint keys: {error}"))?;
+            let mut offsets = reader
+                .query(
+                    "SELECT json_extract(requested.value, '$.path'),
+                            COALESCE(MAX(offsets.byte_offset), 0),
+                            COALESCE(MAX(offsets.mtime), 0)
+                     FROM json_each(?1) AS requested
+                     LEFT JOIN parse_offsets AS offsets
+                       ON offsets.file_path = json_extract(requested.value, '$.key')
+                     GROUP BY json_extract(requested.value, '$.path')",
+                    tracedecay_runtime_core::db::engine::params![keys_json],
+                )
+                .await
+                .map_err(|error| format!("failed to query transcript checkpoints: {error}"))?;
+            let mut checkpoints = Vec::with_capacity(page.len());
+            while let Some(row) = offsets
+                .next()
+                .await
+                .map_err(|error| format!("failed to read transcript checkpoint: {error}"))?
+            {
+                let path = row
+                    .get::<String>(0)
+                    .map_err(|error| format!("failed to decode transcript location: {error}"))?;
                 let byte_offset = u64::try_from(
                     row.get::<i64>(1)
                         .map_err(|error| format!("failed to decode transcript offset: {error}"))?,
@@ -263,13 +309,12 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                         .map_err(|error| format!("failed to decode transcript mtime: {error}"))?,
                 )
                 .map_err(|error| format!("invalid transcript mtime: {error}"))?;
-                page.push((path, byte_offset, mtime));
+                checkpoints.push((path, byte_offset, mtime));
             }
-            drop(rows);
-            if page.is_empty() {
-                break;
-            }
-            for (path, byte_offset, mtime) in &page {
+            drop(offsets);
+            for (path, byte_offset, mtime) in &checkpoints {
+                // Opaque non-Unicode locations cannot be resolved from this
+                // display field; like missing files, they remain untracked.
                 let Ok(metadata) = hotpath::measure_block!(
                     "global_db.registered_sessions.ingest_stat",
                     std::fs::metadata(path)
@@ -295,7 +340,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             }
             after_path = page
                 .last()
-                .map(|(path, _, _)| path.clone())
+                .map(|(path, _)| path.clone())
                 .ok_or_else(|| "session ingest health page unexpectedly empty".to_owned())?;
             if page.len() < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
                 break;

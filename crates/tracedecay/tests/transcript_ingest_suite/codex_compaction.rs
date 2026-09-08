@@ -105,10 +105,6 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
         EnvVarGuard::set("HOME", &home),
         EnvVarGuard::set("USERPROFILE", &home),
     ];
-    let project_id = mark_test_project(&project);
-    // The app-server summarizer resolves its binary from the daemon's own
-    // environment, and the `init` below is what first starts that daemon, so
-    // the fake `codex` has to be installed before anything spawns it.
     let codex_bin = tmp.path().join("codex");
     std::fs::write(
         &codex_bin,
@@ -132,6 +128,9 @@ done
         EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &codex_bin),
         EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
     ];
+    // Init starts the managed daemon, so its provider environment must already
+    // point at this fixture before initialization captures the process environment.
+    let project_id = mark_test_project(&project);
     // The hook resolves the project root through the initialized-store gate,
     // exactly like production installs: `init` creates the project store
     // first, then daemon enrollment mounts the already-initialized layout
@@ -216,12 +215,16 @@ done
     assert_eq!(summary.source_count, 2);
     // Provenance metadata rides the node-level describe; the session-level
     // summary listing is a lightweight overview without metadata_json.
-    assert!(
+    let metadata: serde_json::Value = serde_json::from_str(
         summary
             .metadata_json
             .as_deref()
-            .unwrap_or_default()
-            .contains("codex_app_server:codex-hook-test")
+            .expect("summary provenance"),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata["summary_route"], "codex_app_server:codex-hook-test",
+        "summary provenance must retain the actual app-server model: {metadata}"
     );
 
     let expansion = runtime

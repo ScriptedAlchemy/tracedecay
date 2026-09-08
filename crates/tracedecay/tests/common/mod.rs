@@ -176,6 +176,7 @@ static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 /// [`IsolatedEnv::acquire_blocking`] (sync tests); both return the guard plus
 /// a ready-made `project` directory inside the temp home.
 pub struct IsolatedEnv {
+    toolchain_environment: [(&'static str, Option<OsString>); 3],
     // Field order matters: fields drop in declaration order, so the lock must
     // be declared last. Dropping it first would let the next waiting test
     // install its own isolated env, only for `storage`'s restore to clobber it.
@@ -192,6 +193,31 @@ impl IsolatedEnv {
         // — keeps that out of every individual suite fixture.
         register_process_product_runtime();
         let dir = tempdir_or_panic();
+        let original_home =
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+        let toolchain_environment = [
+            (
+                "RUSTUP_HOME",
+                std::env::var_os("RUSTUP_HOME").or_else(|| {
+                    original_home
+                        .as_ref()
+                        .map(|home| home.join(".rustup").into_os_string())
+                }),
+            ),
+            (
+                "CARGO_HOME",
+                std::env::var_os("CARGO_HOME").or_else(|| {
+                    original_home
+                        .as_ref()
+                        .map(|home| home.join(".cargo").into_os_string())
+                }),
+            ),
+            (
+                "RUSTUP_TOOLCHAIN",
+                std::env::var_os("RUSTUP_TOOLCHAIN")
+                    .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from)),
+            ),
+        ];
         let storage = TraceDecayStorageEnvGuard::for_tempdir(&dir);
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap_or_else(|err| {
@@ -202,6 +228,7 @@ impl IsolatedEnv {
         });
         (
             Self {
+                toolchain_environment,
                 storage,
                 dir,
                 _env_lock: env_lock,
@@ -224,6 +251,22 @@ impl IsolatedEnv {
 
     pub fn home(&self) -> &Path {
         self.storage.home()
+    }
+
+    /// Reuses the installed toolchain while retaining the fixture's isolated
+    /// product home. Values are captured under the environment lock before
+    /// HOME changes, so parallel tests cannot borrow another fixture's home.
+    pub fn apply_toolchain_env(&self, command: &mut Command) {
+        for (key, value) in &self.toolchain_environment {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
     }
 
     /// The throwaway directory holding the isolated home and every checkout, so

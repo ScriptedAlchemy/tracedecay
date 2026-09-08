@@ -295,6 +295,9 @@ pub struct McpServer {
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
     host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
+    /// The process background CPU authority hook-driven observation capture
+    /// prepares under; daemon-owned servers carry the bootstrap worker plan's.
+    background_cpu: Option<Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>>,
     project_session_refresh_wake:
         Option<Arc<dyn tracedecay_application::SessionTemporalRefreshWakePort>>,
     user_session_refresh_wake:
@@ -815,6 +818,7 @@ impl McpServer {
             profile_session_db,
             session_sync_service,
             host_admission_broker,
+            background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
             project_session_refresh_serving,
@@ -1071,6 +1075,7 @@ impl McpServer {
             project_registry_reads,
             profile_session_db,
             host_admission_broker,
+            background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
             project_session_refresh_service,

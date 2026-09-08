@@ -1,3 +1,6 @@
+use tracedecay_application::SharedProfileStoreLocatorV1;
+use tracedecay_domain::BrainId;
+
 use std::path::PathBuf;
 
 use super::*;
@@ -229,15 +232,23 @@ fn lsp_scope_roots_canonicalize_independent_of_folder_order() {
     .unwrap();
     let locator_a = tracedecay_application::RegisteredRootLocatorV1::new(
         ProjectId::new("project.a").unwrap(),
-        tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
-        "store.a",
+        SharedProfileStoreLocatorV1::new(
+            BrainId::new("brain.fixture").unwrap(),
+            tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
+            "store.fixture",
+        )
+        .unwrap(),
         &path_a,
     )
     .unwrap();
     let locator_b = tracedecay_application::RegisteredRootLocatorV1::new(
         ProjectId::new("project.b").unwrap(),
-        tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
-        "store.b",
+        SharedProfileStoreLocatorV1::new(
+            BrainId::new("brain.fixture").unwrap(),
+            tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
+            "store.fixture",
+        )
+        .unwrap(),
         &path_b,
     )
     .unwrap();

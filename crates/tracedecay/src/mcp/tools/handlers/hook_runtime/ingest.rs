@@ -88,6 +88,10 @@ fn host_admission_facade<'a>(
             (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
         },
     };
+    let authority = match authorities.background_cpu {
+        Some(background_cpu) => authority.with_background_cpu(background_cpu),
+        None => authority,
+    };
     Ok(HostAdmissionFacade::new(authority))
 }
 

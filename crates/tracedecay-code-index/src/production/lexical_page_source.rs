@@ -1414,14 +1414,15 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             .saturating_add(self.maximum_page_bytes)
     }
 
-    /// Halve the chunk bound used to mint the next page after a downstream
+    /// Halve the record bound used to mint the next page after a downstream
     /// batch authority refuses the current page. The source cursor is not
     /// advanced until the downstream callback accepts a page, so tightening
     /// here safely re-mints only the refused suffix while preserving every
     /// already admitted page and its cumulative authority.
     ///
-    /// A one-chunk page cannot be subdivided and remains a typed refusal.
-    pub fn tighten_page_chunk_bound(&mut self) -> Option<(usize, usize)> {
+    /// The bound caps chunks and imports, so import-only pages also shrink.
+    /// A one-record page cannot be subdivided and remains a typed refusal.
+    pub fn tighten_page_record_bound(&mut self) -> Option<(usize, usize)> {
         let previous = self.maximum_page_chunks;
         if previous <= 1 {
             return None;
@@ -1738,11 +1739,12 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     ));
                 }
                 if (!chunks.is_empty() || !imports.is_empty())
-                    && page_bytes
-                        .saturating_add(symbol_display_bytes)
-                        .saturating_add(import_bytes)
-                        .saturating_add(serialized.len())
-                        > self.maximum_page_bytes
+                    && (chunks.len().saturating_add(imports.len()) >= self.maximum_page_chunks
+                        || page_bytes
+                            .saturating_add(symbol_display_bytes)
+                            .saturating_add(import_bytes)
+                            .saturating_add(serialized.len())
+                            > self.maximum_page_bytes)
                 {
                     return self.commit_page(
                         previous_cursor,
@@ -4006,13 +4008,62 @@ mod lexical_page_source_tests {
             cursor_before,
         );
 
-        assert_eq!(source.tighten_page_chunk_bound(), Some((4, 2)));
+        assert_eq!(source.tighten_page_record_bound(), Some((4, 2)));
         let retried = match source.next_page(&ActiveControl).expect("tightened retry") {
             VerifiedSealedLexicalPageReadV1::Page(page) => page,
             VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
         };
         assert_eq!(retried.chunk_count(), 2);
         assert_eq!(retried.page_ordinal(), 0);
+    }
+
+    #[test]
+    fn rejected_import_page_subdivides_without_advancing_cursor() {
+        let imports = (0..32)
+            .map(|ordinal| format!("import type {{ Type{ordinal} }} from \"module-{ordinal}\";\n"))
+            .collect::<String>();
+        let fixture = fixture_for_typescript_source(&format!(
+            "{imports}export function item(): number {{ return 1; }}\n"
+        ));
+        let mut source = fixture.open_with_page_chunks(4);
+        let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 128 * 1024 * 1024)
+            .expect("one-page fixture bound is valid");
+        let cursor_before = loop {
+            let cursor = source.cursor().clone();
+            let read = source.next_page(&ActiveControl).expect("fixture page");
+            let VerifiedSealedLexicalPageReadV1::Page(page) = read else {
+                panic!("fixture must expose an import-only page");
+            };
+            if page.chunk_count() == 0 && page.imports().len() == 4 {
+                source
+                    .restore_cursor_classified(&cursor, &ActiveControl)
+                    .expect("restore uncommitted import page");
+                break cursor;
+            }
+        };
+        let rejected = source
+            .next_page_batch_if(&ActiveControl, bounds, |pages| {
+                assert_eq!(pages.len(), 1);
+                assert_eq!(pages[0].chunk_count(), 0);
+                assert_eq!(pages[0].imports().len(), 4);
+                Err::<NonZeroUsize, _>("builder rejects the four-import page")
+            })
+            .expect("source stages import page");
+        assert_eq!(
+            rejected.expect_err("callback refusal must be surfaced"),
+            "builder rejects the four-import page"
+        );
+        assert_eq!(source.cursor(), &cursor_before);
+        assert_eq!(source.tighten_page_record_bound(), Some((4, 2)));
+        assert_eq!(source.cursor(), &cursor_before);
+        let VerifiedSealedLexicalPageReadV1::Page(page) = source
+            .next_page(&ActiveControl)
+            .expect("subdivided import page")
+        else {
+            panic!("fixture must retain import records");
+        };
+        assert_eq!(page.chunk_count(), 0);
+        assert_eq!(page.imports().len(), 2);
     }
 
     #[test]

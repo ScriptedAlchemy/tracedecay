@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
 use tracedecay_store::StoreShardIdV1;
+
+use super::retained_hook_tasks::RetainedHookTaskJoin;
 
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, RegisteredGlobalDbLeaseV1,
@@ -53,7 +56,7 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     foreground_project_opens: Arc<ForegroundProjectOpenState>,
     concurrency: Arc<Semaphore>,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
-    tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
+    tasks: StdMutex<BTreeMap<StoreShardIdV1, Arc<RetainedHookTaskJoin>>>,
     #[cfg(any(test, feature = "test-helpers"))]
     schedule_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-helpers"))]
@@ -184,82 +187,127 @@ impl RegisteredSchemaConvergenceMaintenance {
         #[cfg(any(test, feature = "test-helpers"))]
         let execution_count = Arc::clone(&self.execution_count);
         let task_shard_id = shard_id.clone();
-        let task = tokio::spawn(hotpath::future!(
-            async move {
-                foreground_project_opens.wait_until_settled().await;
-                let permit = match concurrency.acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(error) => {
-                        lock_registered_schema_convergence_statuses(&statuses).insert(
-                            task_shard_id,
-                            RegisteredSchemaConvergenceStatus::Degraded {
-                                message: format!(
-                                    "registered schema convergence admission closed: {error}"
-                                ),
-                            },
-                        );
-                        return;
-                    }
-                };
-                lock_registered_schema_convergence_statuses(&statuses).insert(
-                    task_shard_id.clone(),
-                    RegisteredSchemaConvergenceStatus::Running,
-                );
-                #[cfg(any(test, feature = "test-helpers"))]
-                execution_count.fetch_add(1, Ordering::Relaxed);
-                #[cfg(any(test, feature = "test-helpers"))]
-                if let Some(gate) = gate {
-                    gate.block().await;
+        // Erase the worker state machine before instrumentation retains it.
+        let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+            foreground_project_opens.wait_until_settled().await;
+            let permit = match concurrency.acquire_owned().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    drop(database);
+                    lock_registered_schema_convergence_statuses(&statuses).insert(
+                        task_shard_id,
+                        RegisteredSchemaConvergenceStatus::Degraded {
+                            message: format!(
+                                "registered schema convergence admission closed: {error}"
+                            ),
+                        },
+                    );
+                    return;
                 }
-                let result = match convergence {
-                    Some(convergence) => database.converge_schema(convergence).await,
-                    None => Ok(()),
-                };
-                if let Err(error) = database.release_connection_memory().await {
+            };
+            lock_registered_schema_convergence_statuses(&statuses).insert(
+                task_shard_id.clone(),
+                RegisteredSchemaConvergenceStatus::Running,
+            );
+            #[cfg(any(test, feature = "test-helpers"))]
+            execution_count.fetch_add(1, Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-helpers"))]
+            if let Some(gate) = gate {
+                gate.block().await;
+            }
+            let result = match convergence {
+                Some(convergence) => {
+                    let convergence: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+                        Box::pin(database.converge_schema(convergence));
+                    convergence.await
+                }
+                None => Ok(()),
+            };
+            if let Err(error) = database.release_connection_memory().await {
+                crate::session_registry::log_store_runtime_event(
+                    "registered_schema_convergence_memory_release",
+                    &[
+                        ("outcome", "degraded".to_owned()),
+                        ("database", database.db_path().display().to_string()),
+                        ("shard", format!("{task_shard_id:?}")),
+                        ("error", error.to_string()),
+                    ],
+                );
+            }
+            release_process_allocator_memory();
+            drop(permit);
+            let status = match result {
+                Ok(()) => {
                     crate::session_registry::log_store_runtime_event(
-                        "registered_schema_convergence_memory_release",
+                        "registered_schema_convergence",
+                        &[
+                            ("outcome", "complete".to_owned()),
+                            ("database", database.db_path().display().to_string()),
+                            ("shard", format!("{task_shard_id:?}")),
+                        ],
+                    );
+                    RegisteredSchemaConvergenceStatus::Complete
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    crate::session_registry::log_store_runtime_event(
+                        "registered_schema_convergence",
                         &[
                             ("outcome", "degraded".to_owned()),
                             ("database", database.db_path().display().to_string()),
                             ("shard", format!("{task_shard_id:?}")),
-                            ("error", error.to_string()),
+                            ("error", message.clone()),
                         ],
                     );
+                    RegisteredSchemaConvergenceStatus::Degraded { message }
                 }
-                release_process_allocator_memory();
-                drop(permit);
-                let status = match result {
-                    Ok(()) => {
-                        crate::session_registry::log_store_runtime_event(
-                            "registered_schema_convergence",
-                            &[
-                                ("outcome", "complete".to_owned()),
-                                ("database", database.db_path().display().to_string()),
-                                ("shard", format!("{task_shard_id:?}")),
-                            ],
-                        );
-                        RegisteredSchemaConvergenceStatus::Complete
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        crate::session_registry::log_store_runtime_event(
-                            "registered_schema_convergence",
-                            &[
-                                ("outcome", "degraded".to_owned()),
-                                ("database", database.db_path().display().to_string()),
-                                ("shard", format!("{task_shard_id:?}")),
-                                ("error", message.clone()),
-                            ],
-                        );
-                        RegisteredSchemaConvergenceStatus::Degraded { message }
-                    }
-                };
-                lock_registered_schema_convergence_statuses(&statuses)
-                    .insert(task_shard_id, status);
-            },
+            };
+            drop(database);
+            lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
+        });
+        let task = tokio::spawn(hotpath::future!(
+            work,
             label = "daemon.session_registry.schema_converge"
         ));
-        tasks.insert(shard_id, task);
+        tasks.insert(shard_id, Arc::new(RetainedHookTaskJoin::new(task)));
+    }
+
+    /// Keep an aborted worker tracked until its future has dropped every client.
+    /// Already accepted blocking SQLite work is fenced separately by canonical
+    /// physical retirement: reader-pool quiescence includes outstanding pool
+    /// references, and writer shutdown joins its actor before replacement.
+    /// Cancellation of this join leaves the handle available for the next retry.
+    #[hotpath::skip]
+    pub(super) async fn retire(
+        &self,
+        shard_id: &StoreShardIdV1,
+    ) -> std::result::Result<(), String> {
+        let task = {
+            let tasks = self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(task) = tasks.get(shard_id) else {
+                return Ok(());
+            };
+            Arc::clone(task)
+        };
+        task.abort();
+        task.wait().await.map_err(|error| {
+            format!("registered schema convergence task {shard_id:?} join failed: {error}")
+        })?;
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if tasks
+            .get(shard_id)
+            .is_some_and(|retained| Arc::ptr_eq(retained, &task))
+        {
+            tasks.remove(shard_id);
+            lock_registered_schema_convergence_statuses(&self.statuses).remove(shard_id);
+        }
+        Ok(())
     }
 
     pub(super) fn begin_shutdown(&self) {
@@ -275,23 +323,17 @@ impl RegisteredSchemaConvergenceMaintenance {
 
     #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> std::result::Result<(), String> {
-        self.accepting.store(false, Ordering::Release);
-        let tasks = {
-            let mut tasks = self
-                .tasks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let tasks = std::mem::take(&mut *tasks);
-            for task in tasks.values() {
-                task.abort();
-            }
-            tasks
-        };
+        self.begin_shutdown();
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut failures = Vec::new();
+        // Shared joins remain in the owner while any shutdown waiter can be
+        // cancelled. Keep failed joins so subsequent shutdown reports them too.
         for (shard_id, task) in tasks {
-            if let Err(error) = task.await
-                && !error.is_cancelled()
-            {
+            if let Err(error) = task.wait().await {
                 failures.push(format!(
                     "registered schema convergence task {shard_id:?} join failed: {error}"
                 ));
@@ -372,48 +414,57 @@ impl RegisteredSchemaConvergenceTestGate {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
-    fn long_lived_session_maintenance(&self) -> bool {
-        self.long_lived_session_maintenance
-    }
-
     #[hotpath::measure(label = "daemon.session_registry.attach_registered", future = true)]
     pub(super) async fn attach_registered(
         &self,
         runtime: StoreRuntimeClientLease,
         _operation: &'static str,
     ) -> Result<RegisteredGlobalDbOwnerV1> {
-        let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-        let long_lived = self.long_lived_session_maintenance();
-        // Every registry mode shares terminal graph-operation ownership; only
-        // long-lived daemons defer schema convergence to resumable maintenance.
-        let (database, convergence) = if long_lived {
-            let (database, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
-                database,
-                Arc::clone(&self.semantic_vector_operation_task_owner),
-            )
-            .await?;
-            (database, Some(convergence))
-        } else {
-            (
-                RegisteredGlobalDbOwnerV1::admit_and_attach_with_operation_task_owner(
-                    database,
-                    Arc::clone(&self.semantic_vector_operation_task_owner),
+        self.attach_registered_inner(runtime).await
+    }
+
+    // Erase the inner state machine before Hotpath wraps it by value. Boxing
+    // only the caller leaves large temporaries in the measured poll frame.
+    fn attach_registered_inner(
+        &self,
+        runtime: StoreRuntimeClientLease,
+    ) -> Pin<Box<dyn Future<Output = Result<RegisteredGlobalDbOwnerV1>> + Send + '_>> {
+        Box::pin(async move {
+            let database =
+                Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
+            let long_lived = self.long_lived_session_maintenance;
+            // Every registry mode shares terminal graph-operation ownership; only
+            // long-lived daemons defer schema convergence to resumable maintenance.
+            let (database, convergence) = if long_lived {
+                let (database, convergence) =
+                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+                        database,
+                        Arc::clone(&self.semantic_vector_operation_task_owner),
+                    )
+                    .await?;
+                (database, Some(convergence))
+            } else {
+                (
+                    RegisteredGlobalDbOwnerV1::admit_and_attach_with_operation_task_owner(
+                        database,
+                        Arc::clone(&self.semantic_vector_operation_task_owner),
+                    )
+                    .await?,
+                    None,
                 )
-                .await?,
-                None,
-            )
-        };
-        if long_lived {
-            let lease = database.issue_lease().map_err(|error| {
-                session_registry_error(
-                    "issue registered schema convergence client",
-                    format!("{error:?}"),
-                )
-            })?;
-            self.registered_schema_convergence
-                .schedule(lease, convergence);
-        }
-        Ok(database)
+            };
+            if long_lived {
+                let lease = database.issue_lease().map_err(|error| {
+                    session_registry_error(
+                        "issue registered schema convergence client",
+                        format!("{error:?}"),
+                    )
+                })?;
+                self.registered_schema_convergence
+                    .schedule(lease, convergence);
+            }
+            Ok(database)
+        })
     }
 
     pub fn begin_foreground_project_open(&self) -> Result<ForegroundProjectOpenAdmission> {
@@ -456,6 +507,132 @@ mod tests {
     use tracedecay_domain::{BrainId, UserProfileId};
 
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_shutdown_retains_incomplete_future_drop_and_independent_retirement() {
+        struct HeldDrop {
+            started: Arc<Notify>,
+            release: Arc<(StdMutex<bool>, std::sync::Condvar)>,
+            dropped: Arc<AtomicBool>,
+        }
+        impl Drop for HeldDrop {
+            fn drop(&mut self) {
+                self.started.notify_one();
+                let (lock, ready) = &*self.release;
+                let mut released = lock.lock().expect("drop gate");
+                while !*released {
+                    released = ready.wait(released).expect("drop gate wait");
+                }
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+        // Always release the held destructor, including when an assertion fails.
+        struct ReleaseOnDrop(Arc<(StdMutex<bool>, std::sync::Condvar)>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let (lock, ready) = &*self.0;
+                *lock.lock().expect("release drop gate") = true;
+                ready.notify_all();
+            }
+        }
+        let maintenance = RegisteredSchemaConvergenceMaintenance::new();
+        let shard = |profile: &str| {
+            StoreShardIdV1::profile_sessions(
+                BrainId::try_from("brain.schema-convergence".to_owned()).unwrap(),
+                UserProfileId::try_from(profile.to_owned()).unwrap(),
+            )
+        };
+        let first = shard("profile.first");
+        let second = shard("profile.second");
+        let started = Arc::new(Notify::new());
+        let dropping = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let release_on_drop = ReleaseOnDrop(Arc::clone(&release));
+        let guard = HeldDrop {
+            started: Arc::clone(&dropping),
+            release,
+            dropped: Arc::clone(&dropped),
+        };
+        let worker = tokio::spawn({
+            let started = Arc::clone(&started);
+            async move {
+                let _guard = guard;
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        maintenance
+            .tasks
+            .lock()
+            .unwrap()
+            .insert(first.clone(), Arc::new(RetainedHookTaskJoin::new(worker)));
+        maintenance.tasks.lock().unwrap().insert(
+            second.clone(),
+            Arc::new(RetainedHookTaskJoin::new(tokio::spawn(
+                std::future::pending::<()>(),
+            ))),
+        );
+        started.notified().await;
+        let mut shutdown = Box::pin(maintenance.shutdown());
+        std::future::poll_fn(|cx| {
+            assert!(shutdown.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        dropping.notified().await;
+        drop(shutdown);
+        let mut retry = Box::pin(maintenance.shutdown());
+        std::future::poll_fn(|cx| {
+            assert!(
+                retry.as_mut().poll(cx).is_pending(),
+                "retry must join the held destructor"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(!dropped.load(Ordering::Acquire));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            maintenance.retire(&second),
+        )
+        .await
+        .expect("second shard retires independently")
+        .expect("second retirement");
+        assert!(!dropped.load(Ordering::Acquire));
+        drop(release_on_drop);
+        retry.await.expect("retry joins released destructor");
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn shutdown_and_exact_retirement_preserve_failed_join() {
+        let maintenance = RegisteredSchemaConvergenceMaintenance::new();
+        let shard = StoreShardIdV1::profile_sessions(
+            BrainId::try_from("brain.schema-convergence".to_owned()).unwrap(),
+            UserProfileId::try_from("profile.failed".to_owned()).unwrap(),
+        );
+        let started = Arc::new(Notify::new());
+        let worker = tokio::spawn({
+            let started = Arc::clone(&started);
+            async move {
+                started.notify_one();
+                panic!("convergence task failure");
+            }
+        });
+        maintenance
+            .tasks
+            .lock()
+            .unwrap()
+            .insert(shard.clone(), Arc::new(RetainedHookTaskJoin::new(worker)));
+        started.notified().await;
+        let failure = maintenance
+            .retire(&shard)
+            .await
+            .expect_err("failed task retirement");
+        assert_eq!(maintenance.retire(&shard).await.unwrap_err(), failure);
+        assert_eq!(maintenance.shutdown().await.unwrap_err(), failure);
+    }
 
     #[test]
     fn poisoned_status_lock_recovers_once() {

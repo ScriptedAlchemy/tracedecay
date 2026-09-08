@@ -59,9 +59,27 @@ pub enum HostRegistrationRouteV1 {
     Cli,
 }
 
-/// Evidence behind one stock-host registration route. `starts_analyzer` is
-/// explicit so a projection bridge cannot silently claim or spawn a language
-/// analyzer.
+impl HostRegistrationRouteV1 {
+    /// The canonical capability this route proves. Host-specific routes are
+    /// deliberately narrower than their capability (Claude registers the
+    /// analyzer through its configured-language LSP file, OpenCode through a
+    /// custom LSP entry, Cursor exposes diagnostics through its native
+    /// extension); this mapping is the only place that specialization lives.
+    pub const fn capability(self) -> HostCapabilityV1 {
+        match self {
+            Self::ClaudeConfiguredLanguageLsp | Self::OpenCodeCustomLsp => HostCapabilityV1::Lsp,
+            Self::CursorNativeDiagnostics => HostCapabilityV1::NativeDiagnostics,
+            Self::Hook => HostCapabilityV1::Hooks,
+            Self::Mcp => HostCapabilityV1::Mcp,
+            Self::Cli => HostCapabilityV1::Cli,
+        }
+    }
+}
+
+/// Evidence behind one stock-host registration route. `state` is the
+/// canonical [`stock_host_capabilities`] state of the capability the route
+/// proves, never a second per-host decision. `starts_analyzer` is explicit so
+/// a projection bridge cannot silently claim or spawn a language analyzer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct HostRegistrationEvidenceV1 {
     pub route: HostRegistrationRouteV1,
@@ -70,314 +88,137 @@ pub struct HostRegistrationEvidenceV1 {
     pub starts_analyzer: bool,
 }
 
-/// Truthful host registration matrix used by packaging and conformance
-/// consumers. Evidence references are stable repository or host-contract
-/// identifiers, never inferred compatibility claims.
+/// Registration routes and their evidence for one stock host, used by
+/// packaging and conformance consumers. This table carries route metadata
+/// only; each row's state is projected from the canonical capability matrix,
+/// so changing a host's capability state is one edit in `tracedecay-domain`.
+/// Evidence references are stable repository or host-contract identifiers,
+/// never inferred compatibility claims.
 pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistrationEvidenceV1> {
-    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::{
-        CheckedInEvidenceMissing, HostApiAbsent, HostRegistrationUnsupported, NativeFixtureLimited,
-    };
     use HostRegistrationRouteV1::{
         ClaudeConfiguredLanguageLsp, Cli, CursorNativeDiagnostics, Hook, Mcp, OpenCodeCustomLsp,
     };
 
-    let cli_state = match host {
-        HostKindV1::CursorCloud | HostKindV1::ClineFamily => {
-            Unavailable(HostRegistrationUnsupported)
-        }
-        _ => Supported,
-    };
-    let mut evidence = vec![HostRegistrationEvidenceV1 {
-        route: Cli,
-        state: cli_state,
-        evidence_ref: "src/tool_command.rs",
-        starts_analyzer: false,
-    }];
+    let capabilities = stock_host_capabilities(host);
+    // Every stock route is a projection bridge over the daemon; none of them
+    // spawns a language analyzer.
+    let route =
+        |route: HostRegistrationRouteV1, evidence_ref: &'static str| HostRegistrationEvidenceV1 {
+            route,
+            state: capabilities[route.capability().row_index()].state,
+            evidence_ref,
+            starts_analyzer: false,
+        };
+    let mut evidence = vec![route(Cli, "src/tool_command.rs")];
     match host {
         HostKindV1::ClaudeCode => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: ClaudeConfiguredLanguageLsp,
-                state: Supported,
-                evidence_ref: "plugin/.lsp.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/hooks/hooks-claude.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/.mcp.json",
-                starts_analyzer: false,
-            },
+            route(ClaudeConfiguredLanguageLsp, "plugin/.lsp.json"),
+            route(Hook, "plugin/hooks/hooks-claude.json"),
+            route(Mcp, "plugin/.mcp.json"),
         ]),
         HostKindV1::CursorDesktop => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: CursorNativeDiagnostics,
-                state: Supported,
-                evidence_ref: "plugin/cursor-native-extension/package.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/hooks/hooks-cursor.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/mcp-cursor.json",
-                starts_analyzer: false,
-            },
+            route(
+                CursorNativeDiagnostics,
+                "plugin/cursor-native-extension/package.json",
+            ),
+            route(Hook, "plugin/hooks/hooks-cursor.json"),
+            route(Mcp, "plugin/mcp-cursor.json"),
         ]),
         HostKindV1::CursorCloud => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Degraded(HostRegistrationUnsupported),
-                evidence_ref: "https://cursor.com/changelog",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Degraded(HostRegistrationUnsupported),
-                evidence_ref: "https://cursor.com/en-US/cloud",
-                starts_analyzer: false,
-            },
+            route(Hook, "https://cursor.com/changelog"),
+            route(Mcp, "https://cursor.com/en-US/cloud"),
         ]),
         HostKindV1::Codex => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "crates/tracedecay-agent-hosts/src/agents/codex.rs",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/.mcp.json",
-                starts_analyzer: false,
-            },
+            route(Hook, "crates/tracedecay-agent-hosts/src/agents/codex.rs"),
+            route(Mcp, "plugin/.mcp.json"),
         ]),
         HostKindV1::Devin => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "https://docs.devin.ai/work-with-devin/mcp",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "https://docs.devin.ai/cli/extensibility/mcp/configuration",
-                starts_analyzer: false,
-            },
+            route(Hook, "https://docs.devin.ai/work-with-devin/mcp"),
+            route(
+                Mcp,
+                "https://docs.devin.ai/cli/extensibility/mcp/configuration",
+            ),
         ]),
         HostKindV1::Zed => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "https://zed.dev/docs/ai/mcp",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "crates/tracedecay-agent-hosts/src/agents/zed.rs",
-                starts_analyzer: false,
-            },
+            route(Hook, "https://zed.dev/docs/ai/mcp"),
+            route(Mcp, "crates/tracedecay-agent-hosts/src/agents/zed.rs"),
         ]),
         HostKindV1::Antigravity => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "https://antigravity.google/docs/mcp",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "crates/tracedecay-agent-hosts/src/agents/antigravity.rs",
-                starts_analyzer: false,
-            },
+            route(Hook, "https://antigravity.google/docs/mcp"),
+            route(
+                Mcp,
+                "crates/tracedecay-agent-hosts/src/agents/antigravity.rs",
+            ),
         ]),
         HostKindV1::Vibe => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "https://docs.mistral.ai/vibe/code/cli/mcp-servers",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "crates/tracedecay-agent-hosts/src/agents/vibe.rs",
-                starts_analyzer: false,
-            },
+            route(Hook, "https://docs.mistral.ai/vibe/code/cli/mcp-servers"),
+            route(Mcp, "crates/tracedecay-agent-hosts/src/agents/vibe.rs"),
         ]),
         HostKindV1::Hermes => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "src/agents/hermes/templates.rs",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/hermes/profile_config.rs",
-                starts_analyzer: false,
-            },
+            route(Hook, "src/agents/hermes/templates.rs"),
+            route(Mcp, "src/agents/hermes/profile_config.rs"),
         ]),
         HostKindV1::Kiro => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Degraded(NativeFixtureLimited),
-                evidence_ref: "tests/fixtures/host_events/kiro/baseline.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/kiro.rs",
-                starts_analyzer: false,
-            },
+            route(Hook, "tests/fixtures/host_events/kiro/baseline.json"),
+            route(Mcp, "src/agents/kiro.rs"),
         ]),
         HostKindV1::ClineFamily => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(HostApiAbsent),
-                evidence_ref: "cline_family_hook_evidence_absent_v1",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-                starts_analyzer: false,
-            },
+            route(Hook, "cline_family_hook_evidence_absent_v1"),
+            route(
+                Mcp,
+                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+            ),
         ]),
-        HostKindV1::Cline => {
-            evidence.extend([
-                HostRegistrationEvidenceV1 {
-                    route: Hook,
-                    state: Unavailable(NativeFixtureLimited),
-                    evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-                    starts_analyzer: false,
-                },
-                HostRegistrationEvidenceV1 {
-                    route: Mcp,
-                    state: Supported,
-                    evidence_ref: "https://docs.cline.bot/mcp/mcp-overview",
-                    starts_analyzer: false,
-                },
-            ]);
-        }
+        HostKindV1::Cline => evidence.extend([
+            route(
+                Hook,
+                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+            ),
+            route(Mcp, "https://docs.cline.bot/mcp/mcp-overview"),
+        ]),
         HostKindV1::RooCode => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo/",
-                starts_analyzer: false,
-            },
+            route(
+                Hook,
+                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+            ),
+            route(
+                Mcp,
+                "https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo/",
+            ),
         ]),
         HostKindV1::Kilo => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "https://kilo.ai/docs/automate/mcp/using-in-kilo-code",
-                starts_analyzer: false,
-            },
+            route(
+                Hook,
+                "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+            ),
+            route(Mcp, "https://kilo.ai/docs/automate/mcp/using-in-kilo-code"),
         ]),
         HostKindV1::KimiCode => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/.kimi-plugin/plugin.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/.kimi-plugin/plugin.json",
-                starts_analyzer: false,
-            },
+            route(Hook, "plugin/.kimi-plugin/plugin.json"),
+            route(Mcp, "plugin/.kimi-plugin/plugin.json"),
         ]),
         HostKindV1::OpenCode => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: OpenCodeCustomLsp,
-                state: Supported,
-                evidence_ref: "src/agents/opencode.rs",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/opencode/tracedecay.ts",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/opencode.rs",
-                starts_analyzer: false,
-            },
+            route(OpenCodeCustomLsp, "src/agents/opencode.rs"),
+            route(Hook, "plugin/opencode/tracedecay.ts"),
+            route(Mcp, "src/agents/opencode.rs"),
         ]),
         // The tracedecay Gemini extension declares exactly one registration
         // route — its own `mcpServers.tracedecay` entry, adopted by
         // `gemini extensions install`. The extension format admits hooks, but
         // no checked-in native Gemini event fixture exists and the staged
-        // manifest declares no hook, so the hook route is typed unavailable
-        // rather than claimed.
+        // manifest declares no hook, so the hook row names the absent fixture.
         HostKindV1::Gemini => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "gemini_native_hook_fixture_absent_v1",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/gemini/extension.rs",
-                starts_analyzer: false,
-            },
+            route(Hook, "gemini_native_hook_fixture_absent_v1"),
+            route(Mcp, "src/agents/gemini/extension.rs"),
         ]),
         // Copilot's adopted lifecycle carries exactly one registration route:
         // the `mcpServers.tracedecay` entry that `copilot mcp add` writes into
-        // the host-owned `~/.copilot/mcp-config.json`. The hook route is typed
-        // `HostApiAbsent` rather than `CheckedInEvidenceMissing` because there
-        // is no Copilot hook surface to gather a fixture for — see the
-        // capability row in `tracedecay-domain`.
+        // the host-owned `~/.copilot/mcp-config.json`. There is no Copilot hook
+        // surface to gather a fixture for, so the hook row names the absent
+        // surface — see the capability row in `tracedecay-domain`.
         HostKindV1::Copilot => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(HostApiAbsent),
-                evidence_ref: "copilot_host_hook_surface_absent_v1",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/copilot.rs",
-                starts_analyzer: false,
-            },
+            route(Hook, "copilot_host_hook_surface_absent_v1"),
+            route(Mcp, "src/agents/copilot.rs"),
         ]),
     }
     evidence
@@ -1299,6 +1140,71 @@ mod tests {
         assert_eq!(gemini.edit.route, None);
         assert_eq!(gemini.stop.route, None);
         assert_eq!(gemini.edit.native_fixture_digest, None);
+    }
+
+    /// Host-specific routes prove exactly one canonical capability; the
+    /// generic routes prove the capability of the same name.
+    #[test]
+    fn registration_routes_map_to_one_canonical_capability() {
+        use HostRegistrationRouteV1 as Route;
+
+        for (route, capability) in [
+            (Route::ClaudeConfiguredLanguageLsp, HostCapabilityV1::Lsp),
+            (Route::OpenCodeCustomLsp, HostCapabilityV1::Lsp),
+            (
+                Route::CursorNativeDiagnostics,
+                HostCapabilityV1::NativeDiagnostics,
+            ),
+            (Route::Hook, HostCapabilityV1::Hooks),
+            (Route::Mcp, HostCapabilityV1::Mcp),
+            (Route::Cli, HostCapabilityV1::Cli),
+        ] {
+            assert_eq!(route.capability(), capability, "{route:?}");
+        }
+    }
+
+    /// Every stock host lists its CLI route plus at least one daemon route,
+    /// each route once, each with a non-empty evidence reference. A
+    /// host-specific route (Claude/OpenCode LSP, Cursor native diagnostics)
+    /// is only ever listed on a host whose canonical capability is Supported:
+    /// it is a narrower registration of that capability, not a claim beyond it.
+    #[test]
+    fn registration_evidence_is_complete_for_every_stock_host() {
+        for host in HostKindV1::ALL {
+            let evidence = stock_host_registration_evidence(host);
+            assert!(
+                evidence.len() >= 2,
+                "{host:?} lists a CLI and a daemon route"
+            );
+            assert_eq!(evidence[0].route, HostRegistrationRouteV1::Cli, "{host:?}");
+            let mut routes = evidence
+                .iter()
+                .map(|record| record.route)
+                .collect::<Vec<_>>();
+            routes.dedup();
+            assert_eq!(routes.len(), evidence.len(), "{host:?} repeats a route");
+            for record in &evidence {
+                assert!(
+                    !record.evidence_ref.is_empty(),
+                    "{host:?} {:?}",
+                    record.route
+                );
+                assert!(!record.starts_analyzer, "{host:?} {:?}", record.route);
+                if !matches!(
+                    record.route,
+                    HostRegistrationRouteV1::Hook
+                        | HostRegistrationRouteV1::Mcp
+                        | HostRegistrationRouteV1::Cli
+                ) {
+                    assert_eq!(
+                        record.state,
+                        HostCapabilityStateV1::Supported,
+                        "{host:?} lists host-specific route {:?} without support",
+                        record.route
+                    );
+                }
+            }
+        }
     }
 
     #[test]

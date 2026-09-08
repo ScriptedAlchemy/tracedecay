@@ -126,8 +126,23 @@ pub const RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL: &str = "
         SELECT RAISE(ABORT, 'retrieval anchors are immutable');
     END;
     CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_update
-    BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
-        SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+    BEFORE UPDATE ON retrieval_anchor_aliases
+    WHEN NEW.owner_json != OLD.owner_json
+      OR NEW.alias_kind != OLD.alias_kind
+      OR NEW.locator_digest != OLD.locator_digest
+      OR NOT EXISTS (
+          SELECT 1 FROM retrieval_anchor_dispositions AS disposition
+          WHERE disposition.anchor_id = OLD.anchor_id
+            AND disposition.state = 'superseded'
+            AND disposition.reason_class = 'correction'
+            AND disposition.superseded_by = NEW.anchor_id
+            AND disposition.sequence = (
+                SELECT MAX(latest.sequence) FROM retrieval_anchor_dispositions AS latest
+                WHERE latest.anchor_id = OLD.anchor_id
+            )
+      )
+    BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor alias requires exact supersession');
     END;
     CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_delete
     BEFORE DELETE ON retrieval_anchor_aliases BEGIN
@@ -752,7 +767,8 @@ pub async fn install_retrieval_anchor_schema(
         "DROP TRIGGER IF EXISTS retrieval_anchors_no_update;
          DROP TRIGGER IF EXISTS retrieval_anchors_no_delete;
          DROP TRIGGER IF EXISTS retrieval_anchor_aliases_no_update;
-         DROP TRIGGER IF EXISTS retrieval_anchor_aliases_no_delete;",
+         DROP TRIGGER IF EXISTS retrieval_anchor_aliases_no_delete;
+         DROP TRIGGER IF EXISTS retrieval_anchor_aliases_immutable_update;",
     )
     .await
     .map_err(|error| database_error(operation, error))?;
@@ -837,6 +853,79 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn alias_target_promotion_requires_exact_current_supersession() {
+        let (_directory, conn) = connection().await;
+        install_retrieval_anchor_schema(&conn, "install alias transition fixture")
+            .await
+            .unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER retrieval_anchor_aliases_immutable_update;
+             CREATE TRIGGER retrieval_anchor_aliases_immutable_update
+             BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
+                 SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+             END;",
+        )
+        .await
+        .unwrap();
+        install_retrieval_anchor_schema(&conn, "upgrade shipped alias trigger")
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO retrieval_anchors(anchor_id, anchor_json, owner_json, projection_generation)
+             VALUES ('old', '{}', '{}', 'g'), ('new', '{}', '{}', 'g'), ('other', '{}', '{}', 'g')", (),
+        ).await.unwrap();
+        conn.execute(
+            "INSERT INTO retrieval_anchor_aliases(owner_json, alias_kind, locator_digest, anchor_id)
+             VALUES ('{}', 'native', 'digest', 'old')", (),
+        ).await.unwrap();
+        let promote =
+            "UPDATE retrieval_anchor_aliases SET anchor_id = 'new' WHERE anchor_id = 'old'";
+        assert!(conn.execute(promote, ()).await.is_err());
+        conn.execute(
+            "INSERT INTO retrieval_anchor_dispositions(disposition_id, anchor_id, owner_json,
+                state, superseded_by, reason_class, effective_at, record_json)
+             VALUES ('wrong', 'old', '{}', 'superseded', 'other', 'correction', 1, '{}')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(conn.execute(promote, ()).await.is_err());
+        conn.execute(
+            "INSERT INTO retrieval_anchor_dispositions(disposition_id, anchor_id, owner_json,
+                state, superseded_by, reason_class, effective_at, record_json)
+             VALUES ('exact', 'old', '{}', 'superseded', 'new', 'correction', 2, '{}')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(conn.execute(
+            "UPDATE retrieval_anchor_aliases SET anchor_id = 'new', locator_digest = 'changed' WHERE anchor_id = 'old'", (),
+        ).await.is_err());
+        assert_eq!(conn.execute(promote, ()).await.unwrap(), 1);
+        assert!(
+            conn.execute("DELETE FROM retrieval_anchor_aliases", ())
+                .await
+                .is_err()
+        );
+        install_retrieval_anchor_schema(&conn, "reopen promoted aliases")
+            .await
+            .unwrap();
+        let mut rows = conn
+            .query("SELECT anchor_id FROM retrieval_anchor_aliases", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "new"
         );
     }
 

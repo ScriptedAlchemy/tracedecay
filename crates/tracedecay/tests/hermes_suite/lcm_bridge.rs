@@ -1682,16 +1682,23 @@ assert llm_call["timeout"] == 9.0
     );
 }
 
+/// The bridge decodes exactly the shapes `tracedecay tool --json` prints: the
+/// MCP result with one JSON content block holding either the tool's own result
+/// or a retained `ApplicationEnvelope`. Truncation recovery belongs to the CLI
+/// (`recover_truncated_mcp_result`), so the bridge never issues a retrieve of
+/// its own, and every other shape is an explicit error.
 #[test]
-fn call_tracedecay_json_normalizes_and_decodes_mcp_envelopes() {
+fn call_tracedecay_json_decodes_the_cli_result_contract() {
     run_generated_plugin_script(
         "check_bridge_envelope_decoding.py",
         r#"
 import json
 
 responses = []
+calls = []
 
 def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append(name)
     return responses.pop(0)
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
@@ -1699,6 +1706,17 @@ plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 def call_with_outer(outer):
     responses.append(json.dumps(outer))
     return plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+
+def mcp_result(*texts):
+    return {"content": [{"type": "text", "text": text} for text in texts]}
+
+def envelope(payload, outcome="evidence"):
+    return {
+        "contract": {"schema_id": "schema.application.retained.lcm-status.result", "schema_revision": 1},
+        "request_id": "request.check",
+        "scope": {"project_id": "project.check"},
+        "outcome": {"outcome": outcome, "value": {"page": {}, "payload": payload}},
+    }
 
 missing_content = call_with_outer({})
 assert missing_content["error"] == "tracedecay tool response missing text content"
@@ -1709,90 +1727,57 @@ assert empty_content["error"] == "tracedecay tool response missing text content"
 non_text_content = call_with_outer({"content": [{"type": "text", "text": 123}]})
 assert non_text_content["error"] == "tracedecay tool response missing text content"
 
-responses.append(json.dumps({"content": [{"type": "text", "text": "{not json"}]}))
-invalid_nested_json = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+invalid_nested_json = call_with_outer(mcp_result("{not json"))
 assert invalid_nested_json["error"] == "tracedecay tool returned invalid nested JSON"
 
 outer_error = {"error": "tool failed", "code": "boom", "content": []}
 assert call_with_outer(outer_error) == outer_error
 
-calls = []
+# A bare envelope with no MCP content block is not something the CLI prints.
+bare = call_with_outer(envelope({"status": "ok"}))
+assert bare["error"] == "tracedecay tool response missing text content", bare
 
-def envelope(payload):
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+# Compatibility tools: the block is the result itself, returned untouched even
+# when it carries keys that look like envelope or LCM vocabulary.
+plain = {
+    "status": "ok",
+    "answer": "42",
+    "content": json.dumps({"nested": True}),
+    "outcome": "evidence",
+    "truncated": False,
+}
+assert call_with_outer(mcp_result(json.dumps(plain))) == plain
 
-def fake_retrieve_call(name, args, **kwargs):
-    calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_status":
-        return envelope({"truncated": True, "handle": "payload-1"})
-    if name == "tracedecay_retrieve":
-        if args == {"handle": "payload-1"}:
-            assert kwargs == {"project_root": "/tmp/project"}
-            return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
-        assert args == {"handle": "payload-ignored"}
-        assert kwargs == {}
-        return envelope({"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]})
-    if name == "tracedecay_fact_store":
-        return envelope({"truncated": True, "handle": "payload-ignored"})
-    raise AssertionError(f"unexpected tool call: {name}")
+# Retained surfaces: the block is an ApplicationEnvelope; the result is its
+# outcome payload for every outcome family.
+for outcome in ("evidence", "preview", "effect"):
+    decoded = call_with_outer(mcp_result(json.dumps(envelope({"status": "ok", "kind": outcome}, outcome))))
+    assert decoded == {"status": "ok", "kind": outcome}, decoded
 
-plugin.tools.call_tracedecay_tool = fake_retrieve_call
-retrieved = plugin.call_tracedecay_json("tracedecay_lcm_status", {}, project_root="/tmp/project")
-assert retrieved == {"should_compress": True, "source": "retrieved"}
-assert [call[0] for call in calls] == ["tracedecay_lcm_status", "tracedecay_retrieve"]
+# Prose trailer blocks (stale-graph freshness) ride beside the JSON block.
+with_trailer = call_with_outer(mcp_result(json.dumps(plain), "\ncode_graph_freshness: stale"))
+assert with_trailer == plain, with_trailer
 
-retrieved_fact = plugin.call_tracedecay_json("tracedecay_fact_store", {})
-assert retrieved_fact == {"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]}
-assert [call[0] for call in calls] == [
-    "tracedecay_lcm_status",
-    "tracedecay_retrieve",
-    "tracedecay_fact_store",
-    "tracedecay_retrieve",
-]
+# Malformed envelopes are refused, never returned as an empty success.
+no_payload = call_with_outer(mcp_result(json.dumps(envelope(None))))
+assert "omitted its result payload" in no_payload["error"], no_payload
+two_payloads = call_with_outer(mcp_result(json.dumps(plain), json.dumps(plain)))
+assert "returned 2 JSON payloads" in two_payloads["error"], two_payloads
+list_payload = call_with_outer(mcp_result(json.dumps([1, 2])))
+assert "expected one object" in list_payload["error"], list_payload
 
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-split_payload = json.dumps({"status": "ok", "source": "split-content"})
-responses.append(json.dumps({
-    "content": [
-        {"type": "text", "text": split_payload[:12]},
-        {"type": "text", "text": split_payload[12:]},
-    ]
-}))
-split_content = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
-assert split_content == {"status": "ok", "source": "split-content"}
-
-nested_payload = {"content": json.dumps({"status": "ok", "source": "nested-content"})}
-responses.append(envelope(nested_payload))
-nested_content = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
-assert nested_content == {"status": "ok", "source": "nested-content"}
-
-response_handle_calls = []
-
-def fake_response_handle_call(name, args, **kwargs):
-    response_handle_calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_status":
-        return envelope({"truncated": True, "response_handle": "payload-2"})
-    if name == "tracedecay_retrieve":
-        assert args == {"handle": "payload-2"}
-        return envelope({
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps({"status": "ok", "source": "response-handle"}),
-                }
-            ]
-        })
-    raise AssertionError(f"unexpected tool call: {name}")
-
-plugin.tools.call_tracedecay_tool = fake_response_handle_call
-response_handle_payload = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
-assert response_handle_payload == {"status": "ok", "source": "response-handle"}
-assert [call[0] for call in response_handle_calls] == [
-    "tracedecay_lcm_status",
-    "tracedecay_retrieve",
-]
+# The CLI owns truncation recovery; a handle envelope that somehow arrives is
+# refused as a preview, never dereferenced here, and triggers no second call.
+calls.clear()
+handle_envelope = {"truncated": True, "original_chars": 99, "preview": "{", "handle": "h1"}
+preview = call_with_outer(mcp_result(json.dumps(handle_envelope)))
+assert "truncated preview" in preview["error"], preview
+assert calls == ["tracedecay_lcm_status"], calls
+# grep-style `truncated: bool` result flags are not envelopes.
+flagged = {"truncated": True, "matches": []}
+assert call_with_outer(mcp_result(json.dumps(flagged))) == flagged
 "#,
-        "generated JSON bridge should normalize malformed envelopes and decode LCM payloads",
+        "generated JSON bridge should decode the CLI result contract and refuse other shapes",
     );
 }
 

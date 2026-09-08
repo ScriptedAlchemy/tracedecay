@@ -97,3 +97,46 @@ fn qualify_native_refuses_an_incomplete_request_without_writing_output() {
         "a refused qualification must not create a qualification artifact"
     );
 }
+
+#[test]
+fn qualify_native_requires_daemon_authority_without_writing_output() {
+    let project = tempfile::tempdir().expect("temporary project");
+    let profile_root = project.path().join(".tracedecay");
+    let output_path = project.path().join("qualification.json");
+
+    let output = Command::new(search_eval_direct_bin())
+        .current_dir(project.path())
+        .env("HOME", project.path())
+        .env("USERPROFILE", project.path())
+        .env("XDG_CONFIG_HOME", project.path().join(".config"))
+        .env("XDG_RUNTIME_DIR", project.path().join("run"))
+        .env("TRACEDECAY_DATA_DIR", &profile_root)
+        .env("TRACEDECAY_GLOBAL_DB", profile_root.join("global.db"))
+        .args(["qualify-native", "--project-root"])
+        .arg(project.path())
+        .args(["--profile", "hybrid-reranked"])
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .expect("run packaged evaluator binary");
+
+    assert_eq!(output.status.code(), Some(2));
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("typed evaluator JSON");
+    assert_eq!(response["command"], "qualify_native");
+    assert_eq!(response["status"], "fail");
+    assert!(
+        response["rationale"]
+            .as_str()
+            .is_some_and(|rationale| rationale.contains("daemon authority record is not available")),
+        "unexpected refusal: {response}"
+    );
+    assert!(
+        !output_path.exists(),
+        "unavailable daemon authority must not create a qualification artifact"
+    );
+    assert!(
+        !profile_root.exists(),
+        "qualification must not mint profile or daemon authority"
+    );
+}

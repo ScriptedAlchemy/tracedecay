@@ -129,7 +129,7 @@ pub(super) async fn serve_projectless_client(
         let Some(_activity) = lifecycle.try_enter() else {
             break;
         };
-        let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
+        let response = match JsonRpcRequest::decode(&line) {
             Ok(request) => {
                 boxed_projectless_phase(projectless_response(
                     &request,
@@ -138,11 +138,7 @@ pub(super) async fn serve_projectless_client(
                 ))
                 .await
             }
-            Err(e) => Some(JsonRpcResponse::error(
-                json!(null),
-                ErrorCode::ParseError,
-                format!("Parse error: {e}"),
-            )),
+            Err(error) => Some(error.into_response()),
         };
         if let Some(response) = response {
             write_json_rpc_response(transport, &response).await?;
@@ -407,7 +403,12 @@ async fn projectless_hook_runtime_response(
         session_runtime_registry,
         global_db.as_ref(),
         crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
-            .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone()))),
+            .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
+            .with_background_cpu(
+                store_administration
+                    .session_temporal_refresh_schedulers()
+                    .background_cpu(),
+            ),
         host_admission_broker,
     ))
     .await

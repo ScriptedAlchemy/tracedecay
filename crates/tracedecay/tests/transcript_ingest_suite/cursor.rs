@@ -16,9 +16,9 @@ use tracedecay_sessions::runtime::cursor::{
 };
 use tracedecay_sessions::runtime::source::TranscriptIngestResult;
 
-#[cfg(unix)]
-use crate::common::spawn_tracedecay_daemon;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
+#[cfg(unix)]
+use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, fixture_project_id,
     mark_test_project, open_project_session_db, try_ingest_source,
@@ -293,7 +293,8 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         EnvVarGuard::set("HOME", &home),
         EnvVarGuard::set("USERPROFILE", &home),
     ];
-    let project = init_project(&tmp);
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let project_id = mark_test_project(&project);
     // Since `c24e4a62a` the hook resolves its project root through the
     // initialized-store gate, exactly like production installs: `init` creates
@@ -318,6 +319,15 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .unwrap();
 
     let _daemon = spawn_tracedecay_daemon(&home);
+    // Native pressure needs the registered graph scope as well as the session
+    // shard. An empty graph-file marker bypasses init and never publishes that
+    // scope; exercise the same enrollment that precedes real host callbacks.
+    let init = tracedecay_command_with_home(&home)
+        .arg("init")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "project init failed: {init:?}");
 
     // In production a preCompact event only fires mid-session, after earlier
     // hook traffic has already admitted the project session store. A freshly
@@ -358,7 +368,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         }
         assert!(
             std::time::Instant::now() < warmup_deadline,
-            "daemon never acknowledged pressure within the warmup deadline"
+            "daemon never acknowledged pressure within the warmup deadline: {warmup:?}"
         );
     }
 

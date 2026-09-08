@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use tokio::sync::Notify;
+use tokio::sync::futures::OwnedNotified;
 
 pub(super) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
@@ -40,6 +41,10 @@ use crate::runtime::source::{
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1,
 };
+use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
+
+#[cfg(test)]
+mod meta_cache_tests;
 
 const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 pub const CODEX_HOOK_MAX_NEW_BYTES: u64 = crate::runtime::source::MAX_JSONL_RECORD_BYTES as u64;
@@ -53,16 +58,170 @@ struct CodexMetaCacheKey {
 struct CachedCodexMeta {
     key: CodexMetaCacheKey,
     meta: Arc<CodexMetaWithProvenance>,
-    _memory: Option<tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1>,
+    _memory: Option<ProcessSharedMemoryReservationV1>,
 }
 
 #[derive(Default)]
 struct CodexMetaCache {
     entries: VecDeque<CachedCodexMeta>,
+    /// Keys with a fill in flight, each paired with the `Notify` its waiters
+    /// park on. An entry is owned by exactly one [`CodexMetaFillClaim`].
     in_flight: HashMap<CodexMetaCacheKey, Arc<Notify>>,
 }
 
-static CODEX_META_CACHE: OnceLock<tokio::sync::Mutex<CodexMetaCache>> = OnceLock::new();
+/// Process-retained metadata cache. Every critical section is synchronous, and
+/// a `std` mutex is what lets a fill claim release itself from `Drop`.
+static CODEX_META_CACHE: OnceLock<Mutex<CodexMetaCache>> = OnceLock::new();
+
+fn lock_codex_meta_cache() -> MutexGuard<'static, CodexMetaCache> {
+    CODEX_META_CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Owner of one in-flight metadata fill.
+///
+/// The fill runs on its own task, so the request that elected it may stop
+/// waiting without orphaning the claim: the owner still settles the parse,
+/// publishes or fails, and only then drops. Dropping — after publication, on a
+/// terminal failure, or when the fill task itself is torn down — removes
+/// exactly this claim and wakes every waiter, which re-checks the cache and
+/// elects a new fill when nothing was published.
+struct CodexMetaFillClaim {
+    key: CodexMetaCacheKey,
+    settled: Arc<Notify>,
+}
+
+impl CodexMetaFillClaim {
+    fn publish(
+        self,
+        meta: Arc<CodexMetaWithProvenance>,
+        memory: Option<ProcessSharedMemoryReservationV1>,
+    ) {
+        let mut cache = lock_codex_meta_cache();
+        while cache.entries.len() >= shared_jsonl_preparation_capacity() {
+            cache.entries.pop_front();
+        }
+        cache.entries.push_back(CachedCodexMeta {
+            key: self.key.clone(),
+            meta,
+            _memory: memory,
+        });
+        drop(cache);
+        // Dropping `self` releases the claim and wakes the waiters, who now
+        // find the published entry.
+    }
+}
+
+impl Drop for CodexMetaFillClaim {
+    fn drop(&mut self) {
+        let mut cache = lock_codex_meta_cache();
+        // Only this fill's own claim is released: a late owner never erases a
+        // replacement that waiters elected after it was torn down.
+        if cache
+            .in_flight
+            .get(&self.key)
+            .is_some_and(|settled| Arc::ptr_eq(settled, &self.settled))
+        {
+            cache.in_flight.remove(&self.key);
+        }
+        drop(cache);
+        self.settled.notify_waiters();
+    }
+}
+
+enum CodexMetaLookup {
+    Hit(Arc<CodexMetaWithProvenance>),
+    InFlight(OwnedNotified),
+    Claimed(CodexMetaFillClaim),
+}
+
+#[cfg(test)]
+static CODEX_META_IN_FLIGHT_WAITS: OnceLock<Mutex<HashMap<CodexMetaCacheKey, usize>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn record_in_flight_wait_for_test(key: &CodexMetaCacheKey) {
+    let mut waits = CODEX_META_IN_FLIGHT_WAITS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    *waits.entry(key.clone()).or_default() += 1;
+}
+
+#[cfg(test)]
+fn in_flight_waits_for_test(key: &CodexMetaCacheKey) -> usize {
+    CODEX_META_IN_FLIGHT_WAITS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(key)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn lookup_codex_meta(key: &CodexMetaCacheKey) -> TranscriptIngestResult<CodexMetaLookup> {
+    let mut cache = lock_codex_meta_cache();
+    if let Some(index) = cache.entries.iter().position(|entry| entry.key == *key) {
+        let entry = cache
+            .entries
+            .remove(index)
+            .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+        let meta = Arc::clone(&entry.meta);
+        cache.entries.push_back(entry);
+        hotpath::gauge!("codex_shared_meta_hits").inc(1.0);
+        return Ok(CodexMetaLookup::Hit(meta));
+    }
+    if let Some(settled) = cache.in_flight.get(key) {
+        #[cfg(test)]
+        record_in_flight_wait_for_test(key);
+        // Created under the lock, so a settlement racing this lookup still
+        // wakes the returned future.
+        return Ok(CodexMetaLookup::InFlight(
+            Arc::clone(settled).notified_owned(),
+        ));
+    }
+    let settled = Arc::new(Notify::new());
+    cache.in_flight.insert(key.clone(), Arc::clone(&settled));
+    hotpath::gauge!("codex_shared_meta_misses").inc(1.0);
+    Ok(CodexMetaLookup::Claimed(CodexMetaFillClaim {
+        key: key.clone(),
+        settled,
+    }))
+}
+
+/// Runs one admitted metadata fill to settlement.
+///
+/// The memory reservation travels inside the blocking closure: dropping this
+/// task's `JoinHandle` does not stop started blocking work, so the charge is
+/// released only when the parse itself settles — shrunk into the cache entry
+/// on success, or dropped with the worker's result otherwise.
+async fn fill_codex_session_meta(
+    claim: CodexMetaFillClaim,
+    error_path: PathBuf,
+) -> TranscriptIngestResult<Arc<CodexMetaWithProvenance>> {
+    let memory = reserve_shared_jsonl_page()?;
+    let background_cpu = shared_jsonl_background_cpu()?;
+    let parse_path = claim.key.path.clone();
+    let (parsed, mut memory) = tokio::task::spawn_blocking(move || {
+        let parsed = background_cpu.with_permit(|| session_meta_with_provenance(&parse_path));
+        (parsed, memory)
+    })
+    .await
+    .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?;
+    let parsed = Arc::new(parsed.ok_or(TranscriptIngestError::InvalidSourceIdentity {
+        provider: PROVIDER,
+        path: error_path,
+    })?);
+    if let Some(reservation) = &mut memory {
+        reservation
+            .shrink_to(parsed.retained_bytes())
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    }
+    claim.publish(Arc::clone(&parsed), memory);
+    Ok(parsed)
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CodexJsonlAdmissionProgress {
@@ -315,21 +474,7 @@ fn replay_identity(session_id: &str, domain: &[u8]) -> String {
     format!("sha256:{}", encode_lowercase_hex(&hasher.finalize()))
 }
 
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) fn codex_observation_source_v2(
-    session_id: &str,
-) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    codex_observation_source_v2_inner(session_id)
-}
-
-#[cfg(feature = "test-helpers")]
 pub fn codex_observation_source_v2(
-    session_id: &str,
-) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    codex_observation_source_v2_inner(session_id)
-}
-
-fn codex_observation_source_v2_inner(
     session_id: &str,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
     Ok(ObservationSourceIdentityV1::for_provider_source(
@@ -452,89 +597,32 @@ async fn shared_session_meta_with_provenance(
     })
     .await
     .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-    let cache_lock = CODEX_META_CACHE.get_or_init(tokio::sync::Mutex::default);
-    loop {
-        let mut cache = cache_lock.lock().await;
-        if let Some(index) = cache.entries.iter().position(|entry| entry.key == key) {
-            let entry = cache
-                .entries
-                .remove(index)
-                .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-            let meta = Arc::clone(&entry.meta);
-            cache.entries.push_back(entry);
-            hotpath::gauge!("codex_shared_meta_hits").inc(1.0);
-            return Ok(meta);
+    let claim = loop {
+        if cancellation.is_cancelled() {
+            return Err(TranscriptIngestError::Cancelled { provider: PROVIDER });
         }
-        if let Some(notify) = cache.in_flight.get(&key) {
-            let notified = Arc::clone(notify).notified_owned();
-            drop(cache);
-            tokio::select! {
-                () = notified => {}
-                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
-                    if cancellation.is_cancelled() {
+        match lookup_codex_meta(&key)? {
+            CodexMetaLookup::Hit(meta) => return Ok(meta),
+            CodexMetaLookup::InFlight(settled) => {
+                tokio::select! {
+                    () = settled => {}
+                    () = cancellation.cancelled() => {
                         return Err(TranscriptIngestError::Cancelled { provider: PROVIDER });
                     }
                 }
             }
-            continue;
-        }
-        cache.in_flight.insert(key.clone(), Arc::new(Notify::new()));
-        hotpath::gauge!("codex_shared_meta_misses").inc(1.0);
-        break;
-    }
-
-    let parse_path = key.path.clone();
-    let error_path = path.to_path_buf();
-    let build_cancellation = cancellation.clone();
-    let build = async move {
-        if build_cancellation.is_cancelled() {
-            return Err(TranscriptIngestError::Cancelled { provider: PROVIDER });
-        }
-        let mut memory = reserve_shared_jsonl_page()?;
-        let background_cpu = shared_jsonl_background_cpu()?;
-        let parsed = tokio::task::spawn_blocking(move || {
-            background_cpu.with_permit(|| session_meta_with_provenance(&parse_path))
-        })
-        .await
-        .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?
-        .ok_or(TranscriptIngestError::InvalidSourceIdentity {
-            provider: PROVIDER,
-            path: error_path,
-        })?;
-        let parsed = Arc::new(parsed);
-        if let Some(reservation) = &mut memory {
-            reservation
-                .shrink_to(parsed.retained_bytes())
-                .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-        }
-        Ok::<_, TranscriptIngestError>((parsed, memory))
-    }
-    .await;
-    let mut cache = cache_lock.lock().await;
-    let notify = cache.in_flight.remove(&key);
-    let (parsed, memory) = match build {
-        Ok(built) => built,
-        Err(error) => {
-            drop(cache);
-            if let Some(notify) = notify {
-                notify.notify_waiters();
-            }
-            return Err(error);
+            CodexMetaLookup::Claimed(claim) => break claim,
         }
     };
-    while cache.entries.len() >= shared_jsonl_preparation_capacity() {
-        cache.entries.pop_front();
+    // The fill is detached from this request: cancelling the requester leaves
+    // the owner to settle for every other waiter on the same key.
+    let fill = tokio::spawn(fill_codex_session_meta(claim, path.to_path_buf()));
+    tokio::select! {
+        settled = fill => {
+            settled.map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?
+        }
+        () = cancellation.cancelled() => Err(TranscriptIngestError::Cancelled { provider: PROVIDER }),
     }
-    cache.entries.push_back(CachedCodexMeta {
-        key,
-        meta: Arc::clone(&parsed),
-        _memory: memory,
-    });
-    drop(cache);
-    if let Some(notify) = notify {
-        notify.notify_waiters();
-    }
-    Ok(parsed)
 }
 
 async fn try_admit_codex_jsonl_observations(

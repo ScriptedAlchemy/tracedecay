@@ -30,7 +30,7 @@ use tracedecay_application::feedback::observations::{
 };
 use tracedecay_host_integration::{
     HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostKindV1,
-    HostRegistrationRouteV1, stock_host_capabilities, stock_host_registration_evidence,
+    HostRegistrationRouteV1, stock_host_registration_evidence,
 };
 
 use super::runtime::{
@@ -283,8 +283,8 @@ pub enum AdvisoryHostDeliveryPathV1 {
     CliFeedbackRead,
 }
 
-/// One truthful per-host route. `state` remains unavailable or degraded when
-/// either the host capability matrix or the registration evidence says so.
+/// One truthful per-host route. `state` is the canonical capability state of
+/// the capability the registration route proves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AdvisoryHostDeliveryRouteV1 {
     pub path: AdvisoryHostDeliveryPathV1,
@@ -391,14 +391,11 @@ impl AdvisoryHostDeliveryRegistrationV1 {
     pub fn host_routes(&self, host: HostKindV1) -> Vec<AdvisoryHostDeliveryRouteV1> {
         stock_host_registration_evidence(host)
             .into_iter()
-            .map(|evidence| {
-                let capability = capability_for_registration(evidence.route);
-                AdvisoryHostDeliveryRouteV1 {
-                    path: path_for_registration(evidence.route),
-                    capability,
-                    registration: evidence.route,
-                    state: effective_state(capability_state(host, capability), evidence.state),
-                }
+            .map(|evidence| AdvisoryHostDeliveryRouteV1 {
+                path: path_for_registration(evidence.route),
+                capability: evidence.route.capability(),
+                registration: evidence.route,
+                state: evidence.state,
             })
             .collect()
     }
@@ -685,17 +682,6 @@ where
     })
 }
 
-fn capability_for_registration(route: HostRegistrationRouteV1) -> HostCapabilityV1 {
-    match route {
-        HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp
-        | HostRegistrationRouteV1::OpenCodeCustomLsp => HostCapabilityV1::Lsp,
-        HostRegistrationRouteV1::CursorNativeDiagnostics => HostCapabilityV1::NativeDiagnostics,
-        HostRegistrationRouteV1::Hook => HostCapabilityV1::Hooks,
-        HostRegistrationRouteV1::Mcp => HostCapabilityV1::Mcp,
-        HostRegistrationRouteV1::Cli => HostCapabilityV1::Cli,
-    }
-}
-
 fn path_for_registration(route: HostRegistrationRouteV1) -> AdvisoryHostDeliveryPathV1 {
     match route {
         HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp
@@ -706,33 +692,6 @@ fn path_for_registration(route: HostRegistrationRouteV1) -> AdvisoryHostDelivery
         HostRegistrationRouteV1::Hook => AdvisoryHostDeliveryPathV1::HookV2,
         HostRegistrationRouteV1::Mcp => AdvisoryHostDeliveryPathV1::McpFeedbackRead,
         HostRegistrationRouteV1::Cli => AdvisoryHostDeliveryPathV1::CliFeedbackRead,
-    }
-}
-
-fn capability_state(host: HostKindV1, capability: HostCapabilityV1) -> HostCapabilityStateV1 {
-    stock_host_capabilities(host)
-        .into_iter()
-        .find(|record| record.capability == capability)
-        .map_or(
-            HostCapabilityStateV1::Unavailable(
-                HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
-            ),
-            |record| record.state,
-        )
-}
-
-fn effective_state(
-    capability: HostCapabilityStateV1,
-    registration: HostCapabilityStateV1,
-) -> HostCapabilityStateV1 {
-    match (capability, registration) {
-        (HostCapabilityStateV1::Unavailable(reason), _)
-        | (_, HostCapabilityStateV1::Unavailable(reason)) => {
-            HostCapabilityStateV1::Unavailable(reason)
-        }
-        (HostCapabilityStateV1::Degraded(reason), _)
-        | (_, HostCapabilityStateV1::Degraded(reason)) => HostCapabilityStateV1::Degraded(reason),
-        _ => HostCapabilityStateV1::Supported,
     }
 }
 

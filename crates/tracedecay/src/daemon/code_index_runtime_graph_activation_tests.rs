@@ -21,7 +21,9 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
     scoped_code_index_store_root,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
-use tracedecay_graph_query::{CodeGraphReadFreshnessV1, CodeGraphReadRequest};
+use tracedecay_graph_query::{
+    CodeGraphReadFreshnessV1, CodeGraphReadRequest, request_graph_cancellation,
+};
 use tracedecay_session_memory::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
@@ -185,6 +187,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount retained generation");
@@ -557,6 +560,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount persistent graph generation");
@@ -756,6 +760,41 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         assert_eq!(
             sealed_decode_count, 0,
             "clean restart must seat the verified graph head without replaying partition segments"
+        );
+        assert_eq!(
+            settled_read.generation(),
+            &seeded_generation_id,
+            "graph requests must preserve the restored publication identity"
+        );
+        assert!(
+            Arc::ptr_eq(
+                settled_read.store(),
+                &settled.interactive_graph_store().expect("restored graph"),
+            ),
+            "graph requests must reuse the recovered graph authority"
+        );
+        let reader = settled_read
+            .reader(&settled_context, now_micros())
+            .expect("admitted reader for the recovered graph");
+        let page = reader
+            .symbols_page(None, 16, request_graph_cancellation(&settled_context))
+            .expect("bounded symbol query on the recovered graph");
+        assert!(!page.has_more, "the single-function fixture fits one page");
+        assert!(
+            page.symbols.iter().any(|symbol| symbol
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.simple_name == "alpha")),
+            "the recovered graph must return the fixture function: {:?}",
+            page.symbols
+        );
+        assert_eq!(
+            scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sealed_decode_count(),
+            0,
+            "a graph query after clean restart must not replay partition segments"
         );
     }
     let (held_tx, held_rx) = std::sync::mpsc::channel();

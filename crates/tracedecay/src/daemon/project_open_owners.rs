@@ -2124,6 +2124,10 @@ impl tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeResolverV1
 }
 
 #[cfg(test)]
+#[path = "project_open_owners/git_catalog_tests.rs"]
+mod git_catalog_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

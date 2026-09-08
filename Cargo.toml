@@ -224,11 +224,16 @@ fastembed = { git = "https://github.com/ScriptedAlchemy/fastembed-rs.git", rev =
 # only address a single 1 MiB chunk, which caps an epoch near 32 Ki node
 # records and then panics; the fork spans epochs across chunks and types the
 # exhaustion errors. The fork also carries graph correctness and bounded WAL
-# group-write fixes. Its workspace resolves sibling crates by path, so every
+# group-write fixes, and (ScriptedAlchemy/grafeo#4) the direct compact build:
+# `IncrementalCompactStoreBuilder` + `GrafeoDB::write_compact_container`
+# turn a verified row stream into a compacted container with one columnar
+# copy in memory and one container write — no staging LPG, WAL, or
+# in-memory `compact()` copy — which is how sealed generation stores are
+# built. Its workspace resolves sibling crates by path, so every
 # grafeo crate must come from the same revision — a mixed registry/git graph
 # would build type-incompatible instances of the patched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }

@@ -32,6 +32,7 @@ use cap_fs_ext::{
     DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt, ambient_authority,
 };
 // The directory-fsync path that needs maybe_dir is compiled out on Windows.
+use super::embedding_backend::EmbeddingRuntimeFamilyV1;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_std::fs::{Dir, DirBuilder, File as CapFile, OpenOptions as CapOpenOptions};
@@ -42,7 +43,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_semantic_contracts::{
-    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ModelArtifactManifestV1, Sha256DigestHex,
+    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ModelArtifactManifestV1, RuntimeCompatibilityV1,
+    Sha256DigestHex,
 };
 
 const RECOVERY_SCHEMA_V1: &str = "tracedecay.artifact-store-recovery.v1";
@@ -121,10 +123,21 @@ pub const FASTEMBED_RUNTIME_FAMILY_V1: &str = "fastembed-ort";
 pub const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-5.17.3+ort-2.0.0-rc.12";
 
 impl RuntimeEnvironmentV1 {
-    /// Capture the runtime and host resources of this process. These values
-    /// are independent of any candidate artifact manifest.
-    #[cfg(feature = "semantic-fastembed")]
+    /// Capture runtime identity and host resources independently of an artifact.
     pub fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
+        Self::detect_embedding_process(EmbeddingRuntimeFamilyV1::FastEmbedOrt)
+    }
+
+    pub fn detect_embedding_process(
+        backend: EmbeddingRuntimeFamilyV1,
+    ) -> Result<Self, SemanticCapabilityDisabledV1> {
+        let compiled = match backend {
+            EmbeddingRuntimeFamilyV1::FastEmbedOrt => cfg!(feature = "semantic-fastembed"),
+            EmbeddingRuntimeFamilyV1::Model2VecStatic => cfg!(feature = "semantic-model2vec"),
+        };
+        if !compiled {
+            return Err(SemanticCapabilityDisabledV1::IncompatibleRuntime);
+        }
         let available_threads = std::thread::available_parallelism()
             .ok()
             .and_then(|threads| u32::try_from(threads.get()).ok())
@@ -144,16 +157,11 @@ impl RuntimeEnvironmentV1 {
         Ok(Self {
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
-            runtime: FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
-            build_revision: FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
+            runtime: backend.runtime_family().to_owned(),
+            build_revision: backend.build_revision().to_owned(),
             available_resident_bytes,
             available_threads,
         })
-    }
-
-    #[cfg(not(feature = "semantic-fastembed"))]
-    pub fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
-        Err(SemanticCapabilityDisabledV1::IncompatibleRuntime)
     }
 }
 
@@ -329,10 +337,11 @@ impl AdmittedArtifactSourceV1 {
     fn read_member_bytes(
         &self,
         member: &ArtifactPackageMemberV1,
+        runtime: &RuntimeCompatibilityV1,
     ) -> Result<Vec<u8>, AdmittedArtifactReadErrorV1> {
         let mut file = open_cap_file(
             &self.directory,
-            member_file_name(member.role),
+            member_file_name(member.role, Some(runtime)),
             true,
             false,
             false,
@@ -421,7 +430,7 @@ impl AdmittedArtifactV1 {
         self.source
             .as_ref()
             .ok_or(AdmittedArtifactReadErrorV1::Unavailable)?
-            .read_member_bytes(member)
+            .read_member_bytes(member, &self.manifest.payload.runtime)
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

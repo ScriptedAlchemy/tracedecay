@@ -638,13 +638,13 @@ mod tests {
         std::fs::write(path, source).expect("oversized fixture");
     }
 
-    fn assert_partial_output(output: &Value, visited: u64, returned: u64, omissions: Value) {
+    fn assert_partial_output(output: &Value, visited: u64, returned: u64, omissions: &Value) {
         assert_eq!(output["truncated"], json!(false));
         assert_eq!(output["coverage"]["completeness"], json!("partial"));
         assert_eq!(output["coverage"]["visited"], json!(visited));
         assert_eq!(output["coverage"]["eligible"], Value::Null);
         assert_eq!(output["coverage"]["returned"], json!(returned));
-        assert_eq!(output["omissions"], omissions);
+        assert_eq!(&output["omissions"], omissions);
     }
 
     fn scan_output(project: &Path, pattern: &str) -> (GrepSearchResult, Value) {
@@ -692,7 +692,7 @@ mod tests {
         assert!(scan.hits.is_empty());
         assert_eq!(scan.omissions.oversized_files, 1);
         assert!(!scan.truncated);
-        assert_partial_output(&output, 0, 0, one_budget_omission());
+        assert_partial_output(&output, 0, 0, &one_budget_omission());
 
         let markdown = rendered_scan(&scan);
         assert!(markdown.contains("No matching lines."), "{markdown}");
@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(scan.omissions.oversized_files, 1);
         assert!(!scan.truncated);
         assert_eq!(output["results"][0]["file"], json!("tracked.txt"));
-        assert_partial_output(&output, 3, 1, one_budget_omission());
+        assert_partial_output(&output, 3, 1, &one_budget_omission());
 
         let markdown = rendered_scan(&scan);
         assert!(markdown.contains("tracked.txt:2"), "{markdown}");
@@ -747,7 +747,7 @@ mod tests {
 
         assert_eq!(scan.lines_examined, 1);
         assert_eq!(scan.omissions.oversized_lines, 1);
-        assert_partial_output(&output, 1, 0, one_budget_omission());
+        assert_partial_output(&output, 1, 0, &one_budget_omission());
 
         let markdown = rendered_scan(&scan);
         assert!(
@@ -771,7 +771,7 @@ mod tests {
             &output,
             0,
             0,
-            json!([
+            &json!([
                 {
                     "domain": "source",
                     "count": 1,

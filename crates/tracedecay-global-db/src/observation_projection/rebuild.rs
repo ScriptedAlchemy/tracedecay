@@ -36,7 +36,7 @@ use super::transition::{
 };
 use tracedecay_session_temporal_store::record_canonical_observation_effect;
 
-const REBUILD_PAGE_SIZE: i64 = 128;
+pub(super) const REBUILD_PAGE_SIZE: i64 = 128;
 const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
 const PROJECTION_RETRY_BASE_MICROS: i64 = 5_000_000;
 const PROJECTION_RETRY_MAX_MICROS: i64 = 300_000_000;
@@ -815,7 +815,10 @@ async fn project_observation_in_transaction_with_session(
         verify_effect(transaction, &observation, &effect).await?;
         if !matches!(
             effect,
-            ObservationProjection::Skipped(ProjectionSkipReason::InvalidContract)
+            ObservationProjection::Skipped(
+                ProjectionSkipReason::InvalidContract
+                    | ProjectionSkipReason::NativeSourceSuperseded
+            )
         ) {
             record_canonical_observation_effect(transaction, sequence, &observation, &effect)
                 .await?;
@@ -849,7 +852,9 @@ async fn project_observation_in_transaction_with_session(
     .await?;
     if !matches!(
         effect,
-        ObservationProjection::Skipped(ProjectionSkipReason::InvalidContract)
+        ObservationProjection::Skipped(
+            ProjectionSkipReason::InvalidContract | ProjectionSkipReason::NativeSourceSuperseded
+        )
     ) {
         record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
     }
@@ -1065,7 +1070,10 @@ async fn stage_projection_rebuild_batch_transaction(
         .await?;
         if !matches!(
             effect,
-            ObservationProjection::Skipped(ProjectionSkipReason::InvalidContract)
+            ObservationProjection::Skipped(
+                ProjectionSkipReason::InvalidContract
+                    | ProjectionSkipReason::NativeSourceSuperseded
+            )
         ) {
             record_canonical_observation_effect(transaction, sequence, &observation, &effect)
                 .await?;
@@ -1144,6 +1152,8 @@ async fn activate_projection_rebuild_transaction(
     activate_rebuild_workflow_facts(transaction, &job.generation).await?;
     activate_rebuild_provider_usage(transaction, &job.generation).await?;
     activate_rebuild_dispositions(transaction, &job.generation).await?;
+    super::source_transition::activate_native_source_transitions(transaction, &job.generation)
+        .await?;
 
     transaction
         .execute(
@@ -1971,6 +1981,15 @@ async fn stage_rebuild_effect(
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
+    if effect.skip_reason() == Some(ProjectionSkipReason::NativeSourceSuperseded) {
+        return stage_rebuild_disposition(
+            conn,
+            generation,
+            observation,
+            ProjectionSkipReason::NativeSourceSuperseded,
+        )
+        .await;
+    }
     stage_provider_usage_effects(conn, generation, sequence, observation).await?;
     match effect {
         ObservationProjection::Message(projection) => {
@@ -1995,7 +2014,19 @@ async fn stage_rebuild_effect(
         ObservationProjection::Skipped(reason) => {
             stage_rebuild_disposition(conn, generation, observation, *reason).await
         }
+    }?;
+    if effect
+        .skip_reason()
+        .is_none_or(|reason| reason == ProjectionSkipReason::NonConversationalRecord)
+    {
+        super::source_transition::settle_native_source_transition(
+            conn,
+            observation,
+            super::source_transition::SourceTransitionTarget::Staged(generation),
+        )
+        .await?;
     }
+    Ok(())
 }
 
 async fn activate_rebuild_provider_usage(

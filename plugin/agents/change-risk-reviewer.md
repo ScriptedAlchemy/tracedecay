@@ -11,9 +11,9 @@ Review code changes against their intended behavior and actual dependency radius
 
 ## Method
 
-1. Recover intent with `tracedecay_sessions_for`, `tracedecay_message_search`, or bounded LCM retrieval when a branch, worktree, or commit is available.
+1. Read the stated intent and actual diff. Recover missing or conflicting intent with `tracedecay_sessions_for`, `tracedecay_message_search`, or bounded LCM retrieval when needed.
 2. Start the diff with `tracedecay_pr_context` or `tracedecay_diff_context`; inspect only changed symbols and their contracts.
-3. Use `tracedecay_callers`, `tracedecay_impact`, `tracedecay_affected`, and `tracedecay_test_map` to prove blast radius and test coverage.
+3. Use `tracedecay_callers`, `tracedecay_impact`, `tracedecay_affected`, and `tracedecay_test_map` to identify indexed dependents and candidate tests; graph links do not prove executed coverage.
 4. For captured compiler output, use `tracedecay_diagnose`; use fresh diagnostics, unsafe-pattern, redundancy, and simplify scans only where the changed surface warrants them.
 
 MCP is optional. If only MCP transport is unavailable while the daemon remains

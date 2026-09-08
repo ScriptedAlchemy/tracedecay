@@ -498,7 +498,6 @@ fn a_store_persisted_under_the_legacy_layout_opens_and_drains_its_per_generation
 ///
 /// Fails if release checks only `verified_head` and returns
 /// `NoVerifiedLease` before inspecting the durable cleanup tombstone.
-#[cfg(feature = "graph-sealed-store")]
 #[test]
 fn retired_legacy_replay_without_a_head_releases_its_verified_sealed_staging_rows() {
     let temp = TempDir::new().unwrap();
@@ -547,6 +546,14 @@ fn retired_legacy_replay_without_a_head_releases_its_verified_sealed_staging_row
         )),
         "production no-head replay semantics classify the sole active replay as pending"
     );
+    // The legacy shape under test: the generation's rows already sit in the
+    // staging database when its sealed artifact is built.
+    registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap()
+        .stage_generation_rows_unpublished(Arc::new(generation.clone()))
+        .unwrap();
     let (control, probe) = control_and_probe();
     let commit = registered
         .registry

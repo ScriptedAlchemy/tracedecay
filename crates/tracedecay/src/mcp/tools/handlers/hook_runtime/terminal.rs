@@ -30,6 +30,7 @@ pub(super) fn retain_codex_stop(
         .profile_identity
         .clone()
         .ok_or_else(|| config_error("daemon profile identity is unavailable"))?;
+    let background_cpu = session_authorities.background_cpu.clone();
     let profile_root = profile_root.to_path_buf();
     let weak_registry = Arc::downgrade(session_runtime_registry);
     let task_session_id = session_id.clone();
@@ -53,7 +54,8 @@ pub(super) fn retain_codex_stop(
                         "session_id": task_session_id,
                     });
                     let authorities = SessionAuthorities::new(None, Some(&user_sessions))
-                        .with_profile_identity(Some(std::sync::Arc::clone(&profile_identity)));
+                        .with_profile_identity(Some(std::sync::Arc::clone(&profile_identity)))
+                        .with_background_cpu(background_cpu.clone());
                     let ingested = ingest_transcript_with_cancellation(
                         None,
                         &ingest_args,

@@ -12,17 +12,23 @@ use tracedecay_domain::ExactFieldV1;
 /// Revision 10 is the last TEXT-term posting layout. Revision 11 interns
 /// terms, stores integer field codes, drops redundant serving indexes, and
 /// writes compact row payloads. Revision 12 delta-encodes n-gram document
-/// lists and interns exact terms. Readers accept all shipped layouts; writers
-/// emit 12 unless an explicit benchmark revision is selected.
+/// lists and interns exact terms. Revision 13 clusters `term_postings` by
+/// `(document_id, term_id, field)` so every batch appends to the tail of the
+/// tree instead of rewriting leaves across the whole hashed term-id space,
+/// and derives the term-leading serving index once at finalization. Readers
+/// accept all shipped layouts; writers emit 13 unless an explicit benchmark
+/// revision is selected.
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10: u32 = 10;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11: u32 = 11;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12: u32 = 12;
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13: u32 = 13;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 =
-    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12;
+    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13;
 
 const DIGEST_DOMAIN_V10: &[u8] = b"tracedecay.code-lexical-artifact.v10\0";
 const DIGEST_DOMAIN_V11: &[u8] = b"tracedecay.code-lexical-artifact.v11\0";
 const DIGEST_DOMAIN_V12: &[u8] = b"tracedecay.code-lexical-artifact.v12\0";
+const DIGEST_DOMAIN_V13: &[u8] = b"tracedecay.code-lexical-artifact.v13\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -105,6 +111,28 @@ pub(super) const REQUIRED_ARTIFACT_INDEXES_V12: [(&str, &str, &[&str]); 4] = [
     ),
 ];
 
+/// Revision 13 keeps the interned exact layout of revision 12 but clusters
+/// `term_postings` by document, so the term-leading probe index replaces the
+/// document-leading one.
+pub(super) const REQUIRED_ARTIFACT_INDEXES_V13: [(&str, &str, &[&str]); 4] = [
+    ("rows", "rows_by_chunk", &["chunk_id"]),
+    (
+        "term_postings",
+        "term_postings_by_term",
+        &["term_id", "field", "document_id", "frequency"],
+    ),
+    (
+        "exact_postings",
+        "exact_postings_by_document",
+        &["document_id", "field", "term_id"],
+    ),
+    (
+        "ngram_postings",
+        "ngram_postings_by_ngram",
+        &["kind", "ngram", "page_ordinal", "cardinality"],
+    ),
+];
+
 /// Statistics wakes stay at three steps (field, term, fuzzy flag). Index
 /// wakes are the four serving indexes plus n-gram selectivity.
 pub(super) const STATISTICS_STEP_COUNT_V11: u64 = 3;
@@ -113,8 +141,9 @@ pub(super) const SERVING_INDEX_STEP_COUNT_V11: u64 = 5;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CodeLexicalArtifactWriterRevisionV1 {
     V11,
-    #[default]
     V12,
+    #[default]
+    V13,
 }
 
 impl CodeLexicalArtifactWriterRevisionV1 {
@@ -122,6 +151,7 @@ impl CodeLexicalArtifactWriterRevisionV1 {
         match self {
             Self::V11 => LexicalArtifactLayoutV1::V11,
             Self::V12 => LexicalArtifactLayoutV1::V12,
+            Self::V13 => LexicalArtifactLayoutV1::V13,
         }
     }
 }
@@ -131,6 +161,7 @@ pub(super) enum LexicalArtifactLayoutV1 {
     V10,
     V11,
     V12,
+    V13,
 }
 
 impl LexicalArtifactLayoutV1 {
@@ -139,6 +170,7 @@ impl LexicalArtifactLayoutV1 {
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10 => Ok(Self::V10),
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11 => Ok(Self::V11),
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12 => Ok(Self::V12),
+            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13 => Ok(Self::V13),
             _ => Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
                 "format revision {revision} is unsupported"
             ))),
@@ -150,6 +182,7 @@ impl LexicalArtifactLayoutV1 {
             Self::V10 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10,
             Self::V11 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
             Self::V12 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12,
+            Self::V13 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
         }
     }
 
@@ -158,6 +191,7 @@ impl LexicalArtifactLayoutV1 {
             Self::V10 => DIGEST_DOMAIN_V10,
             Self::V11 => DIGEST_DOMAIN_V11,
             Self::V12 => DIGEST_DOMAIN_V12,
+            Self::V13 => DIGEST_DOMAIN_V13,
         }
     }
 
@@ -168,7 +202,19 @@ impl LexicalArtifactLayoutV1 {
             Self::V10 => &REQUIRED_ARTIFACT_INDEXES_V10,
             Self::V11 => &REQUIRED_ARTIFACT_INDEXES_V11,
             Self::V12 => &REQUIRED_ARTIFACT_INDEXES_V12,
+            Self::V13 => &REQUIRED_ARTIFACT_INDEXES_V13,
         }
+    }
+
+    /// Revisions 12 and 13 intern exact terms through `exact_vocabulary`.
+    pub(super) fn interns_exact_terms(self) -> bool {
+        matches!(self, Self::V12 | Self::V13)
+    }
+
+    /// Revision 13 clusters `term_postings` by `(document_id, term_id,
+    /// field)`; every earlier interned layout clusters by term.
+    pub(super) fn clusters_term_postings_by_document(self) -> bool {
+        self == Self::V13
     }
 }
 
@@ -387,8 +433,9 @@ pub(super) fn lookup_term_ids(
 mod tests {
     use super::{
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, LexicalArtifactLayoutV1, exact_field_code,
-        field_code, field_from_code, stable_exact_term_id,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
+        LexicalArtifactLayoutV1, exact_field_code, field_code, field_from_code,
+        stable_exact_term_id,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
     use tracedecay_domain::ExactFieldV1;
@@ -410,8 +457,13 @@ mod tests {
                 .expect("v12"),
             LexicalArtifactLayoutV1::V12
         );
+        assert_eq!(
+            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13)
+                .expect("v13"),
+            LexicalArtifactLayoutV1::V13
+        );
         assert!(LexicalArtifactLayoutV1::from_revision(9).is_err());
-        assert!(LexicalArtifactLayoutV1::from_revision(13).is_err());
+        assert!(LexicalArtifactLayoutV1::from_revision(14).is_err());
     }
 
     #[test]

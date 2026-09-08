@@ -33,19 +33,10 @@ impl MonotonicDeadline {
 }
 
 /// Cooperative cancellation shared by every worker serving one request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CancellationToken {
     token_id: Option<Arc<str>>,
     inner: TokioCancellationToken,
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self {
-            token_id: None,
-            inner: TokioCancellationToken::new(),
-        }
-    }
 }
 
 impl CancellationToken {

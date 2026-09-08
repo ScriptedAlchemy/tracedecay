@@ -14,7 +14,7 @@ use tracedecay_store::{
 };
 
 use super::publication_support::{
-    check_all, clear_retiring_fence, locator_from_key, map_publication_error, retain_lease_closure,
+    check_all, clear_retiring_fence, locator_from_key, retain_lease_closure,
 };
 use super::staging::{map_staging_error, require_authority_binding};
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
@@ -389,7 +389,7 @@ fn reserve_published(
 {
     let replay = match authority
         .replay(&record.plan.publication_key, context)
-        .map_err(map_publication_error)?
+        .map_err(GraphDbError::from)?
     {
         GraphPublicationReplayLookupV1::Active(replay) => replay,
         GraphPublicationReplayLookupV1::Retired(_) | GraphPublicationReplayLookupV1::Missing => {
@@ -645,7 +645,7 @@ fn converge_retired_cleanup(
     }
     match authority
         .finalize_retired_replay_cleanup(&cleanup.retirement.replay, context)
-        .map_err(map_publication_error)?
+        .map_err(GraphDbError::from)?
     {
         GraphRetiredReplayCleanupFinalizeOutcomeV1::Finalized(_) => Ok(Some(
             SemanticVectorRetentionAction::Finalized(cleanup.retirement.semantic_generation_id),

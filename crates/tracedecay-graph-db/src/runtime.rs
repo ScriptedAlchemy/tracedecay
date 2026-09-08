@@ -17,9 +17,8 @@ use crate::recovery::{
     validate_or_initialize_format,
 };
 use crate::state::{
-    EntityOwnerColumns, ExistingRowsV1, FormatState, indexed_entity_node, latest_projection,
-    load_entity_locator, outgoing_relation_projections, projection_entities, projection_relations,
-    publication,
+    EntityOwnerColumns, FormatState, indexed_entity_node, latest_projection, load_entity_locator,
+    outgoing_relation_projections, projection_entities, projection_relations, publication,
 };
 use crate::verified_marker::{ContainerIdentity, GenerationMarkers};
 use crate::{
@@ -1353,7 +1352,6 @@ impl GraphDb {
             batch,
             metadata,
             endpoint_namespaces,
-            ExistingRowsV1::Probe,
             &self.inner.poisoned,
             check,
         )?;
@@ -1371,40 +1369,6 @@ impl GraphDb {
         .inspect_err(|_| {
             self.inner.poisoned.store(true, Ordering::Release);
         })?;
-        if self.inner.durability == GraphDurability::WalSync
-            && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
-        {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(error);
-        }
-        Ok(commit)
-    }
-
-    /// Commits a persistence-only batch without creating or refreshing any
-    /// HNSW index. Callers that serve vector search from the written rows
-    /// use [`Self::apply_locked`] instead, which keeps the persisted index
-    /// aligned with every committed vector row.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apply_locked_without_vector_index_maintenance(
-        &self,
-        database: &GrafeoDB,
-        state: &mut FormatState,
-        batch: GraphWriteBatch,
-        metadata: mutation::CommitMetadata,
-        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
-        existing_rows: ExistingRowsV1<'_>,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphCommit, GraphDbError> {
-        let commit = mutation::apply(
-            database,
-            state,
-            batch,
-            metadata,
-            endpoint_namespaces,
-            existing_rows,
-            &self.inner.poisoned,
-            check,
-        )?;
         if self.inner.durability == GraphDurability::WalSync
             && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
         {
@@ -1678,30 +1642,6 @@ impl GraphDb {
         database
             .compact()
             .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
-    }
-
-    /// Freezes this database's live store into a columnar `CompactStore` base
-    /// plus a fresh overlay. Production path for a **single-generation sealed
-    /// store only** — the whole-database scope of `GrafeoDB::compact()` then
-    /// coincides exactly with the one immutable generation the store holds.
-    /// The multi-generation staging database is never compacted.
-    #[cfg(feature = "graph-sealed-store")]
-    #[hotpath::measure(label = "graph_db.sealed_store.compact", impl_type = "GraphDb")]
-    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
-        let mut guard = self.write_guard()?;
-        let database = guard.as_mut().ok_or(GraphDbError::Closed)?;
-        database
-            .compact()
-            .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
-    }
-
-    /// Feature-off stub: the sealed-store lane is compiled out, so nothing
-    /// can reach a compaction request; a call is a wiring bug, not a state.
-    #[cfg(not(feature = "graph-sealed-store"))]
-    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
-        Err(GraphDbError::unavailable(
-            "sealed generation compaction requires the graph-sealed-store feature",
-        ))
     }
 
     /// Marks this handle as a reopened sealed store: every later write

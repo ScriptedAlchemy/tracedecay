@@ -11,6 +11,14 @@ truthful typed states, maintainable crate/module boundaries, and direct
 behavioral evidence—not PR choreography, gate scaffolding, or code that merely
 compiles.
 
+## Task completion
+
+Carry the requested change through implementation and relevant verification; fix
+failures introduced by the change before reporting completion. Use focused checks
+for affected behavior and broaden only for unresolved risk. Documentation-only
+edits do not require application builds. Pause for a missing decision or an
+unauthorized external action after completing independent, authorized work.
+
 ## Layout
 
 - The repository root is a **virtual workspace** — it has no package of its
@@ -156,9 +164,9 @@ compiles.
   messages instead of holding a large mixed working tree.
 - Resolve conflicts and integrate parallel work from relevant transcripts,
   plans, and Git history so intent—not whichever side is newer—wins.
-- Before final review, checkpoint the lane, merge the latest explicit clean-main
-  floor, and compare patch IDs plus owned paths. Drop duplicate or superseded
-  work instead of carrying parallel implementations; regenerate canonical
+- When integrating divergent development lanes, checkpoint the lane, merge the
+  latest explicit clean-main floor, and compare patch IDs plus owned paths. Drop
+  duplicate or superseded work instead of carrying parallel implementations; regenerate canonical
   outputs after the merge rather than hand-merging generated files.
 
 ## Learned Workspace Facts

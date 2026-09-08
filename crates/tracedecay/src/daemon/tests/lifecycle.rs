@@ -830,6 +830,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     // the process-wide worker-plan `OnceLock` first.
     super::super::DaemonInvocationState::default()
         .install_worker_selection(
+            &store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install portable broker profile worker plan");

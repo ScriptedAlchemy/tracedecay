@@ -16,11 +16,12 @@ use tracedecay_query::code_search;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
+use super::AutomationSchedulerHandle;
+use super::DaemonEngine;
+#[cfg(unix)]
 use super::explicit_git_state;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
-#[cfg(unix)]
-use super::{AutomationSchedulerHandle, DaemonEngine};
 use super::{
     DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
@@ -278,6 +279,7 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     engine
         .invocation
         .install_worker_selection(
+            &engine.store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install test daemon profile worker plan");

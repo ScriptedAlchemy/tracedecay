@@ -33,9 +33,10 @@ use tracedecay_semantic_contracts::{
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
 
 use super::artifact_store::{
-    ArtifactImportErrorV1, ArtifactInventoryRecordV1, ArtifactLeaseKindV1, ArtifactLeaseV1,
-    ConfiguredHttpsArtifactSourceV1, ExplicitHttpsArtifactTransportV1, GcReceiptV1,
-    ModelArtifactStore, RetentionPolicyV1, RuntimeEnvironmentV1,
+    ArtifactImportErrorV1, ArtifactInventoryRecordV1, ArtifactInventoryStateV1,
+    ArtifactLeaseKindV1, ArtifactLeaseV1, ConfiguredHttpsArtifactSourceV1,
+    ExplicitHttpsArtifactTransportV1, GcReceiptV1, ModelArtifactStore, RetentionPolicyV1,
+    RuntimeEnvironmentV1,
 };
 use super::model_catalog::{
     CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
@@ -49,8 +50,6 @@ const RERANKER_ACTIVE_LEASE_ID_V1: &str = "reranker:active:v1";
 const RERANKER_ROLLBACK_LEASE_ID_V1: &str = "reranker:rollback:v1";
 const EMBEDDING_ACTIVE_LEASE_ID_V1: &str = "embedding:active:v1";
 const EMBEDDING_ROLLBACK_LEASE_ID_V1: &str = "embedding:rollback:v1";
-static SHARED_LIFECYCLE_OWNER: std::sync::OnceLock<Option<Arc<SemanticModelLifecycleOwnerV1>>> =
-    std::sync::OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,7 +354,6 @@ include!("model_lifecycle/reconciliation.rs");
 include!("model_lifecycle/acquisition.rs");
 include!("model_lifecycle/persistence.rs");
 include!("model_lifecycle/local_evaluation.rs");
-include!("model_lifecycle/shared.rs");
 
 #[cfg(all(test, feature = "semantic-fastembed"))]
 #[path = "model_lifecycle/distribution_acquisition_acceptance.rs"]

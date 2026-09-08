@@ -910,6 +910,29 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
         )
     }
 
+    fn project_stage_census(
+        &self,
+        execution: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorStageCensusPage, GraphDbError> {
+        let mut authority = self.authority()?;
+        let request = tracedecay_store::SemanticVectorStageCensusRequest::for_shard(
+            self.binding.shard_id.clone(),
+            None,
+            1,
+        )
+        .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        self.with_operation(
+            execution.cancellation(),
+            execution.deadline(),
+            "project-stage-census",
+            |_, context| {
+                authority
+                    .stage_census(&request, context)
+                    .map_err(map_staging_error)
+            },
+        )
+    }
+
     fn reserve_one_generation(
         &self,
         _after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,

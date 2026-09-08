@@ -54,16 +54,20 @@ impl Drop for SemanticArtifactGcMaintenanceTask {
     }
 }
 
-pub(super) fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMaintenanceTask {
+pub(super) fn spawn_semantic_artifact_gc_maintenance(
+    registry: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
+) -> SemanticArtifactGcMaintenanceTask {
     let task = tokio::spawn(hotpath::future!(
-        async {
+        async move {
             let mut interval = tokio::time::interval(SEMANTIC_ARTIFACT_GC_PERIOD);
             loop {
                 interval.tick().await;
-                let Some(owner) =
-                    tracedecay_semantic::SemanticModelLifecycleOwnerV1::mounted_shared()
-                else {
-                    continue;
+                let owner = match registry.profile_semantic_lifecycle().await {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        tracing::warn!(%error, "semantic artifact maintenance owner unavailable");
+                        continue;
+                    }
                 };
                 let now_unix = SystemTime::now()
                     .duration_since(UNIX_EPOCH)

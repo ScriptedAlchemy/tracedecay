@@ -13,4 +13,4 @@ Map the architecture of the whole repo, or `$ARGUMENTS` if a directory was given
 
 This reports and prioritizes; it does not edit.
 
-Output: a layered module map, dependency hotspots/violations, and a prioritized risk list. If any result includes a `tracedecay_metrics:` line, report the savings.
+Output: a layered module map, dependency hotspots/violations, and a prioritized risk list.

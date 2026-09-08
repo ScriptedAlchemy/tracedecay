@@ -1,13 +1,18 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+#[cfg(test)]
+use std::future::poll_fn;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
+use std::task::{Context, Poll, Waker};
 
 use tracedecay_sessions::observation::ObservationCancellation;
 
 struct RetainedHookTask {
+    key: String,
     generation: u64,
     cancellation: ObservationCancellation,
-    handle: tokio::task::JoinHandle<()>,
+    join: Arc<RetainedHookTaskJoin>,
 }
 
 #[derive(Default)]
@@ -16,6 +21,7 @@ struct RetainedHookTaskState {
     next_generation: u64,
     tasks: BTreeMap<String, RetainedHookTask>,
     retiring: Vec<RetainedHookTask>,
+    join_failures: BTreeMap<String, Vec<String>>,
 }
 
 /// Daemon-owned terminal-hook work. A new terminal receipt for one provider
@@ -63,21 +69,20 @@ impl RetainedHookTasks {
                 operation(task_cancellation).await;
                 finish_retained_hook_task(weak_state, &task_key, generation);
             });
-            state.retiring.retain(|task| !task.handle.is_finished());
             let previous = state.tasks.insert(
-                key,
+                key.clone(),
                 RetainedHookTask {
+                    key,
                     generation,
                     cancellation,
-                    handle: task,
+                    join: Arc::new(RetainedHookTaskJoin::new(task)),
                 },
             );
             if let Some(previous) = previous {
                 previous.cancellation.cancel();
-                if !previous.handle.is_finished() {
-                    state.retiring.push(previous);
-                }
+                state.retiring.push(previous);
             }
+            state.reap_finished();
         }
         true
     }
@@ -95,51 +100,165 @@ impl RetainedHookTasks {
     #[hotpath::skip]
     pub(super) async fn retire(&self, provider: &str, session_id: &str) -> Result<(), String> {
         let key = format!("{provider}\0{session_id}");
-        let task = {
+        {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| "retained hook task state lock is poisoned".to_owned())?;
-            state.tasks.remove(&key)
-        };
-        let Some(task) = task else {
-            return Ok(());
-        };
-        task.cancellation.cancel();
-        match task.handle.await {
-            Ok(()) => Ok(()),
-            Err(error) if error.is_cancelled() => Ok(()),
-            Err(error) => Err(format!("retained hook task join failed: {error}")),
+            if let Some(task) = state.tasks.remove(&key) {
+                state.retiring.push(task);
+            }
+            for task in &state.retiring {
+                if task.key == key {
+                    task.cancellation.cancel();
+                }
+            }
         }
+        self.join_retiring(Some(&key)).await
     }
 
     #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> Result<(), String> {
-        let tasks = {
+        self.begin_shutdown();
+        {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| "retained hook task state lock is poisoned".to_owned())?;
             state.accepting = false;
-            let mut tasks = std::mem::take(&mut state.retiring);
-            tasks.extend(std::mem::take(&mut state.tasks).into_values());
-            for task in &tasks {
+            let tasks = std::mem::take(&mut state.tasks);
+            state.retiring.extend(tasks.into_values());
+            for task in &state.retiring {
                 task.cancellation.cancel();
             }
-            tasks
+        }
+        self.join_retiring(None).await
+    }
+
+    async fn join_retiring(&self, key: Option<&str>) -> Result<(), String> {
+        let joins = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "retained hook task state lock is poisoned".to_owned())?;
+            state
+                .retiring
+                .iter()
+                .filter(|task| key.is_none_or(|key| task.key == key))
+                .map(|task| (task.generation, Arc::clone(&task.join)))
+                .collect::<Vec<_>>()
         };
-        let mut failures = Vec::new();
-        for task in tasks {
-            if let Err(error) = task.handle.await
-                && !error.is_cancelled()
+        for (generation, join) in joins {
+            let result = join.wait().await;
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "retained hook task state lock is poisoned".to_owned())?;
+            if let Some(index) = state
+                .retiring
+                .iter()
+                .position(|task| task.generation == generation)
             {
-                failures.push(format!("retained hook task join failed: {error}"));
+                state.finish_join(index, result);
             }
         }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "retained hook task state lock is poisoned".to_owned())?;
+        let failures = state
+            .join_failures
+            .iter()
+            .filter(|(task_key, _)| key.is_none_or(|key| task_key.as_str() == key))
+            .flat_map(|(_, errors)| errors.iter().cloned())
+            .collect::<Vec<_>>();
         if failures.is_empty() {
             Ok(())
         } else {
             Err(failures.join("; "))
+        }
+    }
+}
+
+// One retained join state per existing task. Concurrent drains share its
+// terminal result; cancelling a waiter never moves out or detaches the handle.
+pub(super) struct RetainedHookTaskJoin {
+    state: tokio::sync::Mutex<RetainedHookTaskJoinState>,
+    abort: tokio::task::AbortHandle,
+}
+
+enum RetainedHookTaskJoinState {
+    Running(tokio::task::JoinHandle<()>),
+    Finished(Result<(), String>),
+}
+
+impl RetainedHookTaskJoin {
+    pub(super) fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            abort: handle.abort_handle(),
+            state: tokio::sync::Mutex::new(RetainedHookTaskJoinState::Running(handle)),
+        }
+    }
+
+    pub(super) async fn wait(&self) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        match &mut *state {
+            RetainedHookTaskJoinState::Finished(result) => result.clone(),
+            RetainedHookTaskJoinState::Running(handle) => {
+                let result = Self::outcome(handle.await);
+                *state = RetainedHookTaskJoinState::Finished(result.clone());
+                result
+            }
+        }
+    }
+
+    pub(super) fn abort(&self) {
+        self.abort.abort();
+    }
+
+    fn try_finished(&self) -> Option<Result<(), String>> {
+        if !self.abort.is_finished() {
+            return None;
+        }
+        let mut state = self.state.try_lock().ok()?;
+        if let RetainedHookTaskJoinState::Running(handle) = &mut *state {
+            let mut cx = Context::from_waker(Waker::noop());
+            let Poll::Ready(result) = Pin::new(handle).poll(&mut cx) else {
+                return None;
+            };
+            *state = RetainedHookTaskJoinState::Finished(Self::outcome(result));
+        }
+        match &*state {
+            RetainedHookTaskJoinState::Finished(result) => Some(result.clone()),
+            RetainedHookTaskJoinState::Running(_) => None,
+        }
+    }
+
+    fn outcome(result: Result<(), tokio::task::JoinError>) -> Result<(), String> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(format!("retained hook task join failed: {error}")),
+        }
+    }
+}
+
+impl RetainedHookTaskState {
+    fn finish_join(&mut self, index: usize, result: Result<(), String>) {
+        let task = self.retiring.swap_remove(index);
+        if let Err(error) = result {
+            self.join_failures.entry(task.key).or_default().push(error);
+        }
+    }
+
+    fn reap_finished(&mut self) {
+        let mut index = 0;
+        while index < self.retiring.len() {
+            if let Some(result) = self.retiring[index].join.try_finished() {
+                self.finish_join(index, result);
+            } else {
+                index += 1;
+            }
         }
     }
 }
@@ -174,7 +293,7 @@ impl Drop for RetainedHookTasks {
         tasks.extend(std::mem::take(&mut state.tasks).into_values());
         for task in tasks {
             task.cancellation.cancel();
-            task.handle.abort();
+            task.join.abort();
         }
     }
 }
@@ -238,11 +357,72 @@ mod tests {
             "shutdown must fence later admission"
         );
 
+        shutdown.abort();
+        assert!(
+            shutdown
+                .await
+                .expect_err("first drain is cancelled")
+                .is_cancelled()
+        );
+        let mut retry = Box::pin(tasks.shutdown());
+        // Poll the canonical task-owner drain itself: there is no later
+        // blocking lifecycle cleanup that could make a lost-handle retry
+        // appear pending. The acknowledged task cannot finish until release.
+        poll_fn(|cx| {
+            assert!(
+                retry.as_mut().poll(cx).is_pending(),
+                "cancelled shutdown must retain the acknowledged live task for retry"
+            );
+            Poll::Ready(())
+        })
+        .await;
         release.notify_one();
-        shutdown
+        retry
             .await
-            .expect("shutdown task remains joinable")
-            .expect("retained hook tasks shut down cleanly");
+            .expect("retried task-owner drain joins the released task");
+    }
+
+    #[tokio::test]
+    async fn targeted_retirement_preserves_failure_without_failing_other_keys() {
+        let tasks = RetainedHookTasks::new();
+        assert!(tasks.retain("memory-graph", "failed", |_| async {
+            panic!("retained task failure");
+        }));
+        let error = tasks
+            .retire("memory-graph", "failed")
+            .await
+            .expect_err("task panic must fail retirement");
+        assert!(error.contains("retained hook task join failed"));
+        assert_eq!(
+            tasks.retire("memory-graph", "failed").await.unwrap_err(),
+            error
+        );
+        assert!(tasks.retain("memory-graph", "healthy", |_| async {}));
+        tasks
+            .retire("memory-graph", "healthy")
+            .await
+            .expect("other key remains healthy");
+        assert_eq!(tasks.shutdown().await.unwrap_err(), error);
+    }
+
+    #[tokio::test]
+    async fn shutdown_retry_preserves_failed_join() {
+        let tasks = RetainedHookTasks::new();
+        assert!(tasks.retain("codex", "failed-session", |_| async {
+            panic!("retained task failure");
+        }));
+        let error = tasks
+            .shutdown()
+            .await
+            .expect_err("task panic must fail drain");
+        assert!(error.contains("retained hook task join failed"));
+        assert_eq!(
+            tasks
+                .shutdown()
+                .await
+                .expect_err("retry must retain failure"),
+            error,
+        );
     }
 
     #[tokio::test]
@@ -324,13 +504,45 @@ mod tests {
         assert!(!retire.is_finished(), "retirement must join its task");
         assert!(!second_cancelled.load(Ordering::Acquire));
 
-        first_release.notify_one();
-        retire
-            .await
-            .expect("retirement task remains joinable")
-            .expect("one retained task retires cleanly");
+        retire.abort();
+        assert!(
+            retire
+                .await
+                .expect_err("first retirement cancelled")
+                .is_cancelled()
+        );
         assert!(tasks.retain("memory-graph", "project-3", |_| async {}));
+        let mut retry = Box::pin(tasks.retire("memory-graph", "project-1"));
+        poll_fn(|cx| {
+            assert!(
+                retry.as_mut().poll(cx).is_pending(),
+                "retry must retain the acknowledged task until release"
+            );
+            Poll::Ready(())
+        })
+        .await;
         assert!(!second_cancelled.load(Ordering::Acquire));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tasks.retire("memory-graph", "project-2"),
+        )
+        .await
+        .expect("independent B retirement must complete while A remains held")
+        .expect("independent B retirement succeeds");
+        assert!(second_cancelled.load(Ordering::Acquire));
+        poll_fn(|cx| {
+            assert!(
+                retry.as_mut().poll(cx).is_pending(),
+                "A remains held after B retirement completes"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        first_release.notify_one();
+        retry
+            .await
+            .expect("retried exact retirement joins released task");
+        assert!(second_cancelled.load(Ordering::Acquire));
 
         tasks.begin_shutdown();
         tasks.shutdown().await.expect("remaining tasks shut down");

@@ -171,7 +171,10 @@ impl ModelArtifactStore {
         for staged in &session.meta.members {
             let file = match open_cap_file(
                 &session.members_dir,
-                member_file_name(staged.member.role),
+                member_file_name(
+                    staged.member.role,
+                    Some(&session.meta.manifest.payload.runtime),
+                ),
                 true,
                 false,
                 false,
@@ -416,7 +419,13 @@ impl ModelArtifactStore {
         for member in &record.members {
             let file = open_cap_file(
                 &directory,
-                member_file_name(member.role),
+                member_file_name(
+                    member.role,
+                    record
+                        .manifest
+                        .as_ref()
+                        .map(|manifest| &manifest.payload.runtime),
+                ),
                 true,
                 false,
                 false,

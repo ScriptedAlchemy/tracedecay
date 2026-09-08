@@ -20,6 +20,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -91,6 +92,10 @@ pub struct DaemonSessionSyncConfig {
     pub project_sessions: RegisteredGlobalDbLeaseV1,
     pub user_sessions: RegisteredGlobalDbLeaseV1,
     pub registry: RegisteredGlobalDbLeaseV1,
+    /// The process background CPU authority transcript-ingest admissions
+    /// prepare captures under; the daemon injects the one its worker plan
+    /// installed.
+    pub background_cpu: Arc<ProcessBackgroundCpuV1>,
     pub startup_import: bool,
     pub project_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub user_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,

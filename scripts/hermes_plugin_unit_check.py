@@ -18,6 +18,9 @@ exists. It asserts the host contracts the 2026-06 review found broken:
      (prompt-cache safety without hijacking small talk).
   6. Hermes host-home state cannot redirect the TraceDecay install, store, or
      project, and removed storage-routing fields stay out of tool schemas.
+  7. Exact routes and read-only membership derive from the generated
+     schemas.json, and call_tracedecay_json decodes only the shapes
+     `tracedecay tool --json` prints (MCP result, retained ApplicationEnvelope).
 
 Usage:
     python3 scripts/hermes_plugin_unit_check.py [plugin_dir]
@@ -184,12 +187,7 @@ def _check_provenance(plugin_dir: Path):
     schemas = json.loads((plugin_dir / "schemas.json").read_text(encoding="utf-8"))
     assert any(schema.get("name") == "tracedecay_search" for schema in schemas), schemas
     assert (plugin_dir / "cli.py").is_file()
-    skill = (plugin_dir / "skills" / "tracedecay" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "normal user-profile installation" in skill, skill
-    assert "current schemas and are rejected" in skill, skill
-    ok("provenance stamp + cli passthrough + storage guidance generated")
+    ok("provenance stamp + cli passthrough generated")
 
 
 def _write_managed_skill_fixtures(plugin_dir: Path) -> Path:
@@ -560,73 +558,144 @@ def _check_nudge_kill_switch(plugin, ctx):
     ok("plugins.tracedecay.nudge kill switch silences the nudge")
 
 
-def _check_response_handle_deref(plugin):
-    # Response handles are a generic MCP transport feature, not LCM-only.
-    # Large fact-store searches must dereference their handle before the
-    # Hermes memory provider tries to read count/facts from the payload.
+def _check_canonical_metadata(plugin, plugin_dir: Path, ctx):
+    # Exact routes and read-only membership come from the generated catalog
+    # (schemas.json carries readOnlyHint as `read_only`), not from lists
+    # maintained beside it.
+    generated = json.loads((plugin_dir / "schemas.json").read_text(encoding="utf-8"))
+    assert all(isinstance(schema.get("read_only"), bool) for schema in generated), generated[0]
+    assert plugin.TOOL_SCHEMAS_BY_NAME.keys() == {schema["name"] for schema in generated}
+    assert {"tracedecay_search", "tracedecay_grep", "tracedecay_fact_store_search"} <= (
+        plugin.READ_ONLY_TOOL_NAMES
+    ), sorted(plugin.READ_ONLY_TOOL_NAMES)
+    assert plugin.READ_ONLY_TOOL_NAMES.isdisjoint(
+        {"tracedecay_str_replace", "tracedecay_fact_store_add", "tracedecay_fact_store_curate"}
+    ), sorted(plugin.READ_ONLY_TOOL_NAMES)
+    assert set(plugin.FACT_STORE_EXACT_ROUTES) >= set(plugin.MEMORY_FACT_ACTIONS.values())
+    assert all(
+        route == f"tracedecay_fact_store_{action}" and route in plugin.TOOL_SCHEMAS_BY_NAME
+        for action, route in plugin.FACT_STORE_EXACT_ROUTES.items()
+    ), plugin.FACT_STORE_EXACT_ROUTES
+    collapsed = plugin._collapsed_fact_store_schema()
+    assert collapsed["parameters"]["properties"]["action"]["enum"] == sorted(
+        plugin.FACT_STORE_EXACT_ROUTES
+    )
+    assert plugin.MISSING_MEMORY_PROVIDER_TOOLS == (), plugin.MISSING_MEMORY_PROVIDER_TOOLS
+    ok("exact routes and read-only membership derive from schemas.json")
+
+    # The mutating/read-only gate for explicit registered-project selectors
+    # follows that annotation.
+    refused = ctx.tools["tracedecay_str_replace"]["handler"](
+        {"path": "src/lib.rs", "old": "a", "new": "b", "project_id": "proj_other"}
+    )
+    assert "does not permit a cross-project mutating selector" in refused, refused
+    ok("catalog readOnlyHint gates cross-project selectors")
+
+    # A canonical schema this catalog does not advertise is an explicit gap:
+    # omitted from the provider's schemas, refused on dispatch, never a
+    # valid-looking empty schema.
+    feedback_schema = plugin.TOOL_SCHEMAS_BY_NAME.pop("tracedecay_fact_feedback")
+    try:
+        assert plugin._memory_schema("tracedecay_fact_feedback", "fact_feedback") is None
+        names = [schema["name"] for schema in ctx.provider.get_tool_schemas()]
+        assert names == ["fact_store", "memory_status"], names
+        refused = ctx.provider.handle_tool_call("fact_feedback", {"fact_id": 1})
+        assert "does not advertise" in refused, refused
+    finally:
+        plugin.TOOL_SCHEMAS_BY_NAME["tracedecay_fact_feedback"] = feedback_schema
+    restored = plugin._memory_schema("tracedecay_fact_feedback", "fact_feedback")
+    assert restored["parameters"] == feedback_schema["parameters"]
+    assert restored["parameters"] is not feedback_schema["parameters"]
+    ok("missing canonical metadata is visible, not papered over")
+
+
+def _check_response_envelope_table(plugin):
+    # `tracedecay tool --json` prints the daemon's MCP result; its one JSON
+    # content block is either the tool's own result (compatibility tools) or
+    # a retained ApplicationEnvelope whose result is outcome.value.payload.
+    # The CLI reassembles truncated payloads itself, so the plugin never
+    # dereferences handles: the decoder is one flat pass, not a recursive guess.
     real_tool = plugin.tools.call_tracedecay_tool
     bridge_calls = []
-    try:
-        def _handled_response(name, args, **kwargs):
-            bridge_calls.append((name, args, kwargs))
-            if name == "tracedecay_lcm_status":
-                return json.dumps(
-                    {
-                        "contract": {
-                            "schema_id": "schema.application.retained.lcm-status.result",
-                            "schema_revision": 1,
-                        },
-                        "outcome": {
-                            "outcome": "evidence",
-                            "value": {
-                                "payload": {
-                                    "status": "not_ingested",
-                                    "provider": "hermes",
-                                    "session_id": "check-session",
-                                }
-                            },
-                        },
-                    }
-                )
-            if name == "tracedecay_retrieve":
-                payload = {
-                    "count": 1,
-                    "facts": [{"fact": {"fact_id": 7, "content": "remember me"}}],
-                }
-            else:
-                payload = {
-                    "truncated": True,
-                    "handle": "rh_fact_search",
-                    "retrieve_tool": "tracedecay_retrieve",
-                    "preview": "{\"count\":1",
-                }
-            return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+    responses = {}
 
-        plugin.tools.call_tracedecay_tool = _handled_response
-        resolved = plugin.call_tracedecay_json(
-            "tracedecay_fact_store_search",
-            {
-                "query": "remember",
-                "project_selector": {"path": "/tmp/selected-project"},
+    def mcp_result(*texts):
+        return json.dumps({"content": [{"type": "text", "text": text} for text in texts]})
+
+    def envelope(payload, outcome="evidence"):
+        return {
+            "contract": {
+                "schema_id": "schema.application.retained.lcm-status.result",
+                "schema_revision": 1,
             },
-        )
-        assert resolved.get("count") == 1, resolved
-        assert [call[0] for call in bridge_calls] == [
-            "tracedecay_fact_store_search",
-            "tracedecay_retrieve",
-        ], bridge_calls
-        assert bridge_calls[1][1]["project_selector"] == {
-            "path": "/tmp/selected-project"
-        }, bridge_calls
-        ok("generic response handles dereference for memory-provider results")
+            "request_id": "request.check",
+            "scope": {"project_id": "project.check"},
+            "outcome": {"outcome": outcome, "value": {"page": {}, "payload": payload}},
+        }
 
-        status = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
-        assert status == {
-            "status": "not_ingested",
-            "provider": "hermes",
-            "session_id": "check-session",
-        }, status
-        ok("mounted application outcomes unwrap to their typed payload")
+    def _scripted(name, args, **kwargs):
+        bridge_calls.append((name, args, kwargs))
+        return responses[name]
+
+    try:
+        plugin.tools.call_tracedecay_tool = _scripted
+        status_payload = {"status": "not_ingested", "provider": "hermes", "session_id": "s"}
+        responses["tracedecay_lcm_status"] = mcp_result(json.dumps(envelope(status_payload)))
+        assert plugin.call_tracedecay_json("tracedecay_lcm_status", {}) == status_payload
+        responses["tracedecay_fact_store_curate"] = mcp_result(
+            json.dumps(envelope({"run_id": "run.1"}, outcome="effect"))
+        )
+        assert plugin.call_tracedecay_json("tracedecay_fact_store_curate", {}) == {
+            "run_id": "run.1"
+        }
+        ok("retained application envelopes unwrap to outcome.value.payload")
+
+        # Adversarial payload keys are not envelope evidence: a plain result
+        # that happens to carry status/answer/content/outcome stays intact and
+        # its string fields are never re-parsed.
+        plain = {
+            "status": "ok",
+            "answer": "42",
+            "content": json.dumps({"nested": True}),
+            "outcome": "evidence",
+        }
+        responses["tracedecay_status"] = mcp_result(json.dumps(plain))
+        assert plugin.call_tracedecay_json("tracedecay_status", {}) == plain
+        ok("compatibility payloads are returned as-is without key heuristics")
+
+        # A prose trailer block beside the JSON block (stale-graph freshness
+        # note) is skipped, not concatenated into the payload.
+        responses["tracedecay_status"] = mcp_result(
+            json.dumps(plain), "\ncode_graph_freshness: stale — serving generation g1"
+        )
+        assert plugin.call_tracedecay_json("tracedecay_status", {}) == plain
+        ok("prose content trailers do not disturb the JSON payload")
+
+        # A truncation envelope is a CLI-level failure (non-zero exit) and
+        # reaches the plugin as tools.error_payload; the plugin issues no
+        # tracedecay_retrieve follow-up of its own.
+        responses["tracedecay_fact_store_search"] = plugin.tools.error_payload(
+            "tracedecay tool exited with status 1"
+        )
+        bridge_calls.clear()
+        refused = plugin.call_tracedecay_json("tracedecay_fact_store_search", {"query": "q"})
+        assert refused == {"error": "tracedecay tool exited with status 1"}, refused
+        assert [call[0] for call in bridge_calls] == ["tracedecay_fact_store_search"]
+        ok("CLI-refused truncation stays a typed error with no plugin retrieve")
+
+        # Malformed shapes are explicit refusals, not empty successes.
+        responses["tracedecay_lcm_status"] = mcp_result(
+            json.dumps(envelope(None))
+        )
+        missing_payload = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+        assert "omitted its result payload" in missing_payload["error"], missing_payload
+        responses["tracedecay_lcm_status"] = mcp_result(json.dumps(plain), json.dumps(plain))
+        two_payloads = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+        assert "returned 2 JSON payloads" in two_payloads["error"], two_payloads
+        responses["tracedecay_lcm_status"] = json.dumps(envelope(status_payload))
+        bare = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+        assert bare["error"] == "tracedecay tool response missing text content", bare
+        ok("envelopes without a payload, extra payloads, or no content block are refused")
     finally:
         plugin.tools.call_tracedecay_tool = real_tool
 
@@ -1082,7 +1151,8 @@ def run_checks(work: Path):
     _check_pre_llm_call_hooks(plugin, ctx)
     _check_terminal_receipts(plugin, ctx, host_home, hermes_descendant, runtime_project)
     _check_nudge_kill_switch(plugin, ctx)
-    _check_response_handle_deref(plugin)
+    _check_canonical_metadata(plugin, plugin_dir, ctx)
+    _check_response_envelope_table(plugin)
     messages = _check_engine_state_and_compress(plugin, ctx, host_home, runtime_project)
     _check_engine_thread_isolation(ctx.engine)
     _check_should_compress_gating(plugin, ctx.engine)

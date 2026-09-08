@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
+use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
@@ -17,7 +18,7 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    admit_candidate_sources,
+    admit_candidate_sources, lexical_checkpoint,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
@@ -946,6 +947,61 @@ impl CodeLexicalProjectionAdapterV1 {
             .saturating_add(self.postings.retained_owned_bytes())
     }
 
+    /// Build a scoped projection with the same extracted symbol identity used
+    /// by sealed-page artifact preparation. Scope selection never substitutes
+    /// caller-supplied names for the published generation's parser authority.
+    pub fn new_published(
+        metadata: CodeLexicalProjectionMetadataV1,
+        generation: &CodeIndexPublishedGenerationV1,
+        allowed_files: &BTreeSet<FileOccurrenceId>,
+    ) -> Result<Self, RetrievalPortError> {
+        let deadline =
+            Instant::now() + Duration::from_micros(lexical_projection_build_deadline_micros(None));
+        if metadata.generation != generation.manifest().generation_id {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
+        let canonical_paths = generation
+            .snapshot()
+            .files
+            .iter()
+            .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
+            .collect();
+        if metadata.repository_id.as_ref() != Some(&generation.snapshot().repository)
+            || metadata.logical_paths != canonical_paths
+            || allowed_files
+                .iter()
+                .any(|file| !metadata.logical_paths.contains_key(file))
+        {
+            return Err(RetrievalPortError::Contract(
+                "lexical scope does not match the published generation".to_owned(),
+            ));
+        }
+        let admitted = generation.admitted_chunks().map_err(contract_error)?;
+        let chunks = admitted
+            .iter()
+            .filter(|chunk| allowed_files.contains(&chunk.chunk().anchor.file_occurrence_id))
+            .map(|chunk| chunk.chunk().clone())
+            .collect();
+        let symbol_qualified_names = generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+            .collect();
+        let mut build = CodeLexicalProjectionBuildV1::new_inner(
+            metadata,
+            chunks,
+            symbol_qualified_names,
+            true,
+        )?;
+        match build.advance_inner(usize::MAX, Some(deadline))? {
+            CodeLexicalProjectionBuildStepV1::Ready(projection) => Ok(*projection),
+            CodeLexicalProjectionBuildStepV1::Pending { .. } => Err(RetrievalPortError::Contract(
+                "unbounded lexical projection build did not complete".to_owned(),
+            )),
+        }
+    }
+
     pub fn new(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
@@ -1075,6 +1131,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut pairs = Vec::new();
         let mut excluded = self.rows.len() as u64 - documents.len();
         for document in documents {
+            lexical_checkpoint(request.control)?;
             let row = &self.rows[document as usize];
             let score = self.score_row(
                 document,

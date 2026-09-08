@@ -37,7 +37,7 @@ impl StorageOperationExecutor for NoTypedWrites {
 }
 
 #[derive(Clone)]
-struct NoTypedReads;
+pub struct NoTypedReads;
 
 impl ReaderQueryExecutor for NoTypedReads {
     fn execute_read(
@@ -50,12 +50,15 @@ impl ReaderQueryExecutor for NoTypedReads {
 }
 
 /// A started registered store: writer, readers, and the Work storage bound to
-/// them. Dropping it stops both actors and removes the directory.
+/// them. Dropping it stops both actors and removes the directory. The writer
+/// and reader pool are exposed for their telemetry: SQLite VM steps and
+/// reader acquisitions are the cost witnesses a storage test can measure
+/// without instrumenting production code.
 pub struct RegisteredWorkStore {
     storage: WorkSqliteStorage,
     path: PathBuf,
-    _writer: PersistentWriter,
-    _readers: ReaderPool<NoTypedReads>,
+    pub writer: PersistentWriter,
+    pub readers: ReaderPool<NoTypedReads>,
     _directory: TempDir,
 }
 
@@ -68,12 +71,22 @@ impl RegisteredWorkStore {
     /// Starts a registered store, running `setup` against the file after the
     /// Work schema is installed and before the writer takes ownership.
     pub fn start_with_setup(name: &str, setup: impl FnOnce(&Connection)) -> Self {
+        Self::start_seeded(name, |connection| {
+            install_work_schema(connection).expect("install work schema");
+            setup(connection);
+        })
+    }
+
+    /// Starts a registered store over a file `seed` shaped before the current
+    /// Work schema is installed — the way a daemon opens a journal an earlier
+    /// release wrote. Installation is idempotent, so a seed may install too.
+    pub fn start_seeded(name: &str, seed: impl FnOnce(&Connection)) -> Self {
         let directory = TempDir::new().expect("work store directory");
         let path = directory.path().join(format!("{name}.sqlite3"));
         {
             let connection = Connection::open(&path).expect("open work store");
+            seed(&connection);
             install_work_schema(&connection).expect("install work schema");
-            setup(&connection);
         }
         let path = path.canonicalize().expect("canonicalize work store");
         Self::open(name, path, directory)
@@ -85,8 +98,8 @@ impl RegisteredWorkStore {
         let Self {
             storage,
             path,
-            _writer: writer,
-            _readers: readers,
+            writer,
+            readers,
             _directory: directory,
         } = self;
         drop(storage);
@@ -121,8 +134,8 @@ impl RegisteredWorkStore {
                 ),
             ),
             path,
-            _writer: writer,
-            _readers: readers,
+            writer,
+            readers,
             _directory: directory,
         }
     }

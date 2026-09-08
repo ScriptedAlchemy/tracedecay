@@ -1,7 +1,4 @@
 [toolchain]
 channel = "1.97.1"
-# `rust-analyzer` is what the LSP acceptance lane negotiates against: the
-# gateway advertises a standard method only when the upstream analyzer's
-# `initialize` response declares it. Lanes that install this pin (Windows
-# build/test) therefore need the component, not just the compiler.
-components = ["clippy", "rustfmt", "rust-analyzer"]
+# LSP acceptance negotiates capabilities with the pinned upstream analyzer.
+components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]

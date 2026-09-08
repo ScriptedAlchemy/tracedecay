@@ -8,10 +8,10 @@ use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     AuthorizedScopeSetError, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, MultiRootScopeSetCasRequestV1, RegisteredRootLocatorV1, RequestContext,
-    RequestId, ResolvedScope,
+    RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
+    ActorId, BrainId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
     UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -141,8 +141,12 @@ fn authorized_scope_set_preserves_registered_root_locator() {
     let context = context("worktree.main", "main");
     let locator = RegisteredRootLocatorV1::new(
         context.scope().project_id.clone(),
-        UserProfileId::new("profile.fixture").unwrap(),
-        "store.fixture".to_owned(),
+        SharedProfileStoreLocatorV1::new(
+            BrainId::new("brain.fixture").unwrap(),
+            UserProfileId::new("profile.fixture").unwrap(),
+            "store.fixture".to_owned(),
+        )
+        .unwrap(),
         common::fixture_abs_root("/workspace/main"),
     )
     .unwrap();
@@ -171,8 +175,12 @@ fn registered_scope_set_refuses_missing_duplicate_and_foreign_profile_roots() {
         );
         let locator = RegisteredRootLocatorV1::new(
             context.scope().project_id.clone(),
-            UserProfileId::new(profile).unwrap(),
-            "store.shared",
+            SharedProfileStoreLocatorV1::new(
+                BrainId::new("brain.fixture").unwrap(),
+                UserProfileId::new(profile).unwrap(),
+                "store.shared",
+            )
+            .unwrap(),
             common::fixture_abs_root(&format!("/workspace/{suffix}")),
         )
         .unwrap();
@@ -258,8 +266,12 @@ fn federated_roots_refuse_a_foreign_profile_store_locator() {
             context.clone(),
             RegisteredRootLocatorV1::new(
                 context.scope().project_id.clone(),
-                UserProfileId::new(profile).unwrap(),
-                "store.shared-profile".to_owned(),
+                SharedProfileStoreLocatorV1::new(
+                    BrainId::new("brain.fixture").unwrap(),
+                    UserProfileId::new(profile).unwrap(),
+                    "store.shared-profile".to_owned(),
+                )
+                .unwrap(),
                 common::fixture_abs_root(root),
             )
             .unwrap(),
@@ -377,4 +389,83 @@ fn scope_digests_separate_references_and_refuse_a_duplicate_exact_root() {
         empty,
         tracedecay_application::AuthorizedScopeSetError::Empty
     ));
+}
+
+#[test]
+fn registered_roots_share_exact_brain_profile_and_store_identity() {
+    let profile = SharedProfileStoreLocatorV1::new(
+        BrainId::new("brain.shared").unwrap(),
+        UserProfileId::new("profile.shared").unwrap(),
+        "store.fixture",
+    )
+    .unwrap();
+    for (second_profile, admitted) in [
+        (profile.clone(), true),
+        (
+            SharedProfileStoreLocatorV1::new(
+                profile.brain_id.clone(),
+                profile.profile_id.clone(),
+                "store.foreign",
+            )
+            .unwrap(),
+            false,
+        ),
+        (
+            SharedProfileStoreLocatorV1::new(
+                BrainId::new("brain.foreign").unwrap(),
+                profile.profile_id.clone(),
+                "store.fixture",
+            )
+            .unwrap(),
+            false,
+        ),
+        (
+            SharedProfileStoreLocatorV1::new(
+                profile.brain_id.clone(),
+                UserProfileId::new("profile.foreign").unwrap(),
+                "store.fixture",
+            )
+            .unwrap(),
+            false,
+        ),
+    ] {
+        let roots = [("alpha", profile.clone()), ("beta", second_profile)]
+            .into_iter()
+            .map(|(suffix, profile)| {
+                let context = context_at(
+                    &format!("project.{suffix}"),
+                    &format!("repository.{suffix}"),
+                    &format!("worktree.{suffix}"),
+                    suffix,
+                );
+                let locator = RegisteredRootLocatorV1::new(
+                    context.scope().project_id.clone(),
+                    profile,
+                    common::fixture_abs_root(&format!("/workspace/{suffix}")),
+                )
+                .unwrap();
+                AuthorizedRootAdmission::new(context, locator).unwrap()
+            })
+            .collect();
+        let result = AuthorizedScopeSetAuthority::authorize_registered(
+            ScopeSetId::new("scope-set.shared-profile").unwrap(),
+            ScopeSetRevision::new(1).unwrap(),
+            roots,
+            &CapabilityId::new(CAPABILITY).unwrap(),
+            &UseCaseId::new(USE_CASE).unwrap(),
+            UtcMicros(10),
+        );
+        if admitted {
+            let set = result.expect("distinct projects share the registered Profile shard");
+            assert_eq!(set.roots().len(), 2);
+            let encoded = serde_json::to_value(&set).unwrap();
+            let restored: AuthorizedScopeSet = serde_json::from_value(encoded).unwrap();
+            assert_eq!(restored, set);
+        } else {
+            assert!(
+                result.is_err(),
+                "foreign brain/profile identity must be denied"
+            );
+        }
+    }
 }

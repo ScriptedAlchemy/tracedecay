@@ -6,16 +6,11 @@ import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import { activationFor, useScope } from '../../data/scope/store.ts';
-import { StateChip } from '../../ui/StateChip.tsx';
-import { usePaletteRegistry, type PaletteEntry } from './paletteRegistry.ts';
 
 interface CommandPaletteRow {
   id: string;
   label: string;
   hint: string;
-  keywords?: readonly string[];
-  state?: PaletteEntry['state'];
-  scopeLabel?: string;
   action: () => void;
 }
 
@@ -37,8 +32,7 @@ function optionId(index: number): string {
 }
 
 /** Command palette: scope-aware search across workspaces, registered
- * projects, and page-provided entries. Results carry the same truth metadata
- * as lists. Lazy-loaded from Shell after first open so @radix-ui/react-dialog
+ * projects. Lazy-loaded from Shell after first open so @radix-ui/react-dialog
  * stays out of the initial shell chunk. */
 export function CommandPalette({
   open,
@@ -49,7 +43,6 @@ export function CommandPalette({
 }) {
   const navigate = useNavigate();
   const selectProject = useScope((s) => s.selectProject);
-  const providers = usePaletteRegistry((state) => state.providers);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   // Entities: registered projects become scope-setting results. Fetched only
@@ -100,42 +93,13 @@ export function CommandPalette({
             })),
           )
         : [];
-    const providerEntries = Object.values(providers).flatMap((provided) =>
-      provided.map((entry) => ({
-        id: `provider:${entry.id}`,
-        label: entry.label,
-        hint: entry.hint,
-        keywords: entry.keywords,
-        state: entry.state,
-        scopeLabel: entry.scopeLabel,
-        action: () => {
-          switch (entry.kind) {
-            case 'navigate':
-              navigate(entry.to);
-              break;
-            case 'legal_action':
-              entry.invoke(entry.reference);
-              break;
-            default: {
-              const exhaustive: never = entry;
-              return exhaustive;
-            }
-          }
-          onOpenChange(false);
-        },
-      })),
-    );
-    return [...workspaceEntries, ...projectEntries, ...providerEntries];
-  }, [navigate, onOpenChange, projects.data, providers, selectProject]);
+    return [...workspaceEntries, ...projectEntries];
+  }, [navigate, onOpenChange, projects.data, selectProject]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return entries;
-    return entries.filter(
-      (entry) =>
-        entry.label.toLowerCase().includes(q) ||
-        entry.keywords?.some((keyword) => keyword.toLowerCase().includes(q)),
-    );
+    return entries.filter((entry) => entry.label.toLowerCase().includes(q));
   }, [entries, query]);
 
   useEffect(() => setActive(0), [query, open]);
@@ -244,14 +208,7 @@ export function CommandPalette({
                 >
                   <span>{entry.label}</span>
                   <span className="flex items-center gap-2 text-2xs text-text-muted">
-                    {entry.state !== undefined ? (
-                      <StateChip kind={entry.state} detail={entry.hint} />
-                    ) : (
-                      entry.hint
-                    )}
-                    {entry.scopeLabel !== undefined ? (
-                      <span className="font-mono">{entry.scopeLabel}</span>
-                    ) : null}
+                    {entry.hint}
                     {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
                   </span>
                 </li>

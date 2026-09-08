@@ -91,13 +91,6 @@ async fn run_foreground_loopback(
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation =
         DaemonInvocationState::with_progress_producer_incarnation(authority.record().epoch);
-    store_administration
-        .configure_codex_preparation_resources(
-            invocation.code_index_schedulers.process_resident_memory(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to configure Codex preparation resources: {error}"),
-        })?;
     invocation.configure_github_read_only_credentials(authority.profile_identity());
     store_administration.install_remote_recovery_project_lifecycle(
         invocation.clone(),
@@ -168,7 +161,9 @@ async fn run_foreground_loopback(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
+        store_administration.session_runtime_registry().await?,
+    );
 
     let lifecycle = DaemonLifecycle::default();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
@@ -524,17 +519,6 @@ async fn run_foreground_unix(
         .with_http_application_registry(http_application_registry.clone());
     engine
         .store_administration
-        .configure_codex_preparation_resources(
-            engine
-                .invocation
-                .code_index_schedulers
-                .process_resident_memory(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to configure Codex preparation resources: {error}"),
-        })?;
-    engine
-        .store_administration
         .install_remote_recovery_project_lifecycle(
             engine.invocation.clone(),
             Arc::clone(&engine.project_open_gates),
@@ -639,7 +623,12 @@ async fn run_foreground_unix(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
+        engine
+            .store_administration
+            .session_runtime_registry()
+            .await?,
+    );
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration
@@ -819,9 +808,11 @@ async fn run_foreground_unix(
 }
 
 /// Install the daemon-wide worker authority from the profile's exact
-/// `ProfileSessions` configuration before publishing a transport endpoint.
-/// Account-deletion-only boots return before this point and never start
-/// projectless capture work.
+/// `ProfileSessions` configuration before publishing a transport endpoint,
+/// then mount the process resources session preparation meters against: the
+/// daemon's resident-memory authority and the background CPU authority the
+/// worker plan just installed. Account-deletion-only boots return before this
+/// point and never start projectless capture work.
 #[hotpath::measure(label = "daemon.bootstrap.worker_plan", future = true)]
 async fn install_profile_worker_plan(
     store_administration: &StoreAdministration,
@@ -835,7 +826,7 @@ async fn install_profile_worker_plan(
         .registered_profile_session_database()
         .await?;
     invocation
-        .install_profile_worker_plan(database, &profile_id)
+        .install_profile_worker_plan(store_administration, database, &profile_id)
         .await?;
     Ok(())
 }

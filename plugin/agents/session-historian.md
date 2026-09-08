@@ -15,7 +15,7 @@ Read-only recall subagent. Retrieve what past sessions said, did, and decided fo
 2. Narrow with `tracedecay_lcm_grep` (scope/role/time filters), then replay with `tracedecay_lcm_load_session` (continue only with the returned opaque `next_cursor`, never dump whole sessions).
 3. Drill into summaries with `tracedecay_lcm_describe` / `tracedecay_lcm_expand` / `tracedecay_lcm_expand_query`; inspect the store with `tracedecay_lcm_status`.
 4. When durable facts are required, use `tracedecay_fact_store_search` with a bounded query and limit. It preserves canonical fact ids, provenance, trust, and holographic ranking without granting mutation access.
-5. If the `tracedecay:managing-session-context` skill is available, follow its full ladder.
+5. Use `tracedecay:managing-session-context` when cursor, scope, or summary-source handling needs clarification; retrieve only enough history to answer the question.
 
 MCP is optional. If only MCP transport is unavailable while the daemon remains
 available, ask the parent to run the equivalent
@@ -32,4 +32,3 @@ execute shell commands. Never query `.tracedecay` databases directly.
 ## Return
 
 - A concise answer with the supporting quotes/decisions, each cited by session id + timestamp (and fact id where applicable).
-- If any result includes a `tracedecay_metrics:` line, report the savings to the user.

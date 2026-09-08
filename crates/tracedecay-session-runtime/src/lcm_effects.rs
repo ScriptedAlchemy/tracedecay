@@ -105,7 +105,7 @@ impl DaemonLcmEffectService {
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         let result = self.compress_phases(request).await;
-        observe_compression_outcome(&result);
+        observe_compression_outcome(result.as_ref());
         result
     }
 
@@ -118,12 +118,7 @@ impl DaemonLcmEffectService {
         let result = self
             .compress_retained_phases(request, convergence_candidate)
             .await;
-        observe_compression_outcome(
-            &result
-                .as_ref()
-                .map(|bounded| bounded.response.clone())
-                .map_err(|error| (*error).clone()),
-        );
+        observe_compression_outcome(result.as_ref().map(|bounded| &bounded.response));
         result
     }
 
@@ -152,15 +147,17 @@ impl DaemonLcmEffectService {
             LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()
         ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
         {
-            return self.commit_compression(request).await;
+            return self.commit_compression(&request).await;
         }
 
+        // The message corpus is owned once by `request`; only `summarizer`
+        // changes between the planning pass and the final commit.
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let pending = self.commit_compression(request.clone()).await?;
+        let pending = self.commit_compression(&request).await?;
         if pending.status != "needs_summary" {
             return Ok(pending);
         }
-        let Some(summary_request) = pending.summary_request.clone() else {
+        let Some(summary_request) = pending.summary_request.as_ref() else {
             return Ok(pending);
         };
         let summary = match super::lcm_summarization::resolve_authoritative_summary(
@@ -187,7 +184,7 @@ impl DaemonLcmEffectService {
             summary_text: summary.text,
             route: Some(summary.route),
         };
-        self.commit_compression(request).await
+        self.commit_compression(&request).await
     }
 
     async fn compress_retained_phases(
@@ -201,18 +198,18 @@ impl DaemonLcmEffectService {
         ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
         {
             return self
-                .commit_retained_compression(request, Some(convergence_candidate), None)
+                .commit_retained_compression(&request, Some(convergence_candidate), None)
                 .await;
         }
 
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
         let pending = self
-            .commit_retained_compression(request.clone(), Some(convergence_candidate), None)
+            .commit_retained_compression(&request, Some(convergence_candidate), None)
             .await?;
         if pending.response.status != "needs_summary" {
             return Ok(pending);
         }
-        let Some(summary_request) = pending.response.summary_request.clone() else {
+        let Some(summary_request) = pending.response.summary_request.as_ref() else {
             return Ok(pending);
         };
         // Host-native compaction text is usable for retained convergence only
@@ -256,7 +253,7 @@ impl DaemonLcmEffectService {
         };
         let mut committed = self
             .commit_retained_compression(
-                request,
+                &request,
                 Some(convergence_candidate),
                 Some(&required_native_source_range),
             )
@@ -272,7 +269,7 @@ impl DaemonLcmEffectService {
     #[hotpath::skip]
     async fn commit_compression(
         &self,
-        request: LcmCompressionRequest,
+        request: &LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         let execution = self.control.execution_control();
         let before_commit = self.control.clone();
@@ -291,7 +288,7 @@ impl DaemonLcmEffectService {
 
     async fn commit_retained_compression(
         &self,
-        request: LcmCompressionRequest,
+        request: &LcmCompressionRequest,
         convergence_candidate: Option<
             &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
         >,
@@ -402,8 +399,9 @@ pub async fn lcm_session_boundary_for_test(
 
 /// Terminal compression outcomes for profiling, including deferrals and
 /// failures: a lane that only counts commits hides exactly the retried and
-/// cancelled work a compaction investigation needs to see.
-fn observe_compression_outcome(result: &Result<LcmCompressionResponse, LcmError>) {
+/// cancelled work a compaction investigation needs to see. Borrows the
+/// outcome so classifying a retained page never copies its response payload.
+fn observe_compression_outcome(result: Result<&LcmCompressionResponse, &LcmError>) {
     match result {
         Ok(response) if response.retry_status.is_some() => {
             hotpath::gauge!("daemon.lcm.compress.deferred").inc(1.0);
@@ -449,6 +447,8 @@ mod tests {
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_store::ParseOffset;
+
+    mod compression_ownership;
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {
         SessionRecord {
@@ -616,7 +616,7 @@ mod tests {
         let cancellation_control = execution_control();
         let cancelled = db
             .lcm_compress_guarded(
-                compression_request("compress-session"),
+                &compression_request("compress-session"),
                 &cancellation_control,
                 || Err(LcmError::Cancelled),
             )
@@ -1558,7 +1558,7 @@ done
         };
         let interrupted = db
             .lcm_compress_retained_page_guarded(
-                interrupted_request,
+                &interrupted_request,
                 &execution_control(),
                 || Err(LcmError::Cancelled),
                 retained_guard(None),
@@ -1633,7 +1633,7 @@ done
         };
         let bounded = db
             .lcm_compress_retained_page_guarded(
-                retained,
+                &retained,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(None),
@@ -1970,7 +1970,7 @@ done
             route: Some("test_partial_invalidation_fairness".to_string()),
         };
         db.lcm_compress_retained_page_guarded(
-            request,
+            &request,
             &execution_control(),
             || Ok(()),
             retained_guard(None),
@@ -2096,7 +2096,7 @@ done
         };
         let poison = db
             .lcm_compress_retained_page_guarded(
-                poison_request,
+                &poison_request,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(None),
@@ -2455,7 +2455,7 @@ done
             };
             let initial = db
                 .lcm_compress_retained_page_guarded(
-                    initial_request,
+                    &initial_request,
                     &execution_control(),
                     || Ok(()),
                     retained_guard(None),
@@ -2624,7 +2624,7 @@ done
                 };
                 let compressed = db
                     .lcm_compress_retained_page_guarded(
-                        request,
+                        &request,
                         &execution_control(),
                         || Ok(()),
                         retained_guard(None),
@@ -2923,7 +2923,7 @@ done
         };
         let initial = db
             .lcm_compress_retained_page_guarded(
-                request,
+                &request,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(None),
@@ -3007,7 +3007,7 @@ done
         };
         let error = db
             .lcm_compress_retained_page_guarded(
-                request,
+                &request,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(Some(tracedecay_lcm::LcmSummarySourceRange {

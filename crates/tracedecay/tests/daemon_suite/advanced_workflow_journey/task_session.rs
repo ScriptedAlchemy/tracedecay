@@ -16,6 +16,7 @@ use tracedecay_application::{
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationValueV1,
     SEMANTIC_RUNTIME_SETTING_KEY, SettingKey,
@@ -34,6 +35,7 @@ use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticFallbackReasonV1,
     SemanticModelLifecycleStateV1, SemanticProfileSelection, SemanticResourceCeilings,
 };
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_usecases::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
 
 use super::{
@@ -214,35 +216,54 @@ pub(super) fn install_semantic_fixture(home: &Path) -> Option<InstalledSemanticF
     let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
         .map(PathBuf::from)
         .filter(|path| path.is_dir())?;
-    let profile = home.join(".tracedecay");
-    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
-        .expect("private semantic fixture profile");
-    let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(&profile);
-    let owner = SemanticModelLifecycleOwnerV1::open_default(&lifecycle_root)
-        .expect("isolated semantic lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &fixture_root, &owner);
-    owner
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    owner
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    match owner.status().state.expect("installed model state") {
-        SemanticModelLifecycleStateV1::Installed {
-            artifact_digest,
-            install_path,
-            ..
-        }
-        | SemanticModelLifecycleStateV1::Ready {
-            artifact_digest,
-            install_path,
-            ..
-        } => Some(InstalledSemanticFixture {
-            artifact_digest,
-            artifact_path: install_path,
-        }),
-        state => panic!("expected installed production model, got {state:?}"),
-    }
+    common::create_runtime().block_on(async {
+        let profile = home.join(".tracedecay");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
+            .expect("private semantic fixture profile");
+        let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(&profile);
+        let identity = profile_identity::load_or_create(&profile)
+            .expect("canonical isolated profile identity");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("isolated profile runtime registry");
+        let owner = registry
+            .profile_semantic_lifecycle()
+            .await
+            .expect("canonical profile artifact owner");
+        seed_distribution_fixture(&lifecycle_root, &fixture_root, &owner);
+        owner
+            .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
+            .expect("select production semantic model");
+        owner
+            .acquire_blocking_for_tests()
+            .expect("install verified distribution fixture");
+        let installed = match owner.status().state.expect("installed model state") {
+            SemanticModelLifecycleStateV1::Installed {
+                artifact_digest,
+                install_path,
+                ..
+            }
+            | SemanticModelLifecycleStateV1::Ready {
+                artifact_digest,
+                install_path,
+                ..
+            } => Some(InstalledSemanticFixture {
+                artifact_digest,
+                artifact_path: install_path,
+            }),
+            state => panic!("expected installed production model, got {state:?}"),
+        };
+        drop(owner);
+        registry
+            .shutdown_terminal_tasks()
+            .await
+            .expect("join profile import workers");
+        registry
+            .close_retained_graph_runtimes_for_shutdown()
+            .await
+            .expect("close profile import runtime");
+        installed
+    })
 }
 
 fn seed_distribution_fixture(

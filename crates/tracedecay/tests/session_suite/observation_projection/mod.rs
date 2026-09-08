@@ -560,15 +560,19 @@ async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
 }
 
 async fn projected_raw_store_ids(tmp: &TempDir) -> Vec<(String, i64)> {
+    projected_raw_store_ids_for_provider(tmp, "claude").await
+}
+
+async fn projected_raw_store_ids_for_provider(tmp: &TempDir, provider: &str) -> Vec<(String, i64)> {
     let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT message_id, store_id FROM lcm_raw_messages
-             WHERE provider = 'claude' ORDER BY message_id",
+             WHERE provider = ?1 ORDER BY message_id",
         )
         .unwrap();
     statement
-        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([provider], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
@@ -617,3 +621,4 @@ mod failure_audit;
 mod message_ids;
 mod queue;
 mod rebuild;
+mod source_transition;

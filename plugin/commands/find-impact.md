@@ -13,4 +13,4 @@ Interpret `$ARGUMENTS` as the symbol, file, or change to analyze. If absent, use
 4. Test set → `tracedecay_affected` (`files`) for every test that can see the change; `tracedecay_test_map` for direct coverage of one symbol/file.
 5. Structural fragility (optional) → `tracedecay_coupling` / `tracedecay_dependency_depth` to see if the target is a high-fan-in hub.
 
-Output: impacted symbols + files, the test set to run, and any hub/coupling risk. If any result includes a `tracedecay_metrics:` line, report the savings.
+Output: impacted symbols + files, the test set to run, and any hub/coupling risk.

@@ -227,19 +227,16 @@ mod tests {
         Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
     ) {
         let tmp = tempfile::tempdir().unwrap();
-        // `initialize_project_graph_for_test` canonicalizes the root it mounts,
-        // so a selected id derived from the symlinked spelling registers a
-        // second authority for the same typed project and the resolver refuses
-        // it as `DuplicateProjectAuthority` (macOS `/var` -> `/private/var`).
-        let base = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(tmp.path());
-        let profile_root = base.join("profile");
-        let active_root = base.join("active");
+        // Register the same canonical paths that retained-target lookup uses.
+        let fixture_root = tmp.path().canonicalize().unwrap();
+        let profile_root = fixture_root.join("profile");
+        let active_root = fixture_root.join("active");
         std::fs::create_dir_all(&active_root).unwrap();
         let active = TraceDecay::init_with_options(&active_root, open_options(&profile_root))
             .await
             .unwrap();
         let runtime = active.test_runtime_for_test().unwrap();
-        let selected_root = base.join("selected");
+        let selected_root = fixture_root.join("selected");
         std::fs::create_dir_all(&selected_root).unwrap();
         let selected_id = ProjectId::new(
             tracedecay_runtime_core::storage::default_profile_project_id(&selected_root),

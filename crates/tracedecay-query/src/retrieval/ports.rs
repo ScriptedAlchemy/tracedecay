@@ -194,6 +194,10 @@ pub trait ExactTermPostingReadPort {
 /// generation.
 ///
 /// Whole-term and language-profiled subtoken postings remain independent.
+/// Implementations consult `request.control` between bounded units of row
+/// work and unwind with [`RetrievalPortError::Cancelled`] once the request is
+/// abandoned, so a settled caller never keeps its execution permit occupied
+/// while the remaining candidate rows decode and score.
 pub trait LexicalPostingReadPort {
     /// Return the committed candidate prefix for `request` against the
     /// pinned generation.

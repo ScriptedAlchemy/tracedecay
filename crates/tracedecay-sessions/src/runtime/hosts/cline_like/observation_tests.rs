@@ -176,7 +176,8 @@ async fn checked_in_cline_family_snapshots_preserve_receipts_through_failures_an
 
 /// Appending to the API history must not disturb an unchanged native UI event:
 /// its observation identity (source, generation, source range) and normalized
-/// payload are facts of `ui_messages.json` alone.
+/// payload are facts of `ui_messages.json` alone. The reciprocal UI append
+/// also preserves the API generation and normalized records.
 #[tokio::test]
 async fn api_append_preserves_unchanged_native_ui_observation() {
     use crate::admission::test_support::MemoryHostAdmission;
@@ -232,6 +233,21 @@ async fn api_append_preserves_unchanged_native_ui_observation() {
         );
         let before = before.pop().unwrap();
 
+        let before_snapshot = source
+            .load_snapshot(&api, StoredCursor::default(), &project, None)
+            .unwrap()
+            .unwrap();
+        let before_records = normalize_cline_like_snapshot_observations(
+            provider,
+            &before_snapshot.transcript.messages,
+        )
+        .unwrap();
+        let before_ui = before_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+            .collect::<Vec<_>>();
+        assert_eq!(before_ui.len(), 1);
+
         let mut entries: Vec<Value> =
             serde_json::from_slice(&std::fs::read(&api).unwrap()).unwrap();
         entries.push(serde_json::json!({
@@ -240,6 +256,32 @@ async fn api_append_preserves_unchanged_native_ui_observation() {
             "ts": 1_800_000_020_i64,
         }));
         std::fs::write(&api, serde_json::to_vec_pretty(&entries).unwrap()).unwrap();
+
+        let after_api = source
+            .load_snapshot(&api, StoredCursor::default(), &project, None)
+            .unwrap()
+            .unwrap();
+        let after_api_records =
+            normalize_cline_like_snapshot_observations(provider, &after_api.transcript.messages)
+                .unwrap();
+        let after_api_ui = after_api_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+            .collect::<Vec<_>>();
+        assert_ne!(before_snapshot.api_generation, after_api.api_generation);
+        assert_eq!(
+            before_snapshot.ui_generation, after_api.ui_generation,
+            "API append preserves UI content generation"
+        );
+        assert_eq!(
+            before_ui, after_api_ui,
+            "API append preserves exact native UI payload, source, identity, and range"
+        );
+        let unchanged_api = after_api_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::ApiHistory)
+            .collect::<Vec<_>>();
+        assert_eq!(unchanged_api.len(), 3);
 
         capture_cline_like_snapshot_observations(
             &admission,
@@ -268,6 +310,40 @@ async fn api_append_preserves_unchanged_native_ui_observation() {
             after.observation().payload(),
             before.observation().payload(),
             "{provider}: API append changed the unchanged UI normalized payload"
+        );
+
+        let ui = api.parent().unwrap().join("ui_messages.json");
+        let mut entries: Vec<Value> = serde_json::from_slice(&std::fs::read(&ui).unwrap()).unwrap();
+        let mut appended = entries[0].clone();
+        appended["ts"] = serde_json::json!(1_800_000_030_i64);
+        entries.push(appended);
+        std::fs::write(&ui, serde_json::to_vec(&entries).unwrap()).unwrap();
+        let after_ui = source
+            .load_snapshot(&api, StoredCursor::default(), &project, None)
+            .unwrap()
+            .unwrap();
+        let after_ui_records =
+            normalize_cline_like_snapshot_observations(provider, &after_ui.transcript.messages)
+                .unwrap();
+        let after_ui_api = after_ui_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::ApiHistory)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after_api.api_generation, after_ui.api_generation,
+            "UI append preserves API content generation"
+        );
+        assert_ne!(after_api.ui_generation, after_ui.ui_generation);
+        assert_eq!(
+            unchanged_api, after_ui_api,
+            "UI append preserves every API payload, source, identity, and range"
+        );
+        assert_eq!(
+            after_ui_records
+                .iter()
+                .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+                .count(),
+            2
         );
     }
 }
@@ -449,20 +525,11 @@ async fn pre_cancelled_snapshot_capture_does_not_advance_cline_source() {
     ));
 }
 
-fn stream_generation(value: u64) -> ObservationSourceGenerationV1 {
-    ObservationSourceGenerationV1::new(value).expect("non-zero generation")
-}
-
 fn normalize(
     provider: &'static str,
     messages: &[SessionMessageRecord],
 ) -> TranscriptIngestResult<Vec<ClineLikeSnapshotObservationRecord>> {
-    normalize_cline_like_snapshot_observations(
-        provider,
-        messages,
-        stream_generation(11),
-        stream_generation(23),
-    )
+    normalize_cline_like_snapshot_observations(provider, messages)
 }
 
 fn message(provider: &str, ordinal: i64) -> SessionMessageRecord {

@@ -134,6 +134,90 @@ pub(in super::super) struct GraphChunk {
     pub budget_exhausted: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in super::super) struct UnbornSource {
+    repository: RepositorySeal,
+    head: HeadSeal,
+    reflog_path: PathBuf,
+    source_generation: String,
+}
+
+pub(in super::super) enum HistorySource {
+    Unborn(Box<UnbornSource>),
+    Reflog(Box<ReflogCursor>),
+}
+
+pub(in super::super) fn initialize_history_source(
+    project_path: &Path,
+    window_end: i64,
+    control: &BoundedGitControl,
+) -> Result<HistorySource, BoundedBackfillInterruption> {
+    match capture_unborn_source(project_path, control)? {
+        Some(source) => Ok(HistorySource::Unborn(Box::new(source))),
+        None => initialize_reflog_cursor(project_path, window_end, control)
+            .map(Box::new)
+            .map(HistorySource::Reflog),
+    }
+}
+
+pub(in super::super) fn capture_unborn_source(
+    project_path: &Path,
+    control: &BoundedGitControl,
+) -> Result<Option<UnbornSource>, BoundedBackfillInterruption> {
+    control.check()?;
+    let repository =
+        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let head = capture_head(&repository)?;
+    if head.target.is_some() {
+        return Ok(None);
+    }
+    // A missing target proves no history only for a local unborn HEAD with
+    // no retained HEAD reflog. An orphan checkout may retain prior history.
+    if !head
+        .referent
+        .as_deref()
+        .is_some_and(|name| name.starts_with(b"refs/heads/"))
+    {
+        return Err(BoundedBackfillInterruption::SourceUnavailable);
+    }
+    let platform = repository
+        .head()
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+        .log_iter();
+    let relative = platform.store.namespace.as_ref().map_or_else(
+        || platform.name.to_path().to_owned(),
+        |namespace| namespace.to_path().join(platform.name.to_path()),
+    );
+    let reflog_path = platform.store.git_dir().join("logs").join(relative);
+    let source_generation = match std::fs::metadata(&reflog_path) {
+        Ok(metadata) if metadata.len() == 0 => present_source_generation(&reflog_path, &metadata)?,
+        Ok(_) => return Err(BoundedBackfillInterruption::UnsupportedSourceFraming),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            absent_source_generation(&reflog_path)?
+        }
+        Err(_) => return Err(BoundedBackfillInterruption::SourceUnavailable),
+    };
+    let source = UnbornSource {
+        repository: capture_repository_seal(&repository)?,
+        head,
+        reflog_path,
+        source_generation,
+    };
+    control.check()?;
+    Ok(Some(source))
+}
+
+pub(in super::super) fn verify_unborn_source(
+    project_path: &Path,
+    source: &UnbornSource,
+    control: &BoundedGitControl,
+) -> Result<(), BoundedBackfillInterruption> {
+    if capture_unborn_source(project_path, control)?.as_ref() != Some(source) {
+        return Err(BoundedBackfillInterruption::SourceChanged);
+    }
+    Ok(())
+}
+
 pub(in super::super) fn initialize_reflog_cursor(
     project_path: &Path,
     window_end: i64,

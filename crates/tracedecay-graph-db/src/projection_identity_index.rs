@@ -14,17 +14,11 @@
 //!
 //! # Validity
 //!
-//! A cached index is reused only while both of these still hold:
-//!
-//! * the store epoch is unchanged — [`IdentityIndexCache::invalidate`] is
-//!   called from every site that takes the `GraphDb` database write lock, which
-//!   is the choke point every mutation, projection replacement, and recovery
-//!   database swap passes through; and
-//! * the owner label still covers the same number of nodes — a cheap label-table
-//!   count that catches any cardinality change an epoch bump might have missed.
-//!
-//! Both are read while the caller holds the database *read* guard, so no writer
-//! can interleave between the check and the page.
+//! A cached index is reused only while the store epoch is unchanged.
+//! [`IdentityIndexCache::invalidate`] is called from every site that takes the
+//! `GraphDb` database write lock, including projection replacement and recovery
+//! database swaps. The caller holds the database read guard through the page
+//! read, so a writer cannot interleave between the epoch check and its use.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

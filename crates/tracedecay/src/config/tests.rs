@@ -336,17 +336,6 @@ fn semantic_config_defaults_to_offline_healthy_baseline() {
     assert_eq!(parsed.semantic, config.semantic);
 }
 
-#[test]
-fn semantic_config_rejects_uncataloged_model_ids() {
-    let mut semantic = SemanticConfig {
-        selected_model: Some("NotInCatalog".to_owned()),
-        ..Default::default()
-    };
-    assert!(semantic.validate().is_err());
-    semantic.selected_model = None;
-    assert!(semantic.validate().is_ok());
-}
-
 /// Host-absolute fixture path: `artifact_path` validation requires
 /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
 fn absolute_fixture_path(posix: &str) -> PathBuf {

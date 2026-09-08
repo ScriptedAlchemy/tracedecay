@@ -1,16 +1,33 @@
 //! Event-replayed Work projection reads over the canonical journal.
+//!
+//! Every read here is positioned by the journal's durable append order, the
+//! `owner_sequence` each event committed with. Snapshot and delta pages are cut
+//! at an append position, and a resume cursor names one, so a follower that
+//! resumes at `to` sees exactly the events appended after the page it holds:
+//! appends to tasks that sort earlier cannot move rows past the cursor the way
+//! an offset into a `task_id, version` ordering let them.
+//!
+//! A read first captures the owner frontier, then reads only the rows it
+//! answers with, bounded by that frontier: an exact read visits one task's
+//! history, and a page discovers its changed tasks from positions alone before
+//! decoding just those tasks' histories.
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{WorkProjectionPortError, WorkProjectionReadPort};
+use tracedecay_application::{WorkProjectionPortError, WorkProjectionReadPort, WorkStorageError};
 use tracedecay_domain::{
     ProjectionGenerationId, TaskId, WorkAuthority, WorkEvent, WorkProjection,
     WorkProjectionCoverageV1, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1,
     WorkProjectionSequenceRangeV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
-    canonical_sha256,
 };
 
 use super::WorkSqliteStorage;
+use super::events::{
+    load_registered_appended_positions, load_registered_changed_histories, load_registered_history,
+    load_registered_owner_frontier,
+};
+
+const CURSOR_TOKEN_PREFIX: &str = "work-projection-append-sequence.v1:";
 
 impl WorkProjectionReadPort for WorkSqliteStorage {
     fn exact_snapshot(
@@ -18,17 +35,15 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        let events = self.load_authority_events(authority).map_err(unavailable)?;
-        let task_events = events
-            .iter()
-            .filter(|event| event.task_id() == task_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        let projection = WorkProjection::rebuild(&task_events)
-            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let frontier =
+            load_registered_owner_frontier(self.handle(), authority).map_err(port_error)?;
+        let history = load_registered_history(self.handle(), authority, task_id, Some(frontier))
+            .map_err(port_error)?;
+        let projection =
+            WorkProjection::rebuild(&history).map_err(|_| WorkProjectionPortError::Unavailable)?;
         WorkProjectionSnapshotV1::new(
             projection_generation(authority)?,
-            sequence(events.len())?,
+            WorkProjectionSequenceV1::new(frontier),
             vec![projection],
             WorkProjectionCoverageV1::complete(1, 1)
                 .map_err(|_| WorkProjectionPortError::Unavailable)?,
@@ -41,34 +56,18 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         authority: &WorkAuthority,
         page_size: u32,
     ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        let events = self.load_authority_events(authority).map_err(unavailable)?;
-        let total = u32::try_from(
-            events
-                .iter()
-                .map(WorkEvent::task_id)
-                .collect::<BTreeSet<_>>()
-                .len(),
-        )
-        .map_err(|_| WorkProjectionPortError::Unavailable)?;
-        let current = sequence(events.len())?;
-        // A capped page must be cut at an event boundary, never at a task
-        // count. The resume cursor is an event sequence, so the page is only
-        // resumable when the tasks it returns are exactly the tasks the
-        // journal prefix `[0, to)` introduced: `delta` then continues the same
-        // walk from `to` and reaches every task this page left out.
-        let page = page_tasks(&events, 0, page_size)?;
-        let projections = rebuild_selected(page.events(&events)?, &page.selected)?;
-        let returned =
-            u32::try_from(projections.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let frontier =
+            load_registered_owner_frontier(self.handle(), authority).map_err(port_error)?;
+        let page = self.read_page(authority, 0, frontier, page_size)?;
         let generation = projection_generation(authority)?;
         let to_sequence = WorkProjectionSequenceV1::new(page.to);
-        let coverage = if page.to == current.get() {
-            WorkProjectionCoverageV1::complete(returned, total)
+        let coverage = if page.to == frontier {
+            WorkProjectionCoverageV1::complete(page.returned()?, page.total)
                 .map_err(|_| WorkProjectionPortError::Unavailable)?
         } else {
             WorkProjectionCoverageV1::capped(
-                returned,
-                total,
+                page.returned()?,
+                page.total,
                 page_size,
                 WorkProjectionSequenceRangeV1::new(WorkProjectionSequenceV1::new(0), to_sequence)
                     .map_err(|_| WorkProjectionPortError::Unavailable)?,
@@ -76,7 +75,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
             )
             .map_err(|_| WorkProjectionPortError::Unavailable)?
         };
-        WorkProjectionSnapshotV1::new(generation, to_sequence, projections, coverage)
+        WorkProjectionSnapshotV1::new(generation, to_sequence, page.projections, coverage)
             .map_err(|_| WorkProjectionPortError::Unavailable)
     }
 
@@ -91,33 +90,21 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
             return Err(WorkProjectionPortError::StaleCursor);
         }
         let from = parse_projection_cursor(cursor)?;
-        let events = self.load_authority_events(authority).map_err(unavailable)?;
-        let current =
-            u64::try_from(events.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
-        if from >= current {
+        let frontier =
+            load_registered_owner_frontier(self.handle(), authority).map_err(port_error)?;
+        if from >= frontier {
             return Err(WorkProjectionPortError::StaleCursor);
         }
-        let all_changed = events
-            .iter()
-            .skip(from as usize)
-            .map(|event| event.task_id().clone())
-            .collect::<BTreeSet<_>>();
-        let total =
-            u32::try_from(all_changed.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
-        let page = page_tasks(&events, from, page_size)?;
-        let to = page.to;
-        let changed = rebuild_selected(page.events(&events)?, &page.selected)?;
-        let returned =
-            u32::try_from(changed.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let page = self.read_page(authority, from, frontier, page_size)?;
         let from_sequence = WorkProjectionSequenceV1::new(from);
-        let to_sequence = WorkProjectionSequenceV1::new(to);
-        let coverage = if to == current {
-            WorkProjectionCoverageV1::complete(returned, total)
+        let to_sequence = WorkProjectionSequenceV1::new(page.to);
+        let coverage = if page.to == frontier {
+            WorkProjectionCoverageV1::complete(page.returned()?, page.total)
                 .map_err(|_| WorkProjectionPortError::Unavailable)?
         } else {
             WorkProjectionCoverageV1::capped(
-                returned,
-                total,
+                page.returned()?,
+                page.total,
                 page_size,
                 WorkProjectionSequenceRangeV1::new(from_sequence, to_sequence)
                     .map_err(|_| WorkProjectionPortError::Unavailable)?,
@@ -129,7 +116,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
             generation,
             from_sequence,
             to_sequence,
-            changed,
+            page.projections,
             BTreeSet::new(),
             coverage,
         )
@@ -137,67 +124,70 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
     }
 }
 
-/// One page of the task walk: the tasks it covers and the exclusive event
-/// sequence it stops at.
+/// One page of the task walk after `from`: the projections it carries, the
+/// inclusive append position it stops at, and how many tasks changed in the
+/// whole `(from, frontier]` range.
 ///
-/// `to` is the page's resume point in both directions — the prefix `[0, to)`
-/// is what the returned projections replay, and a walk restarted at `to`
+/// `to` is the page's resume point in both directions — the prefix `(0, to]`
+/// is what the returned projections replay, and a walk resumed after `to`
 /// yields the tasks this page could not fit. Keeping the two in one value is
 /// what makes a capped page resumable: a cursor minted anywhere else would
-/// name a sequence whose continuation does not contain the missing tasks.
+/// name a position whose continuation does not contain the missing tasks.
 struct TaskPage {
-    selected: BTreeSet<TaskId>,
+    projections: Vec<WorkProjection>,
     to: u64,
+    total: u32,
 }
 
 impl TaskPage {
-    /// The journal prefix the page's projections are rebuilt from.
-    fn events<'a>(
+    fn returned(&self) -> Result<u32, WorkProjectionPortError> {
+        count(self.projections.len())
+    }
+}
+
+impl WorkSqliteStorage {
+    /// Discovers the tasks changed after `from` from append positions alone,
+    /// cuts the page just before the first event of the task that would
+    /// exceed `page_size`, then reads and folds only the selected tasks'
+    /// histories as of that cut.
+    fn read_page(
         &self,
-        events: &'a [WorkEvent],
-    ) -> Result<&'a [WorkEvent], WorkProjectionPortError> {
-        events
-            .get(..usize::try_from(self.to).map_err(|_| WorkProjectionPortError::Unavailable)?)
-            .ok_or(WorkProjectionPortError::Unavailable)
-    }
-}
-
-/// Walks `events` from `from` and admits tasks until one more distinct task
-/// would exceed `page_size`, stopping at that event's offset.
-///
-/// The cut is on the event that introduces the overflowing task, so the page
-/// boundary is a sequence a later read can resume from without either
-/// re-deriving the task order or losing the tasks past the cap.
-fn page_tasks(
-    events: &[WorkEvent],
-    from: u64,
-    page_size: u32,
-) -> Result<TaskPage, WorkProjectionPortError> {
-    let mut selected = BTreeSet::new();
-    let mut to = u64::try_from(events.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
-    for (offset, event) in events.iter().enumerate().skip(from as usize) {
-        if !selected.contains(event.task_id()) && selected.len() == page_size as usize {
-            to = u64::try_from(offset).map_err(|_| WorkProjectionPortError::Unavailable)?;
-            break;
+        authority: &WorkAuthority,
+        from: u64,
+        frontier: u64,
+        page_size: u32,
+    ) -> Result<TaskPage, WorkProjectionPortError> {
+        let positions =
+            load_registered_appended_positions(self.handle(), authority, from, frontier)
+                .map_err(port_error)?;
+        let mut changed = BTreeSet::new();
+        let mut to = frontier;
+        for (sequence, task_id) in positions {
+            // The first event of one task too many is where the page stops;
+            // the walk continues only to count every changed task.
+            if changed.insert(task_id) && changed.len() == page_size as usize + 1 {
+                to = sequence.saturating_sub(1);
+            }
         }
-        selected.insert(event.task_id().clone());
+        let total = count(changed.len())?;
+        let histories = load_registered_changed_histories(self.handle(), authority, from, to)
+            .map_err(port_error)?;
+        let projections = fold_histories(&histories)?;
+        Ok(TaskPage {
+            projections,
+            to,
+            total,
+        })
     }
-    Ok(TaskPage { selected, to })
 }
 
-fn rebuild_selected(
-    events: &[WorkEvent],
-    selected: &BTreeSet<TaskId>,
-) -> Result<Vec<WorkProjection>, WorkProjectionPortError> {
-    selected
-        .iter()
-        .map(|task_id| {
-            let history = events
-                .iter()
-                .filter(|event| event.task_id() == task_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            WorkProjection::rebuild(&history).map_err(|_| WorkProjectionPortError::Unavailable)
+/// Folds histories already grouped by task and ordered by version, each task
+/// exactly once.
+fn fold_histories(histories: &[WorkEvent]) -> Result<Vec<WorkProjection>, WorkProjectionPortError> {
+    histories
+        .chunk_by(|previous, next| previous.task_id() == next.task_id())
+        .map(|history| {
+            WorkProjection::rebuild(history).map_err(|_| WorkProjectionPortError::Unavailable)
         })
         .collect()
 }
@@ -205,13 +195,9 @@ fn rebuild_selected(
 fn projection_generation(
     authority: &WorkAuthority,
 ) -> Result<ProjectionGenerationId, WorkProjectionPortError> {
-    let digest = canonical_sha256(&("tracedecay.work.projection.generation.v1", authority))
-        .map_err(|_| WorkProjectionPortError::Unavailable)?;
-    ProjectionGenerationId::try_from(format!(
-        "generation.work.{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(|_| WorkProjectionPortError::Unavailable)
+    authority
+        .projection_generation_id()
+        .map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
 pub(super) fn projection_cursor(
@@ -220,7 +206,7 @@ pub(super) fn projection_cursor(
 ) -> Result<WorkProjectionResumeCursorV1, WorkProjectionPortError> {
     WorkProjectionResumeCursorV1::new(
         generation_id,
-        format!("work-projection-sequence.v1:{}", sequence.get()),
+        format!("{CURSOR_TOKEN_PREFIX}{}", sequence.get()),
     )
     .map_err(|_| WorkProjectionPortError::Unavailable)
 }
@@ -230,17 +216,20 @@ fn parse_projection_cursor(
 ) -> Result<u64, WorkProjectionPortError> {
     cursor
         .token()
-        .strip_prefix("work-projection-sequence.v1:")
+        .strip_prefix(CURSOR_TOKEN_PREFIX)
         .and_then(|sequence| sequence.parse::<u64>().ok())
         .ok_or(WorkProjectionPortError::StaleCursor)
 }
 
-fn sequence(value: usize) -> Result<WorkProjectionSequenceV1, WorkProjectionPortError> {
-    u64::try_from(value)
-        .map(WorkProjectionSequenceV1::new)
-        .map_err(|_| WorkProjectionPortError::Unavailable)
+fn count(value: usize) -> Result<u32, WorkProjectionPortError> {
+    u32::try_from(value).map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
-fn unavailable(_: tracedecay_application::WorkStorageError) -> WorkProjectionPortError {
-    WorkProjectionPortError::Unavailable
+fn port_error(error: WorkStorageError) -> WorkProjectionPortError {
+    match error {
+        WorkStorageError::NotFoundOrNotAuthorized => {
+            WorkProjectionPortError::NotFoundOrNotAuthorized
+        }
+        _ => WorkProjectionPortError::Unavailable,
+    }
 }

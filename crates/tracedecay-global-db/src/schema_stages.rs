@@ -7,9 +7,9 @@ use super::schema_contract::{
 };
 use super::{
     configuration, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, git_index_transactions, global_db_operation_error,
-    global_db_operation_message, observability_rollup, observation, observation_projection,
-    project_registry, session_temporal_schema, stack_delivery,
+    ensure_session_parent_columns, ensure_table_columns, git_index_transactions,
+    global_db_operation_error, global_db_operation_message, observability_rollup, observation,
+    observation_projection, project_registry, session_temporal_schema, stack_delivery,
 };
 use tracedecay_runtime_core::{
     db::{
@@ -20,6 +20,8 @@ use tracedecay_runtime_core::{
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::{
+    WORK_EVENT_OWNER_SEQUENCE_BACKFILL_V1, WORK_EVENT_OWNER_SEQUENCE_COLUMN,
+    WORK_EVENT_OWNER_SEQUENCE_COLUMN_DDL,
     WORK_PRODUCT_SCHEMA_V1 as WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1,
     WORK_SCHEMA_V1 as WORK_EVENT_JOURNAL_SCHEMA_V1,
 };
@@ -684,6 +686,22 @@ async fn install_registered_schema_stages(
         .execute_batch(WORK_EVENT_JOURNAL_SCHEMA_V1)
         .await
         .map_err(|error| global_db_operation_error("initialize Work event journal", error))?;
+    // A journal created by v0.1.0-beta.37 predates `owner_sequence`; it gains
+    // the column here and the backfill numbers its rows by insertion order.
+    ensure_table_columns(
+        transaction,
+        "work_events_v1",
+        &[(
+            WORK_EVENT_OWNER_SEQUENCE_COLUMN,
+            WORK_EVENT_OWNER_SEQUENCE_COLUMN_DDL,
+        )],
+    )
+    .await
+    .map_err(|error| global_db_operation_error("migrate Work event append order", error))?;
+    transaction
+        .execute_batch(WORK_EVENT_OWNER_SEQUENCE_BACKFILL_V1)
+        .await
+        .map_err(|error| global_db_operation_error("backfill Work event append order", error))?;
     // The Work product graph authority is its own admission stage, not a
     // continuation of the task journal above: it is owner-scoped rather
     // than WorkAuthority-scoped, so a store that carries one and not the

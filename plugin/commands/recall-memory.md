@@ -13,4 +13,4 @@ Interpret `$ARGUMENTS` as the question or topic to recall. If absent, ask what t
 
 If the user asks to update, delete, merge, or prune stored facts, switch to `/tracedecay:curate-memory`.
 
-Output: the recalled decisions/messages with their sources (fact, session id, timestamp). If any result includes a `tracedecay_metrics:` line, report the savings.
+Output: the recalled decisions/messages with their sources (fact, session id, timestamp).

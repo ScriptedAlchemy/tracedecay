@@ -1,6 +1,34 @@
 use std::cmp::Ordering;
 
-use tracedecay_domain::{ExactClass, FreshnessCompatibilityV1, FusedCandidate, SourceOccurrenceId};
+use tracedecay_domain::{
+    ExactClass, FreshnessCompatibilityV1, FusedCandidate, RankingDecision, SourceOccurrenceId,
+};
+
+use super::stage_counters;
+
+/// Fused candidates in `compare_fused` order.
+///
+/// The only constructor sorts, so a stage that takes this type never re-sorts
+/// and never trusts an unchecked caller's claim of order. Mutation through
+/// [`Self::iter_mut`] is limited by contract to `decisions`, which the
+/// comparator does not read.
+pub(super) struct OrderedFusedCandidates(Vec<FusedCandidate>);
+
+impl OrderedFusedCandidates {
+    pub(super) fn sort(mut candidates: Vec<FusedCandidate>) -> Self {
+        stage_counters::record_fused_sort();
+        candidates.sort_by(compare_fused);
+        Self(candidates)
+    }
+
+    pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, FusedCandidate> {
+        self.0.iter_mut()
+    }
+
+    pub(super) fn into_vec(self) -> Vec<FusedCandidate> {
+        self.0
+    }
+}
 
 pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Ordering {
     exact_class_rank(left.exact_class)
@@ -10,6 +38,15 @@ pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Or
         .then_with(|| left.anchor_id.cmp(&right.anchor_id))
         .then_with(|| left.logical_evidence_id.cmp(&right.logical_evidence_id))
         .then_with(|| ordered_occurrence_id_refs(left).cmp(&ordered_occurrence_id_refs(right)))
+}
+
+pub(super) fn decision_cmp(left: &RankingDecision, right: &RankingDecision) -> Ordering {
+    left.kind
+        .cmp(&right.kind)
+        .then_with(|| left.retriever.cmp(&right.retriever))
+        .then_with(|| left.policy_anchor.cmp(&right.policy_anchor))
+        .then_with(|| left.evidence_anchor.cmp(&right.evidence_anchor))
+        .then_with(|| left.detail.cmp(&right.detail))
 }
 
 pub(super) fn exact_class_rank(class: ExactClass) -> u8 {

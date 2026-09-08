@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use tokio::sync::{broadcast, watch};
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexGenerationPublishedV1;
+
 use super::super::{
     install_semantic_activation_runtime_owner, project_open_lsp_scope_grant,
     register_production_lsp_owner,
@@ -214,20 +217,18 @@ pub(super) fn spawn(
             let mut publications = invocation
                 .code_index_schedulers
                 .subscribe_generation_publications();
-            // A publication is announced before its generation is seated in
-            // the slot `try_mount` reads, and a retained `Noop` restore seats
-            // without announcing at all. On a cold project the first
-            // generation therefore becomes exact with no publication left to
-            // wake this owner: it slept forever and the project served
-            // indefinitely with the typed-unavailable feedback cycle. Wait on
-            // the serving-seat signal beside the subscription: every slot
-            // write records a seat, so a woken waiter reads the seated
-            // generation. Subscribe before the first attempt so a seat that
-            // lands during it is not lost. The task dies with its project
-            // server.
-            let mut seats = invocation.code_index_schedulers.subscribe_serving_seats();
+            let mut serving_changes = None;
             let mut partial_publication_retried = false;
             loop {
+                // Sealing announces durable source before the complete serving
+                // owner is installed. Subscribe before probing that owner so a
+                // later serving swap can finish this mount without another edit.
+                if serving_changes.is_none() {
+                    serving_changes = invocation
+                        .code_index_schedulers
+                        .subscribe_serving_generation_changes(&project_root)
+                        .await;
+                }
                 match try_mount(&invocation, &project_root, &mut state).await {
                     Attempt::Terminal => return,
                     Attempt::RetryPartialPublication if !partial_publication_retried => {
@@ -236,48 +237,52 @@ pub(super) fn spawn(
                         continue;
                     }
                     Attempt::RetryPartialPublication => return,
-                    Attempt::AwaitNextPublication => {}
-                }
-                break;
-            }
-            log_deferred_attempt(
-                &project_root,
-                "generation_unavailable",
-                "await_next_publication",
-            );
-            loop {
-                tokio::select! {
-                    publication = publications.recv() => match publication {
-                        Ok(publication) if publication.project_root == project_root => {}
-                        Ok(_) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            log_deferred_attempt(
-                                &project_root,
-                                "publications_closed",
-                                "terminal",
-                            );
-                            return;
-                        }
-                    },
-                    Ok(()) = seats.changed() => {}
-                }
-                match try_mount(&invocation, &project_root, &mut state).await {
-                    Attempt::Terminal => return,
-                    Attempt::AwaitNextPublication => {}
-                    Attempt::RetryPartialPublication => {
-                        tokio::task::yield_now().await;
-                        if try_mount(&invocation, &project_root, &mut state).await
-                            != Attempt::AwaitNextPublication
-                        {
-                            return;
-                        }
+                    Attempt::AwaitNextPublication => {
+                        tracing::info!(
+                            event = "advisory_deferred_generation_unavailable",
+                            project = %project_root.display(),
+                            serving_watch_registered = serving_changes.is_some(),
+                            "waiting after exact complete-generation admission declined"
+                        );
                     }
                 }
+                if !wait_for_generation_change(
+                    &project_root,
+                    &mut publications,
+                    &mut serving_changes,
+                )
+                .await
+                {
+                    return;
+                }
+                partial_publication_retried = false;
             }
         },
         label = "daemon.project.owners.advisory_deferred"
     ))
+}
+
+async fn wait_for_generation_change(
+    project_root: &Path,
+    publications: &mut broadcast::Receiver<CodeIndexGenerationPublishedV1>,
+    serving_changes: &mut Option<watch::Receiver<()>>,
+) -> bool {
+    loop {
+        tokio::select! {
+            publication = publications.recv() => match publication {
+                Ok(publication) if publication.project_root == project_root => return true,
+                Ok(_) => {},
+                Err(broadcast::error::RecvError::Lagged(_)) => return true,
+                Err(broadcast::error::RecvError::Closed) => return false,
+            },
+            serving = async {
+                match serving_changes.as_mut() {
+                    Some(changes) => changes.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => return serving.is_ok(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -516,4 +521,71 @@ async fn classify_failure(
         },
     );
     attempt
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    use tracedecay_domain::{CodeGenerationId, ContentDigest, RepositoryId};
+
+    use super::{CodeIndexGenerationPublishedV1, broadcast, wait_for_generation_change, watch};
+
+    #[tokio::test]
+    async fn serving_installation_wakes_after_sealed_publication_was_consumed() {
+        let root = tempfile::tempdir().expect("project root");
+        let foreign = tempfile::tempdir().expect("foreign project root");
+        let (publication_sender, mut publications) = broadcast::channel(4);
+        let (serving_sender, serving_receiver) = watch::channel(());
+        let mut serving_changes = Some(serving_receiver);
+        let publication = CodeIndexGenerationPublishedV1 {
+            project_root: root.path().to_path_buf(),
+            repository_id: RepositoryId::new("repository.deferred").expect("repository"),
+            generation_id: CodeGenerationId::new("generation.deferred").expect("generation"),
+            snapshot_content_identity: ContentDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("content digest"),
+            observation_time_micros: 1,
+        };
+        publication_sender
+            .send(publication.clone())
+            .expect("sealed publication");
+        assert!(
+            wait_for_generation_change(root.path(), &mut publications, &mut serving_changes).await
+        );
+
+        let mut waiting = Box::pin(wait_for_generation_change(
+            root.path(),
+            &mut publications,
+            &mut serving_changes,
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+        publication_sender
+            .send(CodeIndexGenerationPublishedV1 {
+                project_root: foreign.path().to_path_buf(),
+                ..publication
+            })
+            .expect("foreign publication");
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+
+        serving_sender.send_replace(());
+        assert!(matches!(
+            waiting.as_mut().poll(&mut context),
+            Poll::Ready(true)
+        ));
+        drop(waiting);
+        drop(serving_sender);
+        assert!(
+            !wait_for_generation_change(root.path(), &mut publications, &mut serving_changes).await
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_channel_closure_stops_a_wait_before_scheduler_mount() {
+        let root = tempfile::tempdir().expect("project root");
+        let (sender, mut publications) = broadcast::channel(1);
+        drop(sender);
+        assert!(!wait_for_generation_change(root.path(), &mut publications, &mut None).await);
+    }
 }

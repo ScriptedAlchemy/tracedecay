@@ -2111,6 +2111,14 @@ async fn activate_linked_worktree(
     })?;
     let store_root = graph.store_layout().data_root.join("code-index-v1");
     let graph_runtime = graph.retained_store_runtime_registry();
+    let semantic_lifecycle = graph_runtime
+        .project_semantic_lifecycle(&project_id)
+        .await
+        .map_err(|error| {
+            scheduler_unavailable(&format!(
+                "project semantic lifecycle is unavailable for worktree activation: {error}"
+            ))
+        })?;
     let project_database = Arc::new(graph.db().clone());
     schedulers
         .mount_worktree_with_graph_runtime(
@@ -2123,6 +2131,7 @@ async fn activate_linked_worktree(
             tracedecay_code_index_runtime::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                 graph.get_config().native_graph_activation,
             ),
+            Some(semantic_lifecycle),
         )
         .await
         .map(|_| ())

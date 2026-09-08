@@ -1,5 +1,54 @@
 use super::*;
-use tracedecay_semantic_contracts::SemanticRuntimeScheduleStatusV1;
+use tracedecay_domain::configuration::{
+    ConfigurationValueV1, SEMANTIC_RUNTIME_SETTING_KEY, SettingKey,
+};
+use tracedecay_semantic_contracts::{SemanticConfig, SemanticRuntimeScheduleStatusV1};
+
+fn semantic_runtime_set(config: &SemanticConfig) -> DirectConfigurationMutation {
+    DirectConfigurationMutation::Set {
+        layer: ConfigurationLayerIdV1::Default,
+        key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).expect("semantic runtime key"),
+        value: Box::new(ConfigurationValueV1::Text(
+            serde_json::to_string(config).expect("semantic runtime JSON"),
+        )),
+    }
+}
+
+/// The configuration write boundary admits model ids against the production
+/// catalog: a structurally valid unknown id is a typed validation refusal,
+/// while the default selection and an explicit `None` pass through.
+#[test]
+fn semantic_runtime_writes_admit_only_cataloged_model_ids() {
+    let unknown = SemanticConfig {
+        selected_model: Some("NotARealModel".to_owned()),
+        ..SemanticConfig::default()
+    };
+    unknown
+        .validate()
+        .expect("the contract crate accepts any well-formed id");
+    match semantic_profile_transition(&semantic_runtime_set(&unknown)) {
+        Err(ConfigurationError::Validation(message)) => assert!(
+            message.contains("not in the catalog"),
+            "refusal must name catalog admission: {message}"
+        ),
+        other => panic!("unknown model must be refused at the write boundary: {other:?}"),
+    }
+
+    assert_eq!(
+        semantic_profile_transition(&semantic_runtime_set(&SemanticConfig::default()))
+            .expect("default selection is cataloged"),
+        Some(None)
+    );
+    let disabled = SemanticConfig {
+        selected_model: None,
+        ..SemanticConfig::default()
+    };
+    assert_eq!(
+        semantic_profile_transition(&semantic_runtime_set(&disabled))
+            .expect("a disabled selection needs no catalog entry"),
+        Some(None)
+    );
+}
 
 #[test]
 fn semantic_profile_transition_coordinates_only_when_a_profile_changes() {

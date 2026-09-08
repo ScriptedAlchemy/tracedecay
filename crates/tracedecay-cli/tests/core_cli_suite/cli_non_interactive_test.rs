@@ -1055,6 +1055,24 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
+    // Pause through the same durable authority as the dashboard before the
+    // first mount can admit scheduled work. Manual curation still runs through
+    // its ordinary lock and backend gates.
+    let dashboard_root = profile_sharded_data_root(
+        &profile_root(home.path()),
+        &default_profile_project_id(&canonical_temp_path(project.path())),
+    )
+    .join("dashboard");
+    create_runtime()
+        .block_on(
+            tracedecay_automation_runtime::automation::scheduler::save_scheduler_control(
+                &dashboard_root,
+                &tracedecay_automation_runtime::automation::scheduler::AutomationSchedulerControl {
+                    paused: true,
+                },
+            ),
+        )
+        .expect("pause scheduled work before project activation");
     init_project_fixture(home.path(), project.path());
 
     // A backend-disabled skip is the subject here, and the shipped automation
@@ -1144,9 +1162,7 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     let run_id = run["run_id"]
         .as_str()
         .expect("automation run payload should include a run_id");
-    // The scheduled curation loop writes its own records into the same
-    // ledger, so identify this run by the id the manual call returned rather
-    // than by being the only line in the file.
+    // Inspect the exact run identity returned by the manual call.
     let ledger = std::fs::read_to_string(&ledger_paths[0]).unwrap();
     let record = ledger
         .lines()
@@ -1252,6 +1268,21 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     assert_eq!(
         artifact_view_payload["payload"]["status"],
         "ready_for_review"
+    );
+
+    let mut original_view = tracedecay_command(home.path(), project.path());
+    original_view.args(["automation", "runs", "view", run_id, "--json"]);
+    let original_output = run_with_timeout(original_view, cli_timeout());
+    assert!(
+        original_output.status.success(),
+        "original skipped run remains readable: {}",
+        String::from_utf8_lossy(&original_output.stderr)
+    );
+    let original_payload: serde_json::Value =
+        serde_json::from_slice(&original_output.stdout).expect("original run JSON");
+    assert_eq!(
+        original_payload["record"], view_payload["record"],
+        "artifact publication and inspection must preserve the skipped terminal"
     );
 }
 

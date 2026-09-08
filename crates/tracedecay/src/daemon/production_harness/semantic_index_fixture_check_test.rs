@@ -24,7 +24,8 @@ use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
 
 use super::journey_test_support::git;
 use super::semantic_activation_journey_test::{
-    installed_selection_material, seed_distribution_fixture, wait_for_semantic_generation,
+    install_project_distribution_fixture, installed_selection_material,
+    wait_for_semantic_generation,
 };
 use super::semantic_availability_journey_test::{
     answered, assert_lane_complete, assert_semantic_pending,
@@ -132,22 +133,6 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
         "the check must run against an isolated TRACEDECAY_DATA_DIR, never the live profile"
     );
 
-    // Every member is a local cache hit, so acquisition resolves without the
-    // hub; the production install path re-verifies each SHA-256 pin before
-    // the atomic install.
-    let lifecycle_root =
-        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
-    let lifecycle =
-        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &cache, &lifecycle);
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select the default semantic model");
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install the verified local model bytes");
-    let (artifact_digest, _install_path) = installed_selection_material(&lifecycle);
-
     let isolation = tempfile::TempDir::new().expect("fixture isolation root");
     let project = isolation.path().join("project");
     copy_fixture_tree(&fixture_source, &project);
@@ -171,6 +156,11 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
         .await
         .expect("production composition");
     let resources = harness.resources.as_ref().expect("live harness");
+    // Every member is a local cache hit, so acquisition resolves without the
+    // hub; the production install path re-verifies each SHA-256 pin before
+    // the atomic install.
+    let lifecycle = install_project_distribution_fixture(&harness, &project, &cache).await;
+    let (artifact_digest, _install_path) = installed_selection_material(&lifecycle);
     let code_id = resources
         .invocation
         .code_index_schedulers

@@ -249,7 +249,7 @@ impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub async fn lcm_compress_guarded<F>(
         &self,
-        request: LcmCompressionRequest,
+        request: &LcmCompressionRequest,
         control: &ExecutionControl,
         before_commit: F,
     ) -> Result<LcmCompressionResponse, LcmError>
@@ -314,7 +314,7 @@ impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub async fn lcm_compress_retained_page_guarded<F>(
         &self,
-        request: LcmCompressionRequest,
+        request: &LcmCompressionRequest,
         control: &ExecutionControl,
         before_commit: F,
         guard: compression::RetainedCompressionGuard,

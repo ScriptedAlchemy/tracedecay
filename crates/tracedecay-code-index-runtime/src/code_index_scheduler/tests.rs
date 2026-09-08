@@ -72,7 +72,9 @@ use tracedecay_query::retrieval::exact::{
 };
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::lexical::{
-    LexicalLaneRequest, LexicalRouteKindV1, LexicalRoutingV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
+    LexicalRouteKindV1, LexicalRoutingV1,
 };
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
@@ -91,6 +93,7 @@ use tracedecay_runtime_core::resident_memory::{
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod noop_reconcile_tests;
+mod search_permit_release;
 mod semantic_schedule_order_tests;
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
@@ -4665,6 +4668,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
             .expect("lexical score domain"),
             budget: base.budget,
             base,
+            control: &ReadySemanticControlV1,
         })
         .expect("lexical retrieval over the reopened artifact");
     let RetrieverOutcome::Complete(lexical_batch) = lexical else {
@@ -5315,6 +5319,107 @@ fn incompatible_published_text_artifact_is_withdrawn_and_rebuilt() {
 }
 
 #[test]
+fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn migrated() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let control = UninterruptibleCodeIndexControlV1;
+    let previous_path = {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish generation"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        let generation_id = latest.metadata.manifest().generation_id.clone();
+        let sealed_identity = latest
+            .text_artifact_store
+            .sealed_identity(&generation_id)
+            .expect("sealed identity");
+        let mut source = latest
+            .take_preopened_source_or_open(&sealed_identity, &control)
+            .expect("verified source");
+        let mut metadata = latest.text_projection_metadata().expect("current metadata");
+        // Any revision other than `QUERY_LEXICAL_RETRIEVER_REVISION_V1` stands in
+        // for an artifact built by an earlier retriever. `8ecc5da76` meant to
+        // retire `retriever.lexical.daemon.v1` itself when it published the
+        // qualified-name fields, but that bump also re-pins the search-quality
+        // workload and the packaged native qualification (#1070), so the
+        // current constant still carries that label.
+        metadata.lexical_retriever_revision =
+            ComponentRevision::new("retriever.lexical.daemon.v0").expect("previous revision");
+        assert_ne!(
+            metadata.lexical_retriever_revision.as_str(),
+            tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
+            "the fixture must build an artifact under a revision the scheduler no longer serves"
+        );
+        let root = store.path().join("code-text-artifacts-v1");
+        tracedecay_private_fs::create_private_directory(&root).expect("private artifacts root");
+        let staging = root.join(".previous-search.staging");
+        let mut builder = CodeLexicalArtifactBuilderV1::create(&staging, metadata)
+            .expect("previous-revision artifact builder");
+        let source_receipt = loop {
+            match source.next_page(&control).expect("verified page") {
+                VerifiedSealedLexicalPageReadV1::Page(page) => {
+                    builder.append_page(&page, &control).expect("append page");
+                }
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+            }
+        };
+        let verified = loop {
+            match builder
+                .advance_finalization(&source_receipt, 4_096, &control)
+                .expect("finalize previous-revision artifact")
+            {
+                CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
+                CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => break receipt,
+            }
+        };
+        drop(builder);
+        // This is a valid artifact with stale search semantics, not corrupt
+        // bytes or an unsupported container format.
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &staging,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        )
+        .expect("historical metadata remains readable");
+        latest
+            .text_artifact_store
+            .publish(&staging, &generation_id, &sealed_identity, &control)
+            .expect("publish previous-revision artifact");
+        active_text_artifact_path(store.path())
+    };
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    assert!(
+        !latest
+            .advance_text_serving(1)
+            .expect("reject stale search revision"),
+        "an incompatible search artifact must rebuild before serving"
+    );
+    let mut passes = 0;
+    while !latest
+        .advance_text_serving(64)
+        .expect("rebuild current search fields")
+    {
+        passes += 1;
+        assert!(passes < 10_000, "search-revision rebuild did not converge");
+    }
+    assert!(latest.query_owners_are_warm());
+    assert_ne!(active_text_artifact_path(store.path()), previous_path);
+    assert!(
+        previous_path.is_file(),
+        "retention owns the superseded artifact"
+    );
+}
+
+#[test]
 fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
     let source = (0..256).fold(String::new(), |mut source, index| {
         writeln!(
@@ -5895,6 +6000,90 @@ fn text_artifact_hash_rejects_a_named_file_replaced_during_hashing() {
         ),
         "the hashed handle must still be the regular file named by the staging path"
     );
+}
+
+#[test]
+fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
+    struct SubdivisionControl {
+        cancelled: bool,
+    }
+    impl CodeIndexExecutionControlV1 for SubdivisionControl {
+        fn is_cancelled(&self) -> bool {
+            self.cancelled
+        }
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+    let source = (0..256).fold(String::new(), |mut source, ordinal| {
+        let _ = writeln!(
+            source,
+            "pub fn subdivision_{ordinal}() -> usize {{ {ordinal} }}"
+        );
+        source
+    });
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().unwrap();
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().unwrap());
+    let latest = scheduler.latest_complete().unwrap();
+    assert!(!latest.advance_text_serving(1).unwrap());
+    let before = {
+        let mut slot = latest.text_projection_build.lock_slot();
+        let super::CodeTextProjectionSlotV1::Building(build) = &mut *slot else {
+            panic!("partial text build");
+        };
+        let progress = build.builder.progress().unwrap();
+        assert!(progress.next_page_ordinal > 0);
+        build.builder =
+            CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &build.staging_path,
+                latest.text_projection_metadata().unwrap(),
+                build.builder.fixed_ledger_charge_bytes() + 1,
+                &SubdivisionControl { cancelled: false },
+            )
+            .unwrap();
+        progress
+    };
+    let mut retries = 0;
+    loop {
+        match latest.advance_text_serving(1) {
+            Ok(false) => {
+                retries += 1;
+                assert!(
+                    retries <= 16,
+                    "subdivision must terminate within the initial page bound"
+                );
+                assert_eq!(
+                    latest
+                        .advance_artifact_text_serving(1, &SubdivisionControl { cancelled: true }),
+                    Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+                );
+            }
+            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => break,
+            other => panic!("unexpected projection outcome: {other:?}"),
+        }
+        let slot = latest.text_projection_build.lock_slot();
+        let super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
+            panic!("refusal keeps resumable build");
+        };
+        assert_eq!(build.builder.progress().unwrap(), before);
+        assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
+    }
+    assert!(
+        retries > 0,
+        "oversized page must subdivide before terminal refusal"
+    );
+    let slot = latest.text_projection_build.lock_slot();
+    let super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
+        panic!("indivisible refusal keeps durable prefix");
+    };
+    assert_eq!(build.builder.progress().unwrap(), before);
+    assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
 }
 
 #[test]
@@ -8243,7 +8432,13 @@ async fn a_same_content_successor_pointer_keeps_the_seated_generation_serving() 
     // source content — the exact durable state between a convergence
     // republication's publish and its seat.
     advance_pointer_to_unseated_successor(
-        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+        &super::scoped_code_index_store_root(
+            store.path(),
+            &fixture
+                .path()
+                .canonicalize()
+                .expect("canonical fixture root"),
+        ),
         false,
     );
 
@@ -8294,7 +8489,13 @@ async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
         .await
         .expect("mounted worktree witness");
     advance_pointer_to_unseated_successor(
-        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+        &super::scoped_code_index_store_root(
+            store.path(),
+            &fixture
+                .path()
+                .canonicalize()
+                .expect("canonical fixture root"),
+        ),
         true,
     );
 
@@ -10280,53 +10481,42 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler handle");
-    let (wake, reconcile_in_progress) = {
-        let scheduler = scheduler
+    struct ResumeOnDrop(Arc<super::reconcile_panic_guard::ReconcileFaultInjectionV1>);
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            self.0.resume();
+        }
+    }
+
+    let admitted = Arc::new(super::reconcile_panic_guard::ReconcileFaultInjectionV1::paused());
+    let release = ResumeOnDrop(Arc::clone(&admitted));
+    let wake = {
+        let mut scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (
-            Arc::clone(&scheduler.wake),
-            Arc::clone(&scheduler.reconcile_in_progress),
-        )
+        scheduler.install_reconcile_fault_for_test(Arc::clone(&admitted));
+        Arc::clone(&scheduler.wake)
     };
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let lock_thread = std::thread::spawn(move || {
-        let _guard = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held_tx.send(()).expect("signal scheduler lock held");
-        release_rx.recv().expect("release scheduler lock");
-    });
-    held_rx.recv().expect("scheduler lock acquired");
     fixture.edit("src/lib.rs", "pub fn busy() -> u32 { 2 }\n");
     wake.notify_one();
-    // A claimed pass, not a fixed delay, is this case's precondition: only a
-    // writer already inside a pass is waiting on the scheduler mutex this
-    // thread holds, and only that writer makes retirement report settling. A
-    // host slow enough to leave the woken worker still parked resumed here and
-    // retired an idle owner, which joins immediately.
-    let pass_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while reconcile_in_progress.load(std::sync::atomic::Ordering::Acquire) == 0 {
-        assert!(
-            std::time::Instant::now() <= pass_deadline,
-            "the woken writer never claimed a reconcile pass"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while admitted.attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker admits a reconcile pass before retirement");
     let roots = [fixture.path().canonicalize().expect("canonical root")]
         .into_iter()
         .collect();
 
-    assert!(
-        !registry
-            .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
-            .await,
-        "blocked writer must report settling"
-    );
-    assert_eq!(registry.retiring_owner_count().await, 1);
-    release_tx.send(()).expect("release writer");
-    lock_thread.join().expect("writer joins");
+    let drained = registry
+        .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
+        .await;
+    let retained = registry.retiring_owner_count().await;
+    drop(release);
+    assert!(!drained, "blocked writer must report settling");
+    assert_eq!(retained, 1);
     assert!(
         registry
             .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
@@ -15531,11 +15721,6 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         progress.owner_epoch
     };
 
-    fixture.edit(
-        "src/file_0000.rs",
-        "pub fn beta_0000() -> usize { 10_000 }\n",
-    );
-    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
     let durable_generations_root = {
         let mut scheduler = scheduler
             .lock()
@@ -15546,6 +15731,11 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         scheduler.publication.generations_root = blocker;
         durable
     };
+    fixture.edit(
+        "src/file_0000.rs",
+        "pub fn beta_0000() -> usize { 10_000 }\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
     let reconcile_in_progress = {
         Arc::clone(
             &scheduler
@@ -15578,7 +15768,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let unpublished_b_generation = {
-        let mut scheduler = scheduler
+        let scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
@@ -15600,7 +15790,6 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             generation_a.as_str()
         );
         assert_eq!(scheduler.sealed_decode_count(), 0);
-        scheduler.publication.generations_root = durable_generations_root;
         scheduler
             .publication
             .unpublished_candidate
@@ -15613,18 +15802,22 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             .clone()
     };
 
-    fixture.edit(
-        "revision.marker",
-        "generation C leaves indexed source unchanged\n",
-    );
-    git(
-        fixture.path(),
-        &["commit", "-qam", "advance to generation C"],
-    );
     {
         let mut scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Keep B unpublished until C is committed and its stale retry is
+        // checked; the background owner must not publish between those steps.
+        fixture.edit(
+            "revision.marker",
+            "generation C leaves indexed source unchanged\n",
+        );
+        git(
+            fixture.path(),
+            &["commit", "-qam", "advance to generation C"],
+        );
+        scheduler.publication.generations_root = durable_generations_root;
         scheduler.request_background_reconcile_for_observed_change();
         assert!(
             scheduler

@@ -6,7 +6,7 @@ use tracedecay_store::runtime::{
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationReplayCursorV1, GraphPublicationReplayLookupV1, GraphPublicationReplayRecordV1,
-    GraphPublicationStoreErrorV1, GraphVerifiedHeadV1, RuntimeInterruptionV1,
+    GraphVerifiedHeadV1, RuntimeInterruptionV1,
 };
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -560,24 +560,6 @@ fn interruption_error(context: &GraphPublicationOperationContextV1<'_>) -> Optio
                 GraphDbError::DeadlineExceeded
             }
         })
-}
-
-pub(super) fn map_publication_error(error: GraphPublicationStoreErrorV1) -> GraphDbError {
-    match error {
-        GraphPublicationStoreErrorV1::InvalidRequest(error) => {
-            GraphDbError::invalid(error.to_string())
-        }
-        GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::Cancelled) => {
-            GraphDbError::Cancelled
-        }
-        GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
-            GraphDbError::DeadlineExceeded
-        }
-        GraphPublicationStoreErrorV1::Infrastructure => {
-            GraphDbError::unavailable("relational graph publication authority is unavailable")
-        }
-        GraphPublicationStoreErrorV1::Corrupt(message) => GraphDbError::Corrupt { message },
-    }
 }
 
 #[cfg(test)]

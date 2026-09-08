@@ -4705,7 +4705,19 @@ impl LatestCodeTextGenerationV1 {
                 descriptor.artifact_size_bytes,
                 CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                 control,
-            );
+            )
+            .and_then(|reader| {
+                let expected_metadata = self
+                    .text_projection_metadata()
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+                if reader.metadata() != &expected_metadata {
+                    return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                        "published lexical metadata does not match the current projection"
+                            .to_owned(),
+                    ));
+                }
+                Ok(reader)
+            });
             match reader {
                 Ok(reader) => {
                     let sealed_identity = store.sealed_identity(&generation_id)?;
@@ -4880,7 +4892,11 @@ impl LatestCodeTextGenerationV1 {
             *slot = CodeTextProjectionSlotV1::HeadOpening;
             drop(slot);
             let mut claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
-            match self.open_published_head_or_begin_build(control)? {
+            let outcome = hotpath::measure_block!(
+                "query.artifact.head_open",
+                self.open_published_head_or_begin_build(control)
+            )?;
+            match outcome {
                 TextHeadOpenOutcomeV1::Served => return Ok(true),
                 TextHeadOpenOutcomeV1::Build(initialized) => {
                     slot = claim.install_build(initialized);
@@ -4978,16 +4994,15 @@ impl LatestCodeTextGenerationV1 {
                 Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("query.artifact.batch.refusal_total").inc(1u64);
-                    if let Some((previous_page_chunks, tightened_page_chunks)) =
-                        artifact_build.source.tighten_page_chunk_bound()
+                    checkpoint_text_artifact_control(control)?;
+                    if let Some((previous_page_records, tightened_page_records)) =
+                        artifact_build.source.tighten_page_record_bound()
                     {
-                        tracing::warn!(
-                            event = "code_index_text_projection_page_bound_tightened",
-                            previous_page_chunks,
-                            tightened_page_chunks,
+                        tracing::debug!(
+                            previous_page_records,
+                            tightened_page_records,
                             error = %error,
-                            "code-index text projection subdivided a refused lexical page and \
-                             will resume from the unchanged source cursor"
+                            "subdividing refused lexical page at the unchanged source cursor"
                         );
                         return Ok(false);
                     }
@@ -5015,14 +5030,17 @@ impl LatestCodeTextGenerationV1 {
                             )
                         })
                     })?;
-                    self.publish_text_progress_boundary(
-                        artifact_build,
-                        progress,
-                        CodeIndexBuildPhaseV1::BulkCommit,
-                        u64::try_from(page_count).unwrap_or(u64::MAX),
-                        batch_payload_bytes,
-                        commit_latency_micros,
-                        true,
+                    hotpath::measure_block!(
+                        "query.artifact.batch.progress_publish",
+                        self.publish_text_progress_boundary(
+                            artifact_build,
+                            progress,
+                            CodeIndexBuildPhaseV1::BulkCommit,
+                            u64::try_from(page_count).unwrap_or(u64::MAX),
+                            batch_payload_bytes,
+                            commit_latency_micros,
+                            true,
+                        )
                     )?;
                     #[cfg(feature = "hotpath")]
                     {
@@ -7759,6 +7777,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn freshness_probe_requires_reconcile(&mut self) -> bool {
         let freshness = self.freshness_fence.snapshot();
         if !freshness.verified_against_source
+            || freshness.freshness_unknown
+            || self.epoch.load(Ordering::Acquire) != freshness.reconciled_source_epoch
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
                 .differs_from(&freshness.git_metadata)
         {

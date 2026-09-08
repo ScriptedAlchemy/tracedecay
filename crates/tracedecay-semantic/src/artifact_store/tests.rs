@@ -157,6 +157,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn nested_package_paths_import_into_verified_role_layout() {
+        let (root, store) = store();
+        let model = model_bytes();
+        let mut manifest = manifest_for(&model);
+        for member in &mut manifest.payload.members {
+            member.path = format!("package/{}", member.path);
+        }
+        // Source suffixes do not choose the runtime's physical model format.
+        manifest.payload.members[0].path = "weights/model.safetensors".to_owned();
+        let source = root.path().join("package-source");
+        write_local_package(&source, &manifest, &model);
+        let record = store
+            .import_local_directory(&manifest, &source, NOW)
+            .unwrap();
+        let installed = store.installed_directory(&record.artifact_digest);
+        assert!(installed.join("model.onnx").is_file());
+        assert!(installed.join("tokenizer.json").is_file());
+        assert!(!installed.join("weights").exists());
+        drop(store);
+        let reopened = ModelArtifactStore::open(
+            root.path().join("store"),
+            RetentionPolicyV1 { grace_seconds: 100 },
+        )
+        .unwrap();
+        let admitted = reopened
+            .admit_for_runtime_by_digest(&record.artifact_digest, &env())
+            .unwrap();
+        for member in &manifest.payload.members {
+            assert_eq!(
+                admitted.read_member_bytes(member.role).unwrap(),
+                member_bytes(member.role, &model)
+            );
+        }
+        let mut escaped = manifest;
+        escaped.payload.members[0].path = "../model.onnx".to_owned();
+        assert_eq!(
+            reopened
+                .import_local_directory(&escaped, &source, NOW)
+                .unwrap_err(),
+            ArtifactImportErrorV1::ManifestRejected
+        );
+    }
+
     struct FixtureHttpsTransport {
         members: BTreeMap<String, Vec<u8>>,
         revision: String,
@@ -476,7 +520,7 @@ mod tests {
         assert_eq!(record.state, ArtifactInventoryStateV1::Quarantined);
         assert!(
             !store
-                .artifact_dir(&manifest.artifact_identity_digest())
+                .installed_directory(&manifest.artifact_identity_digest())
                 .exists()
         );
     }
@@ -671,7 +715,7 @@ mod tests {
         let replacement = staging_root.join("replacement");
         let members = session.staging_path.join("members");
         drop(session);
-        std::fs::rename(members, store.artifact_dir(&digest)).unwrap();
+        std::fs::rename(members, store.installed_directory(&digest)).unwrap();
         std::fs::rename(&original, &held).unwrap();
         std::fs::create_dir_all(replacement.join("members")).unwrap();
         std::fs::copy(
@@ -769,7 +813,7 @@ mod tests {
         let manifest = manifest_for(b"collectible component race");
         let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let digest = record.artifact_digest.clone();
-        std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
+        std::fs::create_dir_all(store.installed_directory(&digest)).unwrap();
         let mut inventory = store.inventory().unwrap();
         inventory.records.insert(digest.to_string(), record);
         store.save_inventory(&inventory).unwrap();
@@ -867,7 +911,7 @@ mod tests {
         let digest = manifest.artifact_identity_digest();
         let members_path = session.staging_path.join("members");
         drop(session);
-        std::fs::rename(members_path, store.artifact_dir(&digest)).unwrap();
+        std::fs::rename(members_path, store.installed_directory(&digest)).unwrap();
         drop(store);
 
         let reopened =
@@ -888,7 +932,7 @@ mod tests {
         let manifest = manifest_for(b"interrupted gc");
         let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let digest = record.artifact_digest.clone();
-        std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
+        std::fs::create_dir_all(store.installed_directory(&digest)).unwrap();
         let mut inventory = store.inventory().unwrap();
         inventory.records.insert(digest.to_string(), record.clone());
         store.save_inventory(&inventory).unwrap();
@@ -900,7 +944,7 @@ mod tests {
             "recorded_at_unix": NOW + 150,
             "records": [serde_json::to_value(&record).unwrap()],
         });
-        std::fs::remove_dir_all(store.artifact_dir(&digest)).unwrap();
+        std::fs::remove_dir_all(store.installed_directory(&digest)).unwrap();
         std::fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
         drop(store);
 
@@ -924,7 +968,7 @@ mod tests {
             let manifest = manifest_for(format!("gc crash phase {phase}").as_bytes());
             let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
             let digest = record.artifact_digest.clone();
-            std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
+            std::fs::create_dir_all(store.installed_directory(&digest)).unwrap();
             let mut inventory = store.inventory().unwrap();
             inventory.records.insert(digest.to_string(), record.clone());
             store.save_inventory(&inventory).unwrap();
@@ -938,7 +982,7 @@ mod tests {
             std::fs::write(store.recovery_path(), serde_json::to_vec(&journal).unwrap()).unwrap();
 
             if phase >= 1 {
-                std::fs::remove_dir_all(store.artifact_dir(&digest)).unwrap();
+                std::fs::remove_dir_all(store.installed_directory(&digest)).unwrap();
             }
             if phase >= 2 {
                 inventory.records.remove(digest.as_str());
@@ -1265,21 +1309,21 @@ mod tests {
         let manifest = manifest_for(b"orphan verified artifact");
         let record = store.record_for(&manifest, ArtifactInventoryStateV1::Verified, NOW, None);
         let digest = record.artifact_digest.clone();
-        std::fs::create_dir_all(store.artifact_dir(&digest)).unwrap();
+        std::fs::create_dir_all(store.installed_directory(&digest)).unwrap();
         let mut inventory = store.inventory().unwrap();
         inventory.records.insert(digest.to_string(), record);
         store.save_inventory(&inventory).unwrap();
 
         // Within grace: retained.
         assert!(store.gc(NOW + 50).unwrap().is_empty());
-        assert!(store.artifact_dir(&digest).exists());
+        assert!(store.installed_directory(&digest).exists());
 
         // Past grace: collected with an append-only receipt.
         let receipts = store.gc(NOW + 150).unwrap();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].artifact_digest, digest);
         assert_eq!(receipts[0].prior_state, ArtifactInventoryStateV1::Verified);
-        assert!(!store.artifact_dir(&digest).exists());
+        assert!(!store.installed_directory(&digest).exists());
         let log = std::fs::read_to_string(store.root.join("receipts").join("gc.jsonl")).unwrap();
         assert_eq!(log.lines().count(), 1);
         assert!(store.inventory().unwrap().records.is_empty());

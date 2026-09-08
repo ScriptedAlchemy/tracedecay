@@ -4,28 +4,31 @@ use std::path::{Component, Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{ProjectId, UserProfileId};
+use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 
 use super::{AuthorizedScopeSetError, MultiRootQueryError};
 use crate::{RequestContext, ResolvedScope};
 
-/// Shared physical profile-store locator supplied by the profile authority.
+/// Logical and verified physical identity of the shared Profile shard.
 ///
-/// The typed profile and store IDs select this locator. It never derives an
-/// identity from a path, CWD, active graph, or mutable project alias.
+/// Brain and profile IDs select the shard; the verified store locator binds its
+/// physical store. Lease incarnations and authority epochs remain runtime fences.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct SharedProfileStoreLocatorV1 {
+    pub brain_id: BrainId,
     pub profile_id: UserProfileId,
     pub store_id: String,
 }
 
 impl SharedProfileStoreLocatorV1 {
     pub fn new(
+        brain_id: BrainId,
         profile_id: UserProfileId,
         store_id: impl Into<String>,
     ) -> Result<Self, MultiRootQueryError> {
         let locator = Self {
+            brain_id,
             profile_id,
             store_id: store_id.into(),
         };
@@ -34,6 +37,9 @@ impl SharedProfileStoreLocatorV1 {
     }
 
     pub fn validate(&self) -> Result<(), MultiRootQueryError> {
+        self.brain_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
         self.profile_id
             .validate()
             .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
@@ -56,13 +62,12 @@ pub struct RegisteredRootLocatorV1 {
 impl RegisteredRootLocatorV1 {
     pub fn new(
         project_id: ProjectId,
-        profile_id: UserProfileId,
-        store_id: impl Into<String>,
+        profile: SharedProfileStoreLocatorV1,
         canonical_root: impl Into<PathBuf>,
     ) -> Result<Self, MultiRootQueryError> {
         let locator = Self {
             project_id,
-            profile: SharedProfileStoreLocatorV1::new(profile_id, store_id)?,
+            profile,
             canonical_root: canonical_root.into(),
         };
         locator.validate()?;

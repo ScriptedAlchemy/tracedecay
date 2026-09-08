@@ -1,6 +1,7 @@
 mod apply;
 mod rebuild;
 mod schema;
+mod source_transition;
 mod state;
 mod transition;
 
@@ -20,6 +21,7 @@ pub(crate) use schema::{
 pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
+pub(crate) use source_transition::verify_native_source_supersession;
 pub(crate) use state::rearm_queued_projection_retries;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;

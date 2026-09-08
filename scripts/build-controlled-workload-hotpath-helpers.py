@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 
+PACKAGE = "tracedecay-search-eval"
 EXAMPLE = "emit_controlled_workload_reports"
 FEATURE = "controlled-workload-hotpath"
 
@@ -25,12 +26,25 @@ def cargo_target_directory(source: Path) -> Path:
     return Path(json.loads(output)["target_directory"])
 
 
-def build_example(source: Path, profile: str, target: str | None, feature: str | None) -> None:
+def build_example(
+    source: Path,
+    profile: str,
+    target: str | None,
+    workspace: bool,
+    base_features: str | None,
+    hotpath: bool,
+) -> None:
+    # Package selection drives feature unification. `--workspace` lets a CI
+    # lane that already compiled the workspace reuse that graph for the
+    # feature-off build instead of resolving a second one for this package.
+    selection = ["--workspace"] if workspace else ["-p", PACKAGE]
+    features = [] if base_features is None else [base_features]
+    if hotpath:
+        features.append(f"{PACKAGE}/{FEATURE}" if workspace else FEATURE)
     command = [
         "cargo",
         "build",
-        "-p",
-        "tracedecay-search-eval",
+        *selection,
         "--profile",
         profile,
         "--example",
@@ -39,8 +53,8 @@ def build_example(source: Path, profile: str, target: str | None, feature: str |
     ]
     if target is not None:
         command.extend(["--target", target])
-    if feature is not None:
-        command.extend(["--features", feature])
+    if features:
+        command.extend(["--features", ",".join(features)])
     subprocess.run(command, cwd=source, check=True)
 
 
@@ -55,6 +69,17 @@ def main() -> None:
     parser.add_argument("--source", type=Path, default=Path.cwd())
     parser.add_argument("--profile", choices=("test", "perf", "release"), required=True)
     parser.add_argument("--target")
+    parser.add_argument(
+        "--workspace",
+        action="store_true",
+        help=f"select the whole workspace instead of -p {PACKAGE}, sharing "
+        "the caller's dependency graph",
+    )
+    parser.add_argument(
+        "--features",
+        help="cargo features to enable on both builds (for example the "
+        "root fixture feature the CI test lane compiles with)",
+    )
     args = parser.parse_args()
 
     source = args.source.resolve()
@@ -74,9 +99,9 @@ def main() -> None:
         staged_off = staging / f"hotpath-off{suffix}"
         staged_on = staging / f"hotpath-on{suffix}"
 
-        build_example(source, args.profile, args.target, None)
+        build_example(source, args.profile, args.target, args.workspace, args.features, False)
         shutil.copy2(example, staged_off)
-        build_example(source, args.profile, args.target, FEATURE)
+        build_example(source, args.profile, args.target, args.workspace, args.features, True)
         shutil.copy2(example, staged_on)
 
         off = helper_directory / staged_off.name

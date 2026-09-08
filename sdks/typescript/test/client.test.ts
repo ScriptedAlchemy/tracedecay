@@ -14,6 +14,7 @@ import {
   decodeCanonicalSchema,
   decodeHttpSuccessEnvelope,
   type HttpSuccessEnvelope,
+  type PageState,
 } from "../src/types";
 
 import {
@@ -166,7 +167,7 @@ async function resealCurationEnvelope(envelope: Awaited<ReturnType<typeof curati
   return envelope;
 }
 
-function successEnvelope(payload: unknown) {
+function successEnvelope(payload: unknown, cursor: unknown = null) {
   return {
     kind: "success",
     value: {
@@ -195,7 +196,7 @@ function successEnvelope(payload: unknown) {
             sort_revision: 1,
             total: 1,
             returned: 1,
-            cursor: null,
+            cursor,
             expires_at: null,
           },
           payload,
@@ -206,6 +207,26 @@ function successEnvelope(payload: unknown) {
       future_envelope_field: "preserved",
     },
   };
+}
+
+/** A retained fact-store evidence envelope for the named HTTP binding. */
+function factStoreEnvelope(
+  operation: "fact_store_search" | "fact_store_list",
+  payload: unknown,
+  cursor: unknown,
+) {
+  const envelope = successEnvelope(payload, cursor);
+  envelope.value.binding_id = `binding.http.${operation}.v1`;
+  envelope.value.contract.schema_id =
+    `schema.application.retained.${operation.replaceAll("_", "-")}.result`;
+  return envelope;
+}
+
+function evidencePage(envelope: HttpSuccessEnvelope<unknown>): PageState {
+  if (envelope.outcome.outcome !== "evidence") {
+    throw new Error(`expected evidence, received ${envelope.outcome.outcome}`);
+  }
+  return envelope.outcome.value.page;
 }
 
 function problemEnvelope(
@@ -1073,6 +1094,137 @@ describe("TraceDecayClient transport envelopes", () => {
         );
       },
     );
+  });
+
+  it("decodes each canonical page cursor shape and consumes its continuation", async () => {
+    const factId = `fact.v1.${"a".repeat(64)}.${"b".repeat(64)}`;
+    const searchCursor = {
+      score_millionths: 750_000,
+      updated_at: 1_700_000_000_000_000,
+      fact_id: factId,
+    };
+    const searchPayload = {
+      graph_coverage: { kind: "not_applicable" },
+      hits: [],
+      next_after: searchCursor,
+      owner: { kind: "profile" },
+      retrieval_telemetry: { kind: "not_applicable" },
+    };
+    const listPayload = { facts: [], next_after_fact_id: factId, owner: { kind: "profile" } };
+
+    await withServer(
+      [
+        (_request, response) =>
+          json(response, 200, successEnvelope([], { kind: "opaque", cursor: "cursor.page-2" })),
+        (request, response) => {
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/workflow/list-definitions?cursor=cursor.page-2",
+          );
+          json(response, 200, successEnvelope([]));
+        },
+        (_request, response) =>
+          json(
+            response,
+            200,
+            factStoreEnvelope("fact_store_search", searchPayload, {
+              kind: "fact_search",
+              cursor: searchCursor,
+            }),
+          ),
+        (request, response, body) => {
+          expect(request.url).toBe("/projects/project.sdk/application/retained/fact_store_search");
+          expect(JSON.parse(body)).toEqual({ query: "memory", after: searchCursor });
+          json(response, 200, factStoreEnvelope("fact_store_search", searchPayload, null));
+        },
+        (_request, response) =>
+          json(
+            response,
+            200,
+            factStoreEnvelope("fact_store_list", listPayload, {
+              kind: "fact_list_after",
+              fact_id: factId,
+            }),
+          ),
+        (request, response, body) => {
+          expect(request.url).toBe("/projects/project.sdk/application/retained/fact_store_list");
+          expect(JSON.parse(body)).toEqual({ after_fact_id: factId });
+          json(response, 200, factStoreEnvelope("fact_store_list", listPayload, null));
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+
+        const opaque = evidencePage(await client.operations.workflow_list_definitions({})).cursor;
+        expect(opaque).toEqual({ kind: "opaque", cursor: "cursor.page-2" });
+        if (opaque?.kind !== "opaque") throw new Error("expected an opaque cursor");
+        expect(
+          evidencePage(
+            await client.operations.workflow_list_definitions(
+              {},
+              { page: { cursor: opaque.cursor } },
+            ),
+          ).cursor,
+        ).toBeNull();
+
+        const search = evidencePage(
+          await client.operations.application_fact_store_search({ query: "memory" }),
+        ).cursor;
+        expect(search).toEqual({ kind: "fact_search", cursor: searchCursor });
+        if (search?.kind !== "fact_search") throw new Error("expected a fact search cursor");
+        expect(
+          evidencePage(
+            await client.operations.application_fact_store_search({
+              query: "memory",
+              after: search.cursor,
+            }),
+          ).cursor,
+        ).toBeNull();
+
+        const list = evidencePage(await client.operations.application_fact_store_list({})).cursor;
+        expect(list).toEqual({ kind: "fact_list_after", fact_id: factId });
+        if (list?.kind !== "fact_list_after") throw new Error("expected a fact list cursor");
+        expect(
+          evidencePage(
+            await client.operations.application_fact_store_list({ after_fact_id: list.fact_id }),
+          ).cursor,
+        ).toBeNull();
+      },
+    );
+  });
+
+  it("refuses non-canonical page cursors after decoding", async () => {
+    const cursors: unknown[] = [
+      "cursor.page-2",
+      { kind: "opaque", cursor: "a".repeat(4_097) },
+      { kind: "opaque", cursor: " padded " },
+      { kind: "opaque", cursor: "" },
+      { kind: "opaque", cursor: "tab\tseparated" },
+      { kind: "fact_search", cursor: { score_millionths: 1, updated_at: 2 } },
+      { kind: "fact_search", cursor: { score_millionths: 4_294_967_296, updated_at: 2, fact_id: "f" } },
+      { kind: "fact_list_after", fact_id: 7 },
+      { kind: "unknown_tag", cursor: "cursor.page-2" },
+    ];
+    let served: unknown = null;
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => new Response(JSON.stringify(served), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    served = successEnvelope([], { kind: "opaque", cursor: "a".repeat(4_096) });
+    expect(evidencePage(await requestThroughTransport(client)).cursor).toEqual({
+      kind: "opaque",
+      cursor: "a".repeat(4_096),
+    });
+    for (const cursor of cursors) {
+      served = successEnvelope([], cursor);
+      await expect(requestThroughTransport(client), JSON.stringify(cursor).slice(0, 80))
+        .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    }
   });
 
   it("fails closed when problem envelope identities disagree", async () => {

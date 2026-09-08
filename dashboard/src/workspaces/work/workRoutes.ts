@@ -1,6 +1,4 @@
 import {
-  AdmitWorkExecutionRequestV1Schema,
-  DecideWorkProposalRequestV1Schema,
   ExecutionTopologyMetricsRequestV1Schema,
   ExecutionTopologyMetricsV1Schema,
   ExecutionTopologyViewV1Schema,
@@ -18,7 +16,7 @@ import {
 import type { WorkRoute } from "./workApi.ts";
 
 /**
- * The canonical Work routes this dashboard calls or documents.
+ * The canonical Work routes this dashboard calls.
  *
  * Each one names a core operation of the canonical `WorkOperation` descriptor
  * (`crates/tracedecay-api/src/work.rs`), which is what the daemon mounts and
@@ -28,11 +26,8 @@ import type { WorkRoute } from "./workApi.ts";
  * the dashboard side, and a route invented here would be a request the daemon
  * has never mounted.
  *
- * Declared is not the same as called. Proposal decisions and direct execution
- * admission remain documented because they are mounted product operations;
- * the dashboard's current create and admission journeys instead use the
- * backend-owned prepare/mutate handoff so the browser never mints authority
- * identities, clocks, or revision pins.
+ * Creation and admission use the backend-owned prepare/mutate handoff so the
+ * browser never mints authority identities, clocks, or revision pins.
  */
 
 /**
@@ -130,26 +125,5 @@ export const WORK_MUTATE_GRAPH_ROUTE = {
   operation: "operation.work.mutate_graph",
   path: "/api/work/mutate-graph",
   request: WorkProductMutationRequestV1Schema,
-  response: WorkProductMutationReceiptV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
-export const WORK_REVIEW_PROPOSAL_ROUTE = {
-  operation: "operation.work.review_proposal",
-  path: "/api/work/review-proposal",
-  request: DecideWorkProposalRequestV1Schema,
-  response: WorkProductMutationReceiptV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
-export const WORK_ACCEPT_PROPOSAL_ROUTE = {
-  operation: "operation.work.accept_proposal",
-  path: "/api/work/accept-proposal",
-  request: DecideWorkProposalRequestV1Schema,
-  response: WorkProductMutationReceiptV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
-export const WORK_ADMIT_EXECUTION_ROUTE = {
-  operation: "operation.work.admit_execution",
-  path: "/api/work/admit-execution",
-  request: AdmitWorkExecutionRequestV1Schema,
   response: WorkProductMutationReceiptV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;

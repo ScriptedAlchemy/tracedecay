@@ -4,6 +4,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use tracedecay_application::now_micros;
+use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
     PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord, SessionId,
@@ -897,7 +898,7 @@ async fn resolve_occurrence(
     }
     if message_id.is_empty()
         || provider.is_empty()
-        || !is_canonical_sha256_hex(&content_hash)
+        || !is_lowercase_hex(&content_hash, 64)
         || !anchor
             .source_observations()
             .iter()
@@ -1322,17 +1323,6 @@ fn nonnegative_usize(value: Option<i64>) -> Result<usize, HydrationError> {
 
 fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
     expected.strip_prefix("sha256:").unwrap_or(expected) == sha256_hex(bytes)
-}
-
-fn is_canonical_sha256_hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    tracedecay_domain::canonical_text::sha256_hex(bytes)
 }
 
 #[cfg(test)]

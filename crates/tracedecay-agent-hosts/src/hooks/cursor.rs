@@ -5,6 +5,7 @@
 //! Cursor expects Cursor-shaped stdout, separate from Claude, Codex, and Kiro.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -52,6 +53,7 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.post_tool_use")]
 pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
@@ -65,12 +67,11 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     );
     if let Some(decision) = cursor_post_tool_use_decision(runtime, &event)
         && !super::write_hook_output(
-            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             &decision,
-            Some(&_hook_telemetry),
+            started,
         )
         .await
     {
@@ -81,15 +82,15 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
 
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_start")]
 pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
-    let (root, output) = cursor_session_start_response(runtime, &event).await;
+    let (root, output) = cursor_session_start_response(runtime, &event, started).await;
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
         &output,
-        None,
+        started,
     )
     .await
     {
@@ -103,6 +104,7 @@ pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
 async fn cursor_session_start_response(
     runtime: &HookRuntimeV1,
     event: &str,
+    started: Instant,
 ) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
@@ -120,6 +122,7 @@ async fn cursor_session_start_response(
         event,
         root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)

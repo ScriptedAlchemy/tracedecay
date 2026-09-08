@@ -1,6 +1,6 @@
 ---
 name: using-hotpath
-description: "TraceDecay Dev: Use when profiling TraceDecay with Hotpath, interpreting Hotpath timing/allocation/CPU/async/lock/channel/I/O/HTTP reports, adding feature-gated instrumentation, comparing profiles, or proving a performance fix without confusing inclusive service demand with wall time."
+description: "Profile TraceDecay performance with Hotpath or add and validate feature-gated measurement instrumentation."
 ---
 
 # Using Hotpath
@@ -20,14 +20,12 @@ a serial phase that should use every core, an inlined mega-future — is the
 defect; fix it and keep the limit. Change the budget only when the measured
 cost is genuinely irreducible, in its own commit, with the measurement
 attached. Overrides that keep an investigation moving are scaffolding: label
-them and remove them before merge. (Case study: the 2026-08-27 graph
-activation "deadline exceeded" loop — the wall retried identical work forever;
-the real defects were projection throughput and writer contention.)
+them and remove them before merge.
 
 ## Workflow
 
 1. Record the exact commit, build profile, feature set, corpus, cold/warm state, and workload.
-2. Check `conductor status` before building. Run plain `cargo` (cargo-conductor brokers it; see `AGENTS.md`). Do not set `CARGO_TARGET_DIR` or isolate builds.
+2. If a build is needed, follow the current repository build coordinator and target-directory rules in `AGENTS.md`. Reuse a suitable existing binary for report-only work.
 3. Capture the OS baseline with `scripts/profile-hotpath-os-counters.sh`; this supplies elapsed time, CPU, RSS/swap, faults, and physical/logical I/O that Hotpath cannot infer.
 4. Source `scripts/hotpath-rustflags.sh` before any lane that needs
    `--cfg tokio_unstable`. Cargo's env `RUSTFLAGS` replaces config rustflags
@@ -41,23 +39,13 @@ the real defects were projection throughput and writer contention.)
 6. Interpret totals by resource semantics. Function wall time is inclusive and parallel invocations overlap. Never add nested totals or present aggregate worker-seconds as generation wall time.
 7. Add instrumentation only where the current reports cannot separate competing explanations. Prefer the facility matching the resource rather than another generic function span.
 8. Re-run the same cold and warm journeys in fresh processes. Compare behavior/digests, latency distribution, CPU, memory, faults/swap, I/O, and serving responsiveness.
-9. Prove the feature-off build has no listener, report file, or behavior change.
+9. When changing instrumentation or feature wiring, verify the feature-off build has no listener, report file, or behavior change.
 
-## Choose the correct facility
+## Adding instrumentation
 
-- Synchronous function or bounded phase: `#[hotpath::measure]` or `hotpath::measure_block!("static.label", expression)`.
-- Bulk instrumentation of a suspect area: `#[hotpath::measure_all]` on an inline `mod` or `impl` block applies `measure` to every function inside; exclude trivial or noisy functions with `#[hotpath::skip]`. It cannot be a file-level inner attribute, and trait-impl methods get timing/allocation but not CPU-sample attribution. Use it to blanket one investigation target, not the codebase; trim it back per the instrumentation rules before merge.
-- Async task lifetime, suspension, polling, or cancellation: `#[hotpath::measure(future = true)]` or `hotpath::future!(future, label = "static.label")`; use one, not both.
-- Stream production/consumption: `hotpath::stream!`.
-- Queue depth and send-to-receive latency: `hotpath::channel!`; default wrap mode changes endpoint types, while `proxy = true` preserves them but loses exact depth/latency.
-- Actual read/write operations and bytes: `hotpath::io!` around the one canonical handle, not both a file and its buffer.
-- Lock wait and hold: `hotpath::mutex!` / `hotpath::rw_lock!`, using feature-dependent type aliases when the wrapped type changes.
-- HTTP server: one Axum layer after the complete router is assembled.
-- HTTP client: one supported Hotpath middleware per client. Header completion excludes body download/decode, so measure decoding separately when material.
-- Tokio: register the already-built runtime once with `hotpath::tokio_runtime!(runtime.handle())`.
-- Counts/current state: static `hotpath::gauge!` keys; use additive lifecycle guards for shared state and clean them up in `Drop`.
-- Debug values: avoid in production unless values are bounded and non-sensitive.
-- Direct rusqlite: manual phase/queue/transaction instrumentation; Hotpath 0.24 has no rusqlite adapter. Its `sql` report is fed only by third-party front-ends — `sqlx_tracing_layer()` / `toasty_tracing_layer()` are `tracing_subscriber` layers that harvest those ORMs' completed-query tracing events (emitter-measured elapsed, statements normalized into parameter-insensitive buckets, attributed to the innermost measured frame), and diesel hooks its own instrumentation trait. Use a tracing bridge only for a third-party emitter that already pays tracing's cost; first-party code keeps compile-out macros. Each bridge needs its cargo feature, and a global `EnvFilter` can suppress `sqlx::query` events for the whole stack — attach filters per layer.
+Read [instrumentation-facilities.md](references/instrumentation-facilities.md)
+when choosing or adding probes for a specific resource. Report-only analysis
+does not need the facility catalog.
 
 ## Instrumentation rules
 
@@ -73,7 +61,7 @@ the real defects were projection throughput and writer contention.)
 
 ## Verification
 
-At minimum run the narrow package checks in both feature-off and feature-on modes. For a complete profiling change, also prove:
+For instrumentation changes, run narrow package checks in both feature-off and feature-on modes. Existing-report analysis needs no rebuild. For a performance implementation change, verify the applicable invariants:
 
 - the same durable outputs/digests across worker widths and profiling modes;
 - no listener on 6770/6771 and no report output in the feature-off run;

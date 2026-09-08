@@ -201,14 +201,15 @@ fn open_builder_connection(
     Ok(connection)
 }
 
-fn with_builder_sorter_cpu_admission<T>(
+/// CPU units one builder statement occupies: the builder thread plus every
+/// SQLite sorter helper the connection was granted.
+fn builder_sorter_cpu_units(
     connection: &rusqlite::Connection,
-    operation: impl FnOnce() -> T,
-) -> Result<T, CodeLexicalArtifactErrorV1> {
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let effective_sorter_workers: i64 = connection
         .pragma_query_value(None, "threads", |row| row.get(0))
         .map_err(sqlite_error)?;
-    let admitted_units = usize::try_from(effective_sorter_workers)
+    usize::try_from(effective_sorter_workers)
         .map_err(|_| {
             CodeLexicalArtifactErrorV1::Contract(
                 "SQLite returned a negative lexical sorter worker limit".to_owned(),
@@ -219,7 +220,14 @@ fn with_builder_sorter_cpu_admission<T>(
             CodeLexicalArtifactErrorV1::Contract(
                 "lexical sorter CPU admission width overflowed".to_owned(),
             )
-        })?;
+        })
+}
+
+fn with_builder_sorter_cpu_admission<T>(
+    connection: &rusqlite::Connection,
+    operation: impl FnOnce() -> T,
+) -> Result<T, CodeLexicalArtifactErrorV1> {
+    let admitted_units = builder_sorter_cpu_units(connection)?;
     hotpath::gauge!("query.artifact.sqlite_sorter.admitted_cpu_units").set(admitted_units);
     Ok(tracedecay_code_index::parallelism::with_background_cpu_permits(admitted_units, operation))
 }
@@ -228,9 +236,9 @@ fn with_builder_sorter_cpu_admission<T>(
 mod tests {
     use std::num::NonZeroUsize;
 
-    use super::{
-        ARTIFACT_SQLITE_CACHE_BYTES, open_builder_connection, with_builder_sorter_cpu_admission,
-    };
+    use tracedecay_code_index::parallelism::ProcessBackgroundCpuV1;
+
+    use super::{ARTIFACT_SQLITE_CACHE_BYTES, builder_sorter_cpu_units, open_builder_connection};
 
     /// Staging builder connections stay inside the kernel SQLite window:
     /// no mmap grant, page cache at most 64 MiB, and `synchronous = NORMAL`
@@ -304,13 +312,16 @@ mod tests {
         );
     }
 
+    /// A builder statement is weighted as one builder thread plus every
+    /// SQLite sorter helper the connection was granted, and that weight is
+    /// clamped to the authority's width and released afterwards. The
+    /// authority is local to the test; nothing process-wide is installed.
     #[test]
     fn builder_sorter_statements_hold_their_weighted_cpu_width() {
         let worker_width = tracedecay_code_index::parallelism::indexing_workers();
-        let authority = tracedecay_private_fs::background_cpu::install_process_background_cpu(
+        let authority = std::sync::Arc::new(ProcessBackgroundCpuV1::new(
             NonZeroUsize::new(worker_width).expect("nonzero code-index worker width"),
-        )
-        .expect("install matching process background CPU authority");
+        ));
         let directory = tempfile::tempdir().expect("artifact tempdir");
         let connection = open_builder_connection(&directory.path().join("weighted.sqlite"))
             .expect("builder connection");
@@ -322,13 +333,18 @@ mod tests {
             .saturating_add(1)
             .min(worker_width);
 
-        let observed_units =
-            with_builder_sorter_cpu_admission(&connection, || authority.active_units())
-                .expect("run weighted SQLite statement");
+        let weighted_units =
+            builder_sorter_cpu_units(&connection).expect("builder statement weight");
+        assert_eq!(
+            weighted_units,
+            usize::try_from(configured_threads).expect("nonnegative SQLite helper width") + 1,
+            "one builder plus every configured SQLite helper is the statement's weight"
+        );
+        let observed_units = authority.with_permits(weighted_units, || authority.active_units());
 
         assert_eq!(
             observed_units, expected_units,
-            "one builder plus every configured SQLite helper must share the process CPU authority"
+            "the weighted statement must occupy its helpers' units, clamped to the process width"
         );
         assert_eq!(
             authority.active_units(),

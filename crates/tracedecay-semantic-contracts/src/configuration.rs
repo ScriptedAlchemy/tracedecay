@@ -7,18 +7,15 @@ use tracedecay_domain::{
     ComponentRevision, EmbeddingDocumentCompositionV1, ManifestDigest, host_cpu_target,
 };
 
+/// Catalog ids of the shipped embedding models. These name the catalog
+/// entries; whether a `selected_model` is actually cataloged is decided by
+/// the production catalog in `tracedecay-semantic`, not here — settings
+/// validation is provider-free and structural only.
 pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
 /// Catalog id of the Model2Vec static code-embedding model
 /// (`minishlab/potion-code-16M-v2`, 256 dimensions, no ONNX Runtime).
 pub const MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID: &str = "PotionCode16MV2";
 
-/// Every model id the semantic catalog serves. Settings validation is
-/// provider-free, so the list is mirrored here and the catalog test suite
-/// proves every production entry is accepted by `SemanticConfig::validate`.
-const CATALOGED_SEMANTIC_MODEL_IDS: &[&str] = &[
-    DEFAULT_FASTEMBED_MODEL_ID,
-    MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID,
-];
 const MAX_SEMANTIC_MODEL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_SEMANTIC_TOKENIZER_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_SEMANTIC_RESIDENT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -192,19 +189,18 @@ impl Default for SemanticConfig {
 }
 
 impl SemanticConfig {
+    /// Structural validation only: model-id shape, resource ceilings, profile
+    /// selection shape, and rollback invariants. Catalog membership of
+    /// `selected_model` is admitted where the catalog is declared
+    /// (`tracedecay-semantic`), so adding a model edits one declaration.
     pub fn validate(&self) -> Result<()> {
         validate_semantic_resource_ceilings(self.resources)?;
-        if let Some(model_id) = self.selected_model.as_ref() {
-            if model_id.trim().is_empty() || model_id.len() > 128 {
-                return Err(config_error(
-                    "semantic selected_model must be a non-empty catalog id at most 128 bytes",
-                ));
-            }
-            if !CATALOGED_SEMANTIC_MODEL_IDS.contains(&model_id.as_str()) {
-                return Err(config_error(format!(
-                    "semantic selected_model '{model_id}' is not a cataloged semantic embedding model"
-                )));
-            }
+        if let Some(model_id) = self.selected_model.as_ref()
+            && (model_id.trim().is_empty() || model_id.len() > 128)
+        {
+            return Err(config_error(
+                "semantic selected_model must be a non-empty catalog id at most 128 bytes",
+            ));
         }
         if let Some(active) = self.active_profile.as_ref() {
             active.validate()?;

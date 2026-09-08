@@ -294,12 +294,8 @@ pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );";
 
-/// Session-message anchor-binding triggers, shared with the scoped observation
-/// reset like [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
-///
-/// The guard matches the whole `claude-session-message-v*` projector family,
-/// not one pinned version: a projector-version bump must never silently drop
-/// the anchor binding every published row depends on.
+/// Anchor-binding triggers, shared with the scoped observation reset like
+/// [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
 pub(crate) const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
     include_str!("projection_binding_triggers.sql");
 

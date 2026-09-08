@@ -14,6 +14,7 @@ use tracedecay_domain::{
     EphemeralSanitizedQueryViewV1, OptionalStagePublicStatus, RetrievalRequest, RetrieverKind,
     SemanticRetrievalContinuationV1,
 };
+use tracedecay_semantic::SemanticModelLifecycleOwnerV1;
 use tracedecay_semantic_contracts::RerankCompatibilityPinsV1;
 
 use super::CodeIndexSchedulerRegistryV1;
@@ -66,6 +67,7 @@ impl SemanticQueryAuthorityV1 {
     pub fn from_committed(
         committed: CommittedRetrievalProfileStateV1,
         query_profile_id: tracedecay_domain::FusionProfileId,
+        lifecycle_owner: Option<Arc<SemanticModelLifecycleOwnerV1>>,
     ) -> Result<Self, SemanticQueryAuthorityErrorV1> {
         let activation = committed
             .current_activation
@@ -110,7 +112,8 @@ impl SemanticQueryAuthorityV1 {
             return Err(SemanticQueryAuthorityErrorV1::IncompatibleActivation);
         }
         let rerank = rerank_pins.map(|pins| {
-            let mounted = crate::semantic_code::shared_lifecycle_owner()
+            let mounted = lifecycle_owner
+                .as_ref()
                 .and_then(|owner| owner.mount_reranker(pins.clone()).ok());
             ConfiguredRerankAuthorityV1 { pins, mounted }
         });
@@ -279,8 +282,9 @@ impl CodeIndexSchedulerRegistryV1 {
             .profile()
             .profile_id
             .clone();
+        let lifecycle_owner = self.semantic_lifecycle_owner_for_scope(scope).await;
         let authority = task::spawn_blocking(move || {
-            SemanticQueryAuthorityV1::from_committed(committed, query_profile_id)
+            SemanticQueryAuthorityV1::from_committed(committed, query_profile_id, lifecycle_owner)
         })
         .await
         .map_err(|error| SemanticQueryAuthorityErrorV1::Mount(error.to_string()))??;
@@ -318,6 +322,16 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         worktree.semantic_query_authority = Some((scope.scope_digest.clone(), authority));
         Ok(())
+    }
+
+    pub async fn semantic_lifecycle_owner_for_scope(
+        &self,
+        scope: &ResolvedScope,
+    ) -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
+        scope.validate().ok()?;
+        let mounted = self.mounted.lock().await;
+        let (_, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+        worktree.semantic_lifecycle_owner.clone()
     }
 
     /// The installed semantic route for one exact admitted scope.
@@ -383,8 +397,9 @@ impl CodeIndexSchedulerRegistryV1 {
         // single-flight model worker before canonical generation resolution so
         // model acquisition can overlap a truthful text-index rebuild.
         if matches!(mode, SemanticQueryModeV1::StrictSemantic) {
+            let lifecycle_owner = self.semantic_lifecycle_owner_for_scope(scope).await;
             hotpath::measure_block!("daemon.query.semantic.model_demand", {
-                if let Some(owner) = crate::semantic_code::shared_lifecycle_owner() {
+                if let Some(owner) = lifecycle_owner {
                     let _ = owner.enqueue_demand_acquisition_if_needed();
                 }
             });

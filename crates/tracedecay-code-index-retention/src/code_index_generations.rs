@@ -262,6 +262,40 @@ pub fn retain_bounded_generation_index_with_text_head(
     active_generation_id: &str,
     active_text_head_generation_id: Option<&str>,
 ) -> usize {
+    retain_bounded_generation_index_accounted(
+        entries,
+        active_generation_id,
+        active_text_head_generation_id,
+    )
+    .removed
+}
+
+/// Receipt of one bounded-history sweep: how many entries it evicted and how
+/// many entry visits its byte accounting performed. The visit count is the
+/// falsifiable cost contract — after the canonical sort it is linear in the
+/// entry count, never proportional to entries × evictions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GenerationIndexRetentionSweepV1 {
+    pub(crate) removed: usize,
+    pub(crate) accounting_visits: usize,
+}
+
+/// The retention rule as one selection pass over canonical oldest-first
+/// entries.
+///
+/// Evictions come off the oldest removable entry first until the count and
+/// byte bounds both hold, so the survivors are always the protected entries
+/// (active generation and active text head) plus the newest removable suffix.
+/// Rather than recomputing the whole vector's bytes after every eviction, this
+/// accumulates the byte total of each candidate suffix once, newest to oldest,
+/// with shared text artifacts counted the first time they are seen — exactly
+/// the deduped saturating total the whole-vector recomputation produced — and
+/// then compacts the vector once.
+pub(crate) fn retain_bounded_generation_index_accounted(
+    entries: &mut Vec<DurableGenerationIndexEntryV1>,
+    active_generation_id: &str,
+    active_text_head_generation_id: Option<&str>,
+) -> GenerationIndexRetentionSweepV1 {
     entries.sort_by(|left, right| {
         (left.sealed_at_micros, left.generation_id.as_str())
             .cmp(&(right.sealed_at_micros, right.generation_id.as_str()))
@@ -273,47 +307,84 @@ pub fn retain_bounded_generation_index_with_text_head(
         .map_or(i64::MIN, |entry| entry.sealed_at_micros);
     let oldest_retained =
         active_sealed_at.saturating_sub(MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1);
-    entries.retain(|entry| {
+    let is_protected = |entry: &DurableGenerationIndexEntryV1| {
         entry.generation_id == active_generation_id
             || active_text_head_generation_id == Some(entry.generation_id.as_str())
-            || entry.sealed_at_micros >= oldest_retained
-    });
+    };
+    entries.retain(|entry| is_protected(entry) || entry.sealed_at_micros >= oldest_retained);
 
-    loop {
-        let total_bytes = durable_generation_index_bytes(entries);
-        if entries.len() <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1
-            && total_bytes <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
-        {
-            break;
+    let mut protected_count = 0usize;
+    let mut removable = Vec::new();
+    let (suffix_bytes, accounting_visits) = {
+        let mut accounting = GenerationIndexByteAccountingV1::default();
+        let mut protected_bytes = 0_u64;
+        for (index, entry) in entries.iter().enumerate() {
+            if is_protected(entry) {
+                protected_count += 1;
+                protected_bytes = accounting.add(entry, protected_bytes);
+            } else {
+                removable.push(index);
+            }
         }
-        let Some(index) = entries.iter().position(|entry| {
-            entry.generation_id != active_generation_id
-                && active_text_head_generation_id != Some(entry.generation_id.as_str())
-        }) else {
-            break;
-        };
-        entries.remove(index);
+        // `suffix_bytes[i]` is the deduped byte total of the protected entries
+        // plus the removable entries from removable ordinal `i` onward — the
+        // exact set that survives once the `i` oldest removable entries are
+        // evicted.
+        let mut suffix_bytes = vec![protected_bytes; removable.len() + 1];
+        for ordinal in (0..removable.len()).rev() {
+            suffix_bytes[ordinal] =
+                accounting.add(&entries[removable[ordinal]], suffix_bytes[ordinal + 1]);
+        }
+        (suffix_bytes, accounting.visits)
+    };
+    let evicted_removables = (0..=removable.len())
+        .find(|&evicted| {
+            protected_count + (removable.len() - evicted) <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1
+                && suffix_bytes[evicted] <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
+        })
+        .unwrap_or(removable.len());
+    if evicted_removables > 0 {
+        let first_survivor = removable
+            .get(evicted_removables)
+            .copied()
+            .unwrap_or(entries.len());
+        let mut index = 0usize;
+        entries.retain(|entry| {
+            let survives = is_protected(entry) || index >= first_survivor;
+            index += 1;
+            survives
+        });
     }
-    original_len.saturating_sub(entries.len())
+    hotpath::gauge!("code_index.retention.generation_index.accounting_visits")
+        .set(accounting_visits);
+    GenerationIndexRetentionSweepV1 {
+        removed: original_len.saturating_sub(entries.len()),
+        accounting_visits,
+    }
 }
 
-fn durable_generation_index_bytes(entries: &[DurableGenerationIndexEntryV1]) -> u64 {
-    let generation_bytes = entries.iter().fold(0_u64, |total, entry| {
-        total
+/// Running deduped byte accounting for one retention sweep: every entry
+/// contributes its generation and segment bytes, and a text artifact file
+/// contributes its bytes the first time any entry names it.
+#[derive(Default)]
+struct GenerationIndexByteAccountingV1<'entries> {
+    visits: usize,
+    artifacts_seen: BTreeSet<&'entries str>,
+}
+
+impl<'entries> GenerationIndexByteAccountingV1<'entries> {
+    fn add(&mut self, entry: &'entries DurableGenerationIndexEntryV1, total: u64) -> u64 {
+        self.visits += 1;
+        let total = total
             .saturating_add(entry.size_bytes)
-            .saturating_add(entry.segment_bytes)
-    });
-    let mut artifacts = BTreeSet::new();
-    entries.iter().fold(generation_bytes, |total, entry| {
-        let Some(artifact) = entry.text_artifact.as_ref() else {
-            return total;
-        };
-        if artifacts.insert(artifact.artifact_file.as_str()) {
-            total.saturating_add(artifact.artifact_size_bytes)
-        } else {
-            total
+            .saturating_add(entry.segment_bytes);
+        match entry.text_artifact.as_ref() {
+            Some(artifact) if self.artifacts_seen.insert(artifact.artifact_file.as_str()) => {
+                total.saturating_add(artifact.artifact_size_bytes)
+            }
+            _ => total,
         }
-    })
+    }
 }
 
 pub fn durable_generation_index_digest(

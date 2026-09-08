@@ -1,24 +1,21 @@
 //! Pins the process background CPU authority as the gate on host observation
 //! capture, in both directions.
 //!
-//! `HostAdmissionFacade::application` resolves `process_background_cpu()` and
-//! converts `None` into `Unavailable`/`background_cpu_unavailable`. That makes
-//! the authority a hard precondition for ingest, not an optimization: a
-//! process that reaches capture without it rejects every frame before
-//! preparation and stops ingesting host observations silently.
+//! `HostAdmissionFacade::application` mounts the authority the composition
+//! root injected through `HostAdmissionAuthorities::with_background_cpu` and
+//! converts its absence into `Unavailable`/`background_cpu_unavailable`. That
+//! makes the authority a hard precondition for ingest, not an optimization: a
+//! facade composed without it rejects every frame before preparation and
+//! stops ingesting host observations silently.
 //!
-//! In production the daemon is the sole installer — profile worker-plan
-//! admission during daemon bootstrap (`install_profile_worker_plan` ->
-//! `tracedecay_code_index::parallelism::install_worker_plan`) installs it at
-//! the effective indexing width, and `serve` and the host hooks route to that
-//! daemon rather than capturing in-process. Nothing covered that contract from
-//! the capture side: `background_cpu_unavailable` had no test anywhere in the
-//! tree, so a regression that dropped the install would have surfaced as
-//! silent ingest loss rather than a failing test.
-//!
-//! This lives in its own integration binary on purpose: the authority is a
-//! process-wide `OnceLock`, so the uninstalled half is only observable in a
-//! process no other test has initialized.
+//! In production the daemon is the sole owner — profile worker-plan admission
+//! during daemon bootstrap (`install_profile_worker_plan` ->
+//! `tracedecay_code_index::parallelism::install_worker_plan`) constructs it at
+//! the effective indexing width and hands it to every ingest composition, and
+//! `serve` and the host hooks route to that daemon rather than capturing
+//! in-process. This test covers the contract from the capture side so a
+//! regression that dropped the injection surfaces as a failing test rather
+//! than silent ingest loss.
 
 use std::num::NonZeroUsize;
 
@@ -33,9 +30,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_private_fs::background_cpu::{
-    install_process_background_cpu, process_background_cpu,
-};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
@@ -127,8 +122,8 @@ fn capture_requests(session_id: &SessionId, count: usize) -> Vec<CaptureObservat
     requests
 }
 
-/// Uninstalled then installed, in one process, in this order — the `OnceLock`
-/// makes the uninstalled state unrecoverable once set.
+/// One facade composed without the authority, then the same authorities with
+/// it injected: nothing process-global changes between the two halves.
 #[tokio::test]
 async fn capture_is_rejected_without_the_authority_and_admitted_with_it() {
     let tmp = TempDir::new().expect("temp profile root");
@@ -139,17 +134,14 @@ async fn capture_is_rejected_without_the_authority_and_admitted_with_it() {
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
     let shard = &database.binding().shard_id;
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+    let authorities = HostAdmissionAuthorities::for_profile(
         shard.brain_id.clone(),
         shard.profile_id.clone(),
         database,
-    ));
-
-    // ---- Uninstalled: capture fails closed against a real store. ----
-    assert!(
-        process_background_cpu().is_none(),
-        "this binary must observe the uninstalled authority first"
     );
+    let facade = HostAdmissionFacade::new(authorities.clone());
+
+    // ---- No authority injected: capture fails closed against a real store. ----
     let session_id = SessionId::new("session.background-cpu-admission").expect("valid session id");
     let rejected = facade
         .capture_observations(capture_requests(&session_id, FRAMES))
@@ -166,17 +158,15 @@ async fn capture_is_rejected_without_the_authority_and_admitted_with_it() {
         "the rejection must be the authority-missing reason, not an unrelated one"
     );
 
-    // ---- Install the authority the daemon's worker plan provides. ----
+    // ---- Inject the authority the daemon's worker plan provides. ----
     let width = NonZeroUsize::new(TEST_WIDTH).expect("nonzero width");
-    let installed =
-        install_process_background_cpu(width).expect("composition root installs the authority");
+    let installed = std::sync::Arc::new(ProcessBackgroundCpuV1::new(width));
     assert_eq!(installed.width(), width);
-    assert!(
-        process_background_cpu().is_some(),
-        "the process getter must resolve the installed authority"
+    let facade = HostAdmissionFacade::new(
+        authorities.with_background_cpu(std::sync::Arc::clone(&installed)),
     );
 
-    // ---- Installed: the same capture, same facade, now admitted. ----
+    // ---- Injected: the same capture, same authorities, now admitted. ----
     let outcomes = facade
         .capture_observations(capture_requests(&session_id, FRAMES))
         .await

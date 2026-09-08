@@ -545,10 +545,17 @@ fn verify_interned_term_layout(
             ))
         })?;
     let columns = table_columns(connection, "term_postings")?;
+    // Column order is shared; only the clustered key positions differ
+    // between the term-leading (11/12) and document-leading (13) layouts.
+    let (term_key, field_key, document_key) = if layout.clusters_term_postings_by_document() {
+        (2, 3, 1)
+    } else {
+        (1, 2, 3)
+    };
     let expected = [
-        ("term_id", "INTEGER", 1, 1),
-        ("field", "INTEGER", 1, 2),
-        ("document_id", "INTEGER", 1, 3),
+        ("term_id", "INTEGER", 1, term_key),
+        ("field", "INTEGER", 1, field_key),
+        ("document_id", "INTEGER", 1, document_key),
         ("frequency", "INTEGER", 1, 0),
     ];
     if without_rowid != Some(1)
@@ -560,7 +567,8 @@ fn verify_interned_term_layout(
             .eq(expected)
     {
         return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
-            "artifact term posting table has columns {columns:?}; revision 11 requires interned term identifiers"
+            "artifact term posting table has columns {columns:?}; revision {} requires interned term identifiers in its clustered key order",
+            layout.revision()
         )));
     }
     let vocabulary = table_columns(connection, "vocabulary")?;
@@ -580,7 +588,7 @@ fn verify_interned_term_layout(
             "artifact vocabulary table has columns {vocabulary:?}; revision 11 requires interned terms"
         )));
     }
-    if layout == LexicalArtifactLayoutV1::V12 {
+    if layout.interns_exact_terms() {
         let exact_without_rowid: Option<i64> = connection
             .query_row(
                 "SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = 'exact_postings' AND type = 'table'",
@@ -694,7 +702,9 @@ pub(super) fn encode_ngram_bitmap(
         LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
             encode_ngram_bitmap_v11(bitmap)
         }
-        LexicalArtifactLayoutV1::V12 => encode_ngram_delta_varints_v12(bitmap),
+        LexicalArtifactLayoutV1::V12 | LexicalArtifactLayoutV1::V13 => {
+            encode_ngram_delta_varints_v12(bitmap)
+        }
     }
 }
 
@@ -780,7 +790,9 @@ pub(super) fn decode_ngram_bitmap(
         LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
             decode_ngram_bitmap_v11(encoded)
         }
-        LexicalArtifactLayoutV1::V12 => decode_ngram_delta_varints_v12(encoded),
+        LexicalArtifactLayoutV1::V12 | LexicalArtifactLayoutV1::V13 => {
+            decode_ngram_delta_varints_v12(encoded)
+        }
     }
 }
 

@@ -345,6 +345,7 @@ impl McpServer {
                     self.profile_session_db.as_ref(),
                 )
                 .with_profile_identity(self.profile_identity.clone())
+                .with_background_cpu(self.background_cpu.clone())
                 .with_profile_retained_authority(self.profile_retained_authority.as_ref())
                 .with_lcm_authorities(
                     self.project_lcm_authority.as_deref(),

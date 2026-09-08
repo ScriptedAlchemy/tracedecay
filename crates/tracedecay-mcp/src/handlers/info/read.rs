@@ -48,15 +48,17 @@ pub async fn handle_read(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
 
     let project_root = graph.project_root()?.to_path_buf();
     let project_id = graph.project_id()?.to_owned();
+    // The source-read future carries the whole read pipeline's state; boxing
+    // it keeps this handler's own future small.
     let output = hotpath::future!(
-        graph.read_source(SourceReadRequest {
+        Box::pin(graph.read_source(SourceReadRequest {
             file,
             mode,
             line_range,
             raw_lines: args.get("lines").and_then(Value::as_str),
             include_symbols,
             project_id: &project_id,
-        }),
+        })),
         label = "mcp.info.read.source"
     )
     .await?;

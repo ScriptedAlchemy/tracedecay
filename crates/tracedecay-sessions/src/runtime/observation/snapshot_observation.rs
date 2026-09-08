@@ -24,10 +24,10 @@ mod admission;
 #[cfg(test)]
 pub use admission::snapshot_cursor_after;
 pub use admission::{
-    SnapshotAdmissionRecord, SnapshotAdmissionRunner, SnapshotCaptureOutcome,
-    advance_snapshot_coverage, advance_snapshot_coverage_maybe, capture_snapshot_observations,
-    snapshot_capture_request, snapshot_cursor_covers_range, snapshot_range_was_committed,
-    snapshot_source_identity, snapshot_source_identity_for,
+    SnapshotAdmissionBatch, SnapshotAdmissionRecord, SnapshotAdmissionRunner,
+    SnapshotCaptureOutcome, advance_snapshot_coverage, advance_snapshot_coverage_maybe,
+    capture_snapshot_observations, snapshot_capture_request, snapshot_cursor_covers_range,
+    snapshot_range_was_committed, snapshot_source_identity,
 };
 
 pub const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;

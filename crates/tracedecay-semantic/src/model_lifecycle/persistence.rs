@@ -28,6 +28,10 @@ fn verify_catalog_manifest(
         || manifest.payload.truncation.max_length != model.max_length
         || manifest.payload.spdx_license != model.source.license
         || manifest.payload.upstream.revision != model.source.revision
+        || manifest.payload.runtime.runtime != model.backend.runtime_family().runtime_family()
+        || manifest.payload.runtime.build_revision
+            != model.backend.runtime_family().build_revision()
+        || manifest.payload.precision != model.backend.precision()
     {
         return Err(ModelLifecycleErrorV1::VerificationFailed);
     }

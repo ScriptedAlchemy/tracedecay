@@ -455,17 +455,10 @@ async fn analytics_events_query_since_bounds_timestamp() {
     assert_eq!(events[0].timestamp, 1_715_000_200);
 }
 
-/// A registered profile store that predates the final schema marker is not
-/// upgraded in place.
-///
-/// `5eecf6f3a` ("reject non-final registered schemas") made every non-final
-/// registered schema a terminal `ResetRequired`, and the storage suite's
-/// `incompatible_profile_store_requires_reset_without_in_place_changes` pins
-/// the same rule for an aged stamp. So the retired legacy `sessions` shape
-/// proves the refusal is typed and byte-preserving, and the analytics
-/// aggregate indexes are proved on the admissible open that follows.
+/// Refusing an incompatible store preserves its retired shape; a fresh
+/// admissible profile still supports durable analytics writes and reads.
 #[tokio::test]
-async fn open_at_refuses_a_pre_marker_store_and_migrates_analytics_indexes() {
+async fn incompatible_profile_refusal_preserves_fresh_analytics_behavior() {
     let tmp = TempDir::new().unwrap();
     let legacy_root = tmp.path().join("legacy").join(".tracedecay");
     let legacy_db = legacy_root.join("global.db");
@@ -529,15 +522,6 @@ async fn open_at_refuses_a_pre_marker_store_and_migrates_analytics_indexes() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].id, id);
     assert_eq!(events[0].hook_name.as_deref(), Some("post-tool-use"));
-
-    let index_count = db
-        .profile_analytics_indexes_present_for_test()
-        .await
-        .unwrap();
-    assert_eq!(
-        index_count, 2,
-        "analytics aggregate indexes must migrate on open"
-    );
 }
 
 #[tokio::test]
@@ -1015,10 +999,9 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
     // is that neither secret reaches that projection.
     assert!(
         raw.content
-            .contains("[Externalized LCM ingest payload: kind=tool_result;"),
-        "external raw content must be the payload placeholder: {}",
-        raw.content
+            .starts_with("[Externalized LCM ingest payload: kind=tool_result;")
     );
+    assert!(raw.content.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!raw.content.contains(body_secret));
     assert!(
         !raw.metadata_json

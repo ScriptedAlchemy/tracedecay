@@ -142,33 +142,6 @@ impl ProjectSessionTestRuntime {
             other => panic!("{provider} provider usage read is not Known: {other:?}"),
         }
     }
-
-    pub(super) async fn observation_fact_count(&self, kind: &str) -> usize {
-        self.runtime
-            .replay_observations(
-                HostAdmissionScope::Project,
-                ObservationReplayRequest::new(0, 100).unwrap(),
-            )
-            .await
-            .unwrap()
-            .iter()
-            .map(|stored| {
-                let payload = serde_json::from_slice::<serde_json::Value>(
-                    &stored
-                        .observation()
-                        .canonical_payload_bytes()
-                        .expect("canonical observation payload"),
-                )
-                .expect("canonical observation JSON");
-                payload["facts"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|fact| fact["kind"] == kind)
-                    .count()
-            })
-            .sum()
-    }
 }
 
 pub(super) async fn open_project_session_db(project: &Path) -> Option<ProjectSessionTestRuntime> {

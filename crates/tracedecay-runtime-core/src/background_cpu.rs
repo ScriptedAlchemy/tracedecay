@@ -6,13 +6,17 @@
 //! ceiling. FIFO waiter order prevents a continuously busy class from starving
 //! another class, and RAII releases capacity on success, cancellation, or
 //! unwind.
+//!
+//! There is no process-global instance. The composition root that sizes the
+//! process budget constructs the one production authority and hands the
+//! `Arc` to every consumer; tests construct isolated authorities the same way.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -84,7 +88,12 @@ impl Drop for BackgroundCpuScopeV1 {
 }
 
 impl ProcessBackgroundCpuV1 {
-    fn new(width: NonZeroUsize) -> Self {
+    /// Construct an authority with `width` concurrently admitted CPU units.
+    ///
+    /// Production composition constructs exactly one at the effective worker
+    /// width and injects it; nothing here registers it process-wide.
+    #[must_use]
+    pub fn new(width: NonZeroUsize) -> Self {
         Self {
             width,
             state: Mutex::new(BackgroundCpuStateV1::default()),
@@ -301,9 +310,9 @@ impl ProcessBackgroundCpuV1 {
 }
 
 fn record_state(state: &BackgroundCpuStateV1, width: NonZeroUsize) {
-    hotpath::gauge!("private_fs.background_cpu.width").set(width.get());
-    hotpath::gauge!("private_fs.background_cpu.active_units").set(state.active_units);
-    hotpath::gauge!("private_fs.background_cpu.waiting_work_units").set(waiting_units(state));
+    hotpath::gauge!("runtime_core.background_cpu.width").set(width.get());
+    hotpath::gauge!("runtime_core.background_cpu.active_units").set(state.active_units);
+    hotpath::gauge!("runtime_core.background_cpu.waiting_work_units").set(waiting_units(state));
 }
 
 fn waiting_units(state: &BackgroundCpuStateV1) -> usize {
@@ -333,66 +342,6 @@ impl Drop for BackgroundCpuPermitV1 {
     fn drop(&mut self) {
         self.authority.release(self.units);
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum BackgroundCpuInstallErrorV1 {
-    #[error(
-        "background CPU authority is already installed at width {installed_width}, not requested width {requested_width}"
-    )]
-    ConflictingWidth {
-        installed_width: usize,
-        requested_width: usize,
-    },
-    #[error("background CPU authority installation did not settle")]
-    InstallationDidNotSettle,
-}
-
-static PROCESS_BACKGROUND_CPU: OnceLock<Arc<ProcessBackgroundCpuV1>> = OnceLock::new();
-
-/// Install or idempotently reuse the one process background CPU authority.
-pub fn install_process_background_cpu(
-    width: NonZeroUsize,
-) -> Result<Arc<ProcessBackgroundCpuV1>, BackgroundCpuInstallErrorV1> {
-    if let Some(installed) = PROCESS_BACKGROUND_CPU.get() {
-        return compare_installed_width(installed, width);
-    }
-    let requested = Arc::new(ProcessBackgroundCpuV1::new(width));
-    match PROCESS_BACKGROUND_CPU.set(Arc::clone(&requested)) {
-        Ok(()) => Ok(requested),
-        Err(_) => PROCESS_BACKGROUND_CPU.get().map_or_else(
-            || Err(BackgroundCpuInstallErrorV1::InstallationDidNotSettle),
-            |installed| compare_installed_width(installed, width),
-        ),
-    }
-}
-
-fn compare_installed_width(
-    installed: &Arc<ProcessBackgroundCpuV1>,
-    requested: NonZeroUsize,
-) -> Result<Arc<ProcessBackgroundCpuV1>, BackgroundCpuInstallErrorV1> {
-    if installed.width == requested {
-        Ok(Arc::clone(installed))
-    } else {
-        Err(BackgroundCpuInstallErrorV1::ConflictingWidth {
-            installed_width: installed.width.get(),
-            requested_width: requested.get(),
-        })
-    }
-}
-
-/// Installed process authority, or `None` before daemon worker-plan admission.
-#[must_use]
-pub fn process_background_cpu() -> Option<Arc<ProcessBackgroundCpuV1>> {
-    PROCESS_BACKGROUND_CPU.get().map(Arc::clone)
-}
-
-/// Isolated authority for dependent-crate behavioral tests. Production code
-/// must use the one process authority installed by the daemon worker plan.
-#[cfg(feature = "test-helpers")]
-#[must_use]
-pub fn test_process_background_cpu(width: NonZeroUsize) -> Arc<ProcessBackgroundCpuV1> {
-    Arc::new(ProcessBackgroundCpuV1::new(width))
 }
 
 #[cfg(test)]
@@ -518,6 +467,26 @@ mod tests {
         assert_eq!(authority.active_units(), 1);
         drop(cancelled);
         assert_eq!(authority.active_units(), 0);
+        assert!(authority.try_acquire().is_some());
+    }
+
+    #[test]
+    fn cancelled_waiter_leaves_the_queue_without_pinning_later_work() {
+        let authority = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN));
+        let held = authority.acquire();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let authority = Arc::clone(&authority);
+            let cancellation = Arc::clone(&cancellation);
+            std::thread::spawn(move || authority.acquire_cancellable(&cancellation).is_none())
+        };
+        while authority.waiting_work_units() == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        cancellation.store(true, Ordering::Release);
+        assert!(waiter.join().expect("cancelled waiter"));
+        assert_eq!(authority.waiting_work_units(), 0);
+        drop(held);
         assert!(authority.try_acquire().is_some());
     }
 }

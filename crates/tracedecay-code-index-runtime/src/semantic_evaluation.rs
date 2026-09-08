@@ -886,6 +886,7 @@ type SemanticIncrementalProjectionKeyV1 = (CodeGenerationId, CodeGenerationId);
 
 #[derive(Clone)]
 pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
+    lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     project_root: PathBuf,
     scope: ResolvedScope,
     scheduler: CodeIndexSchedulerRegistryV1,
@@ -932,9 +933,11 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
         scheduler: CodeIndexSchedulerRegistryV1,
         candidate: SemanticEvaluationProfileCandidateV1,
         control: Arc<DaemonSemanticEvaluationControlV1>,
+        lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
         projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
     ) -> Self {
         Self {
+            lifecycle_owner,
             project_root,
             scope,
             scheduler,
@@ -1071,7 +1074,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             .rerank
             .as_ref()
             .and_then(|pins| {
-                crate::semantic_code::shared_lifecycle_owner()
+                self.lifecycle_owner
+                    .as_ref()
                     .and_then(|owner| owner.mount_reranker(pins.clone()).ok())
             });
         let result = hotpath::measure_block!("search_eval.native_query.inputs", {
