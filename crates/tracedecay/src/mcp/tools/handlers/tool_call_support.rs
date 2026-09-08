@@ -76,7 +76,7 @@ pub(super) enum SelectedProjectScopeV1 {
     Unchanged,
     /// The selector named another registered project, whose exact scope this
     /// is. The envelope must report it instead of the admitted scope.
-    Restated(Box<tracedecay_application::ResolvedScope>),
+    Restated(Box<tracedecay_contracts::ResolvedScope>),
     /// The selected project could not be resolved to an exact registered
     /// scope. The route fails closed rather than reporting a result under a
     /// project the caller did not select.
@@ -93,7 +93,7 @@ pub(super) enum SelectedProjectScopeV1 {
 /// selected one.
 pub(super) async fn selected_project_scope(
     selected_project_id: &str,
-    served: &tracedecay_application::ResolvedScope,
+    served: &tracedecay_contracts::ResolvedScope,
     global_db: Option<&RegisteredGlobalDb>,
 ) -> SelectedProjectScopeV1 {
     if served.project_id.as_str() == selected_project_id {
@@ -339,7 +339,7 @@ fn char_offset_to_byte(content: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod selected_project_scope_tests {
     use serde_json::json;
-    use tracedecay_application::ResolvedScope;
+    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
     use super::{SelectedProjectScopeV1, selected_project_id_argument, selected_project_scope};

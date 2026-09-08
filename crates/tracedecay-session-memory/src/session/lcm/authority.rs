@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationTokenId, CapabilityGrantId, OperationReceipt, RequestContext, RequestId,
 };
 use tracedecay_domain::ManifestDigest;
@@ -180,7 +180,7 @@ impl LcmAuthorityRequest {
 
 pub fn lcm_authority_operation_identity(
     operation: LcmAuthorityOperation,
-) -> Result<(CapabilityId, UseCaseId), tracedecay_application::ApplicationContractError> {
+) -> Result<(CapabilityId, UseCaseId), tracedecay_contracts::ApplicationContractError> {
     let (capability, use_case) = match operation {
         LcmAuthorityOperation::Ingest | LcmAuthorityOperation::Compact => {
             (LCM_DAEMON_COMMAND_CAPABILITY, LCM_DAEMON_COMMAND_USE_CASE)

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblemKind, CancellationContext, Deadline, MultiRootExecuteRequestV1,
     MultiRootOperationV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
     MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
@@ -593,7 +593,7 @@ async fn run_authenticated_multi_root_journey() {
     else {
         panic!("multi-root CAS must reach the executor: {:?}", cas.outcome);
     };
-    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
         panic!("multi-root CAS must return evidence");
     };
     let cas_result = packet
@@ -641,7 +641,7 @@ async fn run_authenticated_multi_root_journey() {
             read.outcome
         );
     };
-    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
         panic!("multi-root read must return evidence");
     };
     assert_eq!(packet.payload.clone().flatten().as_ref(), Some(&stored));

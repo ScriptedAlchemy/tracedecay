@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use tracedecay_application::source_edit::{
+use tracedecay_application::tracedecay::SourceEditGraphReadV1;
+use tracedecay_contracts::source_edit::{
     RenameDispositionCountsV1, RenameFileEditV1, RenameHazardKindV1, RenameHazardV1,
     RenameImpactV1, RenameProtectedValueCategoryV1, RenameProtectedValueV1, RenameResult,
     RenameSiteDispositionV1, RenameSiteKindV1, RenameSiteV1, RenameSymbolBindingV1,
@@ -12,7 +13,6 @@ use tracedecay_application::source_edit::{
 use tracedecay_domain::{
     ContentDigest, ManifestDigest, SnapshotFileDispositionV1, canonical_sha256,
 };
-use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -865,7 +865,7 @@ impl TraceDecay {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::source_edit::{
+    use tracedecay_contracts::source_edit::{
         RenameProtectedValueCategoryV1, RenameSiteDispositionV1,
     };
     use tracedecay_domain::{RelationEdgeKindV1, SourceSpan};

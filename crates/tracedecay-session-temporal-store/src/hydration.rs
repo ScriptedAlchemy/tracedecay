@@ -3,7 +3,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,

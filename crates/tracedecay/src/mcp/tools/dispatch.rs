@@ -5,7 +5,7 @@
 //! store, or renderer is selected here.
 
 use serde_json::{Map, Value};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, InvocationTarget, PageRequest, RequestId,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};

@@ -618,7 +618,7 @@ impl ControlledCancellationExecutor {
         }
     }
 
-    async fn await_cancellation(&self, cancellation: tracedecay_application::CancellationSignal) {
+    async fn await_cancellation(&self, cancellation: tracedecay_contracts::CancellationSignal) {
         let ordinal = self.started.fetch_add(1, Ordering::SeqCst);
         while !cancellation.is_cancelled() {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -634,22 +634,22 @@ impl ControlledCancellationExecutor {
 }
 
 #[cfg(unix)]
-impl tracedecay_application::ApplicationInvocationExecutor for ControlledCancellationExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for ControlledCancellationExecutor {
     fn invoke(
         &self,
-        invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
         Box::pin(async move {
             let (context, _) = invocation.into_parts();
             let (_, _, _, cancellation) = context.into_parts();
             self.await_cancellation(cancellation).await;
-            Err(tracedecay_application::InvocationError::Cancelled)
+            Err(tracedecay_contracts::InvocationError::Cancelled)
         })
     }
 }
@@ -659,8 +659,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancella
     fn invoke_controlled(
         &self,
         _request: super::super::DaemonInvocationRequest,
-        _deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
+        _deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
         _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -673,7 +673,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancella
             self.await_cancellation(cancellation).await;
             Err(
                 tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                    stage: tracedecay_application::CancellationStage::DuringRead,
+                    stage: tracedecay_contracts::CancellationStage::DuringRead,
                 },
             )
         })
@@ -683,7 +683,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancella
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,

@@ -1,10 +1,10 @@
 //! Session retrieval, project memory, provider usage, and runtime telemetry
-//! use cases, extracted from `tracedecay-usecases` so session-facing adapters
+//! use cases, extracted from `tracedecay-application` so session-facing adapters
 //! (`tracedecay-automation-runtime`, `tracedecay-host-admission`,
 //! `tracedecay-mcp`, `tracedecay-cli`) compile without the advisory,
 //! semantic-runtime, and code-index surfaces that crate carries.
 //!
-//! This crate must never depend on `tracedecay-usecases`,
+//! This crate must never depend on `tracedecay-application`,
 //! `tracedecay-semantic`, `tracedecay-code-index`, `tracedecay-search-eval`,
 //! or `tracedecay-lsp` — that boundary is the point of the extraction.
 

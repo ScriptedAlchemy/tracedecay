@@ -19,7 +19,7 @@ type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 /// owner validates, so MCP cannot omit a required request field or admit one
 /// that typed Work decoding rejects.
 pub(super) fn work_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
-    let registry = tracedecay_application::work_executable_binding_registry()
+    let registry = tracedecay_contracts::work_executable_binding_registry()
         .map_err(crate::McpCatalogError::CatalogValidation)?;
     if registry.iter().count() != WorkOperation::ALL.len() {
         return Err(invalid_work_discovery(

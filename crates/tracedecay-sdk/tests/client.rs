@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::{Value, json};
-use tracedecay_application::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
+use tracedecay_contracts::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
 use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, McpToolTransport,
     OperationRequestOptions, StreamOptions, StreamResume,
@@ -650,7 +650,7 @@ fn callable_code_uses_the_mounted_http_route_without_an_mcp_transport() {
             "kind": null,
             "scope": {
                 "generation": "generation.sdk",
-                "path_prefix": "crates/tracedecay-application"
+                "path_prefix": "crates/tracedecay-contracts"
             },
             "meta": {
                 "temporal": {"kind": "current"},

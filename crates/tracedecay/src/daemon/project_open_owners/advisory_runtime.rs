@@ -6,15 +6,48 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::context_scout::ContextScoutDeliveryOutcomeV1;
-use tracedecay_application::feedback::observations::{
+use tracedecay_application::advisory::github_runtime::{
+    ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
+    GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
+    discover_exact_commit_pull_request_v1, resolve_registered_github_read_only_credential_v1,
+};
+use tracedecay_application::advisory::{
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
+    AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1,
+    AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
+    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
+    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
+    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
+    ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
+    ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
+    discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
+    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
+};
+use tracedecay_application::delivery::{
+    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
+    ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
+    gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
+};
+use tracedecay_application::feedback::concrete::FeedbackRuntime;
+use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
+use tracedecay_application::feedback::{
+    FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
+    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
+    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
+    resolve_production_feedback_cycle_parts, resolve_project_feedback_scope_v1,
+};
+use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_application::operation_stream::OperationKind;
+use tracedecay_contracts::context_scout::ContextScoutDeliveryOutcomeV1;
+use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
-use tracedecay_application::feedback::{
+use tracedecay_contracts::feedback::{
     FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, SafeDiagnostic, now_micros,
 };
@@ -36,39 +69,6 @@ use tracedecay_lsp::{
     LspRuntimeFuture,
 };
 use tracedecay_session_memory::context::MonotonicDeadline;
-use tracedecay_usecases::advisory::github_runtime::{
-    ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
-    GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
-    discover_exact_commit_pull_request_v1, resolve_registered_github_read_only_credential_v1,
-};
-use tracedecay_usecases::advisory::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
-    AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1,
-    AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
-    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
-    ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
-    ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
-    discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
-    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
-};
-use tracedecay_usecases::delivery::{
-    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
-    ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
-    gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
-};
-use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
-use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
-use tracedecay_usecases::feedback::{
-    FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
-    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
-    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
-    resolve_production_feedback_cycle_parts, resolve_project_feedback_scope_v1,
-};
-use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_usecases::operation_stream::OperationKind;
 
 use super::{
     DaemonInvocationState, POLICY_REVISION_V1, daemon_owned_project_source_access_at,
@@ -277,7 +277,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                         scope: self.feedback_scope.clone(),
                         observed_at,
                     }),
-                    validity: tracedecay_application::AdvisoryFindingValidityWindowV1 {
+                    validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
                         valid_at: observed_at,
                         expires_at,
                     },
@@ -465,7 +465,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
 
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
     project_root: std::path::PathBuf,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 }
 
@@ -528,7 +528,7 @@ struct ProjectOpenScoutProducerV1 {
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     feedback_runtime: Arc<FeedbackRuntime>,
     project_root: std::path::PathBuf,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     code_index_schedulers:
         tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -958,7 +958,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
 ) -> Result<()> {
     let state = state;
     if !matches!(
-        tracedecay_usecases::git_intelligence::NativeGitIntelligence::new(
+        tracedecay_application::git_intelligence::NativeGitIntelligence::new(
             project_root,
             state.scope.repository_id.clone(),
             state.scope.worktree_id.clone(),
@@ -1650,7 +1650,7 @@ async fn resolve_github_stack_observability(
     state: &ProjectOpenDependentOwnerState,
     github_owner: &str,
     github_repository: &str,
-) -> Option<tracedecay_usecases::advisory::GitHubStackObservabilityV1> {
+) -> Option<tracedecay_application::advisory::GitHubStackObservabilityV1> {
     let unavailable = |reason: &str, detail: String| {
         tracing::warn!(
             event = "github_stack_observability_mount",
@@ -1676,7 +1676,7 @@ async fn resolve_github_stack_observability(
     // admitted Git worktree (project open fails earlier otherwise).
     let native_git_fallback_mounted =
         tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some();
-    let probe_owner = match tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
+    let probe_owner = match tracedecay_application::observability::GitHubStackProbeOwnerV1::mount(
         state.scope.clone(),
         topology_policy,
         github_owner,
@@ -1697,11 +1697,13 @@ async fn resolve_github_stack_observability(
         unavailable("producer_unmounted", String::new());
         return None;
     };
-    Some(tracedecay_usecases::advisory::GitHubStackObservabilityV1 {
-        probe_owner,
-        producer,
-        observation_db: state.session_db.clone(),
-    })
+    Some(
+        tracedecay_application::advisory::GitHubStackObservabilityV1 {
+            probe_owner,
+            producer,
+            observation_db: state.session_db.clone(),
+        },
+    )
 }
 
 /// Assembles the CI provider config for a credential that already proved
@@ -1741,7 +1743,7 @@ fn github_discovery_source_access_request(
 }
 
 fn github_discovery_authorization_context(
-    access: &tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
+    access: &tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
     feedback_scope: &FeedbackScopeV1,
 ) -> Option<RequestContext> {
     let observed_at = now_micros();
@@ -1796,8 +1798,8 @@ fn github_discovery_authorization_context(
         DisclosureClass::Evidence,
     )
     .ok()?;
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::ProjectOpenGithubDiscovery,
+    let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+        tracedecay_contracts::request_identity::GlobalRequestSurface::ProjectOpenGithubDiscovery,
     )
     .ok()?;
     RequestContext::new(
@@ -1815,7 +1817,7 @@ fn resolve_production_github_identity(
     project_root: &Path,
     feedback_scope: &FeedbackScopeV1,
     target: &GitHubRepositoryTargetV1,
-    pull: tracedecay_usecases::advisory::github_runtime::GitHubExactCommitPullRequestV1,
+    pull: tracedecay_application::advisory::github_runtime::GitHubExactCommitPullRequestV1,
 ) -> Option<GitHubReviewProviderIdentityV1> {
     let base = pull.base_commit_id;
     let head = pull.head_commit_id;

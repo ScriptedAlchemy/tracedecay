@@ -1,6 +1,7 @@
 //! Project-open Work grant identity and catalog coverage.
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
@@ -8,7 +9,6 @@ use tracedecay_domain::{
     ActorId, LocatorDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::CapabilityId;
-use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 use super::{production_owner_capabilities, project_open_work_grant};
 
@@ -16,10 +16,10 @@ use super::{production_owner_capabilities, project_open_work_grant};
 fn production_project_owner_grants_every_work_operation() {
     let capabilities = production_owner_capabilities().expect("production capabilities");
 
-    for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+    for (_, capability, _) in tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .into_iter()
-        .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
-        .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
+        .chain(tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS)
+        .chain(tracedecay_contracts::HANDOFF_APPLICATION_OPERATION_IDS_V1)
     {
         let capability = CapabilityId::new(capability).expect("Work attempt capability");
         assert!(

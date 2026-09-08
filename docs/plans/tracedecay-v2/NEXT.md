@@ -13,13 +13,13 @@ the machine kache store; do not treat sccache or a per-worktree
 ## Outcomes since 2026-08-19
 
 - Usecase code-index generation retention (journal + receipt store) lives in
-  `tracedecay-code-index-retention`, not `tracedecay-usecases/src/retention`.
+  `tracedecay-code-index-retention`, not `tracedecay-application/src/retention`.
 - GitHub read path: fail-closed REST protocol envelope in
-  `crates/tracedecay-usecases/src/advisory/github_runtime/protocol.rs`
+  `crates/tracedecay-application/src/advisory/github_runtime/protocol.rs`
   (`Retry-After` / `Link`). One static GraphQL query is unchanged.
 - Canonical clock routing: usecases wall-clock reads go through
-  `tracedecay-application` `clock` (`now_micros` / `try_now_micros` in
-  `crates/tracedecay-application/src/clock.rs`).
+  `tracedecay-contracts` `clock` (`now_micros` / `try_now_micros` in
+  `crates/tracedecay-contracts/src/clock.rs`).
 - Hook-identity canonicalization: `envelope_identity_hash16` in
   `crates/tracedecay-hooks/src/lib.rs` (`HookHostV1` aliases domain
   `NativeHostIdentityV1`).

@@ -35,12 +35,12 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_application::storage::identity::StoreKeyV1;
-use tracedecay_application::storage::telemetry::{
+use tracedecay_contracts::storage::identity::StoreKeyV1;
+use tracedecay_contracts::storage::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1,
     TableGrowthTelemetryReadV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestAdmission, RequestContext,
 };

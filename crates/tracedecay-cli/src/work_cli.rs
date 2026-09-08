@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use tracedecay_api::WorkOperation;
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
     AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
     ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand, CancellationSignal,
@@ -29,7 +29,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     DaemonInvocationDelivery, InvocationCancellationPolicy, invocation_now_micros,
 };
@@ -458,7 +458,7 @@ fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplication
             application_outcome_payload(outcome).is_some_and(|hydration| {
                 matches!(
                     hydration,
-                    tracedecay_application::WorkArtifactHydrationV1::Hydrated { attempts, .. }
+                    tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
                         if !attempts.is_empty()
                 )
             })
@@ -517,7 +517,7 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
 
 fn work_problem(
     result_contract: ResultContractRef,
-    request_id: tracedecay_application::RequestId,
+    request_id: tracedecay_contracts::RequestId,
     problem: ApplicationProblem,
 ) -> Result<ApplicationProblemEnvelope> {
     ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn daemon_work_reset_remains_a_typed_cli_problem() {
         use super::daemon_application_problem;
-        use tracedecay_application::ApplicationProblem;
+        use tracedecay_contracts::ApplicationProblem;
         use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
         let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);
@@ -672,10 +672,10 @@ mod tests {
             panic!("work reset must remain a typed reset-required problem");
         };
         assert_eq!(diagnostic.code, "work_authority_reset_required");
-        assert_eq!(retry, tracedecay_application::RetryDirective::Never);
+        assert_eq!(retry, tracedecay_contracts::RetryDirective::Never);
         assert_eq!(
             legal_actions,
-            vec![tracedecay_application::LegalAction::Reset]
+            vec![tracedecay_contracts::LegalAction::Reset]
         );
     }
 }

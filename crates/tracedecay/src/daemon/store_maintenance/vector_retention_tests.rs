@@ -15,6 +15,7 @@ use crate::daemon::maintenance::{
 };
 use crate::daemon::store_writer_gate::{StoreWriterGates, WriterScope};
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, DurableGenerationIndexEntryV1,
@@ -28,7 +29,6 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
 };
-use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::{
     CodeGenerationRetentionOutcomeV1, VectorRetentionInventoryV1, apply_code_generation_retention,
@@ -496,7 +496,7 @@ async fn reset_corrupt_and_denied_vector_authorities_refuse_the_sweep() {
     let global_db =
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("vector-refusals")
             .await;
-    let scope = tracedecay_application::ResolvedScope::new(
+    let scope = tracedecay_contracts::ResolvedScope::new(
         tracedecay_domain::ProjectId::new("project.retention-fixture").expect("project id"),
         tracedecay_domain::RepositoryId::new("repository.retention-fixture")
             .expect("repository id"),
@@ -521,7 +521,7 @@ async fn reset_corrupt_and_denied_vector_authorities_refuse_the_sweep() {
         ),
     ] {
         let configuration =
-            tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
+            tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
                 global_db.registered.clone(),
                 scope.clone(),
             )
@@ -557,7 +557,7 @@ async fn reset_corrupt_and_denied_vector_authorities_refuse_the_sweep() {
 
     // An unavailable graph stays a degraded offline sweep, not a refusal.
     let configuration =
-        tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
+        tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
             global_db.registered.clone(),
             scope,
         )

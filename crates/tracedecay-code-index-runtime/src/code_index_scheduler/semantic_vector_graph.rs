@@ -1,6 +1,6 @@
 //! Daemon implementation of the semantic-vector graph provider port.
 //!
-//! The semantic runtime lives in `tracedecay-usecases` and cannot see daemon
+//! The semantic runtime lives in `tracedecay-application` and cannot see daemon
 //! session-registry types, so this adapter resolves the mounted worktree's
 //! repository/worktree identity and retains the code-graph runtime that owns
 //! the durable semantic-vector projection.
@@ -17,10 +17,10 @@ use tracedecay_domain::{CodeGenerationId, ProjectId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_store::StoreShardIdV1;
 
-use tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1;
+use tracedecay_application::store::vector_generations::GraphVectorGenerationStoreV1;
 
 use crate::code_graph_seat::CodeGraphSeatRuntimePortV1;
-use tracedecay_usecases::semantic_runtime::{
+use tracedecay_application::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticRuntimeFuture, SemanticVectorGraphErrorV1,
     SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1, SemanticVectorOperationTaskOwnerV1,
     SemanticVectorRetentionAuthorizationV1,
@@ -54,9 +54,9 @@ pub enum ProjectVectorReadableSources {
     Ready {
         sources: BTreeSet<CodeGenerationId>,
         configuration_receipt:
-            tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+            tracedecay_application::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
         configured_root_receipt:
-            tracedecay_usecases::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
+            tracedecay_application::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
     },
     ResetRequired(String),
     Corrupt(String),
@@ -111,7 +111,7 @@ pub enum ProjectSemanticVectorCodeScopeLiveness {
 pub async fn retire_one_project_vector_generation(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
-    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
 ) -> ProjectSemanticVectorRetentionStep {
     let step =
@@ -161,11 +161,11 @@ fn observe_retention_step(step: &ProjectSemanticVectorRetentionStep) {
 async fn converge_one_project_vector_generation(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
-    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
 ) -> ProjectSemanticVectorRetentionStep {
     let Some(production_runtime) =
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
+        tracedecay_application::semantic_runtime::project_semantic_production_runtime(project_root)
     else {
         return ProjectSemanticVectorRetentionStep::Unavailable(
             "semantic vector mutation authority is not mounted".to_owned(),
@@ -325,7 +325,7 @@ async fn converge_one_project_vector_generation(
 async fn release_vector_reservation(
     store: &GraphVectorGenerationStoreV1,
     reservation: Option<tracedecay_graph_db::SemanticVectorRetirementReservation>,
-) -> Result<(), tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1> {
+) -> Result<(), tracedecay_application::store::vector_generations::VectorGenerationStoreErrorV1> {
     if let Some(reservation) = reservation {
         store.release_reserved_generation(reservation).await?;
     }
@@ -519,7 +519,7 @@ pub async fn remove_project_vector_code_scope_binding(
 pub async fn project_vector_readable_sources(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
-    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
 ) -> ProjectVectorReadableSources {
     let Some(provider) = schedulers

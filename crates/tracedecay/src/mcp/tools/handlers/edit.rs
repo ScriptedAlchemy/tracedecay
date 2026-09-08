@@ -2,7 +2,7 @@
 //! `ast_grep_rewrite`.
 
 use serde_json::{Value, json};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, EffectId, IdempotencyKey, RenameSymbolSurfaceRequestV1,
     RequestId, SourceEditKind, SourceEditReconciliationDispositionV1, SourceEditRequest,
 };
@@ -310,7 +310,7 @@ fn source_edit_identity_error(error: impl std::fmt::Display) -> TraceDecayError 
 }
 
 fn source_edit_surface_value(
-    result: &tracedecay_application::source_edit::SourceEditSurfaceResultV1,
+    result: &tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
 ) -> Result<Value> {
     Ok(serde_json::to_value(result)?)
 }
@@ -530,7 +530,7 @@ pub(super) async fn handle_rename_symbol(
     invocation: SourceEditInvocationContext,
 ) -> Result<ToolResult> {
     let request: RenameSymbolSurfaceRequestV1 = deserialize_source_edit_surface(&args)?;
-    let binding = tracedecay_application::RenameSymbolBindingV1 {
+    let binding = tracedecay_contracts::RenameSymbolBindingV1 {
         node_id: request.node_id,
         qualified_name: request.qualified_name,
         kind: request.kind,
@@ -555,7 +555,7 @@ pub(super) async fn handle_rename_symbol(
 
 /// Human-readable markdown for a move result: the outcome line, applied
 /// imports, the impact report (the centerpiece), and the preview diff.
-fn move_result_md(result: &tracedecay_application::source_edit::MoveResult) -> String {
+fn move_result_md(result: &tracedecay_contracts::source_edit::MoveResult) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let verb = if result.dry_run {
@@ -631,8 +631,8 @@ mod tests {
 
     use super::*;
     use crate::tracedecay::TraceDecayOpenOptions;
-    use tracedecay_application::source_edit::EditResult;
-    use tracedecay_application::source_edit::{
+    use tracedecay_contracts::source_edit::EditResult;
+    use tracedecay_contracts::source_edit::{
         SourceEditSurfaceOutcomeV1, SourceEditSurfaceResultV1,
     };
 
@@ -653,7 +653,7 @@ mod tests {
         edit: SourceEditRequest,
         request_id: RequestId,
         deadline: Deadline,
-        cancellation: tracedecay_application::CancellationContext,
+        cancellation: tracedecay_contracts::CancellationContext,
     }
 
     fn digest(value: &str) -> ManifestDigest {

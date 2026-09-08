@@ -11,7 +11,7 @@
 use std::fmt;
 
 use serde::Deserialize;
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
     DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorReportCoverageV1,
     DoctorReportEntryV1, DoctorReportV1,
@@ -31,7 +31,7 @@ pub const DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE: &str =
     "no admitted Doctor report source is available for this dashboard scope";
 
 /// The closed Doctor finding-family vocabulary the read routes project.
-pub use tracedecay_application::doctor::DOCTOR_FINDING_FAMILIES as KNOWN_DOCTOR_FINDING_FAMILIES;
+pub use tracedecay_contracts::doctor::DOCTOR_FINDING_FAMILIES as KNOWN_DOCTOR_FINDING_FAMILIES;
 
 /// Path of the Doctor finding read route, filtered by the caller's query.
 pub const DOCTOR_FINDINGS_ROUTE_PATH: &str = "/api/doctor/findings";
@@ -72,7 +72,7 @@ pub fn parse_doctor_finding_family(
 }
 
 /// The stable label for one finding family, used in coverage omission reasons.
-pub use tracedecay_application::doctor::doctor_finding_family_label;
+pub use tracedecay_contracts::doctor::doctor_finding_family_label;
 
 /// The refresh action every Doctor read attaches, including its typed
 /// unavailable states: a caller can always re-read.

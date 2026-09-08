@@ -1,18 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tracedecay_application::source_edit::{
-    RenameHazardKindV1, RenameSiteKindV1, RenameSymbolBindingV1,
-};
+use tracedecay_application::tracedecay::SourceEditGraphReadV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionError, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_contracts::source_edit::{
+    RenameHazardKindV1, RenameSiteKindV1, RenameSymbolBindingV1,
 };
 use tracedecay_domain::{
     ContentDigest, EdgeAuthorityV1, ManifestDigest, RelationEdgeKindV1, SnapshotFileDispositionV1,
     SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
-use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -449,7 +449,7 @@ pub(super) fn load(
 #[cfg(test)]
 mod tests {
     use super::{declaration_kind, relation_kind};
-    use tracedecay_application::source_edit::RenameSiteKindV1;
+    use tracedecay_contracts::source_edit::RenameSiteKindV1;
     use tracedecay_domain::RelationEdgeKindV1;
 
     #[test]

@@ -35,13 +35,13 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use tracedecay_application::semantic_runtime::{
+    SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
+};
+use tracedecay_application::store::vector_generations::GRAPH_BACKGROUND_OPERATION_BUDGET;
 use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
-use tracedecay_usecases::semantic_runtime::{
-    SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
-};
-use tracedecay_usecases::store::vector_generations::GRAPH_BACKGROUND_OPERATION_BUDGET;
 
 mod memory_runtime;
 pub(super) use memory_runtime::{
@@ -807,7 +807,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: tracedecay_application::clock::now_micros(),
+            requested_at: tracedecay_contracts::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -877,7 +877,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let publish_control = RuntimeRequestControlV1 {
-                requested_at: tracedecay_application::clock::now_micros(),
+                requested_at: tracedecay_contracts::clock::now_micros(),
                 deadline: publish_deadline_identity.clone(),
                 cancellation: publish_cancellation_identity.clone(),
             };
@@ -1051,7 +1051,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: tracedecay_application::clock::now_micros(),
+            requested_at: tracedecay_contracts::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -1267,7 +1267,7 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: tracedecay_application::clock::now_micros(),
+            requested_at: tracedecay_contracts::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -1434,7 +1434,7 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: tracedecay_application::clock::now_micros(),
+            requested_at: tracedecay_contracts::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -1660,7 +1660,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     deadline_warned: AtomicBool::new(false),
                 };
                 let control = RuntimeRequestControlV1 {
-                    requested_at: tracedecay_application::clock::now_micros(),
+                    requested_at: tracedecay_contracts::clock::now_micros(),
                     deadline: deadline_identity,
                     cancellation: cancellation_identity,
                 };
@@ -1884,7 +1884,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: tracedecay_application::clock::now_micros(),
+                requested_at: tracedecay_contracts::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
@@ -2506,7 +2506,7 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
-            requested_at: tracedecay_application::clock::now_micros(),
+            requested_at: tracedecay_contracts::clock::now_micros(),
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
@@ -2832,7 +2832,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
-                requested_at: tracedecay_application::clock::now_micros(),
+                requested_at: tracedecay_contracts::clock::now_micros(),
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
@@ -2986,7 +2986,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     deadline_warned: AtomicBool::new(false),
                 };
                 let control = RuntimeRequestControlV1 {
-                    requested_at: tracedecay_application::clock::now_micros(),
+                    requested_at: tracedecay_contracts::clock::now_micros(),
                     deadline: deadline_identity,
                     cancellation: cancellation_identity,
                 };
@@ -3062,7 +3062,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     deadline_warned: AtomicBool::new(false),
                 };
                 let control = RuntimeRequestControlV1 {
-                    requested_at: tracedecay_application::clock::now_micros(),
+                    requested_at: tracedecay_contracts::clock::now_micros(),
                     deadline: deadline_identity,
                     cancellation: cancellation_identity,
                 };

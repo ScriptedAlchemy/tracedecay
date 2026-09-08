@@ -17,10 +17,10 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId};
 use super::McpServer;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::tracedecay::TraceDecayOpenOptions;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_mcp::transport::JsonRpcRequest;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
-use tracedecay_usecases::observation::ObservationCancellation;
 
 const PROJECT_ID: &str = "project.claude-recall";
 const SESSION: &str = "claude-recall-session";

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, ConfigurationRevisionId,
     DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile,
@@ -912,7 +912,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    use tracedecay_application::ResolvedScope;
+    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{
         CalibrationProfileId, ComponentRevision, DiversityPolicy, FusionProfile, ManifestDigest,
         PrivacyDomainId, RefId, RepositoryId, RetrievalAnchorId, RetrievalBudget,

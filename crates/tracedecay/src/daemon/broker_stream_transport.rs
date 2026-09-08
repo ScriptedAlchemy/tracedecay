@@ -524,16 +524,16 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
 mod peer_close_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    use tracedecay_application::{
-        ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
-    };
-    use tracedecay_domain::{ObservabilityPayloadV1, ProjectId};
-    use tracedecay_mcp::McpTransport;
-    use tracedecay_usecases::observability::{
+    use tracedecay_application::observability::{
         BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
         DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1,
         RegisteredObservabilityPortV1,
     };
+    use tracedecay_contracts::{
+        ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+    };
+    use tracedecay_domain::{ObservabilityPayloadV1, ProjectId};
+    use tracedecay_mcp::McpTransport;
 
     struct DeliverySettlementFixture {
         _pin: tracedecay_runtime_core::config::PinnedUserDataDir,

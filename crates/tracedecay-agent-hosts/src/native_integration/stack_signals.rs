@@ -5,14 +5,14 @@
 //! declared-stack preview or terminal receipt and derives replay-stable signal
 //! identity from that canonical evidence.
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_application::stack_coordinator::{
+    StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalKindV1, StackSignalV1,
+};
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     BranchStackRevisionV1, ManifestDigest, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
     NativeIntegrationTerminalOutcomeV1, UtcMicros,
-};
-use tracedecay_usecases::stack_coordinator::{
-    StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalKindV1, StackSignalV1,
 };
 
 /// Produces the one truthful transition represented by a sealed preflight.

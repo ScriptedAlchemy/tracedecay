@@ -1,10 +1,10 @@
 //! Native `gix` reads behind the local branch-ref snapshot values in
-//! `tracedecay_application::branch_snapshots`.
+//! `tracedecay_contracts::branch_snapshots`.
 
 use std::path::Path;
 
 use gix::bstr::ByteSlice as _;
-use tracedecay_application::branch_snapshots::{
+use tracedecay_contracts::branch_snapshots::{
     BranchSnapshot, LocalBranchReadControlV1, LocalBranchRevisionV1, LocalBranchSnapshotErrorV1,
     LocalBranchSnapshotsV1,
 };
@@ -145,7 +145,7 @@ pub fn local_branch_snapshots_controlled(
 mod tests {
     use std::process::Command;
 
-    use tracedecay_application::{CancellationSignal, Deadline, clock};
+    use tracedecay_contracts::{CancellationSignal, Deadline, clock};
 
     use super::*;
 

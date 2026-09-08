@@ -31,18 +31,18 @@ struct RetainedOwnerTestExecutor {
     project_root: PathBuf,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for RetainedOwnerTestExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -50,8 +50,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
         _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -64,14 +64,14 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
             if cancellation.is_cancelled() {
                 return Err(
                     tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
                     },
                 );
             }
             if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
                 return Err(
                     tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
                     },
                 );
             }
@@ -94,7 +94,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }

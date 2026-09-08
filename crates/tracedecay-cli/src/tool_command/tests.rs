@@ -1,6 +1,6 @@
 use super::*;
 use serde_json::{Value, json};
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::{BindingId, SchemaId};

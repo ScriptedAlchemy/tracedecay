@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
 use tracedecay_query::code_search;
 

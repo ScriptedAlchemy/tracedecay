@@ -92,7 +92,7 @@ Official implementation references:
 |---|---|
 | `tracedecay-agent-hosts` | No storage dependency. Continue through application/tool APIs. |
 | `tracedecay-api` | Wire contracts only; no Grafeo types or handles. |
-| `tracedecay-application` | Compose typed graph/vector ports, authorization, hydration, and budgets. |
+| `tracedecay-contracts` | Compose typed graph/vector ports, authorization, hydration, and budgets. |
 | `tracedecay-automation` | Consume Work/workflow graph operations; no direct store access. |
 | `tracedecay-capture` | No change; observations remain canonical input. |
 | `tracedecay-code-extraction` | No change; extracted typed relations remain canonical input. |
@@ -118,7 +118,7 @@ Official implementation references:
 | `tracedecay-sqlite-parity-protocol` | Remove graph/vector parity variants; retain relational protocol variants. (Update 2026-08-07: crate deleted outright — same commit as `tracedecay-rusqlite-parity`; no relational variants were retained because no production caller remained.) |
 | `tracedecay-store` | Own graph-db-neutral attachment, snapshot, generation, and operation ports. |
 | `tracedecay-tool-catalog` | No storage dependency. |
-| `tracedecay-usecases` | Replace Git/vector SQL access with typed graph-db application calls. |
+| `tracedecay-application` | Replace Git/vector SQL access with typed graph-db application calls. |
 | Root `tracedecay` crate | Wire one daemon-owned graph-db registry and expose only typed application journeys. |
 
 ## Data placement
@@ -401,7 +401,7 @@ git commit -am "refactor(code-graph): route Grafeo through graph-db"
 **Files:**
 - Modify: `crates/tracedecay-semantic/src/projector.rs`
 - Modify: `crates/tracedecay-semantic/src/runtime_query.rs`
-- Modify: `crates/tracedecay-usecases/src/store/vector_generations.rs`
+- Modify: `crates/tracedecay-application/src/store/vector_generations.rs`
 - Modify: `src/store/vector_generations.rs`
 - Modify: `crates/tracedecay-query/src/retrieval/semantic/execution_authority.rs`
 - Delete: SQLite code-semantic vector payload/state tables superseded by graph-db
@@ -452,7 +452,7 @@ Remove `semantic_vector_payload_v1`, `semantic_vector_state_slice_v1`, evaluatio
 - [ ] **Step 5: Verify and commit**
 
 ```bash
-cargo nextest run -p tracedecay-semantic -p tracedecay-query -p tracedecay-usecases --no-fail-fast
+cargo nextest run -p tracedecay-semantic -p tracedecay-query -p tracedecay-application --no-fail-fast
 cargo bench --bench code_search --no-run
 git commit -am "refactor(semantic): move vector search to graph-db"
 ```
@@ -462,9 +462,9 @@ git commit -am "refactor(semantic): move vector search to graph-db"
 **Files:**
 - Modify: `src/graph/git.rs`
 - Modify: `crates/tracedecay-code-index/src/git_join.rs`
-- Modify: `crates/tracedecay-usecases/src/git_reads.rs`
-- Modify: `crates/tracedecay-usecases/src/git_query.rs`
-- Modify: `crates/tracedecay-usecases/src/git_intelligence.rs`
+- Modify: `crates/tracedecay-application/src/git_reads.rs`
+- Modify: `crates/tracedecay-application/src/git_query.rs`
+- Modify: `crates/tracedecay-application/src/git_intelligence.rs`
 - Modify: `crates/tracedecay-sessions/src/runtime/git_correlation.rs`
 - Modify: `crates/tracedecay-domain/src/git.rs`
 - Modify: `crates/tracedecay-domain/src/research/git_topology.rs`
@@ -503,7 +503,7 @@ Move parent/reachability and commit-to-code/session/work relations to graph-db. 
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-cargo nextest run -p tracedecay-code-index -p tracedecay-usecases -p tracedecay-sessions git --no-fail-fast
+cargo nextest run -p tracedecay-code-index -p tracedecay-application -p tracedecay-sessions git --no-fail-fast
 git commit -am "refactor(git): project topology into graph-db"
 ```
 
@@ -570,7 +570,7 @@ git commit -am "refactor(sessions): move relation DAGs to graph-db"
 - Delete: `crates/tracedecay-runtime-core/src/db/memory_v2/schema/upgrades.rs`
 - Modify: `crates/tracedecay-runtime-core/src/db/memory_v2/writers/lineage.rs`
 - Modify: `crates/tracedecay-runtime-core/src/db/memory_v2/writers/purge.rs`
-- Modify: `crates/tracedecay-application/src/memory.rs`
+- Modify: `crates/tracedecay-contracts/src/memory.rs`
 - Modify: `crates/tracedecay-dashboard-api/src/memory_service/graph.rs`
 - Modify: `crates/tracedecay-dashboard-api/src/memory_analysis.rs`
 - Delete: `crates/tracedecay-semantic/src/legacy_migration.rs`
@@ -646,7 +646,7 @@ Remove `memory_facts`, V1/V2 dual-write/fallback, cutover/migration/consolidatio
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-cargo nextest run -p tracedecay-runtime-core -p tracedecay-application -p tracedecay-dashboard-api memory --no-fail-fast
+cargo nextest run -p tracedecay-runtime-core -p tracedecay-contracts -p tracedecay-dashboard-api memory --no-fail-fast
 git commit -am "refactor(memory): project relations into graph-db"
 ```
 
@@ -655,8 +655,8 @@ git commit -am "refactor(memory): project relations into graph-db"
 **Files:**
 - Modify: `crates/tracedecay-domain/src/work.rs`
 - Modify: `crates/tracedecay-domain/src/work_read.rs`
-- Modify: `crates/tracedecay-application/src/work.rs`
-- Modify: `crates/tracedecay-application/src/work_read.rs`
+- Modify: `crates/tracedecay-contracts/src/work.rs`
+- Modify: `crates/tracedecay-contracts/src/work_read.rs`
 - Modify: `crates/tracedecay-rusqlite-runtime/src/work/events.rs`
 - Modify: `crates/tracedecay-rusqlite-runtime/src/work/projection.rs`
 - Modify: `crates/tracedecay-rusqlite-runtime/src/work/schema.rs`
@@ -697,7 +697,7 @@ Remove topology blobs/deltas and SQL traversals that duplicate Grafeo. Retain on
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-cargo nextest run -p tracedecay-domain -p tracedecay-application -p tracedecay-rusqlite-runtime work --no-fail-fast
+cargo nextest run -p tracedecay-domain -p tracedecay-contracts -p tracedecay-rusqlite-runtime work --no-fail-fast
 git commit -am "refactor(work): move task topology to graph-db"
 ```
 
@@ -705,9 +705,9 @@ git commit -am "refactor(work): move task topology to graph-db"
 
 **Files:**
 - Modify: `crates/tracedecay-rusqlite-runtime/src/workflow.rs`
-- Modify: `crates/tracedecay-application/src/workflow_catalog.rs`
-- Modify: `crates/tracedecay-application/src/workflow_coordination.rs`
-- Modify: `crates/tracedecay-application/src/workflow_runtime.rs`
+- Modify: `crates/tracedecay-contracts/src/workflow_catalog.rs`
+- Modify: `crates/tracedecay-contracts/src/workflow_coordination.rs`
+- Modify: `crates/tracedecay-contracts/src/workflow_runtime.rs`
 - Modify: `crates/tracedecay-sessions/src/runtime/workflow_index.rs`
 - Modify: `src/daemon/workflow_runtime.rs`
 
@@ -744,7 +744,7 @@ Delete graph-shaped definition/handoff/run topology rows after all application/s
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-cargo nextest run -p tracedecay-application -p tracedecay-sessions -p tracedecay-rusqlite-runtime workflow --no-fail-fast
+cargo nextest run -p tracedecay-contracts -p tracedecay-sessions -p tracedecay-rusqlite-runtime workflow --no-fail-fast
 git commit -am "refactor(workflow): move DAG topology to graph-db"
 ```
 

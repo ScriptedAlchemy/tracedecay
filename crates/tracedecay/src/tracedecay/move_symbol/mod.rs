@@ -14,13 +14,13 @@ mod use_parsing;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use tracedecay_application::source_edit::{MoveHint, MoveResult};
+use tracedecay_application::tracedecay::SourceEditGraphReadV1;
 use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_with};
+use tracedecay_contracts::source_edit::{MoveHint, MoveResult};
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::Visibility;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
-use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use super::TraceDecay;
 use super::edits::{
@@ -330,12 +330,12 @@ impl TraceDecay {
             let rollback = rollback_planned_source_edit_files(
                 &self.project_root,
                 &[
-                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                    tracedecay_application::tracedecay::PlannedSourceEditFile {
                         relative_path: source_rel.clone(),
                         expected: Some(source.clone()),
                         intended: Some(source_modified.clone()),
                     },
-                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                    tracedecay_application::tracedecay::PlannedSourceEditFile {
                         relative_path: dest_rel.clone(),
                         expected: dest_existed.then_some(dest_original.clone()),
                         intended: Some(dest_modified.clone()),

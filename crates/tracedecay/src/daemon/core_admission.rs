@@ -15,7 +15,7 @@ use super::{
     classify_mcp_method, log_daemon_event, parse_daemon_invocation_request,
     read_line_handling_wire_oversized, write_json_rpc_response,
 };
-use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;

@@ -1,13 +1,14 @@
 use super::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use crate::runtime_ports::compose_application_catalog_snapshot;
-use tracedecay_application::git::GitIndexTransactionPortError;
-use tracedecay_application::{
+use tracedecay_application::git_intelligence::NativeGitIntelligence;
+use tracedecay_code_index_runtime::ApplicationCatalogProviderV1;
+use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_contracts::git::GitIndexTransactionPortError;
+use tracedecay_contracts::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GitIndexOperationBindingV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,
     IdempotencyKey, OperationTermination, PolicyDecisionRef, RequestContext, RequestId,
 };
-use tracedecay_code_index_runtime::ApplicationCatalogProviderV1;
-use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_domain::git::{
     GitDiffScopeV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
     GitIndexTransactionOperationV1, GitIndexUnsupportedStateV1,
@@ -18,7 +19,6 @@ use tracedecay_domain::{
     GitIndexPreviewInputV1, GitIndexSigningPolicyV1, canonical_sha256,
 };
 use tracedecay_domain::{ProjectId, UtcMicros};
-use tracedecay_usecases::git_intelligence::NativeGitIntelligence;
 
 fn unavailable_catalog() -> Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
@@ -72,7 +72,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         &scope,
         &project_root,
         &configuration,
-        tracedecay_application::now_micros(),
+        tracedecay_contracts::now_micros(),
     )
     .unwrap();
     let database = graph
@@ -88,7 +88,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             database.clone(),
             project_root.clone(),
             project_id.clone(),
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
         )
         .await
         .unwrap();
@@ -127,7 +127,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             database.clone(),
             project_root.clone(),
             project_id,
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
         )
         .await
         .unwrap();
@@ -248,7 +248,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         std::fs::read(project_root.join(".git/index")).unwrap(),
         index_before_denial
     );
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let issued_at =
         UtcMicros(observed_at.0 - i64::try_from(GRANT_HORIZON.as_micros()).unwrap() - 1);
     let expired =
@@ -293,7 +293,7 @@ fn transaction_preview(
     owner: &tracedecay_code_index_runtime::git_transactions::DaemonGitInvocationOwner,
     suffix: &str,
     operation: GitIndexTransactionOperationV1,
-) -> tracedecay_application::GitIndexApplyRequestV1 {
+) -> tracedecay_contracts::GitIndexApplyRequestV1 {
     let current = owner.current_authority(operation).unwrap();
     let binding = GitIndexOperationBindingV1::for_operation(operation).unwrap();
     let snapshot = tracedecay_code_index_runtime::git_transactions::capture_exact_snapshot(
@@ -416,20 +416,20 @@ fn transaction_preview(
             GitIndexPreviewDispositionV1::Applicable
         },
     );
-    tracedecay_application::GitIndexApplyRequestV1 {
+    tracedecay_contracts::GitIndexApplyRequestV1 {
         context,
         authority,
         binding,
         preview_id: preview.preview_id,
         preview_digest: preview.preview_digest,
         idempotency_key: IdempotencyKey::new(format!("apply.catalog.{suffix}")).unwrap(),
-        proof: tracedecay_application::GitIndexEffectProofV1 {
+        proof: tracedecay_contracts::GitIndexEffectProofV1 {
             policy_digest: current.policy_digest,
             configuration_digest: current.configuration_digest,
             catalog_digest: current.catalog_digest,
             privacy_digest: current.privacy_digest,
             external_proof: None,
         },
-        observed_at: tracedecay_application::now_micros(),
+        observed_at: tracedecay_contracts::now_micros(),
     }
 }

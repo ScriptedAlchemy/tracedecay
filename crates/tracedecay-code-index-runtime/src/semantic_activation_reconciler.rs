@@ -6,12 +6,12 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use tracedecay_semantic_contracts::{
-    SemanticFallbackReasonV1, SemanticLifecycleVerifiedReadyEventV1, SemanticModelLifecycleStateV1,
-};
-use tracedecay_usecases::semantic_runtime::{
+use tracedecay_application::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,
     SemanticRuntimeStateV1, project_lifecycle_status, project_semantic_application_status,
+};
+use tracedecay_semantic_contracts::{
+    SemanticFallbackReasonV1, SemanticLifecycleVerifiedReadyEventV1, SemanticModelLifecycleStateV1,
 };
 
 use crate::code_index_scheduler::CodeIndexSchedulerRegistryV1;

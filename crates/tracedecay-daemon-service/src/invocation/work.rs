@@ -58,7 +58,7 @@ pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationRe
 /// same request against this server cannot grow the missing owner.
 pub(super) fn runtime_publication_failed_problem(request_id: String) -> DaemonInvocationResponse {
     let problem = ApplicationProblem::execution_failed(
-        tracedecay_application::ApplicationExecutionFailureClassV1::Permanent,
+        tracedecay_contracts::ApplicationExecutionFailureClassV1::Permanent,
         SafeDiagnostic {
             code: "application.runtime.owner_failed".to_owned(),
             message: "The project runtime for this operation failed to publish; reopen the project"
@@ -92,7 +92,7 @@ pub async fn execute_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
     project_root: Option<PathBuf>,
     request_id: String,

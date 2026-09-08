@@ -7,7 +7,7 @@
 use std::any::Any;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
@@ -149,7 +149,7 @@ impl ProjectConfigurationRuntime {
     }
 
     /// First-wins type-erased semantic activation payload. Callers in
-    /// `tracedecay-usecases` downcast to the production coordinator.
+    /// `tracedecay-application` downcast to the production coordinator.
     pub fn install_semantic_activation<T: Send + Sync + 'static>(&self, value: Arc<T>) {
         let _ = self
             .semantic_activation

@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::clock::now_micros;
+use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationLayerIdV1, ConfigurationRevisionId,
@@ -35,8 +35,8 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use tracedecay_semantic_contracts::SemanticConfig;
 
+pub use tracedecay_application::config::retrieval;
 pub use tracedecay_global_db::configuration::{registry, resolver};
-pub use tracedecay_usecases::config::retrieval;
 
 /// Name of the legacy configuration migration input stored inside the data
 /// directory. It is not a runtime authority and production code must never
@@ -306,14 +306,14 @@ impl RetentionConfig {
     pub(crate) fn store_soft_budget(
         &self,
         store: &str,
-    ) -> Result<Option<tracedecay_application::storage::StoreSizeBudgetV1>> {
+    ) -> Result<Option<tracedecay_contracts::storage::StoreSizeBudgetV1>> {
         let Some(bytes) = self.store_soft_budgets_bytes.get(store).copied() else {
             return Ok(None);
         };
-        let budget = tracedecay_application::storage::StoreSizeBudgetV1 {
-            store: tracedecay_application::storage::StoreKeyV1::new(store.to_owned())
+        let budget = tracedecay_contracts::storage::StoreSizeBudgetV1 {
+            store: tracedecay_contracts::storage::StoreKeyV1::new(store.to_owned())
                 .map_err(|error| config_error(error.to_string()))?,
-            soft_limit_bytes: tracedecay_application::storage::StorageByteSizeV1(bytes),
+            soft_limit_bytes: tracedecay_contracts::storage::StorageByteSizeV1(bytes),
         };
         budget
             .validate()
@@ -344,7 +344,7 @@ impl RetentionConfig {
             ));
         }
         for (store, bytes) in &self.store_soft_budgets_bytes {
-            tracedecay_application::storage::StoreKeyV1::new(store.clone()).map_err(|_| {
+            tracedecay_contracts::storage::StoreKeyV1::new(store.clone()).map_err(|_| {
                 config_error(format!(
                     "retention store soft budget key '{store}' is not a valid StoreKeyV1"
                 ))

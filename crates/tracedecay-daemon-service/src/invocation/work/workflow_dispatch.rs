@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, Deadline, TaskHandoffToken, WorkflowDefinitionLifecycleCommand,
     WorkflowEffectPreparedV1, WorkflowLifecycleOperation, prepare_task_handoff_issue,
     prepare_task_handoff_redeem, prepare_workflow_definition_registration,
@@ -32,7 +32,7 @@ pub(crate) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
     project_root: PathBuf,
     request_id: String,
@@ -54,10 +54,9 @@ pub(crate) async fn execute_workflow_application(
     };
     let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
     let operation_key = request.operation_key();
-    let Some((_, capability, use_case)) =
-        tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS
-            .iter()
-            .find(|(operation, _, _)| *operation == operation_key)
+    let Some((_, capability, use_case)) = tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS
+        .iter()
+        .find(|(operation, _, _)| *operation == operation_key)
     else {
         return DaemonInvocationResponse::problem(
             request_id,
@@ -85,14 +84,18 @@ pub(crate) async fn execute_workflow_application(
             );
         }
     };
-    let services = match tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
-        &registered.database,
-    ) {
-        Ok(services) => services,
-        Err(error) => {
-            return DaemonInvocationResponse::problem(request_id, workflow_storage_problem(&error));
-        }
-    };
+    let services =
+        match tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
+            &registered.database,
+        ) {
+            Ok(services) => services,
+            Err(error) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    workflow_storage_problem(&error),
+                );
+            }
+        };
 
     match request {
         WorkflowApplicationInvocation::RegisterDefinition(request) => {
@@ -541,7 +544,7 @@ pub(crate) async fn execute_workflow_application(
                     operation_key,
                     use_case,
                     input_digest,
-                    tracedecay_application::WorkflowRunStoragePort::projection(
+                    tracedecay_contracts::WorkflowRunStoragePort::projection(
                         services.effects(),
                         &request.run_id,
                     )

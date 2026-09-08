@@ -1,6 +1,6 @@
 //! Application-port implementation for daemon-owned Git index transactions.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, CancellationStage, EffectId, EffectTermination,
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexPreviewPortResultV1,
     GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionPort,

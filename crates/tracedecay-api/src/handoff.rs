@@ -11,7 +11,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1,
     ListTaskHandoffsRequestV1, ListTaskHandoffsResultV1, OpenInvestigationHandoffRequestV1,
     OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1, RequestId,

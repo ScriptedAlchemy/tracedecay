@@ -21,6 +21,7 @@ use serde_json::Value;
 use tracedecay_domain::ObservationScopeV1;
 
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -32,7 +33,6 @@ use tracedecay_session_memory::session::lcm::{
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
-use tracedecay_usecases::observation::ObservationCancellation;
 
 use super::super::super::SessionAuthorities;
 use super::super::{required_str, required_user_db};

@@ -31,7 +31,7 @@
 //! the events inside it. So a read is answered over the journal's covered
 //! prefix — see [`covered_prefix`](super::covered_prefix) for why the covered
 //! slice is always a prefix — and carries a
-//! [`WorkGraphSelectionCoverageV1`](tracedecay_application::WorkGraphSelectionCoverageV1)
+//! [`WorkGraphSelectionCoverageV1`](tracedecay_contracts::WorkGraphSelectionCoverageV1)
 //! that says how much lies outside it. Answering the slice silently would be
 //! the real falsification; refusing the whole read because a later event was
 //! admitted under a scope this selection does not name would discard work the
@@ -49,7 +49,7 @@
 //! reads, and their explicit zero state *is* representable — an empty timeline
 //! with `Complete { returned: 0 }` coverage — so that is what they answer.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, OpaqueCursor, WorkGraphReadModeV1,
     WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1,
     WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkProductPortContextV1,

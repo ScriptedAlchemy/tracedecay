@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use tracedecay_application::source_edit::AstGrepResult;
+use tracedecay_contracts::source_edit::AstGrepResult;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;

@@ -19,7 +19,7 @@ version = "0.1.0-beta.34"
 [dependencies]
 tracedecay-code-index = { version = "0.1.0" }
 tracedecay-semantic = { version = "0.1.0" }
-tracedecay-usecases = { version = "0.1.0" }
+tracedecay-application = { version = "0.1.0" }
 
 [features]
 lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
@@ -35,7 +35,7 @@ token-counting = []
 test-transport = []
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
-    "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-application/semantic-fastembed",
     "tracedecay-code-index-runtime/semantic-fastembed",
 ]
 """

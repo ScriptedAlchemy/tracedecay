@@ -1,5 +1,5 @@
 //! Native `gix` implementations of the read-only Git ports and values that
-//! `tracedecay-application` declares.
+//! `tracedecay-contracts` declares.
 //!
 //! The contract crate keeps the request/result/error types and ports; this
 //! crate, which already links `gix` for historical retrieval, owns the

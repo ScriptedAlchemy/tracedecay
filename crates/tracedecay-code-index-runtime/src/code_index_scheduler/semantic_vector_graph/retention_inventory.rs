@@ -19,9 +19,9 @@ pub enum ProjectVectorRetentionFailure {
 
 impl ProjectVectorRetentionFailure {
     pub fn from_configuration(
-        error: tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1,
+        error: tracedecay_application::semantic_runtime::SemanticConfigurationBackendErrorV1,
     ) -> Self {
-        use tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1;
+        use tracedecay_application::semantic_runtime::SemanticConfigurationBackendErrorV1;
         match error {
             SemanticConfigurationBackendErrorV1::RejectedAt(stage) => Self::Corrupt(format!(
                 "semantic configuration inventory was rejected by its authority at {stage}"
@@ -83,13 +83,13 @@ impl ProjectVectorRetentionFailure {
     }
 }
 
-impl From<tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1>
+impl From<tracedecay_application::store::vector_generations::VectorGenerationStoreErrorV1>
     for ProjectVectorRetentionFailure
 {
     fn from(
-        error: tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1,
+        error: tracedecay_application::store::vector_generations::VectorGenerationStoreErrorV1,
     ) -> Self {
-        use tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1;
+        use tracedecay_application::store::vector_generations::VectorGenerationStoreErrorV1;
         match error {
             VectorGenerationStoreErrorV1::ResetRequired(message) => Self::ResetRequired(message),
             VectorGenerationStoreErrorV1::Corrupt(message) => Self::Corrupt(message),
@@ -110,12 +110,12 @@ impl From<tracedecay_usecases::store::vector_generations::VectorGenerationStoreE
     future = true
 )]
 pub async fn complete_configuration_inventory(
-    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
 ) -> Result<
-    tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+    tracedecay_application::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
     ProjectVectorRetentionFailure,
 > {
-    use tracedecay_usecases::semantic_runtime::{
+    use tracedecay_application::semantic_runtime::{
         MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
         SemanticConfigurationInventoryPageRequestV1,
     };
@@ -158,19 +158,19 @@ pub async fn complete_configuration_inventory(
     future = true
 )]
 pub async fn validate_configured_vector_roots(
-    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     store: &GraphVectorGenerationStoreV1,
     retained: &RetainedSemanticVectorGraphV1,
     stage_revision: tracedecay_store::SemanticVectorStageCensusRevision,
-    inventory: tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+    inventory: tracedecay_application::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
 ) -> Result<
     (
-        tracedecay_usecases::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
+        tracedecay_application::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
         BTreeSet<CodeGenerationId>,
     ),
     ProjectVectorRetentionFailure,
 > {
-    use tracedecay_usecases::semantic_runtime::{
+    use tracedecay_application::semantic_runtime::{
         MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
         SemanticConfiguredVectorRootPageRequestV1,
     };
@@ -244,7 +244,7 @@ mod tests {
         ProjectSemanticVectorCodeScopeLiveness, ProjectSemanticVectorSourceLiveness,
         ProjectVectorRetentionFailure,
     };
-    use tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1;
+    use tracedecay_application::store::vector_generations::VectorGenerationStoreErrorV1;
 
     #[test]
     fn vector_store_reset_and_corruption_remain_typed() {

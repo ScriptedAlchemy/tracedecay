@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
-use tracedecay_application::retained_surfaces::MemoryAutomationFactEvidenceItemV1;
-use tracedecay_application::{
+use tracedecay_contracts::retained_surfaces::MemoryAutomationFactEvidenceItemV1;
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };
@@ -419,8 +419,8 @@ async fn oversized_automation_request_preserves_candidate_stage_without_executio
     assert!(matches!(
         outcome,
         AutomationTemporalRetrieval::StructuralRefusal(
-            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
             }
         )
     ));
@@ -497,8 +497,8 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
     assert!(matches!(
         refusal,
         AutomationTemporalRetrieval::StructuralRefusal(
-            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
             }
         )
     ));
@@ -540,7 +540,7 @@ fn temporal_automation_evidence_preserves_cursor_manifest_refusal() {
         };
         assert_eq!(
             refusal,
-            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
                 kind,
                 observed,
                 maximum,
@@ -587,7 +587,7 @@ impl AutomationSessionRetrieval for RecordingRejectedAutomationRetrieval {
 
 struct StructuralRefusalAutomationRetrieval {
     anchor_session_id: SessionId,
-    refusal: tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1,
+    refusal: tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1,
     calls: AtomicUsize,
 }
 
@@ -608,8 +608,8 @@ async fn reflector_evidence_keeps_budget_stage_in_terminal_reason() {
     let retrieval = StructuralRefusalAutomationRetrieval {
         anchor_session_id: SessionId::new("session.automation.reflector-budget").unwrap(),
         refusal:
-            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
             },
         calls: AtomicUsize::new(0),
     };
@@ -637,8 +637,8 @@ async fn skill_writer_evidence_keeps_budget_stage_in_terminal_reason() {
     let retrieval = StructuralRefusalAutomationRetrieval {
         anchor_session_id: SessionId::new("session.automation.skill-budget").unwrap(),
         refusal:
-            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
             },
         calls: AtomicUsize::new(0),
     };
@@ -670,8 +670,8 @@ async fn combined_reflector_first_preserves_budget_stage_for_sequential_fallback
     let retrieval = StructuralRefusalAutomationRetrieval {
         anchor_session_id: SessionId::new("session.automation.combined-reflector-budget").unwrap(),
         refusal:
-            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
             },
         calls: AtomicUsize::new(0),
     };
@@ -702,8 +702,8 @@ async fn combined_skill_second_preserves_distinct_budget_stage_for_sequential_fa
     let retrieval = StructuralRefusalAutomationRetrieval {
         anchor_session_id: SessionId::new("session.automation.combined-skill-budget").unwrap(),
         refusal:
-            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
             },
         calls: AtomicUsize::new(0),
     };

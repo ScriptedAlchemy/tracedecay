@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::EffectId;
+use tracedecay_contracts::EffectId;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, read_bounded, with_owned_temp_publish,
@@ -50,7 +50,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
             })
             .collect::<Vec<_>>();
         let value = components.iter().collect::<PathBuf>();
-        tracedecay_usecases::tracedecay::validate_source_edit_candidate_parent(root, &value)?;
+        tracedecay_application::tracedecay::validate_source_edit_candidate_parent(root, &value)?;
         normalized.push(
             components
                 .iter()
@@ -73,7 +73,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
 pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
-        let state = match tracedecay_usecases::tracedecay::read_source_edit_candidate(
+        let state = match tracedecay_application::tracedecay::read_source_edit_candidate(
             root,
             Path::new(relative),
         )? {
@@ -89,7 +89,7 @@ pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<
 }
 
 pub(super) fn source_edit_recovery_digest(
-    files: &[tracedecay_usecases::tracedecay::PlannedSourceEditFile],
+    files: &[tracedecay_application::tracedecay::PlannedSourceEditFile],
 ) -> Result<ManifestDigest> {
     canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
 }
@@ -97,7 +97,7 @@ pub(super) fn source_edit_recovery_digest(
 #[hotpath::measure(label = "usecases.edit.planned_state_digest")]
 pub(super) fn planned_source_edit_state_digest(
     files: &[String],
-    planned_files: &[tracedecay_usecases::tracedecay::PlannedSourceEditFile],
+    planned_files: &[tracedecay_application::tracedecay::PlannedSourceEditFile],
     intended: bool,
 ) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
@@ -135,7 +135,7 @@ fn hash_source_edit_content(content: &[u8]) -> Result<ManifestDigest> {
 fn minted_effect_id(
     domain: &'static str,
     prefix: &'static str,
-    key: &tracedecay_application::IdempotencyKey,
+    key: &tracedecay_contracts::IdempotencyKey,
     input_digest: &ManifestDigest,
 ) -> Result<EffectId> {
     let digest = canonical_sha256(&(domain, key, input_digest)).map_err(domain_error)?;
@@ -147,7 +147,7 @@ fn minted_effect_id(
 }
 
 pub(super) fn effect_id(
-    key: &tracedecay_application::IdempotencyKey,
+    key: &tracedecay_contracts::IdempotencyKey,
     input_digest: &ManifestDigest,
 ) -> Result<EffectId> {
     minted_effect_id(
@@ -159,7 +159,7 @@ pub(super) fn effect_id(
 }
 
 pub(super) fn reconciliation_attempt_effect_id(
-    key: &tracedecay_application::IdempotencyKey,
+    key: &tracedecay_contracts::IdempotencyKey,
     input_digest: &ManifestDigest,
 ) -> Result<EffectId> {
     minted_effect_id(

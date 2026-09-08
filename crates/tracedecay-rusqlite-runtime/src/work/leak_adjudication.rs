@@ -1,6 +1,6 @@
 //! Revision-CAS persistence for bounded Work leak adjudications.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkLeakAdjudicationOutcomeV1, WorkLeakAdjudicationStorageErrorV1,
     WorkLeakAdjudicationStoragePortV1, WorkLeakAdjudicationWriteV1,
 };
@@ -19,7 +19,7 @@ impl WorkLeakAdjudicationStoragePortV1 for WorkSqliteStorage {
         &self,
         authority: &WorkAuthority,
         command_id: &tracedecay_domain::WorkCommandId,
-    ) -> Result<Option<tracedecay_application::WorkLeakAdjudicationReceiptV1>, StorageError> {
+    ) -> Result<Option<tracedecay_contracts::WorkLeakAdjudicationReceiptV1>, StorageError> {
         let transaction = self
             .handle()
             .begin_deferred()
@@ -103,13 +103,7 @@ fn replay_by_command(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     command_id: &str,
-) -> Result<
-    Option<(
-        String,
-        tracedecay_application::WorkLeakAdjudicationReceiptV1,
-    )>,
-    StorageError,
-> {
+) -> Result<Option<(String, tracedecay_contracts::WorkLeakAdjudicationReceiptV1)>, StorageError> {
     let rows = registered_work_query(
         transaction,
         "SELECT canonical_input_digest, receipt_payload, adjudication_id, revision,
@@ -129,11 +123,11 @@ fn replay_by_command(
     let digest = exact_sql_text(&row.values, 0)
         .ok_or(StorageError::Unavailable)?
         .to_owned();
-    let receipt: tracedecay_application::WorkLeakAdjudicationReceiptV1 =
+    let receipt: tracedecay_contracts::WorkLeakAdjudicationReceiptV1 =
         serde_json::from_str(exact_sql_text(&row.values, 1).ok_or(StorageError::Unavailable)?)
             .map_err(|_| StorageError::Unavailable)?;
     let expected_receipt_digest = canonical_sha256(
-        &tracedecay_application::WorkOwnerObservationReceiptV1::Leak(receipt.clone()),
+        &tracedecay_contracts::WorkOwnerObservationReceiptV1::Leak(receipt.clone()),
     )
     .map_err(|_| StorageError::Unavailable)?;
     let revision = exact_sql_integer(&row.values, 3)
@@ -220,7 +214,7 @@ fn insert_receipt(
     let receipt = &write.receipt;
     let payload = serde_json::to_string(receipt).map_err(|_| StorageError::Unavailable)?;
     let receipt_digest = canonical_sha256(
-        &tracedecay_application::WorkOwnerObservationReceiptV1::Leak(receipt.clone()),
+        &tracedecay_contracts::WorkOwnerObservationReceiptV1::Leak(receipt.clone()),
     )
     .map_err(|_| StorageError::Unavailable)?;
     transaction

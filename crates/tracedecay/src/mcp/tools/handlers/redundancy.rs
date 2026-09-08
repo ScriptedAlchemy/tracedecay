@@ -5,8 +5,8 @@
 //! supplies the admitted verified graph and renders the resulting payload.
 
 use serde_json::{Value, json};
-use tracedecay_application::retrieval::RedundancySurfaceRequestV1;
-use tracedecay_application::retrieval::grep_analysis::RedundancyResultV1;
+use tracedecay_contracts::retrieval::RedundancySurfaceRequestV1;
+use tracedecay_contracts::retrieval::grep_analysis::RedundancyResultV1;
 
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::tracedecay::TraceDecay;

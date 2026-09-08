@@ -4,7 +4,7 @@ use super::*;
 pub(super) async fn execute_retained_application(
     request_id: String,
     registered: Option<RegisteredRetainedRuntime>,
-    request: tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1,
+    request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -46,7 +46,7 @@ pub(super) async fn execute_retained_application(
             );
         }
     };
-    let cancellation_signal = match tracedecay_application::CancellationSignal::active(
+    let cancellation_signal = match tracedecay_contracts::CancellationSignal::active(
         context.cancellation().token_id.as_str(),
     ) {
         Ok(signal) => signal,
@@ -62,7 +62,7 @@ pub(super) async fn execute_retained_application(
     if let CancellationState::Cancelled { requested_at } = &context.cancellation().state {
         cancellation_signal.cancel(*requested_at);
     }
-    let service = tracedecay_application::retained_surfaces::RetainedSurfaceServiceV1::new(
+    let service = tracedecay_contracts::retained_surfaces::RetainedSurfaceServiceV1::new(
         registered.ports.as_ref().clone(),
     );
     let execution = hotpath::future!(

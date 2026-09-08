@@ -1,12 +1,12 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationObservation, CancellationStage, EffectTermination,
     ReconciliationState, SourceEditAuthorizationPort, SourceEditRollbackRequestV1, now_micros,
     source_edit_rollback_operation,
 };
 use tracedecay_domain::ManifestDigest;
 
+use tracedecay_application::tracedecay::SourceEditRuntime;
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -25,7 +25,7 @@ use super::verify::{application_contract_error, application_problem, config_erro
 fn durable_request(
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
 ) -> SourceEditDurableRequestV1 {
     SourceEditDurableRequestV1 {
         operation: operation.use_case_id().clone(),
@@ -45,11 +45,11 @@ fn durable_request(
 fn rollback_journal(
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     predicted_state: Option<ManifestDigest>,
     candidate_files: Vec<String>,
-    recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    recovery_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
 ) -> Result<SourceEditJournalV1> {
     let recovery_digest = (!recovery_files.is_empty())
         .then(|| source_edit_recovery_digest(&recovery_files))
@@ -89,7 +89,7 @@ fn persist_pre_effect(
     durability: &SourceEditDurability,
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     outcome: SourceEditOutcome,
     termination: EffectTermination,
@@ -151,7 +151,7 @@ where
     let durability = SourceEditDurability::for_graph(graph);
     let _lock = durability.lock()?;
     let input_digest = request.input_digest().map_err(application_contract_error)?;
-    let requested_authority = tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+    let requested_authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
         request.authority.clone(),
         request.proof.clone(),
         request.context.scope(),
@@ -288,7 +288,7 @@ where
         .recovery_files
         .iter()
         .map(
-            |file| tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+            |file| tracedecay_application::tracedecay::PlannedSourceEditFile {
                 relative_path: file.relative_path.clone(),
                 expected: file.intended.clone(),
                 intended: file.expected.clone(),

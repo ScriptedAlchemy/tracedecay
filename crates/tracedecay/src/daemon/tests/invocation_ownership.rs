@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblemKind, CancellationContext, Deadline, WorkGraphReadRequestV1,
     WorkProductSelectionScopeV1,
 };
@@ -21,11 +21,11 @@ use crate::daemon::{
     DaemonEngine, DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
     execute_daemon_invocation,
 };
-use tracedecay_application::retrieval::PrimitiveRequest;
-use tracedecay_application::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
+use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
+use tracedecay_contracts::retrieval::PrimitiveRequest;
+use tracedecay_contracts::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
 use tracedecay_daemon_service::{DaemonInvocationProblem, ProjectRuntimePublicationStateV1};
-use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -222,7 +222,7 @@ fn assert_feedback_conceals_unknown_handle<'a>(
 }
 
 async fn assert_mounted_invocations(engine: &DaemonEngine, handshake: &DaemonHandshake) {
-    let observed_at = tracedecay_application::clock::now_micros();
+    let observed_at = tracedecay_contracts::clock::now_micros();
     let deadline = Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
         .expect("daemon invocation deadline");
     let cancellation = CancellationContext::active("cancel.project-open-invocations")
@@ -290,7 +290,7 @@ async fn unregistered_project_invocation_reports_truthful_unavailable() {
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "unregistered-project-invocation");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    let observed_at = tracedecay_application::clock::now_micros();
+    let observed_at = tracedecay_contracts::clock::now_micros();
     let deadline = Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
         .expect("daemon invocation deadline");
     let cancellation = CancellationContext::active("cancel.unregistered-project-invocation")

@@ -1,7 +1,7 @@
 //! Canonical single-frame JSON output for CLI adapters.
 
 use serde::Serialize;
-use tracedecay_application::ApplicationResult;
+use tracedecay_contracts::ApplicationResult;
 
 /// Serializes one canonical Plan 09 success or problem envelope as exactly one
 /// UTF-8 JSON line, without a transport-specific `Ok`/`Err` wrapper.
@@ -18,7 +18,7 @@ pub fn json_line<T: Serialize>(result: &ApplicationResult<T>) -> serde_json::Res
 #[cfg(test)]
 mod tests {
     use super::json_line;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
         ResultContractRef, RetryDirective,
     };

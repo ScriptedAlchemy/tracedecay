@@ -5,11 +5,14 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutControlV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
 };
-use tracedecay_application::context_scout::{
+use tracedecay_application::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
+use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1, ContextScoutFeedbackV1,
     ContextScoutWorkV1,
 };
-use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -25,9 +28,6 @@ use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
-use tracedecay_usecases::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
 
 use super::admission::{
     HookV2BindingAdmission, hook_v2_binding_admission, hook_v2_catchup_response,
@@ -354,12 +354,11 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
             return Ok(hook_v2_catchup_response(ACTION));
         }
     }
-    let notice =
-        serde_json::from_value::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(
-            required_value(args, "feedback_notice")?,
-        )
-        .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
-    let status = if tracedecay_usecases::advisory::acknowledge_advisory_hook_notice(
+    let notice = serde_json::from_value::<
+        tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
+    >(required_value(args, "feedback_notice")?)
+    .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
+    let status = if tracedecay_application::advisory::acknowledge_advisory_hook_notice(
         envelope.project_id,
         envelope.worktree_id,
         &notice,

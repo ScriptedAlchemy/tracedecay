@@ -1,5 +1,5 @@
 use super::*;
-use tracedecay_usecases::lsp_runtime::ProductionSemanticAuthorities;
+use tracedecay_application::lsp_runtime::ProductionSemanticAuthorities;
 
 #[derive(Clone)]
 pub struct DaemonLspOwnerRegistrar {
@@ -112,7 +112,7 @@ impl DaemonLspOwnerRegistrar {
             project_root.clone(),
         ));
         let diagnostic_records = Arc::new(
-            tracedecay_usecases::feedback::diagnostics::DatabaseDiagnosticStore::new(database),
+            tracedecay_application::feedback::diagnostics::DatabaseDiagnosticStore::new(database),
         );
         // The invocation handler publishes into the same per-project fan-out
         // that sessions from this factory forward as read-only notifications.

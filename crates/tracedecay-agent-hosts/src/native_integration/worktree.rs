@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     AuthorizedScopeSetPort, NativeWorktreePort, NativeWorktreeTargetV1,
     WorktreeCleanupConfirmRequestV1, WorktreeCleanupConfirmationV1,
     WorktreeCleanupInspectRequestV1, WorktreeCleanupReconcileRequestV1,
@@ -21,7 +21,7 @@ use tracedecay_application::git::{
     WorktreeKindV1, WorktreeObservationV1, WorktreePresenceV1, worktree_confirmation_digest,
     worktree_inspection_digest,
 };
-use tracedecay_application::{AuthorizedRoot, AuthorizedScopeSet, CancellationSignal};
+use tracedecay_contracts::{AuthorizedRoot, AuthorizedScopeSet, CancellationSignal};
 use tracedecay_domain::git::{GitHeadStateV1, GitOperationStateV1};
 use tracedecay_domain::{
     ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
@@ -549,7 +549,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
             return Ok(WorktreeInventoryOutcomeV1::Unavailable);
         }
         let roots = self.scope_roots(&request.target, scope_set)?;
-        let observed_at = tracedecay_application::now_micros();
+        let observed_at = tracedecay_contracts::now_micros();
         let mut entries = Vec::with_capacity(roots.len());
         for root in roots {
             if cancellation.is_cancelled() {
@@ -629,7 +629,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         let inspection = self.observe_target(
             &request.target,
             scope_set,
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
             false,
         )?;
         Ok(match inspection.presence {
@@ -649,7 +649,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         if cancellation.is_cancelled() {
             return Ok(WorktreeConfirmationOutcomeV1::Unavailable);
         }
-        let confirmed_at = tracedecay_application::now_micros();
+        let confirmed_at = tracedecay_contracts::now_micros();
         let inspection = self.observe_target(&request.target, scope_set, confirmed_at, false)?;
         if inspection.presence == WorktreePresenceV1::Foreign {
             return Ok(WorktreeConfirmationOutcomeV1::Denied);

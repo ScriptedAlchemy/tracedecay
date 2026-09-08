@@ -1,7 +1,7 @@
 //! Typed retained projections for daemon-owned session refresh outcomes.
 
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+use tracedecay_contracts::retained_surfaces::{
     RetainedErrorV1, RetainedOutcomeStatusV1, RetainedSurfaceResultV1, SessionRefreshBeginResultV1,
     SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1, SessionRefreshProgressV1,
     SessionRefreshReceiptV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
@@ -234,11 +234,11 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
         }
         SessionRefreshServiceOutcome::Stale => RetainedSurfaceExecutionErrorV1::Stale,
         SessionRefreshServiceOutcome::Aborted => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         SessionRefreshServiceOutcome::DeadlineExceeded => {
             RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             )
         }
         SessionRefreshServiceOutcome::Running(_) => RetainedSurfaceExecutionErrorV1::Conflict,

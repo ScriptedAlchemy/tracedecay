@@ -2,7 +2,7 @@
 //!
 //! The concrete mutation/query ports remain beside their sole durable
 //! implementation. Public request/result DTOs are owned by
-//! `tracedecay-application::configuration` and re-exported from `types` only
+//! `tracedecay-contracts::configuration` and re-exported from `types` only
 //! so the store implementation consumes that same wire authority.
 
 pub mod ports;

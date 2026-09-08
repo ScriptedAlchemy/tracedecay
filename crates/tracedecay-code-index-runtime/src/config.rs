@@ -6,11 +6,11 @@
 //! usecases. The watcher-only sync knobs are constructor-injected as
 //! [`crate::ports::GitWatchSyncConfigV1`].
 
+pub use tracedecay_application::config::retrieval;
 pub use tracedecay_domain::source_path_policy::is_generated_dir_segment;
 #[cfg(test)]
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_runtime_core::config::{TRACEDECAY_DIR, is_ambient_project_root};
-pub use tracedecay_usecases::config::retrieval;
 
 /// Path-level generated/vendored check used by the scheduler snapshot filter.
 ///

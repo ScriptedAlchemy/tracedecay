@@ -11,27 +11,27 @@ use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
 use serde_json::{Value, json};
-use tracedecay_application::clock::now_micros;
-use tracedecay_application::{
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_contracts::clock::now_micros;
+use tracedecay_contracts::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
     OperationReceipt, OperationTermination,
 };
-use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::tracedecay::{TraceDecay, is_test_file};
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::diagnose::{Severity, parse_cargo_output};
-use tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
-use tracedecay_usecases::diagnostics_query::DiagnosticsQuery;
-use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
-use tracedecay_usecases::operation_stream::{
+use tracedecay_application::diagnose::{Severity, parse_cargo_output};
+use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use tracedecay_application::diagnostics_query::DiagnosticsQuery;
+use tracedecay_application::diagnostics_store::DiagnosticsStore;
+use tracedecay_application::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
 use tracedecay_mcp::ToolResult;
@@ -388,7 +388,7 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 async fn publish_parsed_compiler_diagnostics(
     cg: &TraceDecay,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
-    parsed: &[tracedecay_usecases::diagnose::Diagnostic],
+    parsed: &[tracedecay_application::diagnose::Diagnostic],
 ) -> Value {
     use tracedecay_domain::ComponentVersion;
 
@@ -408,7 +408,7 @@ async fn publish_parsed_compiler_diagnostics(
     let database = cg.dashboard_database_guard();
     let store = DiagnosticsStore::new(database.as_ref().clone());
     let outcome =
-        tracedecay_usecases::diagnostics_publication::publish_compiler_diagnostics_through_code_index_v1(
+        tracedecay_application::diagnostics_publication::publish_compiler_diagnostics_through_code_index_v1(
             &root,
             code_index_identity,
             &store,
@@ -423,11 +423,11 @@ async fn publish_parsed_compiler_diagnostics(
 /// Renders the typed publication outcome for the diagnose response. Every
 /// refusal keeps its name so an empty Problems list is explainable.
 fn compiler_publication_report(
-    outcome: &tracedecay_usecases::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1,
+    outcome: &tracedecay_application::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1,
 ) -> Value {
-    use tracedecay_usecases::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1 as Outcome;
+    use tracedecay_application::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1 as Outcome;
 
-    let names = |skips: &[tracedecay_usecases::diagnostics_publication::CompilerDiagnosticResolutionSkipV1]| {
+    let names = |skips: &[tracedecay_application::diagnostics_publication::CompilerDiagnosticResolutionSkipV1]| {
         skips.iter().map(ToString::to_string).collect::<Vec<_>>()
     };
     match outcome {

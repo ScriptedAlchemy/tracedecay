@@ -84,7 +84,7 @@ class CrateLane(str, Enum):
     QUERY = "tracedecay-query"
     CODE_INDEX = "tracedecay-code-index"
     CAPTURE = "tracedecay-capture"
-    APPLICATION = "tracedecay-application"
+    APPLICATION = "tracedecay-contracts"
     HOOKS = "tracedecay-hooks"
     API = "tracedecay-api"
     RUSQLITE_RUNTIME = "tracedecay-rusqlite-runtime"

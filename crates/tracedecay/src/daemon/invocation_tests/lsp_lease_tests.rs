@@ -5,14 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use tokio::sync::Mutex;
-use tracedecay_application::{CancellationContext, Deadline};
+use tracedecay_application::lsp_runtime::UpstreamCapabilityInitializationAuthority;
+use tracedecay_contracts::{CancellationContext, Deadline};
 use tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS;
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_lsp::{
     AuthorizedLspWorkspace, LSP_SESSION_TTL_MS, LspRuntimeFailure, LspRuntimeFuture,
     LspSessionRegistry, SessionLifecycle,
 };
-use tracedecay_usecases::lsp_runtime::UpstreamCapabilityInitializationAuthority;
 
 struct CountingUpstreamCapabilityInitializer(Arc<AtomicUsize>);
 

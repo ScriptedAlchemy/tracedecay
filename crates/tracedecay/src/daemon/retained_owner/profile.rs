@@ -4,11 +4,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[cfg(test)]
-use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
-use tracedecay_application::retained_surfaces::{
-    RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
-};
-use tracedecay_application::{
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
+use tracedecay_contracts::retained_surfaces::{RetainedSurfaceRequestV1, RetainedSurfaceResultV1};
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationResult, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, RequestId, RetainedSurfacePortsV1, RetainedSurfaceServiceV1,
@@ -46,7 +44,7 @@ const PROFILE_RETAINED_REQUEST_GRANT_DOMAIN_V1: &str =
     "tracedecay.daemon.profile-retained.request-grant.v1";
 
 pub(crate) fn profile_session_retrieval_serving_identity(
-    identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
     expected_runtime_shard: &StoreShardIdV1,
     serving_db: &std::path::Path,
 ) -> Option<SessionRetrievalServingIdentityV1> {
@@ -187,7 +185,7 @@ fn profile_retained_configuration_digest(
 }
 
 pub(crate) fn profile_retained_connection_authority(
-    identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
     session_identity: &ResolvedSessionIdentity,
 ) -> Result<ProfileRetainedConnectionAuthorityV1, TraceDecayError> {
     profile_retained_connection_authority_from_persisted_identity(
@@ -251,11 +249,12 @@ pub(crate) async fn execute_profile_retained_application(
     cancellation: CancellationSignal,
 ) -> Result<ApplicationResult<RetainedSurfaceResultV1>, TraceDecayError> {
     let observed_at = now_micros();
-    let operation =
-        tracedecay_application::retained_surface_application_operation(request.operation())
-            .map_err(|error| TraceDecayError::Config {
-                message: error.to_string(),
-            })?;
+    let operation = tracedecay_contracts::retained_surface_application_operation(
+        request.operation(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
     let scope = authorities
         .session_identity
         .session_request_scope()
@@ -321,7 +320,7 @@ pub(crate) async fn execute_profile_retained_application(
 }
 
 fn application_problem_envelope(
-    contract: tracedecay_application::ResultContractRef,
+    contract: tracedecay_contracts::ResultContractRef,
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> Result<ApplicationProblemEnvelope, TraceDecayError> {
@@ -363,11 +362,11 @@ fn profile_retained_surface_ports<'a>(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_application::retained_surfaces::{
+    use tracedecay_contracts::retained_surfaces::{
         MemoryScopeV1, MemoryStatusRequestV1, MessageSearchRequestV1, RetainedOutcomeStatusV1,
         SessionGitRefV1, SessionsForRequestV1,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationOutcome, ApplicationProblemKind, CancellationSignal, Deadline, RequestId,
     };
     use tracedecay_daemon_identity::profile_identity;
@@ -404,7 +403,7 @@ mod tests {
     }
 
     fn profile_retrieval_root(
-        profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+        profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
     ) -> DaemonSessionRetrievalRoot {
         let shard = tracedecay_store::StoreShardIdV1::profile_sessions(
             profile_identity.brain_id().clone(),
@@ -809,7 +808,7 @@ mod tests {
             RetainedSurfaceRequestV1::MessageSearch(MessageSearchRequestV1 {
                 query: Some("must not be misrouted".to_owned()),
                 project_selector: Some(
-                    tracedecay_application::retained_surfaces::RetainedProjectSelectorV1 {
+                    tracedecay_contracts::retained_surfaces::RetainedProjectSelectorV1 {
                         project_id: ProjectId::new("project.foreign-selector")
                             .expect("selector project id"),
                     },
@@ -889,7 +888,7 @@ mod tests {
     fn request_admission_binds_one_operation_and_exact_request_controls() {
         let session_identity = identity("profile.retained-request-bound");
         let connection = connection(&session_identity);
-        let operation = tracedecay_application::retained_surface_application_operation(
+        let operation = tracedecay_contracts::retained_surface_application_operation(
             RetainedSurfaceOperation::MemoryStatus,
         )
         .expect("retained operation");

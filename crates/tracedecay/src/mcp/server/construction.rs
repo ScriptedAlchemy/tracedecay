@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
     remote::status::RemoteOperationalStatusReadPort,
 };
@@ -47,8 +47,9 @@ pub(crate) type CodeGraphProjectionReadPort =
     Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort + 'static>;
 pub(crate) type CodeGraphReadAdmissionPort =
     Arc<dyn tracedecay_graph_query::CodeGraphReadAdmissionPort + 'static>;
-pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
-    Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1 + 'static>;
+pub(crate) type CodeIndexIgnoredDependencyAdmissionPort = Arc<
+    dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1 + 'static,
+>;
 
 /// Concrete route bridge to a project server already mounted by the daemon.
 /// Routed handlers retain the whole server so its graph, query ports, session
@@ -136,7 +137,7 @@ pub(crate) struct McpServerConstructionContext {
     /// server of the profile. Absent on core and direct servers.
     pub(crate) profile_session_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) session_sync_service:
-        Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
+        Option<std::sync::Weak<dyn tracedecay_contracts::session_sync::SessionSyncServicePort>>,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     /// The process background CPU authority hook-driven observation capture
     /// prepares under. Daemon-owned servers carry the one authority the
@@ -189,9 +190,9 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) daemon_invocation_service:
         Option<tracedecay_daemon_service::DaemonInvocationService>,
     pub(crate) delivery_settlement_authority:
-        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+        Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
     pub(crate) delivery_settlement_recorder:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
@@ -220,14 +221,14 @@ pub(crate) struct McpServerDaemonAuthority {
     pub(crate) user_session_refresh_wake:
         tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) session_sync_service:
-        std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>,
+        std::sync::Weak<dyn tracedecay_contracts::session_sync::SessionSyncServicePort>,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) writers: McpServerWriters,
     pub(crate) delivery_settlement_authority:
-        Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+        Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     pub(crate) delivery_settlement_recorder:
-        Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
+        Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>,
 }
 
 pub(crate) struct McpServerDaemonCoreAuthority {

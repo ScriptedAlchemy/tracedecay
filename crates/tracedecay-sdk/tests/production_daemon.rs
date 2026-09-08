@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustls::pki_types::pem::PemObject;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_application::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
-use tracedecay_application::{
+use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef, RequestId,
     ResolvedScope,
 };

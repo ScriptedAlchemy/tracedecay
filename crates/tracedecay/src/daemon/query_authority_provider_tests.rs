@@ -6,6 +6,11 @@ use crate::config::retrieval::{
 };
 use std::{collections::BTreeMap, path::Path, process::Command, time::Duration};
 use tempfile::TempDir;
+use tracedecay_application::semantic_runtime::{
+    CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
+    SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
+    project_semantic_redundancy_revision,
+};
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, ComponentRevision, DiversityPolicy,
@@ -24,11 +29,6 @@ use tracedecay_search_eval::{
     DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
     DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
     OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-};
-use tracedecay_usecases::semantic_runtime::{
-    CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
-    SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
-    project_semantic_redundancy_revision,
 };
 
 fn id<T>(value: &str) -> T

@@ -23,14 +23,24 @@ use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceR
 use tracedecay::daemon::call_default_tool;
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
-use tracedecay_application::feedback::{
+use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_application::feedback::concrete::open_feedback_runtime;
+use tracedecay_application::feedback::owner::{
+    FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
+};
+use tracedecay_application::operation_stream::{
+    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    OperationKind, OperationStreamConfig,
+};
+use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
+use tracedecay_contracts::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
     FeedbackDiagnosticsReadRequestV1,
 };
-use tracedecay_application::retrieval::PrimitiveRequest;
+use tracedecay_contracts::retrieval::PrimitiveRequest;
 #[cfg(all(unix, feature = "test-transport"))]
-use tracedecay_application::{ApplicationEnvelope, IdempotencyKey};
-use tracedecay_application::{
+use tracedecay_contracts::{ApplicationEnvelope, IdempotencyKey};
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemKind, CancellationContext, CancellationObservation,
     CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
     CoverageCompleteness, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
@@ -60,16 +70,6 @@ use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
-use tracedecay_usecases::feedback::owner::{
-    FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
-};
-use tracedecay_usecases::operation_stream::{
-    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
-    OperationKind, OperationStreamConfig,
-};
-use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
@@ -1775,7 +1775,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         mcp_apply.execution.termination,
         OperationTermination::Failed
     );
-    let normalize_replay = |effect: &tracedecay_application::EffectResult<Value>| {
+    let normalize_replay = |effect: &tracedecay_contracts::EffectResult<Value>| {
         let mut value = serde_json::to_value(effect).expect("effect wire value");
         value["authority"]
             .as_object_mut()
@@ -2884,7 +2884,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     )
     .await;
     assert!(
-        matches!(denied, Err(tracedecay_application::InvocationError::Denied)),
+        matches!(denied, Err(tracedecay_contracts::InvocationError::Denied)),
         "an unregistered workspace root must fail closed"
     );
 

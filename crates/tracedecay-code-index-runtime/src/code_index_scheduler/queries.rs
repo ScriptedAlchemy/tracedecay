@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
     CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord, SymbolRelationRecord,
     TypeHierarchyRecord,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CallableCodeQueryFuture, CallableCodeQueryPort, CancellationObservation, CancellationStage,
     CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest, CodeOccurrenceRecord,
     CodeQueryPage, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
@@ -180,7 +180,7 @@ fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
 pub fn semantic_mcp_reason(
     current_source: Option<&CodeGenerationId>,
     latest_code_generation: &CodeGenerationId,
-    runtime_state: Option<&tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1>,
+    runtime_state: Option<&tracedecay_application::semantic_runtime::SemanticRuntimeStateV1>,
 ) -> &'static str {
     if let Some(source_generation) = current_source {
         return if source_generation == latest_code_generation {
@@ -193,7 +193,7 @@ pub fn semantic_mcp_reason(
     }
     match runtime_state {
         None => "semantic_runtime_unavailable",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
             reason,
         }) => match reason {
             SemanticFallbackReasonV1::ConfigurationUnavailable => {
@@ -208,35 +208,35 @@ pub fn semantic_mcp_reason(
             _ => "semantic_runtime_unavailable",
         },
         Some(
-            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
+            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
                 ..
             },
         ) => "semantic_model_not_downloaded",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Downloading {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Downloading {
             ..
         }) => "semantic_model_downloading",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Verifying {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Verifying {
             ..
         }) => "semantic_model_verifying",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Installed {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Installed {
             ..
         }) => "semantic_model_installed",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Loading { .. }) => {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Loading { .. }) => {
             "semantic_model_loading"
         }
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
             ..
         }) => "semantic_indexing",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Current { .. }) => {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Current { .. }) => {
             "semantic_generation_incompatible"
         }
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Degraded {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
             ..
         }) => "semantic_degraded",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Rollback {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Rollback {
             ..
         }) => "semantic_rollback",
-        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Failed { .. }) => {
+        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Failed { .. }) => {
             "semantic_failed"
         }
     }
@@ -248,7 +248,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// admitted scope.
     pub async fn compose_query_fallback(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         request: &tracedecay_domain::RetrievalRequest,
         query_view: &tracedecay_domain::EphemeralSanitizedQueryViewV1,
         lanes: Vec<tracedecay_query::retrieval::fusion::CompositionLaneInput>,
@@ -286,8 +286,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let code_generation = latest.generation.manifest().generation_id.clone();
         let code_generation_display = Some(code_generation.as_str().to_owned());
         let current_source =
-            tracedecay_usecases::semantic_runtime::project_semantic_source_generation(project_root);
-        let status = tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+            tracedecay_application::semantic_runtime::project_semantic_source_generation(
+                project_root,
+            );
+        let status = tracedecay_application::semantic_runtime::project_semantic_application_status(
             project_root,
             None,
         );
@@ -304,7 +306,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn generation_for(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         generation_id: &CodeGenerationId,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
     {
@@ -315,7 +317,7 @@ impl CodeIndexSchedulerRegistryV1 {
     #[hotpath::measure(future = true, label = "query.generation.resolve")]
     pub async fn generation_for_controlled(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         generation_id: &CodeGenerationId,
         control: Option<super::branch_generations::BranchGenerationReadControlV1>,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
@@ -425,7 +427,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         request: &RequestContext,
         requested: &CodeGenerationId,
-        page: &tracedecay_application::PageRequest,
+        page: &tracedecay_contracts::PageRequest,
         authority: &tracedecay_query::retrieval::QueryAuthorityV1,
         routing: &PreparedQueryRoutingBindingsV1,
     ) -> Result<LatestCompleteCodeIndexV1, CallableCodeCursorError> {
@@ -473,7 +475,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         request: &RequestContext,
         requested: &CodeGenerationId,
-        page: &tracedecay_application::PageRequest,
+        page: &tracedecay_contracts::PageRequest,
         authority: &tracedecay_query::retrieval::QueryAuthorityV1,
         routing: &PreparedQueryRoutingBindingsV1,
     ) -> Result<LatestCodeTextGenerationV1, CallableCodeCursorError> {
@@ -587,7 +589,7 @@ fn prepared_routing_bindings(
 }
 
 pub fn maximum_retrieval_budget() -> RetrievalBudget {
-    retrieval_budget(tracedecay_application::MAX_APPLICATION_PAGE_SIZE)
+    retrieval_budget(tracedecay_contracts::MAX_APPLICATION_PAGE_SIZE)
 }
 
 type CallableCodeCursorError = PreparedQueryErrorV1;
@@ -825,7 +827,7 @@ fn bounded_result<T>(
     }
 }
 
-fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_application::CodeQueryScope) -> bool {
+fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_contracts::CodeQueryScope) -> bool {
     tracedecay_runtime_core::path_scope::path_matches_scope(path, scope.path_prefix.as_deref())
 }
 
@@ -1457,7 +1459,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         context: &RetrievalPortContext<'_>,
         generation: &CodeGenerationId,
-        page: &tracedecay_application::PageRequest,
+        page: &tracedecay_contracts::PageRequest,
         temporal: TemporalModeV1,
         operation: &'static str,
         query_binding_digest: ManifestDigest,
@@ -1496,7 +1498,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         context: &RetrievalPortContext<'_>,
         generation: &CodeGenerationId,
-        page: &tracedecay_application::PageRequest,
+        page: &tracedecay_contracts::PageRequest,
         temporal: TemporalModeV1,
         operation: &'static str,
         query_binding_digest: ManifestDigest,
@@ -1539,7 +1541,7 @@ fn finish_direct_query<T: serde::Serialize>(
     operation: &'static str,
     query_binding_digest: ManifestDigest,
     page: CodeQueryPage<T>,
-    requested_page: &tracedecay_application::PageRequest,
+    requested_page: &tracedecay_contracts::PageRequest,
     eligible: u64,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     finish_query_with_coverage(
@@ -1572,7 +1574,7 @@ fn finish_generation_page<T: serde::Serialize>(
     operation: &'static str,
     query_binding_digest: ManifestDigest,
     items: Vec<T>,
-    requested_page: &tracedecay_application::PageRequest,
+    requested_page: &tracedecay_contracts::PageRequest,
     page_label: &'static str,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let eligible = items.len() as u64;
@@ -1610,7 +1612,7 @@ fn finish_generation_candidate_page<K, T>(
     query_binding_digest: ManifestDigest,
     keys: Vec<K>,
     hydrate: impl FnOnce(&[K]) -> Result<Vec<T>, PreparedQueryErrorV1>,
-    requested_page: &tracedecay_application::PageRequest,
+    requested_page: &tracedecay_contracts::PageRequest,
     page_label: &'static str,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>>
 where
@@ -1693,7 +1695,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
     operation: &'static str,
     query_binding_digest: ManifestDigest,
     page: CodeQueryPage<T>,
-    requested_page: &tracedecay_application::PageRequest,
+    requested_page: &tracedecay_contracts::PageRequest,
     coverage: tracedecay_domain::RetrieverCoverage,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let finished_at = query_finished_at();
@@ -1794,7 +1796,7 @@ pub(crate) fn relation_keys(
     kinds: &[RelationEdgeKindV1],
     reverse: bool,
     maximum_depth: u32,
-    scope: &tracedecay_application::CodeQueryScope,
+    scope: &tracedecay_contracts::CodeQueryScope,
 ) -> Vec<RelationKeyV1> {
     let index = latest.record_index();
     let edges = latest.generation.edges();
@@ -1904,7 +1906,7 @@ fn finish_native_lane_page<T, N>(
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
-    requested_page: &tracedecay_application::PageRequest,
+    requested_page: &tracedecay_contracts::PageRequest,
     page: NativeLanePageV1<N>,
     map: impl FnMut(N) -> T,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>>
@@ -1973,7 +1975,7 @@ fn finish_native_lane_query<T, N>(
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
-    requested_page: &tracedecay_application::PageRequest,
+    requested_page: &tracedecay_contracts::PageRequest,
     outcome: NativeLaneOutcomeV1<N>,
     mut map: impl FnMut(N) -> T,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>>
@@ -2579,10 +2581,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let selector = match &request.selector {
-                tracedecay_application::retrieval::ImplementationSelector::Trait { name }
-                | tracedecay_application::retrieval::ImplementationSelector::Method { name } => {
-                    name
-                }
+                tracedecay_contracts::retrieval::ImplementationSelector::Trait { name }
+                | tracedecay_contracts::retrieval::ImplementationSelector::Method { name } => name,
             };
             let symbols = &prepared.latest.generation.symbols().symbols;
             let index = prepared.latest.record_index();
@@ -3369,7 +3369,7 @@ mod tests {
 
     #[test]
     fn code_query_path_prefix_is_segment_bounded() {
-        let scoped = tracedecay_application::CodeQueryScope::new(
+        let scoped = tracedecay_contracts::CodeQueryScope::new(
             CodeGenerationId::new("generation.callable-page").expect("generation"),
             Some("crates/app".to_owned()),
         )
@@ -3383,7 +3383,7 @@ mod tests {
             "crates/application/src/lib.rs",
             &scoped
         ));
-        let trailing_slash = tracedecay_application::CodeQueryScope::new(
+        let trailing_slash = tracedecay_contracts::CodeQueryScope::new(
             CodeGenerationId::new("generation.callable-page").expect("generation"),
             Some("crates/app/".to_owned()),
         )

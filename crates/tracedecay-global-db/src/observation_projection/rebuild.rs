@@ -115,7 +115,7 @@ pub async fn project_observation(
         .begin_write_transaction("begin projection transaction")
         .await
         .map_err(|error| storage("begin projection transaction", error))?;
-    let now_micros = tracedecay_application::clock::now_micros().0;
+    let now_micros = tracedecay_contracts::clock::now_micros().0;
     if let Some(retry) = projection_retry_state(&transaction, observation_id).await?
         && retry.next_retry_at_micros > now_micros
     {
@@ -205,7 +205,7 @@ pub async fn project_queued_observations(
         .begin_write_transaction("begin projection window transaction")
         .await
         .map_err(|error| storage("begin projection window transaction", error))?;
-    let now_micros = tracedecay_application::clock::now_micros().0;
+    let now_micros = tracedecay_contracts::clock::now_micros().0;
     let mut items = Vec::new();
     while items.len() < max {
         let Some(observation_id) = next_ready_projection_head(&transaction, now_micros).await?
@@ -300,7 +300,7 @@ pub async fn project_observation_with_engine(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| storage("begin projection transaction", error))?;
-    let now_micros = tracedecay_application::clock::now_micros().0;
+    let now_micros = tracedecay_contracts::clock::now_micros().0;
     if let Some(retry) = projection_retry_state(&transaction, observation_id).await?
         && retry.next_retry_at_micros > now_micros
     {

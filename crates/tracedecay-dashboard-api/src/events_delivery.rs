@@ -6,13 +6,13 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::Deserialize;
+use tracedecay_application::observability::{
+    DeliverySettlementAuthorityV1, DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
+};
 use tracedecay_domain::{
     DeliveryChannelIdentityV1, DeliveryDropReasonV1, DeliveryEventClassV1,
     DeliverySettlementAttemptV1, DeliverySettlementOutcomeV1, DeliverySettlementV1,
     DeliverySurfaceFamilyV1, UtcMicros, canonical_sha256,
-};
-use tracedecay_usecases::observability::{
-    DeliverySettlementAuthorityV1, DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
 };
 
 use super::DashboardState;
@@ -589,11 +589,11 @@ mod tests {
     use super::*;
     use crate::events_api::DashboardEventKindV1;
     use crate::read_model::DashboardCoverageV1;
-    use tracedecay_domain::ProjectId;
-    use tracedecay_usecases::observability::{
+    use tracedecay_application::observability::{
         BoundedObservabilityProducerV1, DeliverySettlementAuthorityV1,
         ObservabilityProducerIdentityV1,
     };
+    use tracedecay_domain::ProjectId;
 
     fn event() -> DashboardEventV1 {
         DashboardEventV1 {

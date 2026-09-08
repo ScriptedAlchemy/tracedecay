@@ -13,11 +13,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tracedecay_application::git::{
+use tracedecay_application::native_integration::{
+    DaemonNativeIntegrationAuthorization, ExactPairNativeIntegrationTopology,
+    GixNativeIntegrationAdapter, NativeIntegrationGraphRuntimeProviderV1,
+    NativeIntegrationTransactionCoordinator,
+};
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_application::stack_coordinator::{
+    DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1,
+};
+use tracedecay_contracts::git::{
     NativeWorktreeService, WorktreeCleanupReconcileRequestV1, WorktreeCleanupReconciliationV1,
     WorktreeContractError,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedScopeSet, CancellationSignal, NativeIntegrationContractError, NativeIntegrationPort,
     NativeIntegrationPortError, NativeIntegrationRecoveryRequestV1, NativeIntegrationService,
     NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
@@ -29,15 +38,6 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     NativeIntegrationStore, NativeIntegrationStoreResult, StoreShardIdV1, StoreShardScopeV1,
-};
-use tracedecay_usecases::native_integration::{
-    DaemonNativeIntegrationAuthorization, ExactPairNativeIntegrationTopology,
-    GixNativeIntegrationAdapter, NativeIntegrationGraphRuntimeProviderV1,
-    NativeIntegrationTransactionCoordinator,
-};
-use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1,
 };
 
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
@@ -246,7 +246,7 @@ impl DaemonNativeIntegrationOwner {
                             scope_set_id: transaction.scope_set_id,
                             scope_set_revision: transaction.scope_set_revision,
                             scope_set_digest: transaction.scope_set_digest,
-                            target: tracedecay_application::git::NativeWorktreeTargetV1::Worktree {
+                            target: tracedecay_contracts::git::NativeWorktreeTargetV1::Worktree {
                                 project_id: transaction.command.project_id,
                                 repository_id: transaction.command.repository_id,
                                 worktree_id: transaction.command.worktree_id,
@@ -683,7 +683,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         NativeIntegrationCancelDispositionV1, NativeIntegrationCancelRequestV1,
         NativeIntegrationStatusRequestV1,
     };

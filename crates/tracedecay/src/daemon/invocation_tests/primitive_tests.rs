@@ -1,7 +1,8 @@
 use super::*;
 
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_contracts::{
     ApplicationProblemKind, AuthorityReceipt, CallableCodeOperationKind, CancellationContext,
     Deadline, EvidenceCoverage, EvidenceDomain, EvidencePacket, OperationBudgetUsage,
     OperationReceipt, PageState, PolicyDecisionRef, TemporalState, callable_code_operations,
@@ -13,7 +14,6 @@ use tracedecay_domain::{
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_tool_catalog::SortContractId;
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
 
 #[tokio::test]
 async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown() {

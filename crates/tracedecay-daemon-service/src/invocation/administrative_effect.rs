@@ -6,7 +6,7 @@
 //! shape identical across families instead of letting copies drift.
 
 use serde::Serialize;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, AuthorityReceipt, Deadline, EffectId,
     EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationBudgetUsage,
     OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestContext, RequestId,

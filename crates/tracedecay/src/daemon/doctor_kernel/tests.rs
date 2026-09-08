@@ -1,16 +1,16 @@
 //! Daemon-owned Doctor signal-mapper tests.
 //!
 //! Adapter structs, [`DaemonRuntimeHealthSignalV1`], and
-//! [`compose_doctor_report`] live in `tracedecay-application::doctor` and are
+//! [`compose_doctor_report`] live in `tracedecay-contracts::doctor` and are
 //! covered there. This module keeps the mappers that still read daemon,
 //! global-db, LSP, and host-bundle types.
 
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1,
     IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
     storage::StoreSizeSampleV1,
 };
@@ -193,7 +193,7 @@ fn language_server_engine_states_preserve_live_degradation() {
 #[test]
 fn empty_observation_projection_is_absent() {
     let model =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("empty projection");
     assert_eq!(
         observability_read_from_model(Ok(model)),
@@ -204,7 +204,7 @@ fn empty_observation_projection_is_absent() {
 #[test]
 fn retained_or_unreported_observation_history_is_not_absent() {
     let model =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
             &[],
             1,
             0,
@@ -221,7 +221,7 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 
     let unknown =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
             &[],
             0,
             1,
@@ -238,9 +238,9 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 
     let mut active =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("active empty projection");
-    active.coverage = tracedecay_application::feedback::observations::FeedbackCoverageV1::Known;
+    active.coverage = tracedecay_contracts::feedback::observations::FeedbackCoverageV1::Known;
     active.watermark.producer_boot_id =
         Some(tracedecay_domain::canonical_sha256(&"active-observation-boot").unwrap());
     assert_eq!(

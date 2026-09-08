@@ -271,7 +271,7 @@ fn canonical_operation_receipt_round_trips() {
         serde_json::from_value(value).expect("deserialize receipt");
     assert_eq!(decoded, receipt);
 
-    let canonical: tracedecay_application::OperationReceipt = decoded;
+    let canonical: tracedecay_contracts::OperationReceipt = decoded;
     let _: application::OperationReceipt = canonical;
 }
 

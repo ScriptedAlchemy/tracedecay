@@ -4,22 +4,24 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use tracedecay_application::feedback::{
+use tracedecay_application::advisory::GitHubReleaseReadControlV1;
+use tracedecay_application::delivery::{
+    ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1,
+};
+use tracedecay_application::git_query::GitQueryBounds;
+use tracedecay_application::git_reads::{GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1};
+use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
 };
-use tracedecay_application::git::GitReadRequestV1;
-use tracedecay_application::{
+use tracedecay_contracts::git::GitReadRequestV1;
+use tracedecay_contracts::{
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
 };
 use tracedecay_domain::git::GitHeadStateV1;
 use tracedecay_domain::{CommitId, canonical_sha256};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::advisory::GitHubReleaseReadControlV1;
-use tracedecay_usecases::delivery::{ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1};
-use tracedecay_usecases::git_query::GitQueryBounds;
-use tracedecay_usecases::git_reads::{GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1};
 
 use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_dashboard_api::{
@@ -61,7 +63,7 @@ impl DashboardDeliveryReadAdapter {
         if project_id != Some(authority.scope().project_id.as_str()) {
             return ProjectDeliveryReadOutcomeV1::Unavailable;
         }
-        let authorization_observed_at = tracedecay_application::now_micros();
+        let authorization_observed_at = tracedecay_contracts::now_micros();
         let Some(access) = authority.source_access_at(authorization_observed_at).await else {
             return ProjectDeliveryReadOutcomeV1::Unavailable;
         };
@@ -70,7 +72,7 @@ impl DashboardDeliveryReadAdapter {
         }
         let expires_at = std::cmp::min(control.deadline().expires_at, access.grant_expires_at);
         let monotonic_now = Instant::now();
-        let wall_now = tracedecay_application::now_micros();
+        let wall_now = tracedecay_contracts::now_micros();
         let Some(request_deadline) = monotonic_deadline(monotonic_now, wall_now, expires_at) else {
             return ProjectDeliveryReadOutcomeV1::Unavailable;
         };
@@ -125,7 +127,7 @@ impl Drop for GitReadCancellationGuard {
 async fn live_expected_head_commit_id(
     control: &DashboardHttpRequestControlV1,
     project_root: &std::path::Path,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     deadline: Instant,
 ) -> Option<CommitId> {
     if Instant::now() >= deadline || control.cancellation().is_cancelled() {
@@ -197,7 +199,7 @@ impl DashboardDeliveryReadPortV1 for DashboardDeliveryReadAdapter {
 
 fn request_context(
     control: &DashboardHttpRequestControlV1,
-    access: tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
+    access: tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
     issued_at: tracedecay_domain::UtcMicros,
     expires_at: tracedecay_domain::UtcMicros,
     release_deadline: Instant,
@@ -214,11 +216,11 @@ fn request_context(
 
 #[cfg(test)]
 fn request_context_from_parts(
-    request_id: tracedecay_application::RequestId,
+    request_id: tracedecay_contracts::RequestId,
     deadline: Deadline,
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
     observed_at: tracedecay_domain::UtcMicros,
-    access: tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
+    access: tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
 ) -> Option<(RequestContext, GitHubReleaseReadControlV1)> {
     let expires_at = std::cmp::min(deadline.expires_at, access.grant_expires_at);
     let release_deadline = monotonic_deadline(Instant::now(), observed_at, expires_at)?;
@@ -233,10 +235,10 @@ fn request_context_from_parts(
 }
 
 fn request_context_from_parts_with_deadline(
-    request_id: tracedecay_application::RequestId,
-    cancellation: tracedecay_application::CancellationSignal,
+    request_id: tracedecay_contracts::RequestId,
+    cancellation: tracedecay_contracts::CancellationSignal,
     observed_at: tracedecay_domain::UtcMicros,
-    access: tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
+    access: tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
     expires_at: tracedecay_domain::UtcMicros,
     release_deadline: Instant,
 ) -> Option<(RequestContext, GitHubReleaseReadControlV1)> {
@@ -329,7 +331,7 @@ fn monotonic_deadline(
 }
 
 fn has_delivery_source_capability(
-    access: &tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
+    access: &tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
 ) -> bool {
     [
         GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
@@ -354,16 +356,16 @@ mod tests {
     fn source_access(
         capabilities: BTreeSet<CapabilityId>,
         expires_at: UtcMicros,
-    ) -> tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot {
+    ) -> tracedecay_application::source_authorization::ProjectSourceAccessSnapshot {
         let project_id = ProjectId::new("project.dashboard-delivery").expect("project");
-        let scope = tracedecay_application::ResolvedScope::new(
+        let scope = tracedecay_contracts::ResolvedScope::new(
             project_id.clone(),
             RepositoryId::new("repository.dashboard-delivery").expect("repository"),
             WorktreeId::new("worktree.dashboard-delivery").expect("worktree"),
             Some(RefId::new("refs/heads/main").expect("branch")),
         )
         .expect("scope");
-        tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot {
+        tracedecay_application::source_authorization::ProjectSourceAccessSnapshot {
             scope,
             requester: ActorId::new("actor.dashboard-delivery").expect("actor"),
             binding: ScopeSourceBinding::new(
@@ -390,12 +392,11 @@ mod tests {
             CapabilityId::new(GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1).expect("GitHub capability");
         let access = source_access(BTreeSet::from([github.clone()]), UtcMicros(200));
         let request_id =
-            tracedecay_application::RequestId::new("request.dashboard-delivery.deadline")
+            tracedecay_contracts::RequestId::new("request.dashboard-delivery.deadline")
                 .expect("request id");
-        let cancellation = tracedecay_application::CancellationSignal::active(
-            "cancel.dashboard-delivery.deadline",
-        )
-        .expect("cancellation");
+        let cancellation =
+            tracedecay_contracts::CancellationSignal::active("cancel.dashboard-delivery.deadline")
+                .expect("cancellation");
         let (context, _release) = request_context_from_parts(
             request_id.clone(),
             Deadline::new(UtcMicros(150)).expect("deadline"),
@@ -428,10 +429,10 @@ mod tests {
             UtcMicros(200),
         );
         let (context, _release) = request_context_from_parts(
-            tracedecay_application::RequestId::new("request.dashboard-delivery.intersection")
+            tracedecay_contracts::RequestId::new("request.dashboard-delivery.intersection")
                 .expect("request id"),
             Deadline::new(UtcMicros(150)).expect("deadline"),
-            tracedecay_application::CancellationSignal::active(
+            tracedecay_contracts::CancellationSignal::active(
                 "cancel.dashboard-delivery.intersection",
             )
             .expect("cancellation"),
@@ -456,14 +457,13 @@ mod tests {
     #[test]
     fn admission_rejects_cancelled_or_expired_http_control() {
         let access = source_access(BTreeSet::new(), UtcMicros(200));
-        let cancelled = tracedecay_application::CancellationSignal::active(
-            "cancel.dashboard-delivery.cancelled",
-        )
-        .expect("cancellation");
+        let cancelled =
+            tracedecay_contracts::CancellationSignal::active("cancel.dashboard-delivery.cancelled")
+                .expect("cancellation");
         assert!(cancelled.cancel(UtcMicros(100)));
         assert!(
             request_context_from_parts(
-                tracedecay_application::RequestId::new("request.dashboard-delivery.cancelled",)
+                tracedecay_contracts::RequestId::new("request.dashboard-delivery.cancelled",)
                     .expect("request id"),
                 Deadline::new(UtcMicros(150)).expect("deadline"),
                 cancelled,
@@ -474,10 +474,10 @@ mod tests {
         );
         assert!(
             request_context_from_parts(
-                tracedecay_application::RequestId::new("request.dashboard-delivery.expired")
+                tracedecay_contracts::RequestId::new("request.dashboard-delivery.expired")
                     .expect("request id"),
                 Deadline::new(UtcMicros(100)).expect("deadline"),
-                tracedecay_application::CancellationSignal::active(
+                tracedecay_contracts::CancellationSignal::active(
                     "cancel.dashboard-delivery.expired",
                 )
                 .expect("cancellation"),
@@ -494,10 +494,10 @@ mod tests {
         assert!(!has_delivery_source_capability(&access));
         assert!(
             request_context_from_parts(
-                tracedecay_application::RequestId::new("request.dashboard-delivery.denied")
+                tracedecay_contracts::RequestId::new("request.dashboard-delivery.denied")
                     .expect("request id"),
                 Deadline::new(UtcMicros(150)).expect("deadline"),
-                tracedecay_application::CancellationSignal::active(
+                tracedecay_contracts::CancellationSignal::active(
                     "cancel.dashboard-delivery.denied",
                 )
                 .expect("cancellation"),

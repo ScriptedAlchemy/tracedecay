@@ -1,12 +1,12 @@
 use std::path::Path;
 
 use tracedecay::application_surface::ApplicationSurfaceRequest;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
     Deadline, EffectReceipt, ResolvedSetting,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationGetRequestV1,
     ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
     ConfigurationWireRequestV1,
@@ -76,7 +76,7 @@ fn configuration_deadline(
     observed_at: UtcMicros,
 ) -> tracedecay_domain::errors::Result<Deadline> {
     let application_operation =
-        tracedecay_application::configuration::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
             .map_err(|error| configuration_error(error.to_string()))?
             .ok_or_else(|| configuration_error("configuration operation is not cataloged"))?;
     let catalog = tracedecay::application_surface::application_surface_catalog()

@@ -476,7 +476,7 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 
 #[test]
 fn exact_fact_store_definitions_project_canonical_request_schemas() {
-    let registry = tracedecay_application::mcp_executable_binding_registry()
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");
     let tools = get_tool_definitions().expect("tool definitions");
     for operation in [

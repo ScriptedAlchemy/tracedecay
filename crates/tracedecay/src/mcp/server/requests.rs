@@ -23,13 +23,13 @@ struct PreparedToolCall {
     analytics_arguments: Value,
     analytics_session_id: Option<String>,
     /// The deadline the caller declared on the request, when it declared one.
-    caller_deadline: Option<tracedecay_application::Deadline>,
+    caller_deadline: Option<tracedecay_contracts::Deadline>,
 }
 
 struct DispatchedToolCall {
     cg: Arc<TraceDecay>,
     selected_owner: Option<tracedecay_global_db::ProjectRegistryContext>,
-    selected_scope: Option<tracedecay_application::ResolvedScope>,
+    selected_scope: Option<tracedecay_contracts::ResolvedScope>,
     outcome: Result<ToolResult>,
     elapsed_us: Option<u64>,
 }
@@ -56,17 +56,17 @@ struct ToolTokenAccounting {
 
 pub(super) fn invocation_target_for_route(
     route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
-) -> tracedecay_application::InvocationTarget {
+) -> tracedecay_contracts::InvocationTarget {
     route.map_or(
-        tracedecay_application::InvocationTarget::CurrentProject,
-        |route| tracedecay_application::InvocationTarget::Resolved(route.scope.clone()),
+        tracedecay_contracts::InvocationTarget::CurrentProject,
+        |route| tracedecay_contracts::InvocationTarget::Resolved(route.scope.clone()),
     )
 }
 
 pub(super) fn accounting_project_root<'a>(
     active_root: &'a Path,
     selected_owner: Option<&'a tracedecay_global_db::ProjectRegistryContext>,
-    selected_scope: Option<&tracedecay_application::ResolvedScope>,
+    selected_scope: Option<&tracedecay_contracts::ResolvedScope>,
 ) -> Option<&'a Path> {
     match (selected_owner, selected_scope) {
         (None, None) => Some(active_root),
@@ -138,13 +138,13 @@ struct ApplicationSurfaceDispatch<'a> {
 fn requires_application_invocation_executor(tool_name: &str) -> bool {
     ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || crate::mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
-        || tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+        || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
 }
 
 /// Retained name for this module's call sites; the saturating clamp is the one
 /// shared definition so MCP cannot stamp "now" differently from the daemon.
 pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
-    tracedecay_application::clock::now_micros()
+    tracedecay_contracts::clock::now_micros()
 }
 
 pub(super) fn is_source_edit_tool(tool_name: &str) -> bool {
@@ -665,7 +665,7 @@ impl McpServer {
     pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
-            tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+            tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
         ) {
             Ok(profile_id) => profile_id,
             Err(error) => {
@@ -1852,7 +1852,7 @@ mod git_read_control_tests {
         }
 
         let request_id = "request.git-read-controls".to_owned();
-        let signal = tracedecay_application::CancellationSignal::active(
+        let signal = tracedecay_contracts::CancellationSignal::active(
             "cancellation.request.git-read-controls",
         )
         .expect("signal");
@@ -1868,7 +1868,7 @@ mod git_read_control_tests {
 
     #[test]
     fn all_retained_tools_request_the_daemon_invocation_executor() {
-        for operation in tracedecay_application::RetainedSurfaceOperation::CALLABLE {
+        for operation in tracedecay_contracts::RetainedSurfaceOperation::CALLABLE {
             let tool_name = format!("tracedecay_{}", operation.as_str());
             assert!(
                 requires_application_invocation_executor(&tool_name),

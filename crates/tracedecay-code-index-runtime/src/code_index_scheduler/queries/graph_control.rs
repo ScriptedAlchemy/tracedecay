@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{RetrievalBudget, UtcMicros};
 use tracedecay_query::retrieval::graph::GraphExecutionControl;
 

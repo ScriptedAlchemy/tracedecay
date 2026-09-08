@@ -159,7 +159,7 @@ pub fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_application::retrieval::NodeSurfaceRequestV1;
+    use tracedecay_contracts::retrieval::NodeSurfaceRequestV1;
 
     use super::{
         CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,

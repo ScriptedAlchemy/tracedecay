@@ -599,7 +599,7 @@ version = "$product_version"
 TOML
 
 # Twenty-five `include_str!`/`include_bytes!` sites across `tracedecay-agent-hosts`
-# and `tracedecay-usecases` embed repository-root assets — `plugin/`, `tests/`,
+# and `tracedecay-application` embed repository-root assets — `plugin/`, `tests/`,
 # `dashboard/hermes-wrapper/` and `benchmark_data/` — that `cargo package` cannot carry into an archive
 # because they sit outside the package directory. The repository build resolves
 # them two directories above `crates/<name>`, so the stub root has to present
@@ -634,7 +634,7 @@ for required_package in \
   tracedecay \
   tracedecay-cli \
   tracedecay-agent-hosts \
-  tracedecay-application \
+  tracedecay-contracts \
   tracedecay-api \
   tracedecay-tool-catalog \
   tracedecay-lsp \

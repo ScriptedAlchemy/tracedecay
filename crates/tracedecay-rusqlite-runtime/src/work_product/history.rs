@@ -14,7 +14,7 @@
 //!    does not poison the events inside it. So the page is served over the
 //!    covered prefix (see [`covered_prefix`](super::covered_prefix) for why the
 //!    covered slice is always a prefix) and carries a
-//!    [`WorkGraphSelectionCoverageV1`](tracedecay_application::WorkGraphSelectionCoverageV1)
+//!    [`WorkGraphSelectionCoverageV1`](tracedecay_contracts::WorkGraphSelectionCoverageV1)
 //!    naming what lies beyond it. Filtering silently would falsify the
 //!    authorized slice; disclosing the boundary is what makes serving it
 //!    honest. Within that prefix the admitted scopes must still match the
@@ -29,7 +29,7 @@
 //!    durable sequence the previous page ended on, so an event appended between
 //!    two pages cannot shift a caller past an event it never saw.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     OpaqueCursor, WorkHistoryCoverageV1, WorkHistoryReadPortV1, WorkHistoryRequestV1,
     WorkHistoryV1, WorkProductApplicationErrorV1, WorkProductPortContextV1,
     WorkProductSelectionScopeV1, WorkRelationScopeV1,

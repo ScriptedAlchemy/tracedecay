@@ -7,14 +7,15 @@ use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tracedecay_application::{
+use tracedecay_application::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
+use tracedecay_code_index_retention::code_index_generations::{
+    DurablePublicationPointerV1, scoped_code_index_store_root,
+};
+use tracedecay_contracts::{
     VerifiedWorkGraphVersionV1, WorkAttemptReceiptV1, WorkEvidenceContinuationV1,
     WorkEvidenceExpansionSelectorV1, WorkEvidenceOmissionReasonV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkProductSelectionScopeV1,
     WorkTaskSessionEvidenceV1, WorkTaskSessionHydrationStateV1,
-};
-use tracedecay_code_index_retention::code_index_generations::{
-    DurablePublicationPointerV1, scoped_code_index_store_root,
 };
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::configuration::{
@@ -36,7 +37,6 @@ use tracedecay_semantic_contracts::{
     SemanticModelLifecycleStateV1, SemanticProfileSelection, SemanticResourceCeilings,
 };
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
-use tracedecay_usecases::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
 
 use super::{
     PROVIDER_SESSION_ID, advance_provider_transcript_participant_generation, common,
@@ -487,7 +487,7 @@ fn set_semantic_runtime_configuration(
 ) {
     let observed = client
         .execute::<ApplicationConfigurationObservedState>(
-            &tracedecay_application::configuration::ConfigurationObservedStateRequestV1 {},
+            &tracedecay_contracts::configuration::ConfigurationObservedStateRequestV1 {},
         )
         .expect("semantic configuration observed state")
         .result;
@@ -498,7 +498,7 @@ fn set_semantic_runtime_configuration(
         .clone();
     client
         .execute::<ApplicationConfigurationSet>(
-            &tracedecay_application::configuration::ConfigurationSetRequestV1 {
+            &tracedecay_contracts::configuration::ConfigurationSetRequestV1 {
                 layer: ConfigurationLayerIdV1::Project {
                     project_id: project_id.clone(),
                 },
@@ -534,7 +534,7 @@ pub(super) fn wait_for_evaluated_semantic_profile_current(
 ) {
     let configured = client
         .execute::<ApplicationConfigurationGet>(
-            &tracedecay_application::configuration::ConfigurationGetRequestV1 {
+            &tracedecay_contracts::configuration::ConfigurationGetRequestV1 {
                 key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
                     .expect("semantic runtime setting key"),
             },
@@ -969,7 +969,7 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
 }
 
 fn assert_available(
-    omissions: &[tracedecay_application::WorkEvidenceOmissionV1],
+    omissions: &[tracedecay_contracts::WorkEvidenceOmissionV1],
     temporal: TemporalModeV1,
 ) {
     assert!(
@@ -1112,7 +1112,7 @@ fn serve_tool_call(home: &Path, project: &Path, tool_name: &str, arguments: Valu
 type AttemptEvidencePage = (
     Option<WorkAttemptReceiptV1>,
     Option<WorkTaskSessionEvidenceV1>,
-    Vec<tracedecay_application::WorkEvidenceOmissionV1>,
+    Vec<tracedecay_contracts::WorkEvidenceOmissionV1>,
 );
 
 fn retrieve(
@@ -1145,7 +1145,7 @@ fn evidence_for_attempt(
 ) -> (
     Option<WorkAttemptReceiptV1>,
     Option<WorkTaskSessionEvidenceV1>,
-    Vec<tracedecay_application::WorkEvidenceOmissionV1>,
+    Vec<tracedecay_contracts::WorkEvidenceOmissionV1>,
 ) {
     let omissions = result.omissions;
     let mut receipt = None;

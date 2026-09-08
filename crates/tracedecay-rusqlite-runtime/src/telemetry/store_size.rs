@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     RequestAdmission, RequestContext, ResolvedScope,
     clock::now_micros,
     storage::{

@@ -1,6 +1,6 @@
 //! The immutable Work product event journal and its atomic verified projection.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1, WorkProductEventDraftV1,
     WorkProductEventPortErrorV1, WorkProductEventPortV1, WorkProductPortContextV1,
 };

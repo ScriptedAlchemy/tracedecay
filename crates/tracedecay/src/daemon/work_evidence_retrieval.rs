@@ -9,8 +9,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
-use tracedecay_application::{
+use tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1;
+use tracedecay_contracts::{
     OpaqueCursor, RequestContext, ResolvedScope, WorkAnchorHydrationFuture,
     WorkAnchorHydrationPortV1, WorkAnchorHydrationRequestV1, WorkEvidenceCoverageStateV1,
     WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1, WorkEvidenceRetrievalPortV1,
@@ -616,7 +616,7 @@ pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestId,
         WorkProductSelectionScopeV1,
     };
@@ -703,8 +703,8 @@ pub(crate) mod tests {
         .expect("TaskSession fixture context")
     }
 
-    pub(super) fn verified_version() -> tracedecay_application::VerifiedWorkGraphVersionV1 {
-        tracedecay_application::VerifiedWorkGraphVersionV1::new(
+    pub(super) fn verified_version() -> tracedecay_contracts::VerifiedWorkGraphVersionV1 {
+        tracedecay_contracts::VerifiedWorkGraphVersionV1::new(
             WorkGraphVersionV1::new(5).expect("graph version"),
             WorkProductEventSequenceV1::new(5).expect("event sequence"),
             WorkProductSourceWatermarkV1::new(BTreeMap::<SourceStoreId, u64>::new())

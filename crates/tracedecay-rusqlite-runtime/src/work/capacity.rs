@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     MAX_WORK_ATTEMPT_CAPACITY_TASKS, WorkAttemptCapacityV1, WorkAttemptCapacityVerdictV1,
     WorkAttemptStorageError,
 };

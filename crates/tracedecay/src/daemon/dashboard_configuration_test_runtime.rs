@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use axum::Router;
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_configuration::DirectConfigurationMutation;
+use tracedecay_contracts::{
     ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResponse, InvocationError,
     RequestId, ResultContractRef, SafeDiagnostic,
 };
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
@@ -17,10 +17,10 @@ use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_application::{
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_contracts::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
 };
-use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use tracedecay_daemon_service::{
@@ -41,7 +41,7 @@ struct DashboardConfigurationRuntimeForTestV1 {
     service: DaemonInvocationService,
     lsp_registry: Arc<Mutex<LspSessionRegistry>>,
     project_root: PathBuf,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     user_profile_id: UserProfileId,
     result_contract: ResultContractRef,
 }
@@ -57,7 +57,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
     ) -> std::result::Result<DashboardApplicationRouters, String> {
         let http = crate::application_surface::assemble_http_application_router(
             Arc::new(self.clone()),
-            tracedecay_usecases::operation_stream::OperationEventAuthority::default(),
+            tracedecay_application::operation_stream::OperationEventAuthority::default(),
             active_project_id,
         )
         .map_err(|error| error.to_string())?;
@@ -82,13 +82,13 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
         }
         Box::pin(async move {
             let observed_at = invocation_now_micros();
-            let deadline = tracedecay_application::Deadline::new(UtcMicros(
+            let deadline = tracedecay_contracts::Deadline::new(UtcMicros(
                 observed_at
                     .0
                     .saturating_add(CONFIGURATION_REQUEST_DEADLINE_MICROS),
             ))
             .map_err(|_| unavailable_error(&self.result_contract, request_id.clone()))?;
-            let cancellation = tracedecay_application::CancellationSignal::active(format!(
+            let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
                 "cancellation.dashboard.configuration.{}",
                 request_id.as_str()
             ))
@@ -107,7 +107,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
             )
             .with_resolved_scope(Some(self.scope.clone()))
             .with_delivery_route(
-                tracedecay_application::feedback::observations::FeedbackDeliveryRouteV1::Http,
+                tracedecay_contracts::feedback::observations::FeedbackDeliveryRouteV1::Http,
             );
             let response = self
                 .service
@@ -180,8 +180,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor
     fn invoke_controlled(
         &self,
         request: DaemonInvocationRequest,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
         _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -194,14 +194,14 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor
             if cancellation.is_cancelled() {
                 return Err(
                     tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
                     },
                 );
             }
             if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
                 return Err(
                     tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
                     },
                 );
             }
@@ -224,7 +224,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -347,7 +347,7 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
         .await?;
     register_dashboard_test_retained_runtime(&service, &cg, project_root.clone(), project_id)
         .await?;
-    let operation = tracedecay_application::configuration_surface_operation(
+    let operation = tracedecay_contracts::configuration_surface_operation(
         ApplicationSurfaceOperation::ConfigurationBatch.as_str(),
     )
     .map_err(|error| TraceDecayError::Config {

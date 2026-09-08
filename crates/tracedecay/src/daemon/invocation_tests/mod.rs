@@ -6,8 +6,10 @@
 use std::sync::Arc;
 
 use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
-use tracedecay_application::ResolvedScope;
-use tracedecay_application::feedback::observations::FeedbackSourceEventV1;
+use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
+use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::feedback::observations::FeedbackSourceEventV1;
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonWorkProposalRoutingAuthorityV1,
     UnavailableFeedbackCycleRuntimeV1,
@@ -21,8 +23,6 @@ use tracedecay_lsp::{
     LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
     UnavailableSemanticProvider, UpstreamCapabilities,
 };
-use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
-use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 
 struct DeniedWorkEvidenceRetrieval;
 
@@ -31,7 +31,7 @@ impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalP
 {
     fn retrieve_admitted<'a>(
         &'a self,
-        _context: &'a tracedecay_application::RequestContext,
+        _context: &'a tracedecay_contracts::RequestContext,
         _query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
     {

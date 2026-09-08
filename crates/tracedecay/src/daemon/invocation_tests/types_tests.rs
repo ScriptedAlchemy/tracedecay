@@ -3,11 +3,11 @@ use std::any::Any;
 use std::sync::atomic::Ordering;
 
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
+use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_application::feedback::concrete::open_feedback_runtime;
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{ActorId, ConfigurationRevisionId, canonical_sha256};
 use tracedecay_hooks::HookBoundaryV1;
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 
 #[test]
 fn hook_orchestration_admits_only_saved_edit_stop_and_explicit() {

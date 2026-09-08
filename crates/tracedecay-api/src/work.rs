@@ -25,7 +25,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
     AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand,
     CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
@@ -293,9 +293,7 @@ impl WorkOperation {
             }
             Self::Synthesize => schema_name::<WorkSynthesisAttemptV1>(),
             Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
-            Self::RetryAttempt => {
-                schema_name::<tracedecay_application::WorkRetryAttemptOutcomeV1>()
-            }
+            Self::RetryAttempt => schema_name::<tracedecay_contracts::WorkRetryAttemptOutcomeV1>(),
             Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
             Self::ExecutionHistory => schema_name::<WorkExecutionHistoryV1>(),
             Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationV1>(),

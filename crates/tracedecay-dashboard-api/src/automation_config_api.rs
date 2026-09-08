@@ -14,7 +14,7 @@ use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, configuration_authority_unavailable_error,
     configuration_revision_conflict_error, settings_validation_error,
 };
-use tracedecay_application::ApplicationOutcome;
+use tracedecay_contracts::ApplicationOutcome;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,

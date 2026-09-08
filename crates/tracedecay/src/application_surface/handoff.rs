@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use tracedecay_api::HandoffOperation;
-use tracedecay_application::{
+use tracedecay_contracts::{
     IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1, ListTaskHandoffsRequestV1,
     ListTaskHandoffsResultV1, OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1,
     OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1,
@@ -23,7 +23,7 @@ pub(super) fn router_with_executor(
 }
 
 pub(super) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
-    let registry = tracedecay_application::handoff_executable_binding_registry()
+    let registry = tracedecay_contracts::handoff_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
     for operation in HandoffOperation::ALL {
         let operation_id =
@@ -94,11 +94,11 @@ async fn invoke_operation(
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::IssueTaskHandoff(
-                                tracedecay_application::ApplicationOutcome::Effect(outcome),
+                                tracedecay_contracts::ApplicationOutcome::Effect(outcome),
                             ),
                     } => Some((
                         scope,
-                        tracedecay_application::ApplicationOutcome::Effect(outcome),
+                        tracedecay_contracts::ApplicationOutcome::Effect(outcome),
                     )),
                     _ => None,
                 },
@@ -131,11 +131,11 @@ async fn invoke_operation(
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::ListTaskHandoffs(
-                                tracedecay_application::ApplicationOutcome::Evidence(outcome),
+                                tracedecay_contracts::ApplicationOutcome::Evidence(outcome),
                             ),
                     } => Some((
                         scope,
-                        tracedecay_application::ApplicationOutcome::Evidence(outcome),
+                        tracedecay_contracts::ApplicationOutcome::Evidence(outcome),
                     )),
                     _ => None,
                 },
@@ -166,11 +166,11 @@ async fn invoke_operation(
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::OpenInvestigationHandoff(
-                                tracedecay_application::ApplicationOutcome::Effect(outcome),
+                                tracedecay_contracts::ApplicationOutcome::Effect(outcome),
                             ),
                     } => Some((
                         scope,
-                        tracedecay_application::ApplicationOutcome::Effect(outcome),
+                        tracedecay_contracts::ApplicationOutcome::Effect(outcome),
                     )),
                     _ => None,
                 },
@@ -200,11 +200,11 @@ async fn invoke_operation(
                         scope,
                         outcome:
                             HandoffApplicationOutcomeV1::OpenTaskHandoff(
-                                tracedecay_application::ApplicationOutcome::Effect(outcome),
+                                tracedecay_contracts::ApplicationOutcome::Effect(outcome),
                             ),
                     } => Some((
                         scope,
-                        tracedecay_application::ApplicationOutcome::Effect(outcome),
+                        tracedecay_contracts::ApplicationOutcome::Effect(outcome),
                     )),
                     _ => None,
                 },

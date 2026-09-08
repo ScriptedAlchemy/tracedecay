@@ -11,10 +11,10 @@ use tracedecay_api::feedback::{
     FeedbackStatusCoverageV1, FeedbackStatusDenominatorsV1, FeedbackStatusPresentationV1,
     feedback_status_envelope,
 };
-use tracedecay_application::ApplicationContractError;
+use tracedecay_contracts::ApplicationContractError;
 
 use crate::application::feedback::observations::FeedbackObservationReadModelV1;
-use tracedecay_application::feedback::observations::FeedbackCoverageV1;
+use tracedecay_contracts::feedback::observations::FeedbackCoverageV1;
 
 use super::DashboardState;
 use super::read_model::{DashboardEnvelopeV1, scope_from_state};
@@ -97,7 +97,7 @@ fn status_envelope(
 mod tests {
     use super::*;
     use crate::application::feedback::observations::feedback_source_event_envelope_for_subject;
-    use tracedecay_application::feedback::observations::{
+    use tracedecay_contracts::feedback::observations::{
         FeedbackObservationDeliveryV1, FeedbackOperationV1, FeedbackOutcomeV1,
         FeedbackSourceEventV1,
     };

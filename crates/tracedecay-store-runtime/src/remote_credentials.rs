@@ -9,12 +9,12 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use thiserror::Error;
-use tracedecay_application::remote::auth::OpaqueRemoteCredential;
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
+use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
     RemoteCredentialLookupPortV1,
 };
-use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1,
     RemoteCredentialFingerprintV1, UserProfileId, UtcMicros,
@@ -61,7 +61,7 @@ pub enum DaemonRemoteCredentialRegistryErrorV1 {
 /// composition root builds exactly one from the mounted session runtime
 /// registry; MCP, dashboard, and Doctor surfaces all read through it.
 pub type RemoteOperationalStatusProviderV1 =
-    Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>;
+    Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>;
 
 const REMOTE_LISTENER_STOPPED: u8 = 0;
 const REMOTE_LISTENER_SERVING: u8 = 1;
@@ -147,11 +147,11 @@ impl DaemonRemoteCredentialAuthorityV1 {
             .store(REMOTE_LISTENER_STOPPED, Ordering::Release);
     }
 
-    fn listener_read(&self) -> tracedecay_application::RemoteListenerReadV1 {
+    fn listener_read(&self) -> tracedecay_contracts::RemoteListenerReadV1 {
         match self.listener.load(Ordering::Acquire) {
-            REMOTE_LISTENER_SERVING => tracedecay_application::RemoteListenerReadV1::Serving,
-            REMOTE_LISTENER_DEGRADED => tracedecay_application::RemoteListenerReadV1::Degraded,
-            _ => tracedecay_application::RemoteListenerReadV1::Disabled,
+            REMOTE_LISTENER_SERVING => tracedecay_contracts::RemoteListenerReadV1::Serving,
+            REMOTE_LISTENER_DEGRADED => tracedecay_contracts::RemoteListenerReadV1::Degraded,
+            _ => tracedecay_contracts::RemoteListenerReadV1::Disabled,
         }
     }
 
@@ -162,7 +162,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
     /// authority genuinely cannot be read.
     #[hotpath::measure(label = "daemon.remote.operational_status")]
     pub fn operational_status(&self) -> RemoteOperationalStatusReadV1 {
-        let now = tracedecay_application::clock::now_micros();
+        let now = tracedecay_contracts::clock::now_micros();
         if !self.accepting.load(Ordering::Acquire) {
             return RemoteOperationalStatusReadV1::Unavailable;
         }
@@ -170,7 +170,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
             return RemoteOperationalStatusReadV1::Unavailable;
         };
         let listener = self.listener_read();
-        if listener == tracedecay_application::RemoteListenerReadV1::Disabled
+        if listener == tracedecay_contracts::RemoteListenerReadV1::Disabled
             && state.nodes.is_empty()
             && state.grants.is_empty()
             && state.enrollments.is_empty()
@@ -211,13 +211,13 @@ impl DaemonRemoteCredentialAuthorityV1 {
         }
         drop(state);
         let authority = aggregate_authority_states(authorities, now);
-        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+        let spool = tracedecay_contracts::remote::status::RemoteSpoolOperationalStatusV1 {
             pending_count,
             quarantined_count,
             has_sequence_gap,
         };
         let replay_coverage_complete = pending_count == 0 && !has_sequence_gap;
-        match tracedecay_application::remote::status::RemoteOperationalStatusV1::compose(
+        match tracedecay_contracts::remote::status::RemoteOperationalStatusV1::compose(
             enrollment_configured,
             authority,
             spool,
@@ -231,9 +231,9 @@ impl DaemonRemoteCredentialAuthorityV1 {
                 listener,
                 status,
                 coverage: if coverage_complete {
-                    tracedecay_application::DoctorCoverageCompletenessV1::Complete
+                    tracedecay_contracts::DoctorCoverageCompletenessV1::Complete
                 } else {
-                    tracedecay_application::DoctorCoverageCompletenessV1::Partial
+                    tracedecay_contracts::DoctorCoverageCompletenessV1::Partial
                 },
             },
             Err(_) => RemoteOperationalStatusReadV1::Unavailable,

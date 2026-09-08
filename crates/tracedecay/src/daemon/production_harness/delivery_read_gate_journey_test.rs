@@ -8,19 +8,19 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use tracedecay_application::feedback::{
+use tracedecay_application::advisory::GitHubReleaseReadControlV1;
+use tracedecay_application::delivery::{
+    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1,
+};
+use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };
 use tracedecay_domain::{ActorId, CommitId, ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::advisory::GitHubReleaseReadControlV1;
-use tracedecay_usecases::delivery::{
-    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1,
-};
 
 use super::journey_test_support::git;
 use super::*;

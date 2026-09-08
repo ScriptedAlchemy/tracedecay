@@ -14,7 +14,7 @@ mod store;
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexPreviewPortResultV1,
     GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionPort,
     GitIndexTransactionPortError,

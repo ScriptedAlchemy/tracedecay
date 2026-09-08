@@ -8,13 +8,13 @@ use std::future::Future;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_application::retrieval::{
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
     ContextSurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarSurfaceRequestV1, SimilarSymbolV1,
 };
-use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::ExactClass;
 
 use crate::tracedecay::TraceDecay;
@@ -231,11 +231,11 @@ pub(super) async fn handle_search<F>(
     search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
     ignored_dependency_admission: Option<
-        &dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
+        &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
     freshness_reader: Option<&CodeIndexFreshnessReader>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
@@ -797,8 +797,8 @@ pub(super) async fn handle_context<F>(
     search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
     freshness_reader: Option<&CodeIndexFreshnessReader>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
@@ -1044,10 +1044,10 @@ pub(super) async fn handle_find_exact_symbol(
     args: Value,
     scope_prefix: Option<&str>,
     ignored_dependency_admission: Option<
-        &dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
+        &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let name =
         args.get("name")
@@ -1118,8 +1118,8 @@ pub(super) async fn handle_similar(
     args: Value,
     search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
     let limit = request.limit.map_or(10, |value| value.min(100) as usize);
@@ -1468,7 +1468,7 @@ pub(super) async fn handle_rename_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_application::memory::FactSearchHitV1;
+    use tracedecay_contracts::memory::FactSearchHitV1;
 
     #[test]
     fn complete_search_preserves_generation_advance_but_not_stale_admission() {

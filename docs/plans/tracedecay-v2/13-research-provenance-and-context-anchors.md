@@ -34,7 +34,7 @@ contract, dispositions and safe tombstones, and the atomic evidence-assembly sto
 implemented across `crates/tracedecay-domain/src/research/`,
 `crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`,
 `crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`,
-`crates/tracedecay-usecases/src/evidence_assembly.rs`, and `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs`.
+`crates/tracedecay-application/src/evidence_assembly.rs`, and `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs`.
 Per-section verdicts follow.
 
 **Status split (2026-07-26, closed 2026-07-29).** The core above is delivered
@@ -598,7 +598,7 @@ three exact targets and the `derive_exact_*` functions mint `retrieval.v3.sha256
 (`crates/tracedecay-store/src/evidence_assembly.rs`,
 `crates/tracedecay-domain/src/research/anchor.rs`). An application-layer mirror
 (`SourceOccurrenceRecord`/`CanonicalSourceOccurrenceSet`/`EvidenceSpanRecord`) lives in
-`crates/tracedecay-usecases/src/evidence_assembly.rs`. The plan's `PublishEvidenceAssembly::execute` is
+`crates/tracedecay-application/src/evidence_assembly.rs`. The plan's `PublishEvidenceAssembly::execute` is
 realized as the store trait method `EvidenceAssemblyStore::publish_or_replay`.
 
 ## Retriever-contribution evidence
@@ -757,7 +757,7 @@ payloads.
 
 **Status (2026-07-23):** Implemented. The four-layer split — domain validation, store
 publish-or-replay, application authorization/orchestration
-(`crates/tracedecay-usecases/src/evidence_assembly.rs`), and infra persistence
+(`crates/tracedecay-application/src/evidence_assembly.rs`), and infra persistence
 (`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`) — is in place
 with immutable inserts and atomic rollback on replay conflict.
 
@@ -822,8 +822,8 @@ as a prerequisite. Plan 32 is required only for admitted write-side effects and
 workflow automation outside this contract.
 
 **Status (2026-07-23):** Implemented. CI-failure and feedback ingress already
-create/resolve anchors without Plan 32 (`crates/tracedecay-usecases/src/advisory/ci_runtime/`,
-`crates/tracedecay-usecases/src/feedback/owner.rs`); `rh_` response handles remain Plan 21 transport
+create/resolve anchors without Plan 32 (`crates/tracedecay-application/src/advisory/ci_runtime/`,
+`crates/tracedecay-application/src/feedback/owner.rs`); `rh_` response handles remain Plan 21 transport
 artifacts, not durable evidence identity. Anchor resolution is surfaced downstream by the
 shipped dashboard provenance UI (`dashboard/src/ui/EvidenceTruthStrip.tsx`, Observatory
 Doctor findings in `dashboard/src/workspaces/observatory/`), which passes anchor IDs

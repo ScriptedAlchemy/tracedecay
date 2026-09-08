@@ -149,8 +149,8 @@ impl BlockingGitWorkerState {
 
 async fn blocking_git_span_controlled<T, F>(
     label: &str,
-    request_cancellation: Option<tracedecay_application::CancellationSignal>,
-    request_deadline: Option<tracedecay_application::Deadline>,
+    request_cancellation: Option<tracedecay_contracts::CancellationSignal>,
+    request_deadline: Option<tracedecay_contracts::Deadline>,
     work: F,
 ) -> Result<T>
 where
@@ -169,8 +169,8 @@ where
 
 async fn blocking_git_span_controlled_with_state<T, F>(
     label: &str,
-    request_cancellation: Option<tracedecay_application::CancellationSignal>,
-    request_deadline: Option<tracedecay_application::Deadline>,
+    request_cancellation: Option<tracedecay_contracts::CancellationSignal>,
+    request_deadline: Option<tracedecay_contracts::Deadline>,
     state: BlockingGitWorkerState,
     work: F,
 ) -> Result<T>
@@ -191,7 +191,7 @@ where
             worker_cancelled.load(Ordering::Acquire)
                 || worker_request_cancellation
                     .as_ref()
-                    .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                    .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
                 || worker_request_deadline.as_ref().is_some_and(|deadline| {
                     tracedecay_daemon_protocol::deadline_remaining(deadline).is_none()
                 })
@@ -203,7 +203,7 @@ where
             joined = &mut worker => break joined,
             () = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
                 let request_stopped = request_cancellation.as_ref().is_some_and(
-                    tracedecay_application::CancellationSignal::is_cancelled,
+                    tracedecay_contracts::CancellationSignal::is_cancelled,
                 ) || request_deadline.as_ref().is_some_and(|deadline| {
                     tracedecay_daemon_protocol::deadline_remaining(deadline).is_none()
                 });
@@ -628,8 +628,8 @@ const PR_CONTEXT_MAX_IMPACT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
 struct PrContextControls {
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 impl PrContextControls {
@@ -637,7 +637,7 @@ impl PrContextControls {
         if self
             .cancellation
             .as_ref()
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
         {
             return Err(TraceDecayError::project_route(
                 "pr_context_cancelled",
@@ -801,8 +801,8 @@ pub(crate) async fn handle_pr_context<F>(
     cg: &TraceDecay,
     graph: F,
     args: Value,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> Result<ToolResult>
 where
@@ -1328,7 +1328,7 @@ mod blocking_git_span_tests {
     #[tokio::test]
     async fn request_cancellation_joins_the_live_git_worker() {
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.git-worker-test")
+            tracedecay_contracts::CancellationSignal::active("cancel.git-worker-test")
                 .expect("valid cancellation");
         let canceller = cancellation.clone();
         let state = BlockingGitWorkerState::new();

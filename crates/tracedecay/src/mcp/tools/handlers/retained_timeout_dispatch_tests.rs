@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     AutomationRunRequestV1, AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1,
     AutomationTaskRequestV1, AutomationTaskV1, MemoryCuratorRunInputV1, RetainedSurfaceOperation,
     RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblem, AuthorityReceipt, CancellationSignal,
     CapabilityGrantId, Deadline, DisclosureClass, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, LegalAction, OperationBudgetUsage, OperationReceipt,
@@ -54,7 +54,7 @@ fn post_commit_partial_effect(
         )
         .expect("fixture diagnostic"),
         committed_receipt: Box::new(EffectReceipt {
-            operation: tracedecay_application::retained_surface_application_operation(operation)
+            operation: tracedecay_contracts::retained_surface_application_operation(operation)
                 .expect("retained application operation")
                 .use_case_id()
                 .clone(),
@@ -135,7 +135,7 @@ fn fact_store_curate_effect(
     let idempotency_key =
         IdempotencyKey::new("idempotency.retained.fact-store-curate").expect("idempotency key");
     let receipt = EffectReceipt {
-        operation: tracedecay_application::retained_surface_application_operation(
+        operation: tracedecay_contracts::retained_surface_application_operation(
             RetainedSurfaceOperation::FactStoreCurate,
         )
         .expect("fact-store curation operation")
@@ -204,18 +204,18 @@ struct FactStoreCurateSuccessExecutor {
     expected_bounds: (u32, u32),
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for FactStoreCurateSuccessExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSuccessExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -276,7 +276,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for FactStoreCurateSuc
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,
@@ -290,18 +290,18 @@ struct ExpiredDeadlineExecutor {
     mutations: AtomicUsize,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for ExpiredDeadlineExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -351,7 +351,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,
@@ -501,18 +501,18 @@ impl PostCommitPartialEffectExecutor {
     }
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for PostCommitPartialEffectExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEffectExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -548,7 +548,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PostCommitPartialE
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,
@@ -562,18 +562,18 @@ struct PreCommitInterruptionExecutor {
     mutations: AtomicUsize,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for PreCommitInterruptionExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterruptionExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -622,7 +622,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterrupt
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,

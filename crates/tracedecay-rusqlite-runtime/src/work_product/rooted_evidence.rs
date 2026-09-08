@@ -1,6 +1,6 @@
 //! Exact TaskId-rooted projection from an immutable verified Work graph.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     VerifiedWorkEvidenceRootV1, VerifiedWorkGraphVersionV1, WorkEvidenceRootReadErrorV1,
     WorkEvidenceRootReadPortV1, WorkProductPortContextV1,
 };

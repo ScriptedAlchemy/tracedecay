@@ -5,12 +5,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::{
-    ApplicationOperation, CancellationSignal, Deadline, RequestAdmission, RequestContext,
-    RequestId, ResolvedScope,
-};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
+};
+use tracedecay_contracts::{
+    ApplicationOperation, CancellationSignal, Deadline, RequestAdmission, RequestContext,
+    RequestId, ResolvedScope,
 };
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{CodeGenerationId, UtcMicros};

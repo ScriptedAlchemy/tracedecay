@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CancellationStage, OperationTermination, RequestAdmission, RequestContext,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
@@ -329,15 +329,15 @@ impl DaemonLcmAuthority {
         let operation = request.operation();
         let retained_operation = match &request {
             LcmAuthorityRequest::Status(_) => {
-                Some(tracedecay_application::RetainedSurfaceOperation::LcmStatus)
+                Some(tracedecay_contracts::RetainedSurfaceOperation::LcmStatus)
             }
             LcmAuthorityRequest::Doctor(_) => {
-                Some(tracedecay_application::RetainedSurfaceOperation::LcmDoctor)
+                Some(tracedecay_contracts::RetainedSurfaceOperation::LcmDoctor)
             }
             LcmAuthorityRequest::Ingest(_) | LcmAuthorityRequest::Compact(_) => None,
         };
         let retained_application_operation = retained_operation.and_then(|operation| {
-            tracedecay_application::retained_surface_application_operation(operation).ok()
+            tracedecay_contracts::retained_surface_application_operation(operation).ok()
         });
         if cancellation.context().token_id != context.cancellation().token_id
             || !retained_application_operation.is_some_and(|operation| {

@@ -6,7 +6,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use tower::ServiceExt;
 use tracedecay_api::{HandoffOperation, HttpApplicationControls, handoff_application_router};
-use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 
 #[test]

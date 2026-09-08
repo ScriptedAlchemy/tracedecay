@@ -1,7 +1,7 @@
 //! Work invocation response, evidence, and effect construction.
 
 use serde::Serialize;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblem, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantSnapshot,
     Deadline, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
@@ -25,7 +25,7 @@ use super::{RegisteredWorkRuntime, application_problem};
 
 pub(super) fn offer_work_blocked_interval_receipts(
     durable_write_signal: &super::WorkDurableWriteSignalV1,
-    producer: Option<&tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    producer: Option<&tracedecay_application::observability::BoundedObservabilityProducerV1>,
     canonical_project_scope: &str,
     receipts: &[tracedecay_domain::WorkBlockedIntervalReceiptV1],
 ) {
@@ -42,7 +42,7 @@ pub(super) fn offer_work_blocked_interval_receipts(
         return;
     };
     for receipt in receipts {
-        let _ = tracedecay_usecases::observability::record_work_blocked_interval_observation(
+        let _ = tracedecay_application::observability::record_work_blocked_interval_observation(
             Some(producer),
             canonical_project_scope,
             receipt,
@@ -74,7 +74,7 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
                 message: "The Work graph request is invalid".to_owned(),
             },
             retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
         },
         // A read under this selection succeeds and discloses what it left out;
         // a mutation cannot, because the head it would pin is the covered
@@ -92,7 +92,7 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
                         .to_owned(),
                 },
                 retry: RetryDirective::Never,
-                legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+                legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
             }
         }
         WorkProductApplicationErrorV1::VersionConflict => {
@@ -120,7 +120,7 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
                 message: "The Work graph request key was reused with different input".to_owned(),
             },
             retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
         },
         WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EventAuthorityUnavailable
@@ -198,18 +198,18 @@ pub(crate) fn work_blocked_interval_recovery_context(
 /// non-error state: it names an empty scope, not a failing authority.
 pub(super) fn work_topology_problem(
     error: WorkTopologyError,
-) -> Result<tracedecay_application::WorkAttemptTopologyStateV1, ApplicationProblem> {
+) -> Result<tracedecay_contracts::WorkAttemptTopologyStateV1, ApplicationProblem> {
     match error {
         WorkTopologyError::EmptyEvents => {
-            Ok(tracedecay_application::WorkAttemptTopologyStateV1::Absent)
+            Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Absent)
         }
         WorkTopologyError::Cancelled => Err(ApplicationProblem::Cancelled {
-            stage: tracedecay_application::CancellationStage::DuringRead,
+            stage: tracedecay_contracts::CancellationStage::DuringRead,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         }),
         WorkTopologyError::BudgetExhausted => Err(ApplicationProblem::TimedOut {
-            stage: tracedecay_application::CancellationStage::DuringRead,
+            stage: tracedecay_contracts::CancellationStage::DuringRead,
             retry: RetryDirective::AfterDelay,
             legal_actions: Vec::new(),
         }),
@@ -245,22 +245,22 @@ pub(super) fn work_projection_problem(error: WorkProjectionApplicationError) -> 
                 message: "The Work projection page size is invalid".to_owned(),
             },
             retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
         },
         WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::StaleCursor,
+            tracedecay_contracts::WorkProjectionPortError::StaleCursor,
         ) => ApplicationProblem::stale(SafeDiagnostic {
             code: "work.stale_cursor".to_owned(),
             message: "The Work projection cursor is stale".to_owned(),
         }),
         WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::Unavailable,
+            tracedecay_contracts::WorkProjectionPortError::Unavailable,
         ) => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "work.projection_unavailable".to_owned(),
             message: "The Work projection authority is unavailable".to_owned(),
         }),
         WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::NotFoundOrNotAuthorized,
+            tracedecay_contracts::WorkProjectionPortError::NotFoundOrNotAuthorized,
         ) => ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
     }
 }
@@ -569,7 +569,7 @@ fn workflow_effect_terminal_observation(
 
 #[cfg(test)]
 mod workflow_effect_receipt_tests {
-    use tracedecay_application::{CancellationObservation, CancellationStage, EffectTermination};
+    use tracedecay_contracts::{CancellationObservation, CancellationStage, EffectTermination};
     use tracedecay_domain::UtcMicros;
 
     use super::workflow_effect_terminal_observation;
@@ -593,7 +593,7 @@ mod workflow_effect_receipt_tests {
 
 #[cfg(test)]
 mod work_product_problem_tests {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic,
         WorkProductApplicationErrorV1,
     };

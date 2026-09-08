@@ -9,7 +9,7 @@ use std::{
 };
 
 use rusqlite::{Connection, Transaction};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
     storage::{

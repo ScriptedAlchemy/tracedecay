@@ -33,7 +33,10 @@ use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeConfig
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 use tracedecay_global_db::configuration::resolver::{ConfigurationLayerV1, resolve_configuration};
 
-use tracedecay_application::{
+use tracedecay_application::observability::{
+    ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
+};
+use tracedecay_contracts::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
@@ -55,9 +58,6 @@ use tracedecay_domain::{
     WorkSandboxPolicy, WorkflowOperationRef, WorkflowStageClassV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::observability::{
-    ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
-};
 
 /// argv the module maps onto each admitted `(backend, protocol)` pair. These
 /// literals live in `provider_arguments`; the spawn tests assert the child
@@ -1218,7 +1218,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
     .await
     .expect("registered runtime");
     let database = runtime.project_database_arc().expect("project database");
-    let producer = tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+    let producer = tracedecay_application::observability::BoundedObservabilityProducerV1::start(
         database.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: PROJECT.to_owned(),

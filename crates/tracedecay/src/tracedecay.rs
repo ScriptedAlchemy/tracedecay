@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
-use tracedecay_application::context_scout::ContextScoutAddressV1;
+use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
@@ -73,7 +73,7 @@ struct MountedContextScoutClaimAuthorityV1 {
         tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1,
     >,
     pin: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-    context: tracedecay_application::RequestContext,
+    context: tracedecay_contracts::RequestContext,
     lifecycle: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
     address: ContextScoutAddressV1,
     input_watermark: [u8; 32],
@@ -97,7 +97,7 @@ impl TraceDecay {
 
     pub(crate) fn project_store_runtime(
         &self,
-    ) -> &dyn tracedecay_usecases::tracedecay::ProjectStoreRuntimeV1 {
+    ) -> &dyn tracedecay_application::tracedecay::ProjectStoreRuntimeV1 {
         self.store_runtime_registry.port()
     }
 
@@ -136,7 +136,7 @@ impl TraceDecay {
         registry: Arc<tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
         hook: &tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1,
         pin: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-        context: tracedecay_application::RequestContext,
+        context: tracedecay_contracts::RequestContext,
         lifecycle: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
         address: ContextScoutAddressV1,
         input_watermark: [u8; 32],

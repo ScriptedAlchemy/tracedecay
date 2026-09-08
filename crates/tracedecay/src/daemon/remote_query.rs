@@ -11,18 +11,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::remote::composition::{
+use tracedecay_contracts::remote::composition::{
     AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalEvidenceV1,
     PendingLocalUnavailableReasonV1, QueryManifestBindingV1, RemoteCompletenessV1,
     RemoteFreshnessV1, RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
-use tracedecay_application::remote::query::{
+use tracedecay_contracts::remote::query::{
     RemoteExactObservationQueryCommandV1, RemoteExactObservationQueryErrorV1,
     RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryReadPortV1,
     RemoteExactObservationResultV1, RemoteQueryCompleteValueV1, RemoteQueryResultV1,
     RemoteSanitizedObservationV1, remote_exact_observation_query_result_contract_v1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, CoverageCompleteness, CoverageDomainState, Deadline, EvidenceCoverage,
     EvidenceDomain, EvidencePacket, OperationBudgetUsage, OperationReceipt, PageState,
     RetrievalEvidence, TemporalState,

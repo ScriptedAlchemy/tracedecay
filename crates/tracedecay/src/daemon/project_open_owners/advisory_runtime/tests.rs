@@ -14,7 +14,7 @@ fn feedback_scope() -> FeedbackScopeV1 {
 #[test]
 fn hook_notice_registration_is_released_with_the_published_owner() {
     let scope = feedback_scope();
-    let resolved = tracedecay_application::ResolvedScope::new(
+    let resolved = tracedecay_contracts::ResolvedScope::new(
         scope.project_id.clone(),
         scope.repository_id.clone(),
         scope.worktree_id.clone(),

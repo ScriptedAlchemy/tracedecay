@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tracedecay_application::memory::FactSearchGraphCoverageV1;
+use tracedecay_contracts::memory::FactSearchGraphCoverageV1;
 use tracedecay_store::FactReadControl;
 
 use super::{ExplorerQueryRequestV1, ExplorerSourceIdV1, ExplorerSourceProgressV1, ready_source};
@@ -162,8 +162,7 @@ mod tests {
                 completeness: DashboardCoverageCompletenessV1::Partial,
                 limit: 3,
                 graph: Some(FactSearchGraphCoverageV1::Degraded {
-                    reason:
-                        tracedecay_application::memory::FactSearchGraphDegradationV1::Unavailable,
+                    reason: tracedecay_contracts::memory::FactSearchGraphDegradationV1::Unavailable,
                 }),
                 examined: None,
                 eligible: None,

@@ -28,8 +28,8 @@ pub async fn handle_ast_grep_search(
     project_root: &Path,
     args: Value,
     scope_prefix: Option<&str>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let pattern =
         args.get("pattern")
@@ -74,9 +74,9 @@ pub async fn handle_ast_grep_search(
                     scope_prefix.as_deref(),
                     || {
                         cancelled.load(std::sync::atomic::Ordering::Acquire)
-                            || transport_cancellation.as_ref().is_some_and(
-                                tracedecay_application::CancellationSignal::is_cancelled,
-                            )
+                            || transport_cancellation
+                                .as_ref()
+                                .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
                     },
                 )
             },

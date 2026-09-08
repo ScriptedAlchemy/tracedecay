@@ -10,7 +10,7 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
     DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorStorageFindingKindV1,
 };
@@ -92,7 +92,7 @@ fn canonical_kind_status(
             .families()
             .iter()
             .find(|family| family.family() == DoctorFindingFamilyV1::Storage)
-            .map(tracedecay_application::DoctorFamilyCoverageV1::consultation)
+            .map(tracedecay_contracts::DoctorFamilyCoverageV1::consultation)
     });
     let matching = payload
         .entries

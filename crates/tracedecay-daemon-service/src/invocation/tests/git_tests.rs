@@ -22,7 +22,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
     )
     .expect("scope");
-    let request = tracedecay_application::git::GitReadRequestV1::Status;
+    let request = tracedecay_contracts::git::GitReadRequestV1::Status;
     let capability =
         tracedecay_tool_catalog::CapabilityId::new(request.capability_id()).expect("capability");
     let digest =
@@ -39,9 +39,9 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         privacy_digest: digest(),
         evaluated_at: UtcMicros(1),
     };
-    let result = tracedecay_usecases::git_reads::GitReadResultV1::Status(
-        tracedecay_usecases::git_query::GitQueryEnvelopeV1 {
-            value: tracedecay_usecases::git_query::GitStatusSummaryV1 {
+    let result = tracedecay_application::git_reads::GitReadResultV1::Status(
+        tracedecay_application::git_query::GitQueryEnvelopeV1 {
+            value: tracedecay_application::git_query::GitStatusSummaryV1 {
                 repository: scope.repository_id.clone(),
                 head: GitHeadStateV1::Unborn {
                     branch: "refs/heads/main".to_owned(),
@@ -53,7 +53,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
                 untracked: 0,
                 ignored: 0,
                 changed_paths: Vec::new(),
-                schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1
+                schema_version: tracedecay_application::git_query::GIT_QUERY_SCHEMA_VERSION_V1
                     .to_owned(),
             },
             coverage: tracedecay_domain::git::GitCoverageV1::complete(),
@@ -75,7 +75,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
     assert_eq!(packet.authority.authorized_scope_digest, scope.scope_digest);
     assert_eq!(
         packet.coverage.completeness,
-        tracedecay_application::CoverageCompleteness::Complete
+        tracedecay_contracts::CoverageCompleteness::Complete
     );
     assert_eq!(packet.page.returned, 1);
     assert!(packet.payload.is_some());
@@ -89,9 +89,9 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         "request.git-read-packet-partial",
         &request,
         &authority,
-        tracedecay_usecases::git_reads::GitReadResultV1::Status(
-            tracedecay_usecases::git_query::GitQueryEnvelopeV1 {
-                value: tracedecay_usecases::git_query::GitStatusSummaryV1 {
+        tracedecay_application::git_reads::GitReadResultV1::Status(
+            tracedecay_application::git_query::GitQueryEnvelopeV1 {
+                value: tracedecay_application::git_query::GitStatusSummaryV1 {
                     repository: scope.repository_id,
                     head: GitHeadStateV1::Unborn {
                         branch: "refs/heads/main".to_owned(),
@@ -103,7 +103,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
                     untracked: 0,
                     ignored: 0,
                     changed_paths: Vec::new(),
-                    schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1
+                    schema_version: tracedecay_application::git_query::GIT_QUERY_SCHEMA_VERSION_V1
                         .to_owned(),
                 },
                 coverage: tracedecay_domain::git::GitCoverageV1::degraded(vec![
@@ -120,7 +120,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
     .expect("partial Git read packet");
     assert_eq!(
         partial.coverage.completeness,
-        tracedecay_application::CoverageCompleteness::Partial
+        tracedecay_contracts::CoverageCompleteness::Partial
     );
     assert!(matches!(
         partial.omissions.as_slice(),

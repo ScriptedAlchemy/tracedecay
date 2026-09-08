@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay_application::session_sync::{
+use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncCommandV1, SessionSyncControlV1, SessionSyncOutcomeV1,
     SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncServicePort, SessionTranscriptImportV1,
 };
-use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
+use tracedecay_contracts::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::tracedecay::TraceDecay;
@@ -89,7 +89,7 @@ struct AdminCliContext<'a> {
     project: Option<&'a TraceDecay>,
     registered_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     registered_user_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
-    profile_identity: Option<std::sync::Arc<dyn tracedecay_application::ProfileIdentityReadPort>>,
+    profile_identity: Option<std::sync::Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
     session_sync: Option<&'a dyn SessionSyncServicePort>,
     request_id: Option<RequestId>,
     deadline: Option<Deadline>,
@@ -210,7 +210,7 @@ impl<'a> AdminCliContext<'a> {
 
     fn require_profile_identity(
         &self,
-    ) -> Result<&dyn tracedecay_application::ProfileIdentityReadPort> {
+    ) -> Result<&dyn tracedecay_contracts::ProfileIdentityReadPort> {
         self.profile_identity
             .as_deref()
             .ok_or_else(|| TraceDecayError::Config {
@@ -326,14 +326,14 @@ async fn dispatch_admin_cli(
             sessions_unfinished(&database, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
-            tracedecay_usecases::analytics_bridge::analytics_sync_with_db(
+            tracedecay_application::analytics_bridge::analytics_sync_with_db(
                 context.require_accounting_db()?,
                 context.project_root(),
             )
             .await
         }
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
-            tracedecay_usecases::analytics_bridge::analytics_diagnostics_with_db(
+            tracedecay_application::analytics_bridge::analytics_diagnostics_with_db(
                 context.require_accounting_db()?,
                 context
                     .registered_project_session_db

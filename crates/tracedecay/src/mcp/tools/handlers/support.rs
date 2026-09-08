@@ -245,7 +245,7 @@ mod tests {
         CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,
         rendered_tool_result,
     };
-    use tracedecay_application::retrieval::NodeSurfaceRequestV1;
+    use tracedecay_contracts::retrieval::NodeSurfaceRequestV1;
     use tracedecay_global_db::RegisteredGlobalDb;
 
     /// `generic_tool_result` must stay a pure spelling of the closure form it

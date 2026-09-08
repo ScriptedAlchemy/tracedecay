@@ -1,4 +1,4 @@
-//! Thin HTTP/SSE adapter contracts over `tracedecay-application`.
+//! Thin HTTP/SSE adapter contracts over `tracedecay-contracts`.
 //!
 //! The executable owns `CanonicalInvocation`; this crate receives the resolved
 //! binding and its application result after dispatch, then encodes that result
@@ -28,7 +28,7 @@ pub mod workflow;
 
 use serde::Serialize;
 use thiserror::Error;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
     OperationTermination, RequestId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
     StreamTermination,
@@ -272,7 +272,7 @@ mod tests {
         application_router, http_application_full_route_path, http_application_owner_kind,
         http_application_route_path,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
         CancellationSignal, Deadline, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
         StreamEvent, StreamEventKind,
@@ -537,7 +537,7 @@ mod tests {
         let observed = observed.lock().expect("configuration observations");
         assert_eq!(
             observed.len(),
-            tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES.len()
+            tracedecay_contracts::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES.len()
         );
         for (index, (operation, body, actual_deadline, actual_cancellation)) in
             observed.iter().enumerate()

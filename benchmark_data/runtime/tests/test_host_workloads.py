@@ -117,10 +117,10 @@ class HostWorkloadCatalogTests(unittest.TestCase):
 
     def test_selection_and_grouping_preserve_catalog_order(self) -> None:
         sdk = select_workloads(host=HostKind.SDK)
-        application = select_workloads(crate_tag="tracedecay-application")
+        application = select_workloads(crate_tag="tracedecay-contracts")
         both = select_workloads(
             host=HostKind.SDK,
-            crate_tag="tracedecay-application",
+            crate_tag="tracedecay-contracts",
         )
         self.assertEqual(
             both,

@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::o200k_base_singleton;
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
@@ -1727,7 +1727,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
-    use tracedecay_application::context_scout::ContextScoutEvidenceEnvelopeV1;
+    use tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1;
 
     fn address() -> ContextScoutAddressV1 {
         ContextScoutAddressV1 {

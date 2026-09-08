@@ -1,5 +1,5 @@
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
     RequestId, RetainedSurfaceOperation,
 };
@@ -15,7 +15,7 @@ use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::tracedecay::TraceDecay;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
@@ -72,7 +72,7 @@ fn complete_protocol_controls_with_ceiling(
             message: "application surface deadline exceeds the domain clock".to_owned(),
         })?;
     let maximum_deadline_at = UtcMicros(
-        tracedecay_application::clock::now_micros()
+        tracedecay_contracts::clock::now_micros()
             .0
             .saturating_add(ceiling_micros),
     );
@@ -281,7 +281,7 @@ pub(super) fn render_retained_result(
     project_root: Option<&std::path::Path>,
     operation: RetainedSurfaceOperation,
     binding_id: &BindingId,
-    result: ApplicationResult<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
+    result: ApplicationResult<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>,
     requested_format: RequestedOutputFormat,
 ) -> Result<tracedecay_mcp::ToolResult> {
     let result = crate::application_surface::retained::result_value(result).map_err(|error| {
@@ -312,7 +312,7 @@ fn render_canonical_markdown(
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancellationSignal,
         Deadline, RequestId, ResultContractRef, SafeDiagnostic,
     };
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn derives_default_deadline_from_the_exact_catalog_capability() {
         let request_id = RequestId::new("request.mcp.controls.default").unwrap();
-        let before = tracedecay_application::clock::now_micros();
+        let before = tracedecay_contracts::clock::now_micros();
         let (deadline, _) = complete_protocol_controls(
             ApplicationSurfaceOperation::ConfigurationSet,
             &request_id,
@@ -378,7 +378,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let after = tracedecay_application::clock::now_micros();
+        let after = tracedecay_contracts::clock::now_micros();
         assert!(
             deadline.expires_at.0 >= before.0.saturating_add(15_000_000)
                 && deadline.expires_at.0 <= after.0.saturating_add(15_000_000),

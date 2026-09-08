@@ -2,15 +2,15 @@
 //! this module tree funnels its atomic file write through
 //! [`publish_planned_source_edit`], and every crash-recovery path restores
 //! preimages through [`rollback_planned_source_edit_files`]. Both consult the
-//! plan captured by `tracedecay-usecases` so a preview and its later apply
+//! plan captured by `tracedecay-application` so a preview and its later apply
 //! (or rollback) are always looking at the same recorded expectation.
 
 use std::path::Path;
 
-/// The preview/apply plan authority is owned by `tracedecay-usecases`; the
+/// The preview/apply plan authority is owned by `tracedecay-application`; the
 /// root source-edit primitives consult that single set of task-locals so a
 /// preview captured by the use case is the same plan the apply validates.
-pub(in crate::tracedecay) use tracedecay_usecases::tracedecay::{
+pub(in crate::tracedecay) use tracedecay_application::tracedecay::{
     PlannedSourceEditFile, capture_planned_source_edit, validate_planned_source_edit,
 };
 
@@ -163,7 +163,7 @@ fn publish_source_edit_state(
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
-    use tracedecay_usecases::tracedecay::{PlannedSourceEditFile, capture_source_edit_plan};
+    use tracedecay_application::tracedecay::{PlannedSourceEditFile, capture_source_edit_plan};
 
     use super::{
         capture_planned_source_edit, publish_planned_source_edit,
@@ -171,7 +171,7 @@ mod tests {
     };
 
     /// The root primitives must feed the single plan authority owned by
-    /// `tracedecay-usecases`; capturing through `super` and reading back
+    /// `tracedecay-application`; capturing through `super` and reading back
     /// through the use-case scope proves there is no second set of statics.
     #[tokio::test]
     async fn source_edit_plan_capture_retains_exact_pre_and_post_bytes() {

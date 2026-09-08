@@ -48,7 +48,7 @@ impl AutomationSessionRetrieval for CountingAutomationSessionRetrieval {
 struct CombinedBudgetRefusalRetrieval {
     inner: FixtureAutomationSessionRetrieval,
     refusal_call: usize,
-    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
     calls: AtomicUsize,
 }
 
@@ -56,7 +56,7 @@ impl CombinedBudgetRefusalRetrieval {
     fn new(
         cg: &TraceDecay,
         refusal_call: usize,
-        stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+        stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
     ) -> Self {
         Self {
             inner: FixtureAutomationSessionRetrieval::new(cg),
@@ -84,7 +84,7 @@ impl AutomationSessionRetrieval for CombinedBudgetRefusalRetrieval {
             let stage = self.stage;
             return Box::pin(async move {
                 AutomationTemporalRetrieval::StructuralRefusal(
-                    tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                    tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                         stage,
                     },
                 )
@@ -769,7 +769,7 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
     let retrieval = CombinedBudgetRefusalRetrieval::new(
         &cg,
         0,
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
     );
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
@@ -813,7 +813,7 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
     let retrieval = CombinedBudgetRefusalRetrieval::new(
         &cg,
         1,
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
     );
 
     let dispatch = run_combined_review_with_backend_and_retrieval(

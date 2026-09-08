@@ -434,7 +434,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         completion,
     );
     let feedback_notice = if first_admission {
-        tracedecay_usecases::advisory::peek_advisory_hook_notice(
+        tracedecay_application::advisory::peek_advisory_hook_notice(
             envelope.project_id,
             envelope.worktree_id,
         )
@@ -543,7 +543,7 @@ pub(super) fn hook_v2_profile_admit(
     args: &Value,
     action: &str,
     profile_root: &Path,
-    profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
 ) -> Result<Value> {
     let routed_profile_root = std::fs::canonicalize(profile_root).map_err(|error| {
         tracedecay_automation_runtime::automation::config_error(format!(
@@ -608,7 +608,7 @@ pub(super) fn hook_v2_profile_admit(
 }
 
 fn profile_hook_v2_binding(
-    profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
     host: tracedecay_hooks::HookHostV1,
 ) -> tracedecay_hooks::HookScopeBindingV1 {
     let profile_key = format!(

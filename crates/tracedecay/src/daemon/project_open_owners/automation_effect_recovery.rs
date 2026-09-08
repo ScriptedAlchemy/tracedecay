@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_application::CancellationSignal;
+use tracedecay_contracts::CancellationSignal;
 
 use crate::daemon::log_daemon_event;
 use crate::tracedecay::TraceDecay;

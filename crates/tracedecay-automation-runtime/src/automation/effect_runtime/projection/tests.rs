@@ -1,5 +1,5 @@
 use serde_json::json;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationTaskV1, MemoryAutomationCurationReceiptV1,
 };
 use tracedecay_domain::{

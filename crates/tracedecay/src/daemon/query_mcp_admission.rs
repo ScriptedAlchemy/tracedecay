@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use thiserror::Error;
-use tracedecay_application::{ResolvedScope, now_micros};
+use tracedecay_contracts::{ResolvedScope, now_micros};
 use tracedecay_domain::{
     AuthorizationRevision, BrainId, CapabilityId, PrincipalId, ProjectId, UserProfileId, UtcMicros,
     canonical_sha256,
@@ -317,7 +317,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use tracedecay_application::ResolvedScope;
+    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{
         AuthorizationRevision, BrainId, ProjectId, RefId, RepositoryId, UserProfileId, UtcMicros,
         WorktreeId,

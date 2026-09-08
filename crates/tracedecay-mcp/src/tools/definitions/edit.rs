@@ -634,7 +634,7 @@ pub(super) fn def_insert_at_symbol() -> ToolDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_application::SourceEditKind;
+    use tracedecay_contracts::SourceEditKind;
 
     fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 8] {
         [

@@ -4,13 +4,13 @@ use std::path::Path;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tracedecay_application::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_store::StoreShardScopeV1;
 
 use super::map_execution_error;
 use crate::tracedecay::TraceDecay;
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
+use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::store::memory::ProjectMemoryDbHandle;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;

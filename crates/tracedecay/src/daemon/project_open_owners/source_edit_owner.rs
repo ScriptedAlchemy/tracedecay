@@ -1,15 +1,15 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationContext, Deadline, RequestContext, RequestId, now_micros,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
 use super::{POLICY_REVISION_V1, ProjectOpenSourceEditAuthorizationV1};
 use crate::mcp::McpServer;
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 pub(super) fn source_edit_request_context(
     access: &ProjectSourceAccessSnapshot,
@@ -37,8 +37,8 @@ pub(super) fn source_edit_request_context(
     .map_err(|error| TraceDecayError::Config {
         message: format!("source edit route grant unavailable: {error}"),
     })?;
-    let grant = tracedecay_application::CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new(format!(
+    let grant = tracedecay_contracts::CapabilityGrantSnapshot::new(
+        tracedecay_contracts::CapabilityGrantId::new(format!(
             "grant.daemon.source-edit.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))
@@ -51,7 +51,7 @@ pub(super) fn source_edit_request_context(
         access.scope.clone(),
         BTreeSet::from([operation.capability_id().clone()]),
         BTreeSet::from([operation.use_case_id().clone()]),
-        tracedecay_application::DisclosureClass::Sensitive,
+        tracedecay_contracts::DisclosureClass::Sensitive,
     )
     .map_err(source_edit_contract_error)?;
     RequestContext::new(
@@ -79,7 +79,7 @@ pub(super) fn source_edit_authority_error() -> TraceDecayError {
 
 pub(super) fn source_edit_surface_result(
     result: tracedecay_source_edit::SourceEditApplicationResult,
-) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
+) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
     let replayed = result.replayed;
     let mut value = result.value();
     let object = value
@@ -99,13 +99,13 @@ pub(super) async fn invoke_project_open_source_edit_rollback(
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     invocation: crate::mcp::server::SourceEditRollbackInvocationV1,
-) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
+) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
     let effect_control = tracedecay_source_edit::SourceEditEffectControlV1::new(
         invocation.deadline.clone(),
         invocation.cancellation.clone(),
     );
-    let operation = tracedecay_application::source_edit_rollback_operation()
+    let operation = tracedecay_contracts::source_edit_rollback_operation()
         .map_err(source_edit_contract_error)?;
     let access = authorization
         .current_access(observed_at)
@@ -123,7 +123,7 @@ pub(super) async fn invoke_project_open_source_edit_rollback(
         .current_authority(&context, &operation, observed_at)
         .await
         .map_err(|_| source_edit_authority_error())?;
-    let request = tracedecay_application::SourceEditRollbackRequestV1 {
+    let request = tracedecay_contracts::SourceEditRollbackRequestV1 {
         context,
         authority: current.receipt.clone(),
         effect_id: invocation.effect_id,

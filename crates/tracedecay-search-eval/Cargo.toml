@@ -18,7 +18,7 @@ sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["eval-helpers"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
@@ -44,7 +44,7 @@ hotpath = [
     "tracedecay-domain/hotpath",
     "hotpath/hotpath",
     "hotpath/tokio",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-daemon-identity/hotpath",
@@ -58,7 +58,7 @@ hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-daemon-identity/hotpath-alloc",
@@ -72,7 +72,7 @@ hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-daemon-identity/hotpath-cpu",

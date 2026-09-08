@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use axum::http::HeaderMap;
-use tracedecay_application::{
+use tracedecay_contracts::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationRequestControlV1, CancellationSignal, RequestId,
 };
 
@@ -40,7 +40,7 @@ pub(super) fn supplied_request_id(
 
 pub(super) fn accepts_supplied_request_id(path: &str) -> bool {
     path == tracedecay_api::retained_route_path(
-        tracedecay_application::retained_surfaces::RetainedSurfaceOperation::FactStoreCurate,
+        tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation::FactStoreCurate,
     )
 }
 
@@ -94,7 +94,7 @@ impl Drop for ActiveHttpRequest {
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
-    use tracedecay_application::{APPLICATION_REQUEST_ID_HEADER, CancellationSignal, RequestId};
+    use tracedecay_contracts::{APPLICATION_REQUEST_ID_HEADER, CancellationSignal, RequestId};
 
     use super::*;
 

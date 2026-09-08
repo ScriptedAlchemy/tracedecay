@@ -17,7 +17,7 @@
 //! one is refused whole, because narrowing it silently would answer a
 //! different question than the caller asked.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedWorkProductScopeV1, RequestContext, WorkProductOwnerAuthorizationErrorV1,
     WorkProductOwnerAuthorizationPortV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
 };

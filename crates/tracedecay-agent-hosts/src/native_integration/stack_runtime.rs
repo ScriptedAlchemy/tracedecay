@@ -10,13 +10,20 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::git::{
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_application::stack_coordinator::{
+    DaemonGitHubStackCoordinatorV1, OptionalStackPreflightPort, StackCircuitPolicyV1,
+    StackCoordinatorErrorV1, StackCoordinatorStore, StackDeliveryAuthorizationPort,
+    StackDeliveryAuthorizationV1, StackDeliveryBatchV1, StackDeliveryPort, StackPendingDeliveryV1,
+    StackSignalV1,
+};
+use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
     GitHubStackSignalExpandPort, GitHubStackSignalExpandPortError,
     GitHubStackSignalExpandRequestV1, GitHubStackSignalExpandSurfaceResultV1,
     git_surface_operation,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, NativeIntegrationContractError, NativeIntegrationPortError,
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1, RequestAdmission,
     RequestContext, ResolvedScope,
@@ -24,13 +31,6 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, ManifestDigest, NativeIntegrationApprovalV1, ProjectId, StackDeliveryWatermarkId,
     StackSignalId, UtcMicros, canonical_sha256,
-};
-use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, OptionalStackPreflightPort, StackCircuitPolicyV1,
-    StackCoordinatorErrorV1, StackCoordinatorStore, StackDeliveryAuthorizationPort,
-    StackDeliveryAuthorizationV1, StackDeliveryBatchV1, StackDeliveryPort, StackPendingDeliveryV1,
-    StackSignalV1,
 };
 
 use tracedecay_global_db::{
@@ -893,22 +893,22 @@ impl DaemonGitHubStackRuntimeV1 {
             .map_err(|_| StackCoordinatorErrorV1::Unavailable)?
             .remove(&request_digest);
         match disposition {
-            tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::Complete
-            | tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::Partial => {
+            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Complete
+            | tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Partial => {
                 outcome.ok_or(StackCoordinatorErrorV1::Unavailable)
             }
-            tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::SuppressedOpenCircuit
-            | tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::Unavailable
-            | tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::Saturated => {
+            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::SuppressedOpenCircuit
+            | tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Unavailable
+            | tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Saturated => {
                 Ok(NativeIntegrationPreflightOutcomeV1::Unavailable)
             }
-            tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::Cancelled => {
+            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Cancelled => {
                 Ok(NativeIntegrationPreflightOutcomeV1::Cancelled)
             }
-            tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::Stale => {
+            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Stale => {
                 Ok(NativeIntegrationPreflightOutcomeV1::Stale)
             }
-            tracedecay_usecases::stack_coordinator::OptionalPreflightDispositionV1::Denied => {
+            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Denied => {
                 Ok(NativeIntegrationPreflightOutcomeV1::Denied)
             }
         }

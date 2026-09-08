@@ -1,5 +1,5 @@
 use super::*;
-use tracedecay_application::remote::auth::{
+use tracedecay_contracts::remote::auth::{
     RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
 };
 use tracedecay_domain::EnrollmentCredentialStateV1;

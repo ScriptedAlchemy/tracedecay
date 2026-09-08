@@ -62,7 +62,7 @@ pub mod config;
 pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
-pub use tracedecay_usecases::git_query;
+pub use tracedecay_application::git_query;
 pub mod graph;
 mod hooks;
 #[cfg(test)]

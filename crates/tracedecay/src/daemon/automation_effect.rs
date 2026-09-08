@@ -5,18 +5,6 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
-use tracedecay_application::retained_surfaces::{
-    AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
-    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
-    AutomationTaskV1, RetainedSurfaceResultV1,
-};
-use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, Deadline,
-    ProblemOwningLayer, RequestContext, RequestId, RetainedSurfaceExecutionContextV1,
-    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
-    retained_surface_application_operation, retained_surface_execution_problem,
-    retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
-};
 use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, ExactRunPublication, ExactRunPublishOutcome,
@@ -27,6 +15,18 @@ use tracedecay_automation_runtime::automation::runner::{
     RetainedCombinedReviewSettlementGuards, ReusedSchedulerSkip,
 };
 use tracedecay_automation_runtime::automation::{AutomationCommittedReceipt, AutomationRunError};
+use tracedecay_contracts::retained_surfaces::{
+    AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
+    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
+    AutomationTaskV1, RetainedSurfaceResultV1,
+};
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, Deadline,
+    ProblemOwningLayer, RequestContext, RequestId, RetainedSurfaceExecutionContextV1,
+    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
+    retained_surface_application_operation, retained_surface_execution_problem,
+    retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
+};
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
@@ -84,7 +84,7 @@ const RETAINED_SETTLEMENT_RETRY_BUDGET: Duration = Duration::from_mins(2);
 pub(crate) struct AutomationEffectAuthority {
     context: RequestContext,
     cancellation: CancellationSignal,
-    operation: tracedecay_application::ApplicationOperation,
+    operation: tracedecay_contracts::ApplicationOperation,
     prepared: PreparedRetainedEffect,
     admission: DurableAutomationAdmission,
     journal_path: PathBuf,
@@ -1608,13 +1608,13 @@ impl AutomationEffectAuthority {
             request_context: &self.context,
             cancellation_signal: &self.cancellation,
             operation: &self.operation,
-            observed_at: tracedecay_application::now_micros(),
+            observed_at: tracedecay_contracts::now_micros(),
         };
         let committed_outer_result = result.clone();
         let outcome = self.prepared.complete_with_digest(
             &execution,
             &committed_state,
-            tracedecay_application::ReconciliationState::Reconciled,
+            tracedecay_contracts::ReconciliationState::Reconciled,
             RetainedSurfaceResultV1::FactStoreCurate(result),
             None,
         );
@@ -1659,7 +1659,7 @@ impl AutomationEffectAuthority {
     fn outer_result_partial_problem(
         &self,
         reason_code: String,
-        committed_receipt: Box<tracedecay_application::EffectReceipt>,
+        committed_receipt: Box<tracedecay_contracts::EffectReceipt>,
         detail: String,
         committed_outer_result: AutomationRunResultV1,
     ) -> Result<AutomationSettledProblem> {

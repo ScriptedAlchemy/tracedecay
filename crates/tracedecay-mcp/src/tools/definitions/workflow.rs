@@ -20,7 +20,7 @@ type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 /// publishes is invisible to every agent, which is exactly how all sixteen of
 /// them stayed off MCP while CLI and HTTP carried them.
 pub(super) fn workflow_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
-    let registry = tracedecay_application::workflow_executable_binding_registry()
+    let registry = tracedecay_contracts::workflow_executable_binding_registry()
         .map_err(crate::McpCatalogError::CatalogValidation)?;
     if registry.iter().count() != WorkflowOperation::ALL.len() {
         return Err(invalid_workflow_discovery(

@@ -2372,7 +2372,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros().0,
         )
         .await
         .expect("apply observation retention");
@@ -2553,7 +2553,7 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros().0,
         )
         .await
         .expect("apply observation retention");
@@ -2698,7 +2698,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros().0,
         )
         .await
         .expect("apply observation retention");
@@ -2735,7 +2735,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros().0,
         )
         .await
         .expect("apply observation retention");
@@ -3242,7 +3242,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros().0,
         )
         .await
         .expect("apply observation retention");
@@ -3285,7 +3285,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros().0,
         )
         .await
         .expect("apply post-generation observation retention");

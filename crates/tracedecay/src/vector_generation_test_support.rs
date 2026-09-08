@@ -9,7 +9,7 @@ pub use tracedecay_semantic::projector::{
     prepare_vector_generation_async, split_projection_request,
 };
 
-pub use tracedecay_usecases::store::vector_generations::{
+pub use tracedecay_application::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1, VectorGenerationBuildIdV1,
     VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationPublicationV1,
     VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,

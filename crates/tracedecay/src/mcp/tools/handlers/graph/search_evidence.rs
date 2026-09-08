@@ -134,8 +134,8 @@ impl<'a> SearchGraphEvidence<'a> {
         query: &str,
         limit: usize,
         scope_prefix: Option<&str>,
-        deadline: Option<&tracedecay_application::Deadline>,
-        cancellation: Option<&tracedecay_application::CancellationSignal>,
+        deadline: Option<&tracedecay_contracts::Deadline>,
+        cancellation: Option<&tracedecay_contracts::CancellationSignal>,
     ) -> Option<Value> {
         match self.graph {
             Ok(graph) => match dependency_hints::external_import_hint(

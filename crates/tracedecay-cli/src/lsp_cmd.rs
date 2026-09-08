@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, interval};
 use tokio_util::codec::FramedRead;
-use tracedecay_application::{CancellationSignal, Deadline, InvocationError};
+use tracedecay_contracts::{CancellationSignal, Deadline, InvocationError};
 use tracedecay_daemon_protocol::{
     DaemonLspSessionClient, FramePoll, FrameSend, ProcessLocalRequestSequence,
 };
@@ -407,7 +407,7 @@ fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationErr
     let budget_micros = i64::try_from(DEFAULT_LSP_REQUEST_DEADLINE_MS)
         .map_err(|_| InvocationError::Unavailable)?
         .saturating_mul(1_000);
-    let expires_at = tracedecay_application::clock::now_micros()
+    let expires_at = tracedecay_contracts::clock::now_micros()
         .0
         .saturating_add(budget_micros);
     let deadline =

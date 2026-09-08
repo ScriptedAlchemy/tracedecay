@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_application::configuration::ConfigurationSetRequestV1;
+use tracedecay_contracts::configuration::ConfigurationSetRequestV1;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationValueV1,

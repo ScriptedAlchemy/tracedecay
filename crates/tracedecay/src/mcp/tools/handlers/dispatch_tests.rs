@@ -19,18 +19,18 @@ struct RecordingMultiRootExecutor {
     operations: Mutex<Vec<tracedecay_daemon_protocol::DaemonInvocationOperation>>,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -38,8 +38,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        _deadline: tracedecay_application::Deadline,
-        _cancellation: tracedecay_application::CancellationSignal,
+        _deadline: tracedecay_contracts::Deadline,
+        _cancellation: tracedecay_contracts::CancellationSignal,
         _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -59,7 +59,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         tracedecay_domain::errors::Result<()>,
@@ -1174,12 +1174,12 @@ fn git_stdout_in(root: &std::path::Path, args: &[&str]) -> String {
 
 /// A deadline `offset_micros` from now, used to hand the git dispatcher a live
 /// budget the way the admission layer does.
-fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
+fn deadline_from_now(offset_micros: i64) -> tracedecay_contracts::Deadline {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after unix epoch")
         .as_micros() as i64;
-    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
         now.saturating_add(offset_micros),
     ))
     .expect("deadline")
@@ -1206,7 +1206,7 @@ async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_ha
     for tool_name in ["tracedecay_pr_context", "tracedecay_admin_branch_add"] {
         let options = ToolCallRegistryOptions {
             application_deadline: Some(
-                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
+                tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
             ),
             ..ToolCallRegistryOptions::default()
         };
@@ -1622,7 +1622,7 @@ fn carried_deadline_is_preferred_when_shorter_and_clamped_when_longer() {
 #[test]
 fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
     let elapsed =
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(1)).expect("deadline");
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).expect("deadline");
     for tool_name in DISPATCH_GROUP_SPOT_CHECKS {
         assert!(
             tool_dispatch_budget(tool_name, Some(&elapsed)).is_none(),

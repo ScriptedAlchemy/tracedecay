@@ -711,7 +711,7 @@ def _bridge_preview(value, limit: int = 2048) -> str:
 #      retained application surfaces (fact_store_*, fact_feedback,
 #      memory_status, message_search, lcm_*), an ApplicationEnvelope whose
 #      result sits at outcome.value.payload
-#      (crates/tracedecay-application/src/result/envelope.rs::ApplicationOutcome,
+#      (crates/tracedecay-contracts/src/result/envelope.rs::ApplicationOutcome,
 #      serde tag "outcome" / content "value").
 _APPLICATION_OUTCOMES = frozenset(("evidence", "preview", "effect"))
 

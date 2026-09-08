@@ -16,7 +16,7 @@ doctest = false
 hotpath = [
     "hotpath/hotpath",
     "hotpath/tokio",
-    "tracedecay-application/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-code-index-retention/hotpath",
@@ -35,12 +35,12 @@ hotpath = [
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-tool-catalog/hotpath",
-    "tracedecay-usecases/hotpath",
+    "tracedecay-application/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
+    "tracedecay-contracts/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-code-index-retention/hotpath-alloc",
@@ -59,12 +59,12 @@ hotpath-alloc = [
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
+    "tracedecay-contracts/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-code-index-retention/hotpath-cpu",
@@ -83,7 +83,7 @@ hotpath-cpu = [
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
 ]
 lite = [
     "tracedecay-code-extraction/lite",
@@ -93,11 +93,11 @@ lite = [
 full = ["tracedecay-code-extraction/full", "tracedecay-code-index/full"]
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
-    "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-application/semantic-fastembed",
 ]
 semantic-model2vec = [
     "tracedecay-semantic/semantic-model2vec",
-    "tracedecay-usecases/semantic-model2vec",
+    "tracedecay-application/semantic-model2vec",
 ]
 # Forwards the kernel test-transport seam so this crate's unit tests can
 # reach `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test`.
@@ -108,7 +108,7 @@ test-helpers = [
     "tracedecay-graph-db/test-helpers",
     "tracedecay-runtime-core/test-helpers",
     "tracedecay-semantic/test-helpers",
-    "tracedecay-usecases/test-helpers",
+    "tracedecay-application/test-helpers",
 ]
 
 [dependencies]
@@ -136,7 +136,7 @@ tracing = "0.1"
 url = "2"
 walkdir = "2"
 
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
@@ -156,7 +156,7 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 
 [target.'cfg(unix)'.dependencies]
 notify = "6"
@@ -182,6 +182,6 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = [
     "test-helpers",
 ] }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = [
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = [
     "test-helpers",
 ] }

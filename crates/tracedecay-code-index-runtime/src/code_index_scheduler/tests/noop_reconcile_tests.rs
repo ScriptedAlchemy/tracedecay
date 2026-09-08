@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
-use tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {

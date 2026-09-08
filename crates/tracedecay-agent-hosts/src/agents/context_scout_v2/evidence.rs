@@ -1,10 +1,10 @@
 #[cfg(test)]
-use tracedecay_application::context_scout::ContextScoutEvidenceSourceKindV1;
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::ContextScoutEvidenceSourceKindV1;
+use tracedecay_contracts::context_scout::{
     ContextScoutEvidenceAvailabilityV1, ContextScoutEvidenceEnvelopeV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, OmissionReason, ResolvedScope,
     RetrieverContributionState,
 };
@@ -107,21 +107,20 @@ impl ContextScoutEvidenceSourceReceiptExt for ContextScoutEvidenceSourceReceiptV
         match self.contribution_state {
             RetrieverContributionState::Completed
                 if self.coverage.completeness == CoverageCompleteness::Complete
-                    && self.temporal.freshness
-                        == tracedecay_application::FreshnessState::Current
+                    && self.temporal.freshness == tracedecay_contracts::FreshnessState::Current
                     && !self.anchors.is_empty() =>
             {
                 Ok(())
             }
             RetrieverContributionState::Partial
                 if self.coverage.completeness == CoverageCompleteness::Partial
-                    && self.temporal.freshness != tracedecay_application::FreshnessState::Stale
+                    && self.temporal.freshness != tracedecay_contracts::FreshnessState::Stale
                     && !self.anchors.is_empty() =>
             {
                 Ok(())
             }
             RetrieverContributionState::Stale
-                if self.temporal.freshness == tracedecay_application::FreshnessState::Stale
+                if self.temporal.freshness == tracedecay_contracts::FreshnessState::Stale
                     && !self.anchors.is_empty() =>
             {
                 Ok(())
@@ -131,7 +130,7 @@ impl ContextScoutEvidenceSourceReceiptExt for ContextScoutEvidenceSourceReceiptV
             | RetrieverContributionState::Failed
             | RetrieverContributionState::Cancelled
             | RetrieverContributionState::TimedOut
-                if self.temporal.freshness == tracedecay_application::FreshnessState::Unknown
+                if self.temporal.freshness == tracedecay_contracts::FreshnessState::Unknown
                     && self.anchors.is_empty() =>
             {
                 Ok(())
@@ -334,7 +333,7 @@ fn fold_availability(
 
 #[cfg(test)]
 pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1 {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CoverageDomainState, DisclosureClass, EvidenceCoverage, EvidenceDomain, FreshnessState,
         PolicyDecisionRef, TemporalState,
     };

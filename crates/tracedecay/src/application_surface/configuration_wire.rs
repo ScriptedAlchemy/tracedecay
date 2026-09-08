@@ -1,6 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, CancellationStage, ComponentConfigurationState, ConfigurationAuditPage,
     ConfigurationMutationReceipt, ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1,
     OperationTermination, ResolvedSetting, SettingSummary,
@@ -76,7 +76,7 @@ pub(super) fn build_configuration_wire_schema_registry(
 /// executor failed admission as `InvalidRequest`.
 #[hotpath::measure(label = "application_surface.configuration.payload")]
 pub(super) fn configuration_invocation_payload(
-    request: &tracedecay_application::ConfigurationWireRequestV1,
+    request: &tracedecay_contracts::ConfigurationWireRequestV1,
 ) -> Result<Value, ApplicationSurfaceAdapterError> {
     let mut wire = serde_json::to_value(request)
         .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
@@ -201,7 +201,7 @@ pub(super) fn validate_configuration_outcome(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         OperationTermination, configuration::CONFIGURATION_SURFACE_OPERATION_NAMES,
         configuration_surface_operation,
     };

@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_usecases::semantic_runtime::{
+use tracedecay_application::semantic_runtime::{
     SemanticSourceCoherenceOutcomeV1, semantic_source_coherence,
 };
-use tracedecay_usecases::store::vector_generations::{
+use tracedecay_application::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
 };
 

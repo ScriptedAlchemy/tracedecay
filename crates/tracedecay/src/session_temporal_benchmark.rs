@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };

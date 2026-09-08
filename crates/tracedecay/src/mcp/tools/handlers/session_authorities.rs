@@ -1,4 +1,4 @@
-use tracedecay_application::ProfileIdentityReadPort;
+use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 

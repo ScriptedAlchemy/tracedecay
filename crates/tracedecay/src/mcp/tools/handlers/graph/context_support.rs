@@ -4,10 +4,10 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
 };
 use tracedecay_domain::Confidence;

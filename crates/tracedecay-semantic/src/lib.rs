@@ -3,7 +3,7 @@
 //!
 //! The crate owns the semantic implementation outright, including user-data-dir
 //! lifecycle-root discovery via `tracedecay_runtime_core::config::user_data_dir`.
-//! Application/Doctor status projection stays in `tracedecay-usecases`. Shared
+//! Application/Doctor status projection stays in `tracedecay-application`. Shared
 //! configuration, artifact, lifecycle, and runtime-status contracts are
 //! owned by `tracedecay-semantic-contracts`.
 use std::future::Future;
@@ -748,7 +748,7 @@ impl DaemonSemanticRuntimeHandleV1 {
     /// Query-embedder admission for a caller that has already proven exact
     /// source-content coherence between its pinned vector generation and the
     /// code generation it serves (see
-    /// `semantic_source_content_coherent` in `tracedecay-usecases`).
+    /// `semantic_source_content_coherent` in `tracedecay-application`).
     ///
     /// Generation identifiers name physical publications; a warmed query
     /// embedder is physically identified by its projection key alone. Callers

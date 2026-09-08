@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     HandoffOpenAuthorityError, HandoffOpenAuthorityPort, HandoffOpenConsumeOutcomeV1,
     HandoffOpenConsumptionV1, HandoffOpenExpectationV1, HandoffOpenGrantV1,
     HandoffOpenListFilterV1, HandoffOpenListingV1, RequestId,

@@ -1,4 +1,4 @@
-use tracedecay_application::remote::capture::RemoteCapturePersistenceErrorV1;
+use tracedecay_contracts::remote::capture::RemoteCapturePersistenceErrorV1;
 
 use crate::exact_sql::ExactSqlTransaction;
 

@@ -5,19 +5,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_application::code_index::{
+    CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
+    CodeIndexIgnoredDependencyAdmissionRequestV1,
+};
+use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };
-use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_domain::{
     ActorId, CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::code_index::{
-    CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
-    CodeIndexIgnoredDependencyAdmissionRequestV1,
-};
 
 use super::project_code_index_ignored_dependency_admission_port;
 use tracedecay_code_index_runtime::code_index_scheduler::{

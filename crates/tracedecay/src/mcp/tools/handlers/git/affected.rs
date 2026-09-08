@@ -1,7 +1,7 @@
 //! `tracedecay_affected` — breadth-first reverse-dependency traversal from changed files to the tests that cover them.
 
 use super::*;
-use tracedecay_usecases::primitives::{
+use tracedecay_application::primitives::{
     AffectedTestTraversal, affected_test_proximity, rank_affected_tests,
 };
 
@@ -182,7 +182,7 @@ pub(crate) async fn handle_affected(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_usecases::primitives::RankedAffectedTest;
+    use tracedecay_application::primitives::RankedAffectedTest;
 
     struct FakeAffectedTestDependents {
         dependents: HashMap<String, Vec<String>>,

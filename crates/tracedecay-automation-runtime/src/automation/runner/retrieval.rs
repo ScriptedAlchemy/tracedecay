@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
-use tracedecay_application::{
+use tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1;
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     ProfileIdentityReadPort, RequestContext, RequestId,
 };
@@ -28,7 +28,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::LcmScope;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_memory::context::{
@@ -587,9 +587,9 @@ pub(super) const fn automation_structural_refusal_reason(
 }
 
 const fn automation_budget_refusal_reason(
-    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
 ) -> &'static str {
-    use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+    use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 
     match stage {
         SessionRetrievalBudgetStageV1::RequestResultLimit => {

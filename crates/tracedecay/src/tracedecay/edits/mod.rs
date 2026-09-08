@@ -53,7 +53,7 @@
 //! ```compile_fail
 //! async fn direct_rename_symbol_is_not_public(
 //!     graph: &tracedecay::tracedecay::TraceDecay,
-//!     binding: &tracedecay_application::RenameSymbolBindingV1,
+//!     binding: &tracedecay_contracts::RenameSymbolBindingV1,
 //! ) {
 //!     let _ = graph.rename_symbol(binding, "new_name", true).await;
 //! }

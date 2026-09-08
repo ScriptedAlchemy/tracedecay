@@ -1,7 +1,7 @@
 //! Native `gix` reader for the narrow historical-blob read port.
 //!
 //! The port, its request/response values, and the canonical path predicate
-//! live in `tracedecay_application::git`; this crate owns the concrete `gix`
+//! live in `tracedecay_contracts::git`; this crate owns the concrete `gix`
 //! read so the contract crate stays dependency-free and every historical
 //! consumer (use cases, the search evaluator) mounts the same production read.
 //!
@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1,
     GitHistoricalBlobV1, GitIntelligenceError, is_canonical_repository_relative_path,
 };

@@ -3,12 +3,12 @@ use std::collections::BTreeSet;
 use super::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     MAX_APPLICATION_PAGE_SIZE, PageRequest, RetrievalPortContext, RetrievalPortOutcome,
     SessionLookupRequest, SessionLookupResult, SessionRetrievalBudgetStageV1,
     SessionRetrievalStructuralRefusalV1, TemporalRetrievalFailure, TemporalRetrievalPort,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, OmissionReason, RequestId, ResultContractRef,
 };
@@ -1040,9 +1040,9 @@ fn rendering_deadlines_remain_distinct_from_cancellation() {
     assert!(!temporal_kernel_deadline(&TemporalKernelError::Cancelled));
 }
 
-fn admitted_lookup_context(scope: tracedecay_application::ResolvedScope) -> RequestContext {
+fn admitted_lookup_context(scope: tracedecay_contracts::ResolvedScope) -> RequestContext {
     let actor = ActorId::new("actor.session-lookup").expect("actor");
-    let now = tracedecay_application::now_micros();
+    let now = tracedecay_contracts::now_micros();
     let expires_at = UtcMicros(now.0 + 60_000_000);
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.session-lookup").expect("grant id"),

@@ -10,9 +10,9 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tracedecay_application::context_scout::ContextScoutDeliveryReceiptV1;
+use tracedecay_contracts::context_scout::ContextScoutDeliveryReceiptV1;
 #[cfg(test)]
-use tracedecay_application::context_scout::ContextScoutFeedbackV1;
+use tracedecay_contracts::context_scout::ContextScoutFeedbackV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
@@ -32,7 +32,7 @@ pub(crate) struct DaemonAdmissionPort<'a> {
     project_root: &'a Path,
     session_id: Option<&'a str>,
     lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
-    feedback_notice: Mutex<Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>>,
+    feedback_notice: Mutex<Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>>,
     github_stack_signal_available: Mutex<bool>,
     /// The caller's hook span, so the admission round trip is attributed like
     /// every other hook/daemon call. Passing `None` here reported hosts that
@@ -61,7 +61,7 @@ impl<'a> DaemonAdmissionPort<'a> {
 
     pub(crate) fn take_feedback_notice(
         &self,
-    ) -> Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1> {
+    ) -> Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1> {
         self.feedback_notice
             .lock()
             .ok()
@@ -79,7 +79,8 @@ impl<'a> DaemonAdmissionPort<'a> {
 
 pub(crate) struct DaemonAdmissionResponseV1 {
     pub(crate) immediate: HookImmediateAdmissionV1,
-    pub(crate) feedback_notice: Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>,
+    pub(crate) feedback_notice:
+        Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     pub(crate) github_stack_signal_available: bool,
 }
 
@@ -102,7 +103,7 @@ struct DaemonAdmissionResponseWireV1 {
     disposition: Option<HookTransportDispositionV1>,
     orchestration: Option<serde_json::Value>,
     ready_guidance: Option<HookReadyGuidanceV1>,
-    feedback_notice: Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>,
+    feedback_notice: Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: Option<bool>,
     reason: Option<String>,
 }
@@ -259,13 +260,13 @@ impl<'a> DaemonFeedbackNoticeDeliveryPort<'a> {
     }
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>
+impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>
     for DaemonFeedbackNoticeDeliveryPort<'_>
 {
     fn deliver_hook_v2<'a>(
         &'a self,
         envelope: &'a HookEventEnvelopeV2,
-        feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
@@ -287,7 +288,7 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
     fn deliver_legacy<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
@@ -499,7 +500,7 @@ mod tests {
 
     #[test]
     fn daemon_feedback_notice_survives_admission_decode() {
-        let notice = tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+        let notice = tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
             scope: FeedbackScopeV1 {
                 project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
                 repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),

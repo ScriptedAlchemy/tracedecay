@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tracedecay_application::Deadline;
+use tracedecay_contracts::Deadline;
 
 use super::{
     ExplorerFinalityV1, ExplorerQueryRunV1, ExplorerRunStateV1, ExplorerSourceIdV1,

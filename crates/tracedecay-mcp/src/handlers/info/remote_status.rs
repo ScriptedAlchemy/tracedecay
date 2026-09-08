@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_application::remote::status::RemoteOperationalStatusReadPort;
-use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort;
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_domain::errors::Result;
 
 use crate::ToolResult;
@@ -34,10 +34,10 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::{Value, json};
-    use tracedecay_application::remote::status::{
+    use tracedecay_contracts::remote::status::{
         RemoteOperationalStatusReadV1, RemoteOperationalStatusV1, RemoteSpoolOperationalStatusV1,
     };
-    use tracedecay_application::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
+    use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
     use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
     use super::handle_remote_status;

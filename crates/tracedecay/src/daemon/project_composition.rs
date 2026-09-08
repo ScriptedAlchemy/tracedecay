@@ -849,11 +849,12 @@ impl ProjectOpenInputs<'_> {
         // degradation for an unreadable file) plus the home-level OpenCode
         // analyzer-ownership registration adopted on top of the project-level
         // one.
-        let diagnostic_broker = tracedecay_usecases::dashboard_diagnostics::open_diagnostic_broker(
-            self.canonical_project_path.to_path_buf(),
-            &cg.store_layout().dashboard_root,
-        )
-        .await;
+        let diagnostic_broker =
+            tracedecay_application::dashboard_diagnostics::open_diagnostic_broker(
+                self.canonical_project_path.to_path_buf(),
+                &cg.store_layout().dashboard_root,
+            )
+            .await;
         let application_invocation_executor: Arc<
             dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
         > = Arc::new(InProcessDaemonInvocationExecutor::new(
@@ -1187,7 +1188,7 @@ impl ProjectOpenInputs<'_> {
             &code_index.scope,
             self.canonical_project_path,
             runtime_configuration,
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("project delivery source access denied: {error}"),
@@ -1267,9 +1268,8 @@ impl ProjectOpenInputs<'_> {
                 user_refresh: user_session_refresh_wake.clone(),
             })
             .await?;
-        let session_sync_port: Arc<
-            dyn tracedecay_application::session_sync::SessionSyncServicePort,
-        > = session_sync_owner;
+        let session_sync_port: Arc<dyn tracedecay_contracts::session_sync::SessionSyncServicePort> =
+            session_sync_owner;
         let session_sync_service = Arc::downgrade(&session_sync_port);
         let store_telemetry_sampling = self.store_administration.store_telemetry_sampling();
         register_route_store_telemetry(
@@ -1721,22 +1721,23 @@ fn project_dashboard_explorer_semantic_reader(
     Arc::new(move |project_root: std::path::PathBuf| {
         let configuration_client = Arc::clone(&configuration_client);
         Box::pin(async move {
-            let activated = tracedecay_usecases::semantic_runtime::project_committed_semantic_pins(
-                &project_root,
-            )
-            .is_some();
+            let activated =
+                tracedecay_application::semantic_runtime::project_committed_semantic_pins(
+                    &project_root,
+                )
+                .is_some();
             let configuration = configuration_client
                 .current()
                 .await
                 .ok()
                 .and_then(|pinned| {
-                    tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
+                    tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
                         &pinned.into_current_state(),
                     )
                     .ok()
                 });
             let status = Some(
-                tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
+                tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
                     Some(&project_root),
                     configuration,
                 ),
@@ -1831,10 +1832,10 @@ fn semantic_project_runtime(
 struct ProjectCodeIndexAuthorities {
     publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver,
     project_id: tracedecay_domain::ProjectId,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     graph_projection_read_port: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission:
-        Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
+        Arc<dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
     generation_census_reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
     graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort,
     search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
@@ -1948,7 +1949,7 @@ fn project_dashboard_freshness_reader(
 fn register_route_store_telemetry(
     sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cg: &Arc<crate::tracedecay::TraceDecay>,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],
 ) {
     let record_telemetry_registration = |path: &Path, registered: bool| {
@@ -1985,8 +1986,8 @@ async fn project_delivery_settlement_ports(
     invocation: &DaemonInvocationState,
     canonical_project_path: &Path,
 ) -> Result<(
-    Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
-    Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
+    Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
+    Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>,
 )> {
     let authority = invocation
         .service

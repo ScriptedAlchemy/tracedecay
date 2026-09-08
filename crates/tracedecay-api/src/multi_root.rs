@@ -9,7 +9,7 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::Value;
-use tracedecay_application::RequestId;
+use tracedecay_contracts::RequestId;
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, constant_operation_handlers,

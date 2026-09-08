@@ -190,7 +190,7 @@ fn multi_root_git_generation_reads_each_explicit_root() {
 
 #[test]
 fn multi_root_families_refuse_cross_family_fallback() {
-    use tracedecay_application::MultiRootOperationV1;
+    use tracedecay_contracts::MultiRootOperationV1;
 
     let git = MultiRootOperationV1::Git { request: json!({}) };
     assert!(multi_root_family_allows(
@@ -399,11 +399,10 @@ fn test_handshake_defaults() -> DaemonHandshake {
 
 #[test]
 fn search_request_controls_distinguish_cancellation_and_timeout() {
-    let cancellation =
-        tracedecay_application::CancellationSignal::active("cancellation.search-test")
-            .expect("cancellation");
+    let cancellation = tracedecay_contracts::CancellationSignal::active("cancellation.search-test")
+        .expect("cancellation");
     let deadline =
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
 
     assert_eq!(
         super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 9),
@@ -653,7 +652,7 @@ async fn apply_project_setting_via_surface(
     );
     let operation = ApplicationSurfaceOperation::ConfigurationBatch;
     let application_operation =
-        tracedecay_application::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
     let catalog =
@@ -664,12 +663,12 @@ async fn apply_project_setting_via_surface(
         .deadline()
         .maximum_millis();
     let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
-    let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+    let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::Cli,
+    let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+        tracedecay_contracts::request_identity::GlobalRequestSurface::Cli,
     )
     .expect("surface request id");
     let idempotency_key = tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
@@ -677,10 +676,10 @@ async fn apply_project_setting_via_surface(
     )
     .expect("configuration idempotency key");
     let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
-        tracedecay_application::ConfigurationWireRequestV1::Batch(
-            tracedecay_application::ConfigurationBatchRequestV1 {
+        tracedecay_contracts::ConfigurationWireRequestV1::Batch(
+            tracedecay_contracts::ConfigurationBatchRequestV1 {
                 mutations: vec![
-                    tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
+                    tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
                         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                             project_id: target.project_id,
                         },
@@ -693,7 +692,7 @@ async fn apply_project_setting_via_surface(
             },
         ),
     );
-    let cancellation = tracedecay_application::CancellationSignal::active(format!(
+    let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
         "cancellation.surface.{}",
         request_id.as_str()
     ))
@@ -704,7 +703,7 @@ async fn apply_project_setting_via_surface(
             operation,
             request_id,
             request,
-            tracedecay_application::PageRequest::first(10).expect("surface page"),
+            tracedecay_contracts::PageRequest::first(10).expect("surface page"),
             Some(deadline),
             cancellation,
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,

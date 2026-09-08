@@ -30,8 +30,8 @@ unauthorized external action after completing independent, authorized work.
 - `crates/tracedecay-cli/` — the package that produces the shipped
   `tracedecay` binary.
 - `crates/` — the remaining workspace member crates (`tracedecay-api`,
-  `-application`, `-domain`, `-store`, `-hooks`, `-policy`, `-tool-catalog`,
-  rusqlite parity/runtime crates).
+  `-application`, `-contracts`, `-domain`, `-store`, `-hooks`, `-policy`,
+  `-tool-catalog`, rusqlite parity/runtime crates).
 - `dashboard/` — the single embedded dashboard (React + rsbuild + vitest).
   `dashboard/src/contracts/` is generated from Rust schemas via schemars —
   never hand-edit it; regenerate with the `contracts:generate` script and

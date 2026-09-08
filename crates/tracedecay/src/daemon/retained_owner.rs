@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     RequestAdmission, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfacePortsV1, now_micros,
 };
@@ -24,7 +24,7 @@ mod session;
 pub(crate) mod session_refresh;
 
 pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memory_target};
-pub(crate) use tracedecay_application::retained_receipts as receipts;
+pub(crate) use tracedecay_contracts::retained_receipts as receipts;
 pub(crate) use tracedecay_session_memory::memory_mapping;
 pub(crate) use tracedecay_session_memory::memory_mapping::search_page;
 pub(crate) use tracedecay_session_memory::memory_mutation;
@@ -129,12 +129,12 @@ where
         RequestAdmission::Admitted => {}
         RequestAdmission::Cancelled => {
             return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::BeforeRead,
+                tracedecay_contracts::CancellationStage::BeforeRead,
             ));
         }
         RequestAdmission::TimedOut => {
             return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeRead,
+                tracedecay_contracts::CancellationStage::BeforeRead,
             ));
         }
     }
@@ -148,13 +148,13 @@ where
         .ok()
         .map(Duration::from_micros)
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeRead,
+            tracedecay_contracts::CancellationStage::BeforeRead,
         ))?;
     match tokio::time::timeout(remaining, future).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(map_execution_error(error)),
         Err(_) => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         )),
     }
 }
@@ -241,7 +241,7 @@ mod tests {
             operation: "lcm_store_open".to_owned(),
         });
 
-        let problem = tracedecay_application::retained_surface_execution_problem(error);
+        let problem = tracedecay_contracts::retained_surface_execution_problem(error);
         let diagnostic = problem
             .diagnostic()
             .expect("an unavailable problem carries a diagnostic")

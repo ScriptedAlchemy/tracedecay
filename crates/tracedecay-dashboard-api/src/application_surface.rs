@@ -10,11 +10,11 @@ use axum::extract::Json;
 use axum::http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
-use tracedecay_application::{
+use tracedecay_configuration::DirectConfigurationMutation;
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, AuthorizedScopeSet,
     NativeIntegrationSurfaceResultV1, RequestId,
 };
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
@@ -161,7 +161,7 @@ pub trait DashboardApplicationRuntime: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::{Deadline, RequestId};
+    use tracedecay_contracts::{Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
 
     #[test]
@@ -169,7 +169,7 @@ mod tests {
         let control = crate::DashboardHttpRequestControlV1 {
             request_id: RequestId::new("request.dashboard-memory-control").expect("request id"),
             deadline: Deadline::new(UtcMicros(500)).expect("deadline"),
-            cancellation: tracedecay_application::CancellationSignal::active(
+            cancellation: tracedecay_contracts::CancellationSignal::active(
                 "cancellation.dashboard-memory-control",
             )
             .expect("cancellation"),

@@ -13,8 +13,8 @@ use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use tokio::sync::{Mutex as AsyncMutex, watch};
-use tracedecay_usecases::feedback::FeedbackCycleRuntime;
-use tracedecay_usecases::primitives::PrimitiveProjectRuntime;
+use tracedecay_application::feedback::FeedbackCycleRuntime;
+use tracedecay_application::primitives::PrimitiveProjectRuntime;
 
 use crate::invocation::{
     BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationOwner, DaemonLspInvocationOwner,
@@ -213,7 +213,7 @@ pub struct ProjectRuntime {
 /// coordinator identity before exposing it through the configuration runtime.
 pub(crate) struct RegisteredSemanticActivationOwnerV1 {
     pub(crate) coordinator:
-        Arc<tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
+        Arc<tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
     pub(crate) reconciler: Arc<
         tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
     >,
@@ -565,19 +565,19 @@ impl RegisteredAdvisoryRuntimeV1 {
 #[derive(Clone)]
 pub struct RegisteredDeliveryReadAuthorityV1 {
     project_root: PathBuf,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
-    handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
-    source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
+    handle: tracedecay_application::delivery::ProjectDeliveryReadHandleV1,
+    source_access: Arc<dyn tracedecay_application::ProjectSourceAccessSnapshotPort>,
 }
 
 impl RegisteredDeliveryReadAuthorityV1 {
     pub fn new(
         project_root: PathBuf,
-        scope: tracedecay_application::ResolvedScope,
+        scope: tracedecay_contracts::ResolvedScope,
         configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
-        handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
-        source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
+        handle: tracedecay_application::delivery::ProjectDeliveryReadHandleV1,
+        source_access: Arc<dyn tracedecay_application::ProjectSourceAccessSnapshotPort>,
     ) -> Self {
         Self {
             project_root,
@@ -588,7 +588,7 @@ impl RegisteredDeliveryReadAuthorityV1 {
         }
     }
 
-    pub fn scope(&self) -> &tracedecay_application::ResolvedScope {
+    pub fn scope(&self) -> &tracedecay_contracts::ResolvedScope {
         &self.scope
     }
 
@@ -596,7 +596,7 @@ impl RegisteredDeliveryReadAuthorityV1 {
         &self.project_root
     }
 
-    pub fn handle(&self) -> tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1 {
+    pub fn handle(&self) -> tracedecay_application::delivery::ProjectDeliveryReadHandleV1 {
         Arc::clone(&self.handle)
     }
 
@@ -604,7 +604,7 @@ impl RegisteredDeliveryReadAuthorityV1 {
     pub async fn source_access_at(
         &self,
         observed_at: tracedecay_domain::UtcMicros,
-    ) -> Option<tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot> {
+    ) -> Option<tracedecay_application::source_authorization::ProjectSourceAccessSnapshot> {
         let current = self.configuration.client().current().await.ok()?;
         self.source_access
             .source_access_at(&self.scope, &self.project_root, &current, observed_at)
@@ -1299,7 +1299,7 @@ impl ProjectRuntimeRegistryV1 {
         &self,
         project_root: &Path,
         expected: &Arc<
-            tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+            tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
         >,
     ) -> SemanticActivationOwnerWithdrawalV1 {
         let mut runtimes = self.lock_runtimes();

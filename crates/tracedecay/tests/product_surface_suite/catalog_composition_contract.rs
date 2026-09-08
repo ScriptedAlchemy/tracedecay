@@ -7,7 +7,7 @@ use tracedecay_api::{
     http_application_full_route_path, http_route_documents, is_http_application_operation_exposed,
     retained_application_route_path,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
     ApplicationOperation, ResultContractRef, RetainedSurfaceOperation,
     application_catalog_contributions, application_handler_descriptors,

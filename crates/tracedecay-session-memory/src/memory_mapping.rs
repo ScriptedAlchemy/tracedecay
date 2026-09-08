@@ -5,8 +5,8 @@ use crate::memory::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1,
     FactContradictionV1, FactFeedbackActionV1, FactFeedbackDetailsAvailabilityV1,
     FactFeedbackRequestV1, FactFeedbackV1, FactIdentitySourceResultV1, FactPayloadAccessV1,
@@ -1040,11 +1040,11 @@ pub fn feedback_result(
     outcome: &tracedecay_store::ProjectMemoryFactFeedbackOutcomeV1,
     action: FactFeedbackActionV1,
 ) -> Result<
-    tracedecay_application::retained_surfaces::FactFeedbackResultV1,
+    tracedecay_contracts::retained_surfaces::FactFeedbackResultV1,
     RetainedSurfaceExecutionErrorV1,
 > {
     Ok(
-        tracedecay_application::retained_surfaces::FactFeedbackResultV1 {
+        tracedecay_contracts::retained_surfaces::FactFeedbackResultV1 {
             fact: projection(outcome.fact())?,
             feedback: FactFeedbackV1 {
                 event_id: outcome.event_id().clone(),
@@ -1125,12 +1125,12 @@ pub fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecutionErrorV1
         | FactStoreError::GraphConflict => RetainedSurfaceExecutionErrorV1::Conflict,
         FactStoreError::GraphCancelled | FactStoreError::ReadCancelled => {
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             )
         }
         FactStoreError::GraphBudgetExhausted => RetainedSurfaceExecutionErrorV1::Saturated,
         FactStoreError::GraphDeadlineExceeded => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         FactStoreError::GraphResetRequired { owner, .. } => match owner {
             FactOwnerV1::Profile => RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
@@ -1149,8 +1149,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use serde_json::{Value, json};
-    use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-    use tracedecay_application::retained_surfaces::{
+    use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+    use tracedecay_contracts::retained_surfaces::{
         FactCategoryV1, FactFeedbackActionV1, FactFeedbackRequestV1, FactReadOptionsV1,
         FactSearchCursorV1, FactSourceLabelPatchV1, FactStoreRemoveRequestV1,
         FactStoreSearchRequestV1, FactStoreSupersedeRequestV1, FactStoreUpdateRequestV1,
@@ -1621,13 +1621,13 @@ mod tests {
         assert_eq!(
             map_store_error(FactStoreError::GraphCancelled),
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead
+                tracedecay_contracts::CancellationStage::DuringRead
             )
         );
         assert_eq!(
             map_store_error(FactStoreError::ReadCancelled),
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead
+                tracedecay_contracts::CancellationStage::DuringRead
             )
         );
         assert_eq!(
@@ -1637,7 +1637,7 @@ mod tests {
         assert_eq!(
             map_store_error(FactStoreError::GraphDeadlineExceeded),
             RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::DuringRead
+                tracedecay_contracts::CancellationStage::DuringRead
             )
         );
         assert_eq!(
@@ -1684,10 +1684,10 @@ mod tests {
             RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             ),
             RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             ),
         ] {
             assert_eq!(

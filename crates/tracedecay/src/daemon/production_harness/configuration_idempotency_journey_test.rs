@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationResult, CancellationSignal, ConfigurationBatchRequestV1,
     ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1,
     ConfigurationWriteCredentialRequestV1, Deadline, PageRequest,
@@ -81,7 +81,7 @@ async fn cli_configuration_set(
     );
     let operation = ApplicationSurfaceOperation::ConfigurationSet;
     let application_operation =
-        tracedecay_application::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
     let catalog =
@@ -100,8 +100,8 @@ async fn cli_configuration_set(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::Cli,
+    let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+        tracedecay_contracts::request_identity::GlobalRequestSurface::Cli,
     )
     .expect("CLI request id");
     let cancellation =
@@ -113,7 +113,7 @@ async fn cli_configuration_set(
             operation,
             request_id,
             crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                tracedecay_application::ConfigurationWireRequestV1::Set(request),
+                tracedecay_contracts::ConfigurationWireRequestV1::Set(request),
             ),
             PageRequest::first(10).expect("CLI page"),
             Some(deadline),
@@ -171,7 +171,7 @@ async fn configuration_batch_via_surface(
     );
     let operation = ApplicationSurfaceOperation::ConfigurationBatch;
     let application_operation =
-        tracedecay_application::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
     let catalog =
@@ -192,22 +192,22 @@ async fn configuration_batch_via_surface(
     .expect("configuration deadline");
     let request_surface = match surface {
         tracedecay_tool_catalog::BindingSurface::Cli => {
-            tracedecay_application::request_identity::GlobalRequestSurface::Cli
+            tracedecay_contracts::request_identity::GlobalRequestSurface::Cli
         }
         tracedecay_tool_catalog::BindingSurface::Dashboard => {
-            tracedecay_application::request_identity::GlobalRequestSurface::DashboardSettings
+            tracedecay_contracts::request_identity::GlobalRequestSurface::DashboardSettings
         }
         other => panic!("unsupported configuration batch test surface: {other:?}"),
     };
     let request_id =
-        tracedecay_application::request_identity::mint_global_request_id(request_surface)
+        tracedecay_contracts::request_identity::mint_global_request_id(request_surface)
             .expect("surface request id");
     if surface == tracedecay_tool_catalog::BindingSurface::Dashboard {
         return crate::application_surface::resolve_dashboard_application_surface(
             operation,
             request_id,
             crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                tracedecay_application::ConfigurationWireRequestV1::Batch(request),
+                tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
             Some(&executor),
@@ -225,7 +225,7 @@ async fn configuration_batch_via_surface(
             operation,
             request_id,
             crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                tracedecay_application::ConfigurationWireRequestV1::Batch(request),
+                tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             PageRequest::first(10).expect("surface page"),
             Some(deadline),

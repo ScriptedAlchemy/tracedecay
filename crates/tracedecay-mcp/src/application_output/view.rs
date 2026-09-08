@@ -1,6 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemRecord, ApplicationResult, EvidenceCoverage, Omission,
     OperationReceipt, ResolvedScope,
 };
@@ -330,7 +330,7 @@ fn payload_summary(payload: Option<&Value>) -> serde_json::Result<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
         Deadline, EvidenceCoverage, EvidenceDomain, Omission, OmissionReason, OperationBudgetUsage,
         OperationReceipt, OperationTermination,
@@ -339,7 +339,7 @@ mod tests {
 
     use super::{CanonicalHumanView, HumanField, HumanFieldValue, payload_summary};
     use serde_json::Value;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
         ResultContractRef, SafeDiagnostic,
     };

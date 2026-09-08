@@ -4,10 +4,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_application::ProfileIdentityReadPort;
+use tracedecay_application::observation::ObservationCancellation;
+use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
-use tracedecay_usecases::observation::ObservationCancellation;
 
 pub type SessionHistoricalIngestPass<'a> =
     Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
@@ -297,10 +297,10 @@ fn classify_transcript_ingest_outcome(
 #[cfg(test)]
 mod tests {
     use super::{SessionHistoricalIngestOutcome, classify_transcript_ingest_outcome};
+    use tracedecay_application::observation::ObservationCancellation;
     use tracedecay_sessions::runtime::{
         IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome,
     };
-    use tracedecay_usecases::observation::ObservationCancellation;
 
     fn ingest_outcome_with_failure(
         reason_code: &'static str,

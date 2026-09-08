@@ -951,7 +951,7 @@ impl ProductionProjectCompositionHarnessV1 {
 async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
 ) -> Result<()> {
     let wait_started = Instant::now();
     let publication = timeout(Duration::from_secs(20), async {

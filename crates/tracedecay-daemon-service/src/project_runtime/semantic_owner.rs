@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
-use tracedecay_application::doctor::{
+use tracedecay_contracts::doctor::{
     SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;

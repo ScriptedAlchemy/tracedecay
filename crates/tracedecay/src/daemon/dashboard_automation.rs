@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracedecay_application::now_micros;
 use tracedecay_automation::managed_skills::validate_skill_id;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
@@ -23,6 +22,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 };
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
 use tracedecay_automation_runtime::ports::project_runtime::ProjectRuntime as _;
+use tracedecay_contracts::now_micros;
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonInvocationService;
@@ -52,7 +52,7 @@ type DashboardAutomationProjectResolver =
 const USER_JOB_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 fn automation_run_observer(
-    producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    producer: Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     project_root: PathBuf,
     surface: &'static str,
 ) -> Box<dyn FnOnce(&AutomationRunLedgerRecord) + Send + 'static> {
@@ -617,7 +617,7 @@ fn automation_admission_conflict() -> DashboardAutomationAuthorityErrorV1 {
 
 fn automation_terminal_run(
     terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
-) -> DashboardAutomationResult<tracedecay_application::retained_surfaces::AutomationRunResultV1> {
+) -> DashboardAutomationResult<tracedecay_contracts::retained_surfaces::AutomationRunResultV1> {
     if let Some(run) = terminal.run_result() {
         return Ok(run.clone());
     }

@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::time::Instant;
-use tracedecay_application::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
+use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
 
 /// Resolves the daemon handshake for the current client. One labeled
 /// boundary so a slow CLI invocation can attribute time to client identity
@@ -279,7 +279,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use serde_json::json;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, AuthorityReceipt, CancellationContext,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain,
         EvidencePacket, OperationReceipt, PageState, PolicyDecisionRef, RequestContext, RequestId,
@@ -380,7 +380,7 @@ mod tests {
             cancellation: None,
         };
         let packet = EvidencePacket::from_retrieval(evidence, authority, receipt).unwrap();
-        serde_json::to_value(tracedecay_application::ApplicationEnvelope::evidence(
+        serde_json::to_value(tracedecay_contracts::ApplicationEnvelope::evidence(
             contract(),
             context.request_id().clone(),
             scope(),

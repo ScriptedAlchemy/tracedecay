@@ -1,32 +1,32 @@
 //! Exact, deadline-bounded Work leak evidence classification.
 
-use tracedecay_application::clock::now_micros;
-use tracedecay_application::{ApplicationProblem, Deadline, RequestContext, SafeDiagnostic};
+use tracedecay_contracts::clock::now_micros;
+use tracedecay_contracts::{ApplicationProblem, Deadline, RequestContext, SafeDiagnostic};
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 pub(super) struct DaemonWorkLeakEvidenceV1 {
     pub(super) attempt: tracedecay_domain::WorkAttemptV1,
     pub(super) has_live_owner: bool,
-    pub(super) effect: Option<tracedecay_application::WorkAttemptEffectHolderV1>,
-    pub(super) placement: tracedecay_application::WorkPlacementReadingV1,
+    pub(super) effect: Option<tracedecay_contracts::WorkAttemptEffectHolderV1>,
+    pub(super) placement: tracedecay_contracts::WorkPlacementReadingV1,
     pub(super) delivery: tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
 }
 
-impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1 {
+impl tracedecay_contracts::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1 {
     fn inspect(
         &self,
         authority: &tracedecay_domain::WorkAuthority,
-        command: &tracedecay_application::AdjudicateWorkLeakCommandV1,
+        command: &tracedecay_contracts::AdjudicateWorkLeakCommandV1,
         scan_started_at: UtcMicros,
         scan_deadline: UtcMicros,
     ) -> Result<
-        tracedecay_application::VerifiedWorkLeakEvidenceV1,
-        tracedecay_application::WorkLeakEvidenceErrorV1,
+        tracedecay_contracts::VerifiedWorkLeakEvidenceV1,
+        tracedecay_contracts::WorkLeakEvidenceErrorV1,
     > {
         if self.attempt.identity() != &command.attempt
             || !attempt_matches_authority(&self.attempt, authority)
         {
-            return Err(tracedecay_application::WorkLeakEvidenceErrorV1::Conflict);
+            return Err(tracedecay_contracts::WorkLeakEvidenceErrorV1::Conflict);
         }
         if self
             .effect
@@ -34,11 +34,11 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
             .is_some_and(|holder| holder.attempt() != self.attempt.identity())
             || !placement_matches_attempt(&self.placement, self.attempt.identity())
         {
-            return Err(tracedecay_application::WorkLeakEvidenceErrorV1::Conflict);
+            return Err(tracedecay_contracts::WorkLeakEvidenceErrorV1::Conflict);
         }
         let scan_completed_at = now_micros();
         if scan_completed_at.0 > scan_deadline.0 {
-            return Err(tracedecay_application::WorkLeakEvidenceErrorV1::TimedOut);
+            return Err(tracedecay_contracts::WorkLeakEvidenceErrorV1::TimedOut);
         }
         let (kind, recovery, owner_class, coverage, evidence_kind) = if self.has_live_owner
             && terminal_horizon_elapsed(
@@ -168,7 +168,7 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
                 "incomplete-attempt-evidence",
             )
         };
-        Ok(tracedecay_application::VerifiedWorkLeakEvidenceV1 {
+        Ok(tracedecay_contracts::VerifiedWorkLeakEvidenceV1 {
             attempt: command.attempt.clone(),
             kind,
             recovery,
@@ -192,16 +192,16 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
 #[hotpath::measure(label = "daemon.service.work.adjudicate_leak", future = true)]
 pub(super) async fn adjudicate_leak(
     registered: &super::super::RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
     context: &RequestContext,
-    command: tracedecay_application::AdjudicateWorkLeakCommandV1,
+    command: tracedecay_contracts::AdjudicateWorkLeakCommandV1,
     observed_at: UtcMicros,
     deadline: &Deadline,
-) -> Result<tracedecay_application::WorkLeakAdjudicationOutcomeV1, ApplicationProblem> {
+) -> Result<tracedecay_contracts::WorkLeakAdjudicationOutcomeV1, ApplicationProblem> {
     let maximum_scan_deadline = observed_at
         .0
-        .saturating_add(tracedecay_application::MAX_WORK_LEAK_SCAN_MICROS_V1 as i64);
+        .saturating_add(tracedecay_contracts::MAX_WORK_LEAK_SCAN_MICROS_V1 as i64);
     let scan_deadline = UtcMicros(deadline.expires_at.0.min(maximum_scan_deadline));
     let storage = registered.database.work_storage().map_err(|_| {
         ApplicationProblem::unavailable(SafeDiagnostic {
@@ -219,14 +219,14 @@ pub(super) async fn adjudicate_leak(
     )
     .await?;
     let service =
-        tracedecay_application::WorkLeakAdjudicationServiceV1::new(storage.clone(), evidence);
+        tracedecay_contracts::WorkLeakAdjudicationServiceV1::new(storage.clone(), evidence);
     service.adjudicate(context, command, observed_at, scan_deadline)
 }
 
 #[hotpath::measure(label = "daemon.service.work.read_leak_evidence", future = true)]
 async fn read_leak_evidence(
     registered: &super::super::RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
     context: &RequestContext,
     attempt_identity: &tracedecay_domain::WorkAttemptIdentityV1,
@@ -234,7 +234,7 @@ async fn read_leak_evidence(
 ) -> Result<DaemonWorkLeakEvidenceV1, ApplicationProblem> {
     let attempt = services.attempts().status(
         context,
-        &tracedecay_application::WorkAttemptStatusRequestV1 {
+        &tracedecay_contracts::WorkAttemptStatusRequestV1 {
             task_id: attempt_identity.task_id().clone(),
             run_id: attempt_identity.run_id().clone(),
             attempt_id: attempt_identity.attempt_id().clone(),
@@ -242,7 +242,7 @@ async fn read_leak_evidence(
     )?;
     let placement = services.placement().status(
         context,
-        &tracedecay_application::WorkPlacementStatusRequestV1 {
+        &tracedecay_contracts::WorkPlacementStatusRequestV1 {
             task_id: attempt.identity().task_id().clone(),
             run_id: attempt.identity().run_id().clone(),
         },
@@ -257,7 +257,7 @@ async fn read_leak_evidence(
                 message: "The Work delivery evidence authority is unavailable.".to_owned(),
             })
         })?;
-    let effect = tracedecay_application::WorkAttemptEffectServiceV1::new(storage.clone())
+    let effect = tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage.clone())
         .load(context, attempt.identity())?;
     let has_live_owner =
         attempt_processes.holds_attempt(&context.scope().worktree_id, attempt.identity());
@@ -280,12 +280,12 @@ fn attempt_matches_authority(
 }
 
 fn placement_matches_attempt(
-    placement: &tracedecay_application::WorkPlacementReadingV1,
+    placement: &tracedecay_contracts::WorkPlacementReadingV1,
     attempt: &tracedecay_domain::WorkAttemptIdentityV1,
 ) -> bool {
     match placement {
-        tracedecay_application::WorkPlacementReadingV1::Absent => true,
-        tracedecay_application::WorkPlacementReadingV1::Placed { placement } => {
+        tracedecay_contracts::WorkPlacementReadingV1::Absent => true,
+        tracedecay_contracts::WorkPlacementReadingV1::Placed { placement } => {
             placement.identity().task_id() == attempt.task_id()
                 && placement.identity().run_id() == attempt.run_id()
         }
@@ -294,9 +294,9 @@ fn placement_matches_attempt(
 
 fn missing_managed_worktree_binding(
     attempt: &tracedecay_domain::WorkAttemptV1,
-    placement: &tracedecay_application::WorkPlacementReadingV1,
+    placement: &tracedecay_contracts::WorkPlacementReadingV1,
 ) -> bool {
-    let tracedecay_application::WorkPlacementReadingV1::Placed { placement } = placement else {
+    let tracedecay_contracts::WorkPlacementReadingV1::Placed { placement } = placement else {
         // An explicitly absent managed placement cannot be relabeled as a
         // missing worktree binding; existing-worktree runs need no placement.
         return false;
@@ -356,13 +356,13 @@ fn delivery_has_unsettled_observation(
     }
 }
 
-fn unresolved_effect(effect: &Option<tracedecay_application::WorkAttemptEffectHolderV1>) -> bool {
+fn unresolved_effect(effect: &Option<tracedecay_contracts::WorkAttemptEffectHolderV1>) -> bool {
     effect.as_ref().is_some_and(|holder| {
         !matches!(
             holder.effect_state(),
             tracedecay_domain::WorkEffectStateV1::Observational
         ) && holder.resolution()
-            != Some(tracedecay_application::WorkAttemptEffectResolutionV1::NoEffect)
+            != Some(tracedecay_contracts::WorkAttemptEffectResolutionV1::NoEffect)
     })
 }
 
@@ -394,10 +394,10 @@ fn opaque_leak_evidence_ref(
     kind: &str,
     attempt: &tracedecay_domain::WorkAttemptIdentityV1,
     has_live_owner: bool,
-    effect: &Option<tracedecay_application::WorkAttemptEffectHolderV1>,
-    placement: &tracedecay_application::WorkPlacementReadingV1,
+    effect: &Option<tracedecay_contracts::WorkAttemptEffectHolderV1>,
+    placement: &tracedecay_contracts::WorkPlacementReadingV1,
     delivery: &tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
-) -> Result<String, tracedecay_application::WorkLeakEvidenceErrorV1> {
+) -> Result<String, tracedecay_contracts::WorkLeakEvidenceErrorV1> {
     let delivery_digest = delivery_evidence_digest(delivery)?;
     let digest = canonical_sha256(&(
         "tracedecay.daemon.work-leak-evidence.v2",
@@ -408,13 +408,13 @@ fn opaque_leak_evidence_ref(
         placement,
         delivery_digest,
     ))
-    .map_err(|_| tracedecay_application::WorkLeakEvidenceErrorV1::Unavailable)?;
+    .map_err(|_| tracedecay_contracts::WorkLeakEvidenceErrorV1::Unavailable)?;
     Ok(format!("work-leak:{kind}:{}", digest.as_str()))
 }
 
 fn delivery_evidence_digest(
     delivery: &tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
-) -> Result<ManifestDigest, tracedecay_application::WorkLeakEvidenceErrorV1> {
+) -> Result<ManifestDigest, tracedecay_contracts::WorkLeakEvidenceErrorV1> {
     let evidence = match delivery {
         tracedecay_global_db::WorkAttemptDeliveryCensusReadV1::Unbound => {
             canonical_sha256(&("tracedecay.daemon.work-leak-delivery.v1", "unbound"))
@@ -434,7 +434,7 @@ fn delivery_evidence_digest(
             observed_at_least,
         )),
     };
-    evidence.map_err(|_| tracedecay_application::WorkLeakEvidenceErrorV1::Unavailable)
+    evidence.map_err(|_| tracedecay_contracts::WorkLeakEvidenceErrorV1::Unavailable)
 }
 
 #[cfg(test)]

@@ -11,13 +11,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use tracedecay_application::feedback::{
+use tracedecay_application::advisory::GitHubRepositoryTargetV1;
+use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_GET_CAPABILITY_ID_V1,
     FEEDBACK_LIST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     PROXIMITY_CAPABILITY_ID_V1,
 };
-use tracedecay_application::{ApplicationContractError, ResolvedScope, now_micros};
+use tracedecay_contracts::{ApplicationContractError, ResolvedScope, now_micros};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
     SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
@@ -29,14 +30,19 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::advisory::GitHubRepositoryTargetV1;
 
 use super::DaemonInvocationState;
-use tracedecay_application::request_identity::{PreviewIdentityDomain, derive_preview_identity};
+use tracedecay_contracts::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::mcp::McpServer;
+use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_application::primitives::{
+    admitted_root_uri_for_project, locator_digest_for_project,
+};
+use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_service::{
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
@@ -45,10 +51,6 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
-use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
-use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
-use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 mod advisory_runtime;
 mod automation_effect_recovery;
@@ -120,8 +122,8 @@ struct ProjectOpenSourceEditAuthorizationV1 {
 }
 
 struct CurrentSourceEditAuthorityV1 {
-    receipt: tracedecay_application::AuthorityReceipt,
-    proof: tracedecay_application::SourceEditEffectProofV1,
+    receipt: tracedecay_contracts::AuthorityReceipt,
+    proof: tracedecay_contracts::SourceEditEffectProofV1,
 }
 
 impl ProjectOpenSourceEditAuthorizationV1 {
@@ -129,7 +131,7 @@ impl ProjectOpenSourceEditAuthorizationV1 {
     async fn current_access(
         &self,
         observed_at: UtcMicros,
-    ) -> std::result::Result<ProjectSourceAccessSnapshot, tracedecay_application::ApplicationProblem>
+    ) -> std::result::Result<ProjectSourceAccessSnapshot, tracedecay_contracts::ApplicationProblem>
     {
         let current = self
             .configuration
@@ -149,13 +151,13 @@ impl ProjectOpenSourceEditAuthorizationV1 {
     #[hotpath::skip]
     async fn current_authority(
         &self,
-        context: &tracedecay_application::RequestContext,
-        operation: &tracedecay_application::ApplicationOperation,
+        context: &tracedecay_contracts::RequestContext,
+        operation: &tracedecay_contracts::ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> std::result::Result<CurrentSourceEditAuthorityV1, tracedecay_application::ApplicationProblem>
+    ) -> std::result::Result<CurrentSourceEditAuthorityV1, tracedecay_contracts::ApplicationProblem>
     {
         let access = self.current_access(observed_at).await?;
-        if context.admission_at(observed_at) != tracedecay_application::RequestAdmission::Admitted
+        if context.admission_at(observed_at) != tracedecay_contracts::RequestAdmission::Admitted
             || !access.allows(context, operation, observed_at)
         {
             return Err(concealed_source_edit_problem());
@@ -196,7 +198,7 @@ impl ProjectOpenSourceEditAuthorizationV1 {
             &privacy_digest,
         ))
         .map_err(|_| concealed_source_edit_problem())?;
-        let policy = tracedecay_application::PolicyDecisionRef::new(
+        let policy = tracedecay_contracts::PolicyDecisionRef::new(
             "policy.daemon.source-edit.v1",
             POLICY_REVISION_V1,
             policy_digest,
@@ -205,9 +207,9 @@ impl ProjectOpenSourceEditAuthorizationV1 {
         )
         .map_err(|_| concealed_source_edit_problem())?;
         let receipt =
-            tracedecay_application::AuthorityReceipt::from_context(context, policy, observed_at)
+            tracedecay_contracts::AuthorityReceipt::from_context(context, policy, observed_at)
                 .map_err(|_| concealed_source_edit_problem())?;
-        let proof = tracedecay_application::SourceEditEffectProofV1 {
+        let proof = tracedecay_contracts::SourceEditEffectProofV1 {
             policy_digest: receipt.policy.digest.clone(),
             configuration_revision_id: access.configuration_revision,
             configuration_digest: access.configuration_digest,
@@ -225,18 +227,18 @@ impl ProjectOpenSourceEditAuthorizationV1 {
     }
 }
 
-impl tracedecay_application::SourceEditAuthorizationPort for ProjectOpenSourceEditAuthorizationV1 {
+impl tracedecay_contracts::SourceEditAuthorizationPort for ProjectOpenSourceEditAuthorizationV1 {
     fn admit<'a>(
         &'a self,
-        context: &'a tracedecay_application::RequestContext,
-        operation: &'a tracedecay_application::ApplicationOperation,
+        context: &'a tracedecay_contracts::RequestContext,
+        operation: &'a tracedecay_contracts::ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> tracedecay_application::SourceEditAuthorizationFuture<'a> {
+    ) -> tracedecay_contracts::SourceEditAuthorizationFuture<'a> {
         Box::pin(async move {
             self.current_authority(context, operation, observed_at)
                 .await
                 .and_then(|current| {
-                    tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+                    tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
                         current.receipt,
                         current.proof,
                         context.scope(),
@@ -248,11 +250,11 @@ impl tracedecay_application::SourceEditAuthorizationPort for ProjectOpenSourceEd
 
     fn recheck_effect<'a>(
         &'a self,
-        context: &'a tracedecay_application::RequestContext,
-        operation: &'a tracedecay_application::ApplicationOperation,
-        admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
+        context: &'a tracedecay_contracts::RequestContext,
+        operation: &'a tracedecay_contracts::ApplicationOperation,
+        admission: &'a tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
         observed_at: UtcMicros,
-    ) -> tracedecay_application::SourceEditAuthorizationFuture<'a> {
+    ) -> tracedecay_contracts::SourceEditAuthorizationFuture<'a> {
         Box::pin(async move {
             let current = self
                 .current_authority(context, operation, observed_at)
@@ -268,7 +270,7 @@ impl tracedecay_application::SourceEditAuthorizationPort for ProjectOpenSourceEd
             {
                 return Err(concealed_source_edit_problem());
             }
-            tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+            tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
                 current.receipt,
                 current.proof,
                 context.scope(),
@@ -278,9 +280,9 @@ impl tracedecay_application::SourceEditAuthorizationPort for ProjectOpenSourceEd
     }
 }
 
-fn concealed_source_edit_problem() -> tracedecay_application::ApplicationProblem {
-    tracedecay_application::ApplicationProblem::not_found_or_not_authorized(
-        tracedecay_application::RetryDirective::Never,
+fn concealed_source_edit_problem() -> tracedecay_contracts::ApplicationProblem {
+    tracedecay_contracts::ApplicationProblem::not_found_or_not_authorized(
+        tracedecay_contracts::RetryDirective::Never,
     )
 }
 
@@ -289,9 +291,9 @@ async fn invoke_project_open_source_edit(
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     invocation: crate::mcp::server::SourceEditInvocationV1,
-) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
+) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
-    let operation = tracedecay_application::source_edit_operation(invocation.edit.kind())
+    let operation = tracedecay_contracts::source_edit_operation(invocation.edit.kind())
         .map_err(source_edit_contract_error)?;
     let access = authorization
         .current_access(observed_at)
@@ -325,7 +327,7 @@ async fn invoke_project_open_source_edit(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("source edit preview identity failed: {error}"),
             })?;
-            tracedecay_application::IdempotencyKey::new(format!("preview.{preview_identity}"))
+            tracedecay_contracts::IdempotencyKey::new(format!("preview.{preview_identity}"))
                 .map_err(source_edit_contract_error)?
         }
         None => {
@@ -350,7 +352,7 @@ async fn invoke_project_open_source_edit(
             });
         }
     };
-    let request = tracedecay_application::SourceEditEffectRequestV1 {
+    let request = tracedecay_contracts::SourceEditEffectRequestV1 {
         context,
         authority: current.receipt.clone(),
         edit: invocation.edit,
@@ -375,13 +377,13 @@ async fn invoke_project_open_source_edit_reconciliation(
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     invocation: crate::mcp::server::SourceEditReconciliationInvocationV1,
-) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
+) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
     let effect_control = tracedecay_source_edit::SourceEditEffectControlV1::new(
         invocation.deadline.clone(),
         invocation.cancellation.clone(),
     );
-    let operation = tracedecay_application::source_edit_reconciliation_operation()
+    let operation = tracedecay_contracts::source_edit_reconciliation_operation()
         .map_err(source_edit_contract_error)?;
     let access = authorization
         .current_access(observed_at)
@@ -399,7 +401,7 @@ async fn invoke_project_open_source_edit_reconciliation(
         .current_authority(&context, &operation, observed_at)
         .await
         .map_err(|_| source_edit_authority_error())?;
-    let request = tracedecay_application::SourceEditReconciliationRequestV1 {
+    let request = tracedecay_contracts::SourceEditReconciliationRequestV1 {
         context,
         authority: current.receipt.clone(),
         kind: invocation.kind,
@@ -1215,13 +1217,13 @@ enum InitialSemanticActivationRestoreV1 {
 fn classify_initial_semantic_activation_restore(
     observed: std::result::Result<
         (),
-        tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverErrorV1,
+        tracedecay_application::semantic_runtime::RetrievalProfileActivationObserverErrorV1,
     >,
 ) -> std::result::Result<
     InitialSemanticActivationRestoreV1,
-    tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverErrorV1,
+    tracedecay_application::semantic_runtime::RetrievalProfileActivationObserverErrorV1,
 > {
-    use tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverErrorV1;
+    use tracedecay_application::semantic_runtime::RetrievalProfileActivationObserverErrorV1;
 
     match observed {
         Ok(()) => Ok(InitialSemanticActivationRestoreV1::Mounted),
@@ -1246,14 +1248,14 @@ async fn register_semantic_configuration_owners(
     configuration: &tracedecay_configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
     let configuration_pin =
-        tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
+        tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
             configuration,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("semantic retrieval configuration pin failed: {error}"),
         })?;
     let configuration_store =
-        tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
+        tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
             graph.configuration_runtime().registered_database(),
             scope.clone(),
         )
@@ -1261,12 +1263,12 @@ async fn register_semantic_configuration_owners(
             message: format!("semantic retrieval configuration store unavailable: {error}"),
         })?;
     let accepted_profiles = Arc::new(
-        tracedecay_usecases::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::new(
+        tracedecay_application::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::new(
             graph.configuration_runtime().registered_database(),
         ),
     );
     let operation = Arc::new(
-        tracedecay_usecases::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
+        tracedecay_application::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
             Arc::clone(graph.configuration_runtime()),
             accepted_profiles,
         ),
@@ -1528,7 +1530,7 @@ async fn register_semantic_configuration_owners(
         // activation authority and no Ready receipt, and never replaces an
         // existing record.
         let retention_roots_seated =
-            tracedecay_usecases::semantic_runtime::commit_project_absent_semantic_roots(
+            tracedecay_application::semantic_runtime::commit_project_absent_semantic_roots(
                 project_root.to_path_buf(),
                 configuration_pin.revision_id.clone(),
             );
@@ -1545,20 +1547,20 @@ async fn register_semantic_configuration_owners(
 }
 
 pub(super) struct SemanticOwnerInstallFailureV1 {
-    reason: tracedecay_application::doctor::SemanticOwnerDegradedReasonV1,
+    reason: tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1,
     detail: String,
 }
 
 impl SemanticOwnerInstallFailureV1 {
     fn new(
-        reason: tracedecay_application::doctor::SemanticOwnerDegradedReasonV1,
+        reason: tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1,
         detail: String,
     ) -> Self {
         Self { reason, detail }
     }
 
-    pub(super) fn into_state(self) -> tracedecay_application::doctor::SemanticOwnerStateV1 {
-        tracedecay_application::doctor::SemanticOwnerStateV1::Degraded {
+    pub(super) fn into_state(self) -> tracedecay_contracts::doctor::SemanticOwnerStateV1 {
+        tracedecay_contracts::doctor::SemanticOwnerStateV1::Degraded {
             reason: self.reason,
             detail: self.detail,
         }
@@ -1575,18 +1577,18 @@ pub(super) async fn install_semantic_activation_runtime_owner(
     scope: ResolvedScope,
 ) -> std::result::Result<bool, SemanticOwnerInstallFailureV1> {
     let Some(inspector) =
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
+        tracedecay_application::semantic_runtime::project_semantic_production_runtime(project_root)
     else {
         return Ok(false);
     };
     let configuration_store =
-        tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
+        tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
             configuration_runtime.registered_database(),
             scope,
         )
         .map_err(|error| {
             SemanticOwnerInstallFailureV1::new(
-                tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::ConfigurationStoreUnavailable,
+                tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::ConfigurationStoreUnavailable,
                 format!("semantic retrieval configuration store unavailable: {error}"),
             )
         })?;
@@ -1594,7 +1596,7 @@ pub(super) async fn install_semantic_activation_runtime_owner(
         .query_activation_registrar(project_root, configuration_runtime.registered_database());
     let lifecycle_events = inspector.verified_ready_events();
     let candidate = Arc::new(
-        tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
+        tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
             configuration_store,
             configuration_runtime.configuration_store(),
             inspector,
@@ -1611,7 +1613,7 @@ pub(super) async fn install_semantic_activation_runtime_owner(
         .await
         .map_err(|error| {
             SemanticOwnerInstallFailureV1::new(
-                tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::ActivationOwnerRegistrationRefused,
+                tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::ActivationOwnerRegistrationRefused,
                 error.to_string(),
             )
         })?;
@@ -1623,14 +1625,14 @@ pub(super) async fn install_semantic_activation_runtime_owner(
                 .await
         {
             return Err(SemanticOwnerInstallFailureV1::new(
-                tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::PartialRegistrationCleanupFailed,
+                tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::PartialRegistrationCleanupFailed,
                 format!(
                     "semantic activation coordinator installation failed and its partial owner could not be removed: {error}"
                 ),
             ));
         }
         return Err(SemanticOwnerInstallFailureV1::new(
-            tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::ConfigurationRuntimeInstallationRefused,
+            tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::ConfigurationRuntimeInstallationRefused,
             error.to_string(),
         ));
     }
@@ -1641,7 +1643,7 @@ pub(super) async fn install_semantic_activation_runtime_owner(
 async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    scope_grant: tracedecay_application::CapabilityGrantSnapshot,
+    scope_grant: tracedecay_contracts::CapabilityGrantSnapshot,
     registered_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     database: tracedecay_runtime_core::db::Database,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1849,7 +1851,7 @@ pub(super) fn daemon_owned_project_source_access_at(
 
 pub(crate) struct DaemonOwnedProjectSourceAccess;
 
-impl tracedecay_usecases::ProjectSourceAccessSnapshotPort for DaemonOwnedProjectSourceAccess {
+impl tracedecay_application::ProjectSourceAccessSnapshotPort for DaemonOwnedProjectSourceAccess {
     fn source_access_at(
         &self,
         scope: &ResolvedScope,
@@ -1864,12 +1866,11 @@ impl tracedecay_usecases::ProjectSourceAccessSnapshotPort for DaemonOwnedProject
 fn project_open_work_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
-) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
-{
-    let capabilities = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+) -> std::result::Result<tracedecay_contracts::CapabilityGrantSnapshot, ApplicationContractError> {
+    let capabilities = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
-        .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
-        .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
+        .chain(tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
+        .chain(tracedecay_contracts::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
         .map(|(_, capability, _)| CapabilityId::new(*capability))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -1884,10 +1885,10 @@ fn project_open_work_grant(
             field: "project-open Work capability grant",
         });
     }
-    let use_cases = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+    let use_cases = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
-        .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
-        .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
+        .chain(tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
+        .chain(tracedecay_contracts::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
         .map(|(_, _, use_case)| tracedecay_tool_catalog::UseCaseId::new(*use_case))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -1905,8 +1906,8 @@ fn project_open_work_grant(
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "project-open Work grant digest",
     })?;
-    tracedecay_application::CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new(format!(
+    tracedecay_contracts::CapabilityGrantSnapshot::new(
+        tracedecay_contracts::CapabilityGrantId::new(format!(
             "grant.tracedecay-daemon.project-open.work.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))?,
@@ -1918,18 +1919,17 @@ fn project_open_work_grant(
         access.scope.clone(),
         capabilities,
         use_cases,
-        tracedecay_application::DisclosureClass::Sensitive,
+        tracedecay_contracts::DisclosureClass::Sensitive,
     )
 }
 
 pub(super) fn project_open_retained_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
-) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
-{
-    let operations = tracedecay_application::RetainedSurfaceOperation::CALLABLE
+) -> std::result::Result<tracedecay_contracts::CapabilityGrantSnapshot, ApplicationContractError> {
+    let operations = tracedecay_contracts::RetainedSurfaceOperation::CALLABLE
         .into_iter()
-        .map(tracedecay_application::retained_surface_application_operation)
+        .map(tracedecay_contracts::retained_surface_application_operation)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let capabilities = operations
         .iter()
@@ -1960,8 +1960,8 @@ pub(super) fn project_open_retained_grant(
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "project-open retained grant digest",
     })?;
-    tracedecay_application::CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new(format!(
+    tracedecay_contracts::CapabilityGrantSnapshot::new(
+        tracedecay_contracts::CapabilityGrantId::new(format!(
             "grant.tracedecay-daemon.project-open.retained.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))?,
@@ -1973,15 +1973,14 @@ pub(super) fn project_open_retained_grant(
         access.scope.clone(),
         capabilities,
         use_cases,
-        tracedecay_application::DisclosureClass::Sensitive,
+        tracedecay_contracts::DisclosureClass::Sensitive,
     )
 }
 
 pub(super) fn project_open_lsp_scope_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
-) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
-{
+) -> std::result::Result<tracedecay_contracts::CapabilityGrantSnapshot, ApplicationContractError> {
     let capability = CapabilityId::new(LSP_WORKSPACE_CAPABILITY_ID_V1).map_err(|_| {
         ApplicationContractError::Inconsistent {
             field: "project-open LSP workspace capability",
@@ -2013,8 +2012,8 @@ pub(super) fn project_open_lsp_scope_grant(
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "project-open LSP workspace grant digest",
     })?;
-    tracedecay_application::CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new(format!(
+    tracedecay_contracts::CapabilityGrantSnapshot::new(
+        tracedecay_contracts::CapabilityGrantId::new(format!(
             "grant.tracedecay-daemon.project-open.lsp-workspace.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))?,
@@ -2026,7 +2025,7 @@ pub(super) fn project_open_lsp_scope_grant(
         access.scope.clone(),
         capabilities,
         use_cases,
-        tracedecay_application::DisclosureClass::Sensitive,
+        tracedecay_contracts::DisclosureClass::Sensitive,
     )
 }
 
@@ -2082,14 +2081,14 @@ fn production_owner_capabilities()
         })?);
     }
     for descriptor in
-        tracedecay_application::retrieval::catalog::primitive_read_handler_descriptors()?
+        tracedecay_contracts::retrieval::catalog::primitive_read_handler_descriptors()?
     {
         capabilities.insert(descriptor.operation().capability_id().clone());
     }
-    for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+    for (_, capability, _) in tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .into_iter()
-        .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
-        .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
+        .chain(tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS)
+        .chain(tracedecay_contracts::HANDOFF_APPLICATION_OPERATION_IDS_V1)
     {
         capabilities.insert(CapabilityId::new(capability).map_err(|_| {
             ApplicationContractError::Inconsistent {
@@ -2097,8 +2096,8 @@ fn production_owner_capabilities()
             }
         })?);
     }
-    for operation in tracedecay_application::RetainedSurfaceOperation::CALLABLE {
-        let operation = tracedecay_application::retained_surface_application_operation(operation)?;
+    for operation in tracedecay_contracts::RetainedSurfaceOperation::CALLABLE {
+        let operation = tracedecay_contracts::retained_surface_application_operation(operation)?;
         capabilities.insert(operation.capability_id().clone());
     }
     Ok(capabilities)
@@ -2133,7 +2132,7 @@ mod tests {
 
     #[test]
     fn transient_semantic_activation_restore_is_deferred_but_refusals_are_terminal() {
-        use tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverErrorV1;
+        use tracedecay_application::semantic_runtime::RetrievalProfileActivationObserverErrorV1;
 
         assert_eq!(
             classify_initial_semantic_activation_restore(Err(
@@ -2181,7 +2180,7 @@ mod tests {
         let capabilities = production_owner_capabilities().expect("production capabilities");
 
         for descriptor in
-            tracedecay_application::retrieval::catalog::primitive_read_handler_descriptors()
+            tracedecay_contracts::retrieval::catalog::primitive_read_handler_descriptors()
                 .expect("primitive read descriptors")
         {
             assert!(
@@ -2196,10 +2195,9 @@ mod tests {
     fn production_project_owner_grants_every_retained_operation() {
         let capabilities = production_owner_capabilities().expect("production capabilities");
 
-        for operation in tracedecay_application::RetainedSurfaceOperation::CALLABLE {
-            let operation =
-                tracedecay_application::retained_surface_application_operation(operation)
-                    .expect("retained application operation");
+        for operation in tracedecay_contracts::RetainedSurfaceOperation::CALLABLE {
+            let operation = tracedecay_contracts::retained_surface_application_operation(operation)
+                .expect("retained application operation");
             assert!(
                 capabilities.contains(operation.capability_id()),
                 "{} must be granted to the daemon-owned retained route",

@@ -3,15 +3,15 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, EffectId, EffectResult, SourceEditVerificationStateV1,
     SourceEditVerificationV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 
+use tracedecay_application::tracedecay::SourceEditRuntime;
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::digest::{load_record, persist_record, source_edit_recovery_digest};
@@ -44,7 +44,7 @@ pub(super) struct SourceEditJournalV1 {
     pub(super) predicted_state: Option<ManifestDigest>,
     pub(super) candidate_files: Vec<String>,
     #[serde(default)]
-    pub(super) recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
     #[serde(default)]
     pub(super) recovery_digest: Option<ManifestDigest>,
     pub(super) request: SourceEditDurableRequestV1,
@@ -71,13 +71,13 @@ impl SourceEditJournalV1 {
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceEditDurableRequestV1 {
     pub(super) operation: tracedecay_tool_catalog::UseCaseId,
-    pub(super) request_id: tracedecay_application::RequestId,
+    pub(super) request_id: tracedecay_contracts::RequestId,
     pub(super) actor: tracedecay_domain::ActorId,
-    pub(super) scope: tracedecay_application::ResolvedScope,
-    pub(super) authority: tracedecay_application::AuthorityReceipt,
-    pub(super) authority_proof: tracedecay_application::SourceEditEffectProofV1,
-    pub(super) idempotency_key: tracedecay_application::IdempotencyKey,
-    pub(super) deadline: tracedecay_application::Deadline,
+    pub(super) scope: tracedecay_contracts::ResolvedScope,
+    pub(super) authority: tracedecay_contracts::AuthorityReceipt,
+    pub(super) authority_proof: tracedecay_contracts::SourceEditEffectProofV1,
+    pub(super) idempotency_key: tracedecay_contracts::IdempotencyKey,
+    pub(super) deadline: tracedecay_contracts::Deadline,
     pub(super) started_at: UtcMicros,
     pub(super) dry_run: bool,
     #[serde(default)]
@@ -90,13 +90,13 @@ pub(super) struct SourceEditRollbackRecordV1 {
     pub(super) version: u8,
     pub(super) effect_id: EffectId,
     pub(super) input_digest: ManifestDigest,
-    pub(super) idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(super) idempotency_key: tracedecay_contracts::IdempotencyKey,
     pub(super) operation: tracedecay_tool_catalog::UseCaseId,
     pub(super) actor: tracedecay_domain::ActorId,
-    pub(super) scope: tracedecay_application::ResolvedScope,
+    pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) expected_state: ManifestDigest,
     pub(super) committed_state: ManifestDigest,
-    pub(super) recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
     pub(super) recovery_digest: ManifestDigest,
     pub(super) record_digest: ManifestDigest,
 }
@@ -139,7 +139,7 @@ impl SourceEditRollbackRecordV1 {
 pub(super) struct SourceEditDurableResultV1 {
     pub(super) version: u8,
     pub(super) input_digest: ManifestDigest,
-    pub(super) authority_proof: tracedecay_application::SourceEditEffectProofV1,
+    pub(super) authority_proof: tracedecay_contracts::SourceEditEffectProofV1,
     pub(super) dry_run: bool,
     #[serde(default)]
     pub(super) predicted_state: Option<ManifestDigest>,
@@ -156,7 +156,7 @@ pub(super) struct ResolvedSourceEditPreview {
     pub(super) candidate_files: Vec<String>,
     pub(super) expected_state: Option<ManifestDigest>,
     pub(super) predicted_state: Option<ManifestDigest>,
-    pub(super) planned_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    pub(super) planned_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
 }
 
 impl SourceEditDurability {
@@ -170,8 +170,8 @@ impl SourceEditDurability {
     }
 
     #[hotpath::measure(label = "usecases.edit.lock")]
-    pub(super) fn lock(&self) -> Result<tracedecay_usecases::tracedecay::SyncLockGuard> {
-        tracedecay_usecases::tracedecay::try_acquire_sync_lock_at(
+    pub(super) fn lock(&self) -> Result<tracedecay_application::tracedecay::SyncLockGuard> {
+        tracedecay_application::tracedecay::try_acquire_sync_lock_at(
             &self.root.join("source-edit.lock"),
         )
     }
@@ -182,7 +182,7 @@ impl SourceEditDurability {
 
     pub(super) fn receipt_path(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<PathBuf> {
         let digest = canonical_sha256(&("tracedecay.source-edit-receipt-key.v1", key.as_str()))
             .map_err(domain_error)?;
@@ -194,7 +194,7 @@ impl SourceEditDurability {
 
     fn reconciliation_receipt_path(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<PathBuf> {
         let digest = canonical_sha256(&(
             "tracedecay.source-edit-reconciliation-receipt-key.v1",
@@ -261,8 +261,8 @@ impl SourceEditDurability {
         committed_state: &ManifestDigest,
         succeeded: bool,
     ) -> Result<()> {
-        let move_operation = tracedecay_application::source_edit_operation(
-            tracedecay_application::SourceEditKind::MoveSymbol,
+        let move_operation = tracedecay_contracts::source_edit_operation(
+            tracedecay_contracts::SourceEditKind::MoveSymbol,
         )
         .map_err(application_contract_error)?;
         if &journal.request.operation != move_operation.use_case_id()
@@ -317,7 +317,7 @@ impl SourceEditDurability {
 
     pub(super) fn load_receipt(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<Option<SourceEditDurableResultV1>> {
         let receipt = load_record::<SourceEditDurableResultV1>(
             &self.receipt_path(key)?,
@@ -347,7 +347,7 @@ impl SourceEditDurability {
 
     pub(super) fn load_reconciliation_receipt(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<Option<SourceEditDurableResultV1>> {
         let receipt = load_record::<SourceEditDurableResultV1>(
             &self.reconciliation_receipt_path(key)?,
@@ -426,8 +426,8 @@ impl SourceEditDurableResultV1 {
 }
 
 fn validate_durable_authority(
-    authority: &tracedecay_application::AuthorityReceipt,
-    proof: &tracedecay_application::SourceEditEffectProofV1,
+    authority: &tracedecay_contracts::AuthorityReceipt,
+    proof: &tracedecay_contracts::SourceEditEffectProofV1,
 ) -> Result<()> {
     proof
         .validate_for(authority)
@@ -435,8 +435,8 @@ fn validate_durable_authority(
 }
 
 pub(super) fn same_source_edit_authority(
-    left: &tracedecay_application::AuthorityReceipt,
-    right: &tracedecay_application::AuthorityReceipt,
+    left: &tracedecay_contracts::AuthorityReceipt,
+    right: &tracedecay_contracts::AuthorityReceipt,
 ) -> bool {
     left.grant_id == right.grant_id
         && left.grant_revision == right.grant_revision

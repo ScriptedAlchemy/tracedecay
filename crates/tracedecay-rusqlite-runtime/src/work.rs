@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAppendOutcome, WorkAppendRequest, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
@@ -92,7 +92,7 @@ impl WorkSqliteStorage {
 
     pub fn resume_cursor(
         snapshot: &WorkProjectionSnapshotV1,
-    ) -> Result<WorkProjectionResumeCursorV1, tracedecay_application::WorkProjectionPortError> {
+    ) -> Result<WorkProjectionResumeCursorV1, tracedecay_contracts::WorkProjectionPortError> {
         projection::projection_cursor(snapshot.generation_id().clone(), snapshot.sequence())
     }
 }

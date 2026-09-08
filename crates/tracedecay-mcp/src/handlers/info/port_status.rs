@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::ToolResult;
 use crate::{decode_primitive_request, generic_tool_result, unique_file_paths};
 use serde_json::Value;
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     PortMatchedSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1, PortTargetOnlySymbolV1,
     PortUnmatchedSymbolV1,
 };

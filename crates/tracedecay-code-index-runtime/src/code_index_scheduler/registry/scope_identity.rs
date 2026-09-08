@@ -1,6 +1,6 @@
 //! Scope checks for sealed code-index generations.
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 
 use super::super::{LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1};
 

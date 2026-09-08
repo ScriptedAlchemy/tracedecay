@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationObservation, CancellationStage, EffectTermination,
     ReconciliationState, SourceEditAuthorizationPort, SourceEditEffectRequestV1, SourceEditRequest,
     SourceEditVerificationV1, now_micros, source_edit_operation,
@@ -8,8 +8,8 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 use tracedecay_graph_db::GraphCancellation;
 
+use tracedecay_application::tracedecay::SourceEditRuntime;
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -32,7 +32,7 @@ use super::verify::{
 fn durable_request(
     operation: &ApplicationOperation,
     request: &SourceEditEffectRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
 ) -> SourceEditDurableRequestV1 {
     SourceEditDurableRequestV1 {
         operation: operation.use_case_id().clone(),
@@ -76,7 +76,7 @@ fn persist_pre_effect_result(
     durability: &SourceEditDurability,
     operation: &ApplicationOperation,
     request: &SourceEditEffectRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     outcome: SourceEditOutcome,
     state: PreEffectState,
@@ -137,7 +137,7 @@ fn fail_pre_effect(
     durability: &SourceEditDurability,
     operation: &ApplicationOperation,
     request: &SourceEditEffectRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     state: PreEffectState,
 ) -> Result<SourceEditApplicationResult> {
@@ -158,7 +158,7 @@ fn fail_pre_effect_with_outcome(
     durability: &SourceEditDurability,
     operation: &ApplicationOperation,
     request: &SourceEditEffectRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     state: PreEffectState,
     outcome: SourceEditOutcome,
@@ -212,7 +212,7 @@ fn persist_unknown(
 /// Whether a rechecked admission still carries the receipt and proof the
 /// request was admitted with.
 fn authority_still_matches(
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     request: &SourceEditEffectRequestV1,
 ) -> bool {
     same_source_edit_authority(&authority.receipt, &request.authority)
@@ -242,7 +242,7 @@ where
     let durability = SourceEditDurability::for_graph(graph);
     let _lock = durability.lock()?;
     let input_digest = request.input_digest().map_err(application_contract_error)?;
-    let requested_authority = tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+    let requested_authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
         request.authority.clone(),
         request.proof.clone(),
         request.context.scope(),
@@ -548,7 +548,7 @@ where
     }
 
     let (effect_result, plan_complete) = hotpath::future!(
-        tracedecay_usecases::tracedecay::apply_source_edit_plan(
+        tracedecay_application::tracedecay::apply_source_edit_plan(
             planned_files,
             run_source_edit(
                 graph,
@@ -655,7 +655,7 @@ where
 pub(super) async fn resolve_source_edit_preview(
     graph: &SourceEditRuntime,
     code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
-    context: &tracedecay_application::RequestContext,
+    context: &tracedecay_contracts::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,
     cancellation: Arc<dyn GraphCancellation>,
     edit: SourceEditRequest,
@@ -671,7 +671,7 @@ pub(super) async fn resolve_source_edit_preview(
         _ => edit.with_dry_run(true),
     };
     let (outcome, planned_files) =
-        tracedecay_usecases::tracedecay::capture_source_edit_plan(run_source_edit(
+        tracedecay_application::tracedecay::capture_source_edit_plan(run_source_edit(
             graph,
             SourceEditGraphReadAuthorityV1 {
                 port: code_graph,
@@ -726,7 +726,7 @@ pub(super) async fn resolve_source_edit_preview(
 
 fn source_edit_graph_cancellation(
     control: Option<&SourceEditEffectControlV1>,
-    context: &tracedecay_application::RequestContext,
+    context: &tracedecay_contracts::RequestContext,
 ) -> Arc<dyn GraphCancellation> {
     control.map_or_else(
         || tracedecay_graph_query::request_graph_cancellation(context),

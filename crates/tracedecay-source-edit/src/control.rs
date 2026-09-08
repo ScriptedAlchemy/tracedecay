@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, EffectTermination,
     now_micros,
 };

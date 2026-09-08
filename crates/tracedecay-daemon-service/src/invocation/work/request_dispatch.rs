@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracedecay_application::{CancellationContext, Deadline};
+use tracedecay_contracts::{CancellationContext, Deadline};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::CapabilityId;
 
@@ -30,7 +30,7 @@ pub(super) async fn dispatch_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
     project_root: Option<PathBuf>,
     request_id: String,
@@ -40,7 +40,7 @@ pub(super) async fn dispatch_work_application(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let operation_key = request.operation_key();
-    let Some((_, capability, use_case)) = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+    let Some((_, capability, use_case)) = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
         .find(|(operation, _, _)| *operation == operation_key)
     else {
@@ -70,7 +70,7 @@ pub(super) async fn dispatch_work_application(
             );
         }
     };
-    let services = match tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+    let services = match tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     ) {
         Ok(services) => services,
@@ -92,7 +92,7 @@ pub(super) async fn dispatch_work_application(
                 request,
             );
             if let Ok(proposal) = &result {
-                let _ = tracedecay_usecases::observability::record_task_intelligence_decision(
+                let _ = tracedecay_application::observability::record_task_intelligence_decision(
                     observability_producer.as_deref(),
                     proposal,
                     observed_at,
@@ -120,26 +120,26 @@ pub(super) async fn dispatch_work_application(
                         DaemonInvocationProblem::Unavailable,
                     );
                 };
-                let binding = tracedecay_application::WorkProductBindingV1::new(
+                let binding = tracedecay_contracts::WorkProductBindingV1::new(
                     capability_id,
                     use_case.clone(),
                 );
-                let created = tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                let created = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
                     &registered.database,
                     binding.clone(),
                 )
                 .map_err(|_| {
-                    tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+                    tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
                 })
                 .and_then(|product| {
                     preparation::current_work_product_revision_pins(&registered)
                         .map_err(|_| {
-                            tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+                            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
                         })
                         .and_then(|revisions| {
                             if command.mutation.revisions != revisions {
                                 return Err(
-                                    tracedecay_application::WorkProductApplicationErrorV1::RevisionConflict,
+                                    tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
                                 );
                             }
                             product
@@ -180,14 +180,14 @@ pub(super) async fn dispatch_work_application(
                 if result.is_ok() {
                     let disposition = match disposition {
                         tracedecay_domain::WorkProposalDispositionV1::Rejected => {
-                            Some(tracedecay_application::ReviewProposalDispositionV1::Rejected)
+                            Some(tracedecay_contracts::ReviewProposalDispositionV1::Rejected)
                         }
                         tracedecay_domain::WorkProposalDispositionV1::Superseded => {
-                            Some(tracedecay_application::ReviewProposalDispositionV1::Superseded)
+                            Some(tracedecay_contracts::ReviewProposalDispositionV1::Superseded)
                         }
                         tracedecay_domain::WorkProposalDispositionV1::Accepted => None,
                     };
-                    let _ = tracedecay_usecases::observability::record_reliance_decision(
+                    let _ = tracedecay_application::observability::record_reliance_decision(
                         observability_producer.as_deref(),
                         &proposal_ref,
                         &command_ref,
@@ -224,7 +224,7 @@ pub(super) async fn dispatch_work_application(
                     true,
                 );
                 if result.is_ok() {
-                    let _ = tracedecay_usecases::observability::record_reliance_decision(
+                    let _ = tracedecay_application::observability::record_reliance_decision(
                         observability_producer.as_deref(),
                         &proposal_ref,
                         &command_ref,
@@ -252,21 +252,21 @@ pub(super) async fn dispatch_work_application(
                 let result = CapabilityId::new(*capability)
                 .map_err(|_| {
                     work_product_problem(
-                        tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+                        tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
                     )
                 })
                 .and_then(|capability| {
-                    let binding = tracedecay_application::WorkProductBindingV1::new(
+                    let binding = tracedecay_contracts::WorkProductBindingV1::new(
                         capability,
                         use_case.clone(),
                     );
-                    tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                    tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
                         &registered.database,
                         binding.clone(),
                     )
                         .map_err(|_| {
                             work_product_problem(
-                                tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+                                tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
                             )
                         })
                         .and_then(|product| {
@@ -274,7 +274,7 @@ pub(super) async fn dispatch_work_application(
                                 preparation::current_work_product_revision_pins(&registered)?;
                             if command.mutation.revisions != revisions {
                                 return Err(work_product_problem(
-                                    tracedecay_application::WorkProductApplicationErrorV1::RevisionConflict,
+                                    tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
                                 ));
                             }
                             product
@@ -306,7 +306,7 @@ pub(super) async fn dispatch_work_application(
                 );
             };
             let binding =
-                tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
+                tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
             attempt_operations::start_attempt(
                 &registered,
                 &services,
@@ -333,7 +333,7 @@ pub(super) async fn dispatch_work_application(
                 );
             };
             let binding =
-                tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
+                tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
             attempt_operations::synthesize(
                 &registered,
                 &services,
@@ -387,7 +387,7 @@ pub(super) async fn dispatch_work_application(
                 );
             };
             let binding =
-                tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
+                tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
             attempt_operations::retry_attempt(
                 &registered,
                 &services,
@@ -426,14 +426,12 @@ pub(super) async fn dispatch_work_application(
                                             "the verified topology task count overflowed",
                                         )
                                     })?;
-                                Ok(
-                                    tracedecay_application::WorkAttemptTopologyStateV1::Verified(
-                                        tracedecay_application::WorkAttemptTopologyBindingV1 {
-                                            generation: topology.generation().as_str().to_owned(),
-                                            task_count,
-                                        },
-                                    ),
-                                )
+                                Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
+                                    tracedecay_contracts::WorkAttemptTopologyBindingV1 {
+                                        generation: topology.generation().as_str().to_owned(),
+                                        task_count,
+                                    },
+                                ))
                             }
                             Err(error) => work_topology_problem(error),
                         }
@@ -479,14 +477,12 @@ pub(super) async fn dispatch_work_application(
                                                 "the verified topology task count overflowed",
                                             )
                                         })?;
-                                    Ok(
-                                tracedecay_application::WorkAttemptTopologyStateV1::Verified(
-                                    tracedecay_application::WorkAttemptTopologyBindingV1 {
-                                        generation: topology.generation().as_str().to_owned(),
-                                        task_count,
-                                    },
-                                ),
-                            )
+                                    Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
+                                        tracedecay_contracts::WorkAttemptTopologyBindingV1 {
+                                            generation: topology.generation().as_str().to_owned(),
+                                            task_count,
+                                        },
+                                    ))
                                 }
                                 Err(error) => work_topology_problem(error),
                             }
@@ -521,7 +517,7 @@ pub(super) async fn dispatch_work_application(
                     operation_key,
                     use_case,
                     input_digest,
-                    tracedecay_application::execution_topology_view(
+                    tracedecay_contracts::execution_topology_view(
                         services.attempts(),
                         services.placement(),
                         &registered.work_topology_policy,
@@ -537,14 +533,12 @@ pub(super) async fn dispatch_work_application(
                                                 "the verified topology task count overflowed",
                                             )
                                         })?;
-                                    Ok(
-                                tracedecay_application::WorkAttemptTopologyStateV1::Verified(
-                                    tracedecay_application::WorkAttemptTopologyBindingV1 {
-                                        generation: topology.generation().as_str().to_owned(),
-                                        task_count,
-                                    },
-                                ),
-                            )
+                                    Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
+                                        tracedecay_contracts::WorkAttemptTopologyBindingV1 {
+                                            generation: topology.generation().as_str().to_owned(),
+                                            task_count,
+                                        },
+                                    ))
                                 }
                                 Err(error) => work_topology_problem(error),
                             }
@@ -558,11 +552,11 @@ pub(super) async fn dispatch_work_application(
         }
         WorkApplicationInvocationV1::TopologyMetrics(request) => {
             let observations =
-                tracedecay_usecases::observability::RegisteredObservabilityPortV1::new(
+                tracedecay_application::observability::RegisteredObservabilityPortV1::new(
                     &registered.database,
                 );
             let metrics = hotpath::future!(
-                tracedecay_application::execution_topology_rollup_metrics(
+                tracedecay_contracts::execution_topology_rollup_metrics(
                     &observations,
                     &observations,
                     &context,
@@ -631,7 +625,7 @@ pub(super) async fn dispatch_work_application(
                     .adjudicate(&context, command);
                 if let Ok(outcome) = &adjudicated {
                     let _observation =
-                        tracedecay_usecases::observability::record_work_duplicate_observation(
+                        tracedecay_application::observability::record_work_duplicate_observation(
                             observability_producer.as_deref(),
                             context.scope().project_id.as_str(),
                             &authority,
@@ -665,7 +659,7 @@ pub(super) async fn dispatch_work_application(
             )
             .await;
             if let Ok(outcome) = &adjudicated {
-                let _ = tracedecay_usecases::observability::record_work_leak_observation(
+                let _ = tracedecay_application::observability::record_work_leak_observation(
                     observability_producer.as_deref(),
                     context.scope().project_id.as_str(),
                     outcome.receipt(),
@@ -712,9 +706,9 @@ pub(super) async fn dispatch_work_application(
                     );
                 };
                 let binding =
-                    tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
+                    tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
                 let product_services =
-                    match tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                    match tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
                         &registered.database,
                         binding,
                     ) {
@@ -808,9 +802,9 @@ pub(super) async fn dispatch_work_application(
                     );
                 };
                 let binding =
-                    tracedecay_application::WorkProductBindingV1::new(capability, use_case.clone());
+                    tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
                 let product_services =
-                    match tracedecay_usecases::work::RegisteredWorkProductServicesV1::attach(
+                    match tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
                         &registered.database,
                         binding.clone(),
                     ) {

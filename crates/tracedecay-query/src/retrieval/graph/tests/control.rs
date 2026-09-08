@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use tracedecay_application::retrieval::MAX_APPLICATION_PAGE_SIZE;
+use tracedecay_contracts::retrieval::MAX_APPLICATION_PAGE_SIZE;
 
 struct CancelDuringTraversal {
     checks: AtomicUsize,

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay_application::ProfileIdentityReadPort;
+use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};

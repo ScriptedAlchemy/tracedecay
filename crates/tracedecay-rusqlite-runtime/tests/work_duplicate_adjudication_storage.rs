@@ -3,7 +3,7 @@ mod work_registered_store;
 use rusqlite::params;
 use std::num::NonZeroU16;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkDuplicateAdjudicationPortV1,
     WorkDuplicateAdjudicationStorageErrorV1, WorkDuplicateAdjudicationWriteV1,
     WorkOwnerObservationKindV1, WorkOwnerObservationMarkOutcomeV1, WorkOwnerObservationReceiptV1,

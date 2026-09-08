@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 
 use tracedecay_session_memory::context::CancellationToken;
 

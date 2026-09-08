@@ -86,7 +86,7 @@ NOTES.md         cross-sheet design rules and wire-truth constraints
 ## Data
 
 All figures are **fake but honestly shaped**: they use real crate and file paths
-from this repository (`crates/tracedecay-application/src/retrieval/service.rs`
+from this repository (`crates/tracedecay-contracts/src/retrieval/service.rs`
 and friends) and only quantities the graph actually holds or already computes —
 node `kind` / `file_path` / `start_line` / `end_line` / `degree`, edge kinds
 `calls` / `uses` / `imports` / `contains`, per-edge call-site counts, file-level

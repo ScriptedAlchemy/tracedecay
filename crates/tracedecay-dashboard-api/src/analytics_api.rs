@@ -11,7 +11,7 @@ use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::ObservatoryReadModelV1;
+use tracedecay_contracts::ObservatoryReadModelV1;
 use tracedecay_domain::CoverageStateV1;
 
 use tracedecay_automation::analytics::{
@@ -29,7 +29,7 @@ use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::util::{i64_field, query_i64, query_i64_result, query_rows, str_field};
 
-pub use tracedecay_usecases::analytics_bridge::{
+pub use tracedecay_application::analytics_bridge::{
     AnalyticsDiagnosticsPayloadV1, AnalyticsDiagnosticsRatiosV1, AnalyticsEventKindCountV1,
     AnalyticsHintEfficacyCategoryV1, AnalyticsHintEfficacyTotalsV1, AnalyticsHintEfficacyV1,
     AnalyticsHookNameCountV1, AnalyticsHookWindowV1, AnalyticsOutcomeCountV1,

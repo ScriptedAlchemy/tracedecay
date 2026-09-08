@@ -1,6 +1,6 @@
 //! Pinned configuration authority for Work proposal routes.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     RequestContext, ResolvedScope, WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1,
     WorkRoutingSnapshotV1,
 };

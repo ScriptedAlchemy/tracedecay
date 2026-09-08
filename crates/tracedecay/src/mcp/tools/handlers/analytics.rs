@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tracedecay_application::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
-use tracedecay_application::{
+use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_contracts::{
     CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
 };
 use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
@@ -418,7 +418,7 @@ pub(super) async fn handle_analytics(
 
     if section.is_none() {
         let observatory = hotpath::future!(
-            tracedecay_usecases::observability::observatory_read_model(
+            tracedecay_application::observability::observatory_read_model(
                 gdb,
                 scope.filter.as_deref(),
                 since,
@@ -426,8 +426,9 @@ pub(super) async fn handle_analytics(
             label = "mcp.analytics.report.observatory"
         )
         .await;
-        let observatory = tracedecay_usecases::observability::observatory_mcp_value(&observatory)
-            .map_err(config_error)?;
+        let observatory =
+            tracedecay_application::observability::observatory_mcp_value(&observatory)
+                .map_err(config_error)?;
         let provider_scope = if all_projects {
             None
         } else {
@@ -445,7 +446,7 @@ pub(super) async fn handle_analytics(
         };
         let provider_usage_db = if all_projects { None } else { project_sessions };
         let costs = hotpath::future!(
-            tracedecay_usecases::observability::costs_read_model(
+            tracedecay_application::observability::costs_read_model(
                 gdb,
                 provider_usage_db,
                 provider_scope.as_ref(),
@@ -456,7 +457,7 @@ pub(super) async fn handle_analytics(
         )
         .await;
         let costs =
-            tracedecay_usecases::observability::costs_mcp_value(&costs).map_err(config_error)?;
+            tracedecay_application::observability::costs_mcp_value(&costs).map_err(config_error)?;
         let object = value
             .as_object_mut()
             .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
