@@ -24,14 +24,28 @@ pub(super) fn git(project: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
-pub(super) fn tool_payload(response: &JsonRpcResponse) -> Value {
+/// The JSON payload a tool answered with, plus whether the tool flagged that
+/// answer as a refusal (`isError`).
+///
+/// A refusal is still an answer: the transport carried a typed payload the
+/// caller can act on, which is what separates it from a JSON-RPC error. Only
+/// callers that expect a refusal decode through this; [`tool_payload`] treats
+/// one as failure.
+pub(super) fn tool_answer(response: &JsonRpcResponse) -> (bool, Value) {
     assert!(response.error.is_none(), "tool failed: {response:?}");
     let result = response.result.as_ref().expect("tool result");
-    assert_ne!(result["isError"], true, "tool failed: {result}");
+    let refused = result["isError"] == true;
     let text = result["content"][0]["text"].as_str().expect("tool text");
-    serde_json::from_str(text).unwrap_or_else(|error| {
+    let payload = serde_json::from_str(text).unwrap_or_else(|error| {
         panic!("tool did not return JSON: {error}; result={result}; text={text}")
-    })
+    });
+    (refused, payload)
+}
+
+pub(super) fn tool_payload(response: &JsonRpcResponse) -> Value {
+    let (refused, payload) = tool_answer(response);
+    assert!(!refused, "tool failed: {payload}");
+    payload
 }
 
 /// Wall-clock attribution ledger for the long semantic journeys (#838).
