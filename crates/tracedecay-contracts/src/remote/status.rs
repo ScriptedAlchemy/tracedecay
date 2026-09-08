@@ -129,9 +129,8 @@ pub enum RemoteOperationalStatusReadV1 {
 /// root installs exactly one closure backed by the session-runtime owner;
 /// absence at a consumer is [`RemoteOperationalStatusReadV1::Unavailable`],
 /// never an empty success.
-pub type RemoteOperationalStatusReaderV1 = Arc<
-    dyn Fn() -> RemoteOperationalStatusReadV1 + Send + Sync + 'static,
->;
+pub type RemoteOperationalStatusReaderV1 =
+    Arc<dyn Fn() -> RemoteOperationalStatusReadV1 + Send + Sync + 'static>;
 
 impl RemoteOperationalStatusReadV1 {
     /// Projects the Doctor operational read from the same observation, so the
