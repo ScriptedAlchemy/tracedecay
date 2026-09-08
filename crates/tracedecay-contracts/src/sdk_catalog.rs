@@ -378,7 +378,8 @@ mod tests {
 
     use super::{
         application_http_executable_binding_registry, mounted_executable_binding_registries,
-        project_mcp_availability, sdk_executable_binding_registry,
+        preserves_shipped_mcp_sdk_transport, project_mcp_availability,
+        sdk_executable_binding_registry,
     };
     use crate::{
         application_catalog_contributions, context_scout_surface_catalog_contribution,
@@ -416,6 +417,7 @@ mod tests {
     fn sdk_registry_projects_every_mounted_family_including_handoff_and_multi_root() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
         let mounted = mounted_executable_binding_registries().expect("mounted registries");
+        let mcp_registry = crate::mcp_executable_binding_registry().expect("MCP registry");
         let mounted_operations = mounted
             .iter()
             .flat_map(|source| source.iter())
@@ -454,6 +456,19 @@ mod tests {
             let RouteExposureV1::Public { route_path, .. } = mounted_binding.exposure() else {
                 continue;
             };
+            if preserves_shipped_mcp_sdk_transport(operation_id, mcp_registry) {
+                // The one shipped SDK method that rides its MCP tool; the
+                // dedicated `session_lookup` test pins that transport.
+                assert!(
+                    matches!(
+                        projected_binding.transport(),
+                        SdkTransportBindingV1::McpTool { .. }
+                    ),
+                    "{} keeps its shipped MCP transport in the SDK",
+                    operation_id.as_str()
+                );
+                continue;
+            }
             assert!(
                 matches!(
                     projected_binding.transport(),
