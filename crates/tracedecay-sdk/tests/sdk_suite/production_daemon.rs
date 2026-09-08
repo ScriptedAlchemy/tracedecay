@@ -30,17 +30,17 @@ use tracedecay_sdk::operations::{TypedOperation, WorkflowGetDefinition, Workflow
 use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
 const REMOTE_TLS_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/localhost.crt.pem");
+    include_bytes!("../../../../tests/fixtures/remote_tls/localhost.crt.pem");
 const REMOTE_TLS_PRIVATE_KEY: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/localhost.key.pem");
+    include_bytes!("../../../../tests/fixtures/remote_tls/localhost.key.pem");
 const REMOTE_TLS_ROOT_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/localhost-root.crt.pem");
+    include_bytes!("../../../../tests/fixtures/remote_tls/localhost-root.crt.pem");
 const REMOTE_TLS_ALTERNATE_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/alternate.crt.pem");
+    include_bytes!("../../../../tests/fixtures/remote_tls/alternate.crt.pem");
 const REMOTE_TLS_ALTERNATE_PRIVATE_KEY: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/alternate.key.pem");
+    include_bytes!("../../../../tests/fixtures/remote_tls/alternate.key.pem");
 const REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
+    include_bytes!("../../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
 
 struct Daemon {
     child: Child,
