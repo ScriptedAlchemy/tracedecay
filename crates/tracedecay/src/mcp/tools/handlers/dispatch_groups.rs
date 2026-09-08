@@ -5,7 +5,7 @@ use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_code_index::intake::content_digest;
 use tracedecay_contracts::{ApplicationProblem, ResultContractRef, RetainedSurfaceOperation};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
-use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
+use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use crate::application_surface::resolve_catalog_tool_binding;

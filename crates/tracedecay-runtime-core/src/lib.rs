@@ -107,12 +107,6 @@ pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
-// #1090: `crates/tracedecay/src/mcp/tools/handlers/dispatch_groups.rs` belongs
-// to the session-refresh lane (#1108) and still imports these two through the
-// kernel; that lane repoints it to `tracedecay_privacy`, then this forward goes.
-pub mod privacy {
-    pub use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
-}
 mod profiled_lock;
 pub mod resident_memory;
 pub mod runtime_identity;

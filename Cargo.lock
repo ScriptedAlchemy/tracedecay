@@ -6842,7 +6842,6 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
