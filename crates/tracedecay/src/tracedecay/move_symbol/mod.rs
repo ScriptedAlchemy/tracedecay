@@ -20,14 +20,16 @@ use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::Visibility;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
-use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
+use tracedecay_source_edit::{publish_planned_source_edit, rollback_planned_source_edit_files};
+use tracedecay_usecases::tracedecay::{
+    PlannedSourceEditFile, SourceEditGraphReadV1, capture_planned_source_edit,
+    validate_planned_source_edit,
+};
 
 use super::TraceDecay;
 use super::edits::{
-    EditSymbolV1, LeadingKind, capture_planned_source_edit, classify_leading_line,
-    edit_success_message, edit_symbol_from_summary, publish_planned_source_edit,
-    resolve_symbol_for_edit, rollback_planned_source_edit_files, splice_lines,
-    validate_planned_source_edit,
+    EditSymbolV1, LeadingKind, classify_leading_line, edit_success_message,
+    edit_symbol_from_summary, resolve_symbol_for_edit, splice_lines,
 };
 
 use fs_guards::{
@@ -330,12 +332,12 @@ impl TraceDecay {
             let rollback = rollback_planned_source_edit_files(
                 &self.project_root,
                 &[
-                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                    PlannedSourceEditFile {
                         relative_path: source_rel.clone(),
                         expected: Some(source.clone()),
                         intended: Some(source_modified.clone()),
                     },
-                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                    PlannedSourceEditFile {
                         relative_path: dest_rel.clone(),
                         expected: dest_existed.then_some(dest_original.clone()),
                         intended: Some(dest_modified.clone()),

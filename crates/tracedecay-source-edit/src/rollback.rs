@@ -18,6 +18,7 @@ use super::journal::{
     SourceEditJournalV1, same_source_edit_authority,
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::rollback_planned_source_edit_files;
 use super::reconcile::recover_source_edit_transaction;
 use super::records::{applied_record, durable_record, interrupted_record, unknown_record};
 use super::verify::{application_contract_error, application_problem, config_error};
@@ -319,11 +320,14 @@ where
         return Ok(record.into_live_application_result(outcome, None));
     }
 
-    let apply_result = hotpath::future!(
-        graph.apply_source_edit_rollback(&retained.recovery_files),
-        label = "usecases.edit.rollback.apply"
-    )
-    .await;
+    // A caller-requested rollback of a completed edit is a live operation, so
+    // the graph is resynchronized wholesale by the daemon-owned scheduler
+    // rather than reindexed file by file: a rollback may delete a file the edit
+    // created, and a deleted path has no bytes left to reindex.
+    let apply_result = hotpath::measure_block!(
+        "usecases.edit.rollback.apply",
+        rollback_planned_source_edit_files(graph.project_root(), &retained.recovery_files)
+    );
     let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if apply_result.is_err() || committed_state != retained.expected_state {
         if committed_state != journal.expected_state {

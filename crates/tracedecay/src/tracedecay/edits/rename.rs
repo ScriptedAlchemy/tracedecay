@@ -12,15 +12,14 @@ use tracedecay_application::source_edit::{
 use tracedecay_domain::{
     ContentDigest, ManifestDigest, SnapshotFileDispositionV1, canonical_sha256,
 };
-use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
+use tracedecay_source_edit::{SourceEditFileAuthority, publish_planned_source_edit};
+use tracedecay_usecases::tracedecay::{
+    PlannedSourceEditFile, SourceEditGraphReadV1, capture_planned_source_edit,
+};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
-use super::file_authority::SourceEditFileAuthority;
-use super::plan::{
-    PlannedSourceEditFile, capture_planned_source_edit, publish_planned_source_edit,
-};
 use super::preview::{
     MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
 };

@@ -9,15 +9,17 @@
 use std::path::Path;
 
 use same_file::Handle;
-use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
+use tracedecay_runtime_core::path_safety::normalize_source_edit_relative_path;
+use tracedecay_source_edit::SourceEditFileAuthority;
+use tracedecay_usecases::tracedecay::{
+    SourceEditGraphReadV1, capture_planned_source_edit, validate_planned_source_edit,
+};
 
 use tracedecay_application::source_edit::{EditResult, InsertResult, MultiEditResult};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
 
-use super::file_authority::{SourceEditFileAuthority, normalize_source_edit_relative_path};
-use super::plan::{capture_planned_source_edit, validate_planned_source_edit};
 use super::preview::{
     MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
 };

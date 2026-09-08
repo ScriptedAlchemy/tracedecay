@@ -18,8 +18,7 @@ use tracedecay_graph_query::SourceReadRuntimePort;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_usecases::tracedecay::{
-    EditDiagnosticRecord, GraphFuture, PlannedSourceEditFile, SourceEditGraphReadV1,
-    SourceEditRuntimePort,
+    EditDiagnosticRecord, GraphFuture, SourceEditGraphReadV1, SourceEditRuntimePort,
 };
 
 use super::TraceDecay;
@@ -233,27 +232,6 @@ impl SourceEditRuntimePort for TraceDecay {
         Box::pin(TraceDecay::rename_symbol(
             self, graph, binding, new_name, dry_run,
         ))
-    }
-
-    fn recover_source_edit_preimages<'a>(
-        &'a self,
-        files: &'a [PlannedSourceEditFile],
-    ) -> GraphFuture<'a, ()> {
-        Box::pin(TraceDecay::recover_source_edit_preimages(self, files))
-    }
-
-    fn apply_source_edit_rollback<'a>(
-        &'a self,
-        files: &'a [PlannedSourceEditFile],
-    ) -> GraphFuture<'a, ()> {
-        Box::pin(TraceDecay::apply_source_edit_rollback(self, files))
-    }
-
-    fn commit_source_edit_postimages<'a>(
-        &'a self,
-        files: &'a [PlannedSourceEditFile],
-    ) -> GraphFuture<'a, ()> {
-        Box::pin(TraceDecay::commit_source_edit_postimages(self, files))
     }
 }
 

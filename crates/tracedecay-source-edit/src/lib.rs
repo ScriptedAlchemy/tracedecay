@@ -26,8 +26,10 @@ mod control;
 mod digest;
 mod dispatch;
 mod execute;
+mod file_authority;
 mod journal;
 mod outcome;
+mod plan;
 mod reconcile;
 mod records;
 mod rollback;
@@ -37,7 +39,9 @@ mod verify;
 mod test_support;
 
 pub use control::SourceEditEffectControlV1;
+pub use file_authority::SourceEditFileAuthority;
 pub use outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+pub use plan::{publish_planned_source_edit, rollback_planned_source_edit_files};
 
 use execute::{execute_source_edit_inner, resolve_source_edit_preview};
 use reconcile::reconcile_source_edit_effect_unknown_inner;

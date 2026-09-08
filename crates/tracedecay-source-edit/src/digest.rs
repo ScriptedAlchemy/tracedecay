@@ -12,6 +12,7 @@ use tracedecay_private_fs::framed_log::{
 
 use tracedecay_domain::errors::Result;
 
+use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
 use super::verify::{application_contract_error, config_error, domain_error, io_error};
 use super::{
     MAX_DURABLE_RECORD_BYTES, SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1,
@@ -50,7 +51,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
             })
             .collect::<Vec<_>>();
         let value = components.iter().collect::<PathBuf>();
-        tracedecay_usecases::tracedecay::validate_source_edit_candidate_parent(root, &value)?;
+        SourceEditFileAuthority::open(root, &value)?;
         normalized.push(
             components
                 .iter()
@@ -73,10 +74,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
 pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
-        let state = match tracedecay_usecases::tracedecay::read_source_edit_candidate(
-            root,
-            Path::new(relative),
-        )? {
+        let state = match read_source_edit_candidate(root, Path::new(relative))? {
             Some(bytes) => {
                 hotpath::gauge!("usecases.edit.digest_bytes").inc(bytes.len() as f64);
                 Some(hash_source_edit_content(&bytes)?)

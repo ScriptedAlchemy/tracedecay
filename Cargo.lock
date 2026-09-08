@@ -7018,7 +7018,10 @@ dependencies = [
 name = "tracedecay-source-edit"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "hotpath",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7116,7 +7119,6 @@ dependencies = [
 name = "tracedecay-usecases"
 version = "0.1.0"
 dependencies = [
- "cap-fs-ext",
  "cap-std",
  "criterion",
  "fs2",
