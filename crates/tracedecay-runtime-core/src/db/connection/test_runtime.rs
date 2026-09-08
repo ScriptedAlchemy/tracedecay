@@ -12,7 +12,7 @@ use tracedecay_store::{
 use super::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1, StoreRuntimeClientLease,
 };
-use crate::store_runtime::registry::{
+use crate::shard_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
     StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,

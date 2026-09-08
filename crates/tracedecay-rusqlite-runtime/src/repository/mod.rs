@@ -1,11 +1,11 @@
 //! Concrete adapters over already-open canonical SQLite shards.
 //!
-//! These executors are mounted in production. The daemon's store-runtime
-//! registry attaches every non-code shard through
+//! These executors are mounted in production. The shard-runtime registry
+//! attaches every non-code shard through
 //! [`RepositoryPhysicalAttachmentFactory`], which builds a
 //! [`ConcreteRepositoryWriteExecutor`] and a
 //! [`ConcreteRepositoryReadExecutor`]; see
-//! `crates/tracedecay-runtime-core/src/store_runtime/registry/ports.rs`. The
+//! `crates/tracedecay-runtime-core/src/shard_runtime/registry/ports.rs`. The
 //! executors still contain no
 //! locator, opener, migration installer, registry binding, or
 //! generic SQL surface — the attachment supplies all of those.

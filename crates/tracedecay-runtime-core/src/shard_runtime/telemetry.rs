@@ -434,7 +434,7 @@ mod tests {
     use tracedecay_store::{StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1};
 
     use super::*;
-    use crate::store_runtime::shard::{
+    use crate::shard_runtime::shard::{
         ShardRuntime, ShardRuntimeEvictionBlocker, ShardRuntimeLeaseKind,
     };
 

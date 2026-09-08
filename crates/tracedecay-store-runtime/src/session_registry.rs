@@ -28,20 +28,21 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
     LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
     StoreRuntimeClientLease, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
 };
-use tracedecay_runtime_core::store_runtime::resolver::{
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
+
+use crate::store_locator_resolver::{
     LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
     LocalStoreRuntimeResolverV1,
 };
-use tracedecay_session_temporal_store::relations::SessionRelationScope;
 
 mod code_graph;
 mod code_graph_manifest;
@@ -1023,7 +1024,7 @@ impl ProjectSessionClosedRetirementProofV1 {
                     && target.verified_locator() == &self.locator
         ) && matches!(
             self.store.outcomes(),
-            [tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { target }]
+            [tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { target }]
                 if target.binding() == &self.binding
         )
     }
@@ -1089,7 +1090,7 @@ enum ProjectRuntimeRetirementFaultV1 {
     ReservationTargetConsumed,
     Reconciliation(MemoryGraphReconciliationRetirementTerminalV1),
     GraphRefusal(tracedecay_graph_db::GraphDbError),
-    StoreStart(tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure),
+    StoreStart(tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure),
     Terminal {
         graph: GraphDbRetirementCommit,
         store: StoreRuntimeRetirementCommit,
@@ -1618,7 +1619,7 @@ impl ProjectSessionReplacementReservationV1 {
 
     fn reserve_store_target(
         &mut self,
-    ) -> Result<tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementTarget>
+    ) -> Result<tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementTarget>
     {
         let session = self.sessions.as_mut().ok_or_else(|| {
             session_registry_error(
@@ -2543,7 +2544,7 @@ struct ProjectSessionNativeRetirementV1 {
     replacement: Option<ProjectSessionReplacementReservationV1>,
     graph: Option<tracedecay_graph_db::GraphDbRetirementReservation>,
     store:
-        Option<tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementReservation>,
+        Option<tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementReservation>,
     graph_native_boundary: bool,
 }
 
@@ -2551,7 +2552,7 @@ impl ProjectSessionNativeRetirementV1 {
     fn new(
         replacement: ProjectSessionReplacementReservationV1,
         graph: tracedecay_graph_db::GraphDbRetirementReservation,
-        store: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementReservation,
+        store: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementReservation,
     ) -> Self {
         Self {
             replacement: Some(replacement),
@@ -2573,7 +2574,7 @@ impl ProjectSessionNativeRetirementV1 {
     fn store_mut(
         &mut self,
     ) -> Result<
-        &mut tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementReservation,
+        &mut tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementReservation,
     > {
         self.store.as_mut().ok_or_else(|| {
             session_registry_error(
@@ -2829,9 +2830,9 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     pub fn runtime_telemetry(
         &self,
-    ) -> tracedecay_runtime_core::store_runtime::telemetry::RuntimeTelemetryProjection {
+    ) -> tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryProjection {
         let inventory = self.registry.inventory(AdmissionConfigV1::default(), None);
-        tracedecay_runtime_core::store_runtime::telemetry::project_runtime_telemetry(&inventory)
+        tracedecay_runtime_core::shard_runtime::telemetry::project_runtime_telemetry(&inventory)
     }
 
     #[hotpath::skip]
@@ -3169,7 +3170,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub fn lookup_store_runtime(
         &self,
         expected: &tracedecay_store::StoreRuntimeBindingV1,
-    ) -> tracedecay_runtime_core::store_runtime::registry::StoreRuntimeLookup {
+    ) -> tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeLookup {
         self.registry.lookup(expected)
     }
 

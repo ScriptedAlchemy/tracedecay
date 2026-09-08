@@ -694,7 +694,7 @@ mod tests {
         ));
         assert!(matches!(
             runtime.dispatch_submit(submit, submit_probe).await,
-            Err(crate::store_runtime::registry::StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            Err(crate::shard_runtime::registry::StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "submit through database client",
                 ..
             })

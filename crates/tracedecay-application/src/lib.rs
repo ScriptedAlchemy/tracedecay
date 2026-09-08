@@ -13,7 +13,7 @@
 //!
 //! Graph reads use the Grafeo-backed
 //! `tracedecay_global_db::VerifiedGraphRuntimePortV1` (defined in
-//! `tracedecay-runtime-core::store_runtime::verified_graph`) rather than a
+//! `tracedecay_runtime_core::shard_runtime`) rather than a
 //! parallel port owned here.
 //! Source editing is its own vertical slice in `tracedecay-source-edit`:
 //! planning, preview capture, journal, rollback, and reconciliation live

@@ -6,9 +6,11 @@
 //! migrations, the observation/memory/session stores, git and worktree
 //! topology reads, process-level leases, and the privacy detectors.
 //!
-//! ## Outward seams that could not follow the kernel
+//! ## What sits above this kernel
 //!
-//! `daemon::store_runtime::session_registry` stayed in the root crate: it
+//! [`shard_runtime`] is the per-shard runtime and registry that `db::Database`
+//! is built on. The store runtime that decides which shards a daemon opens and
+//! how they converge, retire, and shut down is `tracedecay-store-runtime`; it
 //! stores `RegisteredGlobalDbLeaseV1` in its public surface, and
 //! `tracedecay-global-db` depends on this kernel — so the kernel taking that
 //! edge back would be a Cargo cycle. `global_db`, sessions, and semantic
@@ -18,10 +20,10 @@
 //! session-scoped shard uses to install the registered global/session schema
 //! (owned by `tracedecay-global-db`, which this crate cannot name). It
 //! **fails closed**: an unregistered installer refuses the open rather than
-//! publishing an uninitialised store. The root registers it from
-//! `daemon::store_runtime::register_registered_schema_installer()`, called at
-//! the top of `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor
-//! of the production registry.
+//! publishing an uninitialised store. `tracedecay-store-runtime` registers it
+//! from `register_registered_schema_installer()`, called at the top of
+//! `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor of the
+//! production registry.
 //!
 //! `test-transport` forwards to `tracedecay-rusqlite-runtime/test-transport`.
 //! Platform cfgs travel with the code that needs them: `cfg(windows)`
@@ -101,10 +103,20 @@ pub mod privacy;
 mod profiled_lock;
 pub mod resident_memory;
 pub mod runtime_identity;
+pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store;
-pub mod store_runtime;
+// #1074: forwarding kept only for lane #1103's fenced files
+// crates/tracedecay-code-index-runtime/src/code_graph_seat.rs and
+// crates/tracedecay-code-index-runtime/src/code_index_scheduler.rs, which must
+// migrate to `shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1`; delete
+// this module with that migration.
+pub mod store_runtime {
+    pub mod registry {
+        pub use crate::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
+    }
+}
 pub mod sync;
 pub mod text;
 pub mod timeutil;

@@ -1,10 +1,12 @@
-//! Canonical daemon registry for store runtimes.
+//! Process-wide registry of published shard runtimes.
 //!
 //! Entries are keyed only by typed shard identity and incarnation. Locator
 //! resolution starts after an opening entry wins singleflight, and publication
-//! retains exactly one concrete [`ShardRuntime`] for that binding.
-// The typed failure stays by-value at this boundary; `resolver.rs` documents
-// the boxed alternative if the variant set grows further.
+//! retains exactly one concrete [`ShardRuntime`] for that binding. Which shards
+//! get opened, and when they retire, is decided above this kernel by the store
+//! runtime (`tracedecay-store-runtime`) through the ports in `ports.rs`.
+// The typed failure stays by-value at this boundary; the store-runtime
+// resolver documents the boxed alternative if the variant set grows further.
 #![allow(clippy::result_large_err)]
 
 mod attachment;
@@ -1546,7 +1548,7 @@ impl StoreRuntimeRegistry {
                 config: StoreRuntimeRegistryConfig::default(),
                 state: hotpath::mutex!(
                     Mutex::new(RegistryState::default()),
-                    label = "runtime_core.store_runtime.registry_state"
+                    label = "runtime_core.shard_runtime.registry_state"
                 ),
             }),
         }
@@ -1577,7 +1579,7 @@ impl StoreRuntimeRegistry {
                 config,
                 state: hotpath::mutex!(
                     Mutex::new(RegistryState::default()),
-                    label = "runtime_core.store_runtime.registry_state"
+                    label = "runtime_core.shard_runtime.registry_state"
                 ),
             }),
         })

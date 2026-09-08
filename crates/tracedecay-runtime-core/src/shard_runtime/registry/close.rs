@@ -429,7 +429,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::store_runtime::registry::{
+    use crate::shard_runtime::registry::{
         LifecycleShardRuntimePublisher, PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot,
         ProfileAuthorityPinResult, PublishedShardRuntime, ResolvedStoreLocator,
         ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeClientLease,
@@ -437,7 +437,7 @@ mod tests {
         StoreRuntimeOpenResult, StoreRuntimeRegistryConfig, StoreRuntimeRegistryFuture,
         StoreRuntimeResolver,
     };
-    use crate::store_runtime::shard::ShardRuntime;
+    use crate::shard_runtime::shard::ShardRuntime;
 
     fn id<T>(value: &str) -> T
     where

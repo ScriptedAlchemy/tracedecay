@@ -16,7 +16,7 @@ use tracedecay_graph_db::{
     GraphProjectorRevision, GraphProperty, GraphPropertyName, NeverCancelled,
     VerifiedGraphSnapshot, take_graph_db_traversal_counters,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 use super::test_support::MemoryEvidenceGraphRuntime;
 use super::*;

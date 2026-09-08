@@ -18,20 +18,28 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+// `hotpath::rw_lock!` returns an instrumented wrapper when profiling is on and
+// its std argument when it is off, so the field type is spelled through the
+// hotpath aliases (each is its std counterpart in the no-op build).
+use hotpath::rw_locks::{
+    RwLock as ProfiledRwLock, RwLockReadGuard as ProfiledRwLockReadGuard,
+    RwLockWriteGuard as ProfiledRwLockWriteGuard,
+};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_runtime_core::db::DatabaseAuthority;
+use tracedecay_runtime_core::memory::user::user_memory_db_path;
+use tracedecay_runtime_core::shard_runtime::registry::{
+    ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
+    StoreRuntimeRegistryFuture, StoreRuntimeResolver,
+};
+use tracedecay_runtime_core::storage;
+use tracedecay_sessions::runtime::user_sessions_db_path;
 use tracedecay_store::{
     BrainId, BrainNodeId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1,
     UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest as store_locator_digest,
 };
-
-use super::registry::{
-    ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
-    StoreRuntimeRegistryFuture, StoreRuntimeResolver,
-};
-use crate::profiled_lock::{ProfiledRwLock, ProfiledRwLockReadGuard, ProfiledRwLockWriteGuard};
-use crate::storage;
 
 mod graph;
 
@@ -194,11 +202,11 @@ impl LocalStoreRuntimeResolverV1 {
             profile_authority,
             project_authorities: Arc::new(hotpath::rw_lock!(
                 RwLock::new(BTreeMap::new()),
-                label = "runtime_core.store_runtime.resolver_project_authorities"
+                label = "store_runtime.resolver_project_authorities"
             )),
             code_authorities: Arc::new(hotpath::rw_lock!(
                 RwLock::new(BTreeMap::new()),
-                label = "runtime_core.store_runtime.resolver_code_authorities"
+                label = "store_runtime.resolver_code_authorities"
             )),
         }
     }
@@ -390,7 +398,7 @@ impl LocalStoreRuntimeResolverV1 {
             }
             StoreShardScopeV1::ProfileMemory => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &canonical_profile_root.join(crate::memory::user::USER_MEMORY_DB_FILENAME),
+                    &user_memory_db_path(&canonical_profile_root),
                     &canonical_profile_root,
                 )?;
                 verified_locator(
@@ -404,8 +412,7 @@ impl LocalStoreRuntimeResolverV1 {
             }
             StoreShardScopeV1::ProfileSessions => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &canonical_profile_root
-                        .join(crate::store_runtime::profile_paths::USER_SESSIONS_DB_FILENAME),
+                    &user_sessions_db_path(&canonical_profile_root),
                     &canonical_profile_root,
                 )?;
                 verified_locator(
@@ -625,7 +632,7 @@ impl StoreRuntimeResolver for LocalStoreRuntimeResolverV1 {
         &'a self,
         key: &'a StoreRuntimeKey,
         mode: StoreRuntimeOpenMode,
-        database_authority: Option<&'a crate::db::DatabaseAuthority>,
+        database_authority: Option<&'a DatabaseAuthority>,
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
     {
         Box::pin(async move {
@@ -1103,10 +1110,6 @@ fn require_local_filesystem(
 fn canonical_locator_digest(path: &Path) -> LocalStoreLocatorResult<LocatorDigest> {
     store_locator_digest(path)
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)
-}
-
-pub fn canonical_store_locator_digest(path: &Path) -> Result<LocatorDigest, String> {
-    canonical_locator_digest(path).map_err(|reason| format!("{reason:?}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1688,9 +1691,7 @@ mod tests {
         let profile_memory = resolved(resolve_as_local(&resolver, &profile_memory_key));
         assert_eq!(
             profile_memory.locator().path(),
-            fixture
-                .profile_root
-                .join(crate::memory::user::USER_MEMORY_DB_FILENAME)
+            user_memory_db_path(&fixture.profile_root)
         );
         assert_eq!(
             profile_memory.metadata().kind,
@@ -1707,9 +1708,7 @@ mod tests {
         let profile_sessions = resolved(resolve_as_local(&resolver, &profile_sessions_key));
         assert_eq!(
             profile_sessions.locator().path(),
-            fixture
-                .profile_root
-                .join(crate::store_runtime::profile_paths::USER_SESSIONS_DB_FILENAME)
+            user_sessions_db_path(&fixture.profile_root)
         );
         assert_eq!(
             profile_sessions.metadata().kind,

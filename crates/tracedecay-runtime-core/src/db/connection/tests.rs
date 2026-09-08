@@ -7,7 +7,7 @@ use super::{
     platform_safe_mmap_size,
 };
 use crate::db::DatabaseOwnerV1;
-use crate::store_runtime::VerifiedGraphRuntimePortV1;
+use crate::shard_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     VerifiedGraphSnapshot,
@@ -66,14 +66,14 @@ macro_rules! assert_retained_purpose_adapter_blocks_one_client {
             .unwrap()
             .into_store_retirement_target()
             .unwrap();
-        let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+        let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
             $control.registry().reserve_retirement_batch(vec![target])
         else {
             panic!("a retained purpose adapter must block database owner retirement");
         };
         assert!(refusal.blockers().iter().any(|blocker| matches!(
             blocker,
-            crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+            crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
                 count: 1,
                 ..
             }
@@ -829,11 +829,11 @@ async fn owner_issuance_and_retirement_fence_race_without_losing_the_exact_attac
     ) {
         (
             Ok(lease),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
         ) => {
             assert!(refusal.blockers().iter().any(|blocker| matches!(
                 blocker,
-                crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+                crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
                     count: 1,
                     ..
                 }
@@ -842,7 +842,7 @@ async fn owner_issuance_and_retirement_fence_race_without_losing_the_exact_attac
         }
         (
             Err(DatabaseOwnerErrorV1::RetirementFenced),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
         ) => drop(reservation),
         _ => panic!(
             "issuance and fencing must linearize as one client blocker or one exact reservation"
@@ -875,7 +875,7 @@ async fn weak_owner_issuer_does_not_block_retirement_and_restores_ready_issuance
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a weak issuer must not retain a Store client or block retirement");
@@ -928,11 +928,11 @@ async fn weak_owner_issuer_and_retirement_fence_race_as_client_or_reservation() 
     ) {
         (
             Ok(lease),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
         ) => {
             assert!(refusal.blockers().iter().any(|blocker| matches!(
                 blocker,
-                crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+                crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
                     count: 1,
                     ..
                 }
@@ -941,7 +941,7 @@ async fn weak_owner_issuer_and_retirement_fence_race_as_client_or_reservation() 
         }
         (
             Err(DatabaseOwnerWeakLeaseIssuerErrorV1::Retiring),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
         ) => drop(reservation),
         _ => panic!(
             "weak issuance and fencing must linearize as one client blocker or one exact reservation"
@@ -971,7 +971,7 @@ async fn weak_owner_issuer_denies_terminal_and_dropped_owner() {
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a weak issuer must not block terminal retirement");
@@ -1026,14 +1026,14 @@ async fn owner_issued_database_clones_share_one_external_client_blocker() {
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a cloned database issuance must remain one external client blocker");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1073,14 +1073,14 @@ async fn derived_connection_snapshot_and_telemetry_retain_the_one_client_blocker
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a derived database handle must retain the exact client token");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1153,14 +1153,14 @@ async fn independently_issued_runtime_clients_are_separate_retirement_blockers()
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("independently issued runtime clients must block owner retirement");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 2,
             ..
         }
@@ -1329,14 +1329,14 @@ async fn graph_publication_storage_retains_the_issuing_client_token() {
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("graph publication storage must retain its issuing client token");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1374,14 +1374,14 @@ async fn semantic_vector_staging_retains_the_issuing_client_token() {
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("semantic staging must retain its issuing client token");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1412,7 +1412,7 @@ async fn owner_reservation_restore_faults_when_the_exact_attachment_is_missing_o
     assert!(matches!(
         missing_owner.issue_lease(),
         Err(DatabaseOwnerErrorV1::RetirementFaulted(
-            crate::store_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
+            crate::shard_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
         ))
     ));
 
@@ -1432,7 +1432,7 @@ async fn owner_reservation_restore_faults_when_the_exact_attachment_is_missing_o
     assert!(matches!(
         stale_owner.issue_lease(),
         Err(DatabaseOwnerErrorV1::RetirementFaulted(
-            crate::store_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
+            crate::shard_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
         ))
     ));
 }
@@ -1488,14 +1488,14 @@ async fn read_write_owner_can_issue_independent_read_only_clients_without_escala
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("both independently issued clients must block owner retirement");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 3,
             ..
         }
@@ -1640,7 +1640,7 @@ async fn owner_reservation_rollback_preserves_database_inner_and_publication_ide
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("the exact owner attachment must be reservable without a count allowance");
@@ -1678,7 +1678,7 @@ async fn paired_target_composition_refusal_preserves_exact_inputs_for_ready_rest
     .unwrap();
     let (owner, runtime, control) = fixture.into_parts();
     drop(runtime);
-    let key = crate::store_runtime::registry::StoreRuntimeKey::new(
+    let key = crate::shard_runtime::registry::StoreRuntimeKey::new(
         control.binding().shard_id.clone(),
         control.binding().incarnation,
     );
@@ -1714,13 +1714,13 @@ async fn paired_target_composition_refusal_preserves_exact_inputs_for_ready_rest
     // the graph; cancellation returns it through the normal paired handoff.
     let database_reservation = owner.reserve_retirement().unwrap();
     let retry_target =
-        crate::store_runtime::registry::StoreRuntimeRetirementTarget::with_owner_attachments(
+        crate::shard_runtime::registry::StoreRuntimeRetirementTarget::with_owner_attachments(
             owner.registered_binding().clone(),
             authority.clone(),
             Box::new(database_reservation),
             graph_target,
         );
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control
             .registry()
             .reserve_retirement_batch(vec![retry_target])
@@ -1762,7 +1762,7 @@ async fn paired_database_and_graph_owner_target_restores_the_exact_database_owne
     let inner = Arc::as_ptr(&first.inner);
     drop(first);
 
-    let key = crate::store_runtime::registry::StoreRuntimeKey::new(
+    let key = crate::shard_runtime::registry::StoreRuntimeKey::new(
         control.binding().shard_id.clone(),
         control.binding().incarnation,
     );
@@ -1776,7 +1776,7 @@ async fn paired_database_and_graph_owner_target_restores_the_exact_database_owne
         .unwrap()
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("paired owner target must reserve one exact Store entry");
@@ -1812,7 +1812,7 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
     let issued = owner.issue_lease().unwrap();
     let inner = Arc::as_ptr(&issued.inner);
     drop(issued);
-    let key = crate::store_runtime::registry::StoreRuntimeKey::new(
+    let key = crate::shard_runtime::registry::StoreRuntimeKey::new(
         control.binding().shard_id.clone(),
         control.binding().incarnation,
     );
@@ -1828,14 +1828,14 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
 
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a live client must block the exact paired owner target");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1858,7 +1858,7 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
         .unwrap()
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("the restored paired owner target must reserve without remounting");
@@ -1880,7 +1880,7 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
         .unwrap()
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("the exact graph target must remain reusable after cancellation");
@@ -1909,7 +1909,7 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
     let (owner, runtime, control) = fixture.into_parts();
     drop(runtime);
     let external = match control.registry().lookup(control.binding()) {
-        crate::store_runtime::registry::StoreRuntimeLookup::Ready(lease) => lease,
+        crate::shard_runtime::registry::StoreRuntimeLookup::Ready(lease) => lease,
         other => panic!("expected the exact registered runtime before retirement: {other:?}"),
     };
     let external_clone = external.clone();
@@ -1921,21 +1921,21 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("external client and operation must block the exact owner reservation");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
     )));
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::OperationLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::OperationLeases {
             count: 1,
             ..
         }
@@ -1949,7 +1949,7 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("releasing external client tokens must permit exact retirement");
@@ -1958,7 +1958,7 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
     assert!(
         matches!(
             commit.outcomes(),
-            [crate::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }]
+            [crate::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }]
         ),
         "unexpected retirement outcomes: {:?}",
         commit.outcomes()

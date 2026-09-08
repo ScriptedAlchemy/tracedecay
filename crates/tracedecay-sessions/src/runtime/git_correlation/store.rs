@@ -15,7 +15,7 @@ use tracedecay_graph_db::{
 };
 use tracedecay_runtime_core::{
     db::engine::{Executor, QueryExecutor},
-    store_runtime::VerifiedGraphRuntimePortV1,
+    shard_runtime::VerifiedGraphRuntimePortV1,
 };
 use tracedecay_store::FactReadControl;
 

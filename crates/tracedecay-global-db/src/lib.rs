@@ -144,7 +144,7 @@ pub use remote_deletion::{
     RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
     RemoteDeletionTombstoneTransitionOutcome,
 };
-pub use tracedecay_runtime_core::store_runtime::{
+pub use tracedecay_runtime_core::shard_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
 };
 pub use tracedecay_sessions::runtime::TranscriptPersistenceError;

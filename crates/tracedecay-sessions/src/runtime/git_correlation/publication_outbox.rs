@@ -277,7 +277,7 @@ mod tests {
         Executor, QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior,
         params,
     };
-    use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+    use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
     use super::{
         enqueue_git_evidence_publication, pending_git_evidence_publication_count,

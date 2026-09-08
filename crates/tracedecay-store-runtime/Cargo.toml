@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Daemon project-store and session-registry runtime for TraceDecay"
+description = "Canonical TraceDecay store runtime: project-store, shard, and session lifecycle over the database kernels"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [lib]
@@ -118,7 +118,11 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+# glibc `malloc_trim` for allocator release, and `statfs(2)` for the store
+# locator resolver's macOS store-locality detection (Linux reads
+# `/proc/self/mountinfo` instead; `MNT_LOCAL` is the kernel's direct answer
+# to "is this volume local").
+[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

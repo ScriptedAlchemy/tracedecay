@@ -9,7 +9,7 @@
 
 /// Installer for the registered global/session schema.
 ///
-/// `store_runtime::registry` initialises a freshly created profile- or
+/// `shard_runtime::registry` initialises a freshly created profile- or
 /// session-scoped shard by running the registered global-database schema
 /// against the attachment it just opened. That schema lives in
 /// `tracedecay-global-db`, which depends on this crate — so the kernel cannot
