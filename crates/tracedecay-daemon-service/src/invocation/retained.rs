@@ -1,28 +1,49 @@
 use super::*;
+use crate::project_runtime::ProjectRuntimePublicationStateV1;
+
+/// The response for an admitted project route whose retained runtime is not
+/// registered.
+///
+/// The retained runtime registers in the full server's owner phase, behind the
+/// core publication that already admits this route. Under a warming
+/// publication the missing runtime is that owner still mounting — the same
+/// retryable state the primitive and configuration owners answer — and under
+/// a failed publication it is the terminal owner failure. Only a settled
+/// publication without a retained owner (a read-only project database mounts
+/// none) is truthfully "no retained runtime is registered for this scope".
+pub(super) fn missing_retained_runtime_problem(
+    publication: Option<ProjectRuntimePublicationStateV1>,
+    request_id: String,
+) -> DaemonInvocationResponse {
+    if matches!(
+        publication,
+        Some(ProjectRuntimePublicationStateV1::Warming | ProjectRuntimePublicationStateV1::Failed)
+    ) {
+        return missing_registered_owner_problem(publication, request_id);
+    }
+    DaemonInvocationResponse::with_outcome(
+        request_id,
+        DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "application.retained.authority-unavailable".to_owned(),
+                message: "The retained application authority is unavailable: \
+                          no retained runtime is registered for this scope."
+                    .to_owned(),
+            }),
+        },
+    )
+}
 
 #[hotpath::measure(label = "daemon.service.retained.execute", future = true)]
 pub(super) async fn execute_retained_application(
     request_id: String,
-    registered: Option<RegisteredRetainedRuntime>,
+    registered: RegisteredRetainedRuntime,
     request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
     request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> DaemonInvocationResponse {
-    let Some(registered) = registered else {
-        return DaemonInvocationResponse::with_outcome(
-            request_id,
-            DaemonInvocationOutcome::ApplicationProblem {
-                problem: ApplicationProblem::unavailable(SafeDiagnostic {
-                    code: "application.retained.authority-unavailable".to_owned(),
-                    message: "The retained application authority is unavailable: \
-                              no retained runtime is registered for this scope."
-                        .to_owned(),
-                }),
-            },
-        );
-    };
     let effective_deadline = Deadline {
         expires_at: UtcMicros(deadline.expires_at.0.min(registered.grant.expires_at.0)),
     };

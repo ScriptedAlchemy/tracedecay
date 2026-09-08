@@ -468,6 +468,51 @@ fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
     error_message_is_project_open_retryable(&error.to_string())
 }
 
+/// The delay a completed tool result directs before the same request is sent
+/// again, when its typed problem is a retryable pre-admission state.
+///
+/// A project-scoped owner that registers behind the core publication (the
+/// retained memory authority, the configuration runtime) answers a
+/// `RetryDirective::AfterDelay` unavailable while it is still mounting. The
+/// daemon renders that record under the tool result's `problem` member, so
+/// the one-shot client reads the directive from the same field every MCP
+/// client does. An admitted terminal (a partial effect, a permanent owner
+/// failure) never directs a delay and is the answer.
+fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration> {
+    let record: tracedecay_contracts::ApplicationProblemRecord =
+        serde_json::from_value(result.get("problem")?.clone()).ok()?;
+    record.pre_admission_retry_delay()
+}
+
+/// How long to wait before re-sending the request whose outcome is `result`,
+/// or `None` when that outcome is the answer.
+///
+/// Two states are ridden out: the daemon's project-open refusal (a JSON-RPC
+/// error carrying the warming hint or a saturated open queue) on the client's
+/// own cadence, and a completed result whose typed problem directs an
+/// after-delay retry, on the delay the directive names. Neither is retried
+/// past `deadline`: when the budget cannot hold the wait, the daemon's own
+/// typed state — a warming project, a still-mounting authority — is the
+/// truthful answer, not the client's deadline bookkeeping.
+fn project_open_retry_wait(
+    result: &Result<serde_json::Value>,
+    deadline: Instant,
+) -> Option<Duration> {
+    let remaining = DaemonClientDeadline::until(deadline)
+        .and_then(|client_deadline| client_deadline.remaining())
+        .ok()?;
+    match result {
+        Err(error) if is_project_open_retryable_error(error) => {
+            Some(remaining.min(PROJECT_OPEN_RETRY_INTERVAL))
+        }
+        Err(_) => None,
+        Ok(result) => {
+            let delay = tool_result_retry_after_delay(result)?;
+            (remaining > delay).then_some(delay)
+        }
+    }
+}
+
 #[hotpath::measure(label = "daemon.core.call_tool_retry", future = true)]
 async fn call_tool_with_project_open_retry(
     socket_path: &Path,
@@ -477,30 +522,18 @@ async fn call_tool_with_project_open_retry(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     loop {
-        match call_tool_within(
+        let result = call_tool_within(
             socket_path,
             handshake,
             tool_name,
             arguments.clone(),
             deadline,
         )
-        .await
-        {
-            Err(error) if is_project_open_retryable_error(&error) => {
-                // When the budget is spent, the daemon's own typed state (a
-                // warming project, a still-mounting authority) is the truthful
-                // answer; the client's deadline bookkeeping error is not.
-                let remaining = DaemonClientDeadline::until(deadline)
-                    .and_then(|client_deadline| client_deadline.remaining());
-                match remaining {
-                    Ok(remaining) => {
-                        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
-                    }
-                    Err(_) => return Err(error),
-                }
-            }
-            result => return result,
-        }
+        .await;
+        let Some(wait) = project_open_retry_wait(&result, deadline) else {
+            return result;
+        };
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -508,9 +541,10 @@ async fn call_tool_with_project_open_retry(
 ///
 /// Production one-shot clients must not read forever against a stalled-but
 /// accepting daemon. The request deadline travels on the wire; the local read
-/// waits that deadline plus the 30s response grace. A warming project still
-/// retries for at most the 15s open grace, never past this envelope. Callers
-/// that need a different budget use [`call_default_tool_within`] or
+/// waits that deadline plus the 30s response grace. A warming project, or an
+/// owner still mounting behind its core publication, still retries for at
+/// most the 15s open grace, never past this envelope. Callers that need a
+/// different budget use [`call_default_tool_within`] or
 /// [`call_default_tool_awaiting_project_open`].
 pub async fn call_default_tool(
     handshake: &DaemonHandshake,
@@ -519,28 +553,27 @@ pub async fn call_default_tool(
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
     let deadline = Instant::now() + tool_request_deadline()?;
-    match call_tool_within(
+    let result = call_tool_within(
         &socket_path,
         handshake,
         tool_name,
         arguments.clone(),
         deadline,
     )
+    .await;
+    let retry_deadline = (Instant::now() + PROJECT_OPEN_RETRY_GRACE).min(deadline);
+    let Some(wait) = project_open_retry_wait(&result, retry_deadline) else {
+        return result;
+    };
+    tokio::time::sleep(wait).await;
+    call_tool_with_project_open_retry(
+        &socket_path,
+        handshake,
+        tool_name,
+        arguments,
+        retry_deadline,
+    )
     .await
-    {
-        Err(error) if is_project_open_retryable_error(&error) => {
-            let retry_deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
-            call_tool_with_project_open_retry(
-                &socket_path,
-                handshake,
-                tool_name,
-                arguments,
-                retry_deadline.min(deadline),
-            )
-            .await
-        }
-        result => result,
-    }
 }
 
 pub async fn call_default_tool_within(
@@ -556,14 +589,17 @@ pub async fn call_default_tool_within(
     call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
-/// Calls a daemon tool, waiting out a warming project until `deadline`.
+/// Calls a daemon tool, waiting out a warming project — and the owners that
+/// mount behind its core publication — until `deadline`.
 ///
 /// Bootstrap callers deliberately trigger the cold open they are waiting for,
 /// so the warming hint is progress rather than an answer: `tracedecay init`
-/// asks for a status it can only get after the open completes. That is the
-/// opposite of [`call_default_tool_within`], whose callers want the typed
-/// warming state returned to them, and wider than [`call_default_tool`], whose
-/// grace is sized for an already-open project rather than a first index.
+/// asks for a status it can only get after the open completes, and
+/// `tracedecay tool` wants the retained owner's answer, not its still-mounting
+/// state. That is the opposite of [`call_default_tool_within`], whose callers
+/// want the typed warming state returned to them, and wider than
+/// [`call_default_tool`], whose grace is sized for an already-open project
+/// rather than a first index.
 pub async fn call_default_tool_awaiting_project_open(
     handshake: &DaemonHandshake,
     tool_name: &str,

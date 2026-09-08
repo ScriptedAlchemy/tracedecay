@@ -4,6 +4,7 @@ use serde::{
     de::{IntoDeserializer, MapAccess, SeqAccess, Visitor},
 };
 use std::fmt;
+use std::time::Duration;
 use tracedecay_tool_catalog::{SchemaId, SchemaRef};
 
 use crate::context::{RequestId, ResolvedScope};
@@ -588,6 +589,18 @@ impl ApplicationProblemRecord {
 
     pub fn is_admitted_terminal(&self) -> bool {
         self.terminality == ProblemTerminality::AdmittedTerminal
+    }
+
+    /// The delay this problem directs before the same request may be sent
+    /// again, when it is a retryable pre-admission state such as a warming or
+    /// still-mounting authority. Admitted terminals and every other retry
+    /// directive answer `None`: nothing about the request should be repeated
+    /// on a timer.
+    pub fn pre_admission_retry_delay(&self) -> Option<Duration> {
+        (self.retryable && self.retry == RetryDirective::AfterDelay && self.is_pre_admission())
+            .then_some(self.retry_after_millis)
+            .flatten()
+            .map(Duration::from_millis)
     }
 
     pub fn source(&self) -> &ApplicationProblem {
