@@ -63,6 +63,15 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"
 
+# Windows store-locality detection: drive type and volume filesystem name for
+# the locator's metadata (`GetDriveTypeW`, `GetVolumeInformationW`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
