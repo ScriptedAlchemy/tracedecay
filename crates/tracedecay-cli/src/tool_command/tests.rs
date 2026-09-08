@@ -1,7 +1,9 @@
 use super::*;
 use serde_json::{Value, json};
+use tracedecay::application_surface::retained::decode_request as decode_retained_request;
 use tracedecay::application_surface::{
     parse_http_application_surface_request, resolve_application_surface_dispatch_with_controls,
+    resolve_catalog_tool_binding,
 };
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, OpaqueCursor, PageRequest, RequestId,
@@ -380,6 +382,49 @@ fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
 
     assert_eq!(dispatch.project_path, None);
     assert!(!dispatch.allow_init);
+}
+
+#[test]
+fn profile_scoped_session_refresh_dispatch_is_projectless() {
+    for tool_name in [
+        "tracedecay_session_refresh_begin",
+        "tracedecay_session_refresh_status",
+        "tracedecay_session_refresh_cancel",
+    ] {
+        let dispatch = DaemonToolDispatch::for_tool(
+            Some("/explicit/project".to_owned()),
+            tool_name,
+            &json!({ "scope": { "kind": "profile", "profile_id": "profile.refresh" } }),
+        );
+        assert_eq!(dispatch.project_path, None, "{tool_name}");
+        assert!(!dispatch.allow_init, "{tool_name}");
+
+        let project_scoped = DaemonToolDispatch::for_tool(
+            Some("/explicit/project".to_owned()),
+            tool_name,
+            &json!({ "scope": { "kind": "project", "project": { "id": "project.refresh" } } }),
+        );
+        assert_eq!(
+            project_scoped.project_path,
+            Some(tracedecay::config::resolve_path(Some(
+                "/explicit/project".to_owned()
+            ))),
+            "{tool_name}"
+        );
+    }
+    // A non-refresh tool with an object `scope` is not a profile request: it
+    // keeps its explicit project.
+    let dispatch = DaemonToolDispatch::for_tool(
+        Some("/explicit/project".to_owned()),
+        "tracedecay_message_search",
+        &json!({ "scope": { "kind": "profile" } }),
+    );
+    assert_eq!(
+        dispatch.project_path,
+        Some(tracedecay::config::resolve_path(Some(
+            "/explicit/project".to_owned()
+        )))
+    );
 }
 
 #[test]
@@ -1260,14 +1305,162 @@ fn transport_equivalent_requests() -> Vec<TransportEquivalentRequest> {
     requests
 }
 
+/// The canonical session refresh request in both owner scopes. The daemon
+/// decodes exactly this shape on every transport; the CLI and MCP arguments
+/// are the HTTP body plus the presentation-only `format`.
+fn session_refresh_equivalent_requests() -> Vec<TransportEquivalentRequest> {
+    let session = |store_id: &str, root_id: &str| json!({ "id": "session.refresh", "store_id": store_id, "root_id": root_id });
+    let target = json!({
+        "temporal_mode": { "kind": "current" },
+        "grain": "logical_message",
+        "frontier": { "observed_through": 9, "committed_through": 4 }
+    });
+    let profile_scope = json!({ "kind": "profile", "profile_id": "profile.refresh" });
+    let project_scope = json!({
+        "kind": "project",
+        "project": {
+            "id": "project.refresh",
+            "profile_id": "profile.refresh",
+            "repository_id": "repository.refresh",
+            "worktree_id": "/worktree/refresh",
+            "branch_id": "branch.refresh"
+        }
+    });
+    let mut requests = Vec::new();
+    for (tool_name, scope, session, handle) in [
+        (
+            "tracedecay_session_refresh_begin",
+            profile_scope.clone(),
+            session("store.profile.refresh", "root.profile.refresh"),
+            Value::Null,
+        ),
+        (
+            "tracedecay_session_refresh_status",
+            profile_scope.clone(),
+            session("store.profile.refresh", "root.profile.refresh"),
+            json!("srh_profile"),
+        ),
+        (
+            "tracedecay_session_refresh_cancel",
+            profile_scope,
+            session("store.profile.refresh", "root.profile.refresh"),
+            json!("srh_profile"),
+        ),
+        (
+            "tracedecay_session_refresh_begin",
+            project_scope.clone(),
+            session("store.project.refresh", "branch.refresh"),
+            Value::Null,
+        ),
+        (
+            "tracedecay_session_refresh_status",
+            project_scope,
+            session("store.project.refresh", "branch.refresh"),
+            json!("srh_project"),
+        ),
+    ] {
+        let body = json!({
+            "scope": scope,
+            "session": session,
+            "source": { "scope": "codex" },
+            "target": target,
+            "handle": handle,
+        });
+        requests.push(TransportEquivalentRequest {
+            tool_name,
+            arguments: body.clone(),
+            http_body: body,
+            http_page: http_page(10, None),
+        });
+    }
+    requests
+}
+
+/// The retained half of the transport equivalence: CLI and MCP normalize
+/// through the shared argument adapter and, like the HTTP body, land on
+/// `decode_request` for the exact operation. All three must decode the same
+/// canonical `RetainedSurfaceRequestV1` and bind one request/result contract.
+fn assert_retained_transports_decode_one_canonical_request(
+    equivalent: &TransportEquivalentRequest,
+    operation: tracedecay_contracts::RetainedSurfaceOperation,
+) {
+    let tool_name = equivalent.tool_name;
+    let (cli_body, cli_format) = cli_surface_invocation(
+        tool_name,
+        with_format(equivalent.arguments.clone(), "json"),
+        false,
+    )
+    .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
+    let mcp = normalize_application_tool_args(
+        tool_name,
+        with_format(equivalent.arguments.clone(), "json"),
+    )
+    .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
+    assert_eq!(cli_format, RequestedOutputFormat::Json, "{tool_name}");
+    assert_eq!(
+        mcp.requested_format,
+        RequestedOutputFormat::Json,
+        "{tool_name}"
+    );
+
+    let decoded = [
+        (BindingSurface::Cli, cli_body),
+        (BindingSurface::Mcp, mcp.request),
+        (BindingSurface::Http, equivalent.http_body.clone()),
+    ]
+    .map(|(surface, body)| {
+        let request = decode_retained_request(operation, body)
+            .unwrap_or_else(|error| panic!("{tool_name} {surface:?} request: {error}"));
+        assert_eq!(request.operation(), operation, "{tool_name} {surface:?}");
+        let binding = resolve_catalog_tool_binding(surface, tool_name)
+            .unwrap_or_else(|error| panic!("{tool_name} {surface:?} binding: {error}"))
+            .unwrap_or_else(|| panic!("{tool_name} has no {surface:?} catalog binding"));
+        (
+            surface,
+            serde_json::to_value(&request).expect("decoded request"),
+            binding.request_schema,
+            binding.result_schema,
+        )
+    });
+    let (_, cli_request, cli_request_schema, cli_result_schema) = &decoded[0];
+    let expected_scope = equivalent.arguments["scope"]["kind"]
+        .as_str()
+        .expect("fixture scope kind");
+    assert_eq!(
+        cli_request["request"]["scope"]["kind"], expected_scope,
+        "{tool_name}: the canonical request must carry the owner scope unchanged"
+    );
+    for (surface, request, request_schema, result_schema) in &decoded[1..] {
+        assert_eq!(
+            request, cli_request,
+            "{tool_name}: {surface:?} decoded a different canonical request than the CLI"
+        );
+        assert_eq!(
+            request_schema, cli_request_schema,
+            "{tool_name}: {surface:?} bound a different request contract than the CLI"
+        );
+        assert_eq!(
+            result_schema, cli_result_schema,
+            "{tool_name}: {surface:?} bound a different result contract than the CLI"
+        );
+    }
+}
+
 /// The same request, decoded by every transport, must reach the same reviewed
 /// request and result contract as the same canonical
 /// [`ApplicationSurfaceRequest`]. CLI and MCP decode through the shared
 /// argument adapter; HTTP decodes through its own body-plus-query projection.
 /// A transport that grew its own request shape would fail here before any
-/// daemon was involved.
+/// daemon was involved. Retained operations (the session refresh lifecycle in
+/// both owner scopes) take the retained decoder for the same proof.
 #[test]
 fn cli_mcp_and_http_decode_one_canonical_request() {
+    for equivalent in session_refresh_equivalent_requests() {
+        let operation =
+            tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(equivalent.tool_name)
+                .unwrap_or_else(|| panic!("{} is a retained operation", equivalent.tool_name));
+        assert_retained_transports_decode_one_canonical_request(&equivalent, operation);
+    }
     for equivalent in transport_equivalent_requests() {
         let tool_name = equivalent.tool_name;
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)

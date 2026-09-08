@@ -412,6 +412,167 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     }
 }
 
+/// The daemon's durable profile identity, read back after the daemon has
+/// published it. `--profile-id` must name exactly this authority; the test
+/// never fabricates one.
+fn daemon_profile_id(home: &Path) -> String {
+    let profile_root = profile_root(home);
+    let started = Instant::now();
+    loop {
+        match tracedecay_daemon_identity::profile_identity::load_existing(&profile_root) {
+            Ok(identity) => return identity.profile_id().as_str().to_owned(),
+            Err(error) if started.elapsed() < Duration::from_secs(30) => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("daemon never published its profile identity: {error}"),
+        }
+    }
+}
+
+fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "sessions refresh {step} should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!("refresh {step} must print the typed result: {error}\n{stdout}")
+    })
+}
+
+/// A profile-scoped refresh travels CLI → daemon on the projectless route and
+/// settles through the profile session authority: begin issues an opaque
+/// handle bound to the profile store, status reads it back, cancel returns the
+/// durable receipt, and the receipt stays terminal — all with the canonical
+/// `scope.kind=profile` request and no project anywhere.
+#[cfg(unix)]
+#[test]
+fn sessions_refresh_profile_scope_begins_reads_and_cancels_through_the_daemon() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let profile_id = daemon_profile_id(home.path());
+    let selectors = [
+        "--profile-id",
+        profile_id.as_str(),
+        "--session-id",
+        "session.cli.profile-refresh",
+        "--provider",
+        "codex",
+        "--source",
+        "0",
+        "--target",
+        "0",
+        "--json",
+    ];
+
+    let mut begin = tracedecay_command_without_daemon(home.path(), cwd.path());
+    begin.args(["sessions", "refresh", "begin"]).args(selectors);
+    let begun = refresh_json(&run_with_timeout(begin, cli_timeout()), "begin");
+    assert!(
+        matches!(begun["outcome"].as_str(), Some("started" | "joined")),
+        "{begun}"
+    );
+    assert_eq!(begun["scope"], "profile", "{begun}");
+    assert_eq!(begun["tool"], "tracedecay_session_refresh_begin", "{begun}");
+    let handle = begun["handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("begin must return an opaque handle: {begun}"))
+        .to_owned();
+    assert!(handle.starts_with("srh_"), "{handle}");
+    let operation_id = begun["operation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("begin must return the durable operation id: {begun}"))
+        .to_owned();
+    assert_ne!(handle, operation_id);
+
+    let mut status = tracedecay_command_without_daemon(home.path(), cwd.path());
+    status
+        .args(["sessions", "refresh", "status"])
+        .args(selectors)
+        .args(["--handle", &handle]);
+    let observed = refresh_json(&run_with_timeout(status, cli_timeout()), "status");
+    assert!(
+        matches!(observed["outcome"].as_str(), Some("running" | "complete")),
+        "{observed}"
+    );
+    assert_eq!(observed["scope"], "profile", "{observed}");
+    assert_eq!(
+        observed["tool"], "tracedecay_session_refresh_status",
+        "{observed}"
+    );
+
+    let mut cancel = tracedecay_command_without_daemon(home.path(), cwd.path());
+    cancel
+        .args(["sessions", "refresh", "cancel"])
+        .args(selectors)
+        .args(["--handle", &handle]);
+    let cancelled = refresh_json(&run_with_timeout(cancel, cli_timeout()), "cancel");
+    assert!(
+        matches!(
+            cancelled["outcome"].as_str(),
+            Some("cancelled" | "complete")
+        ),
+        "{cancelled}"
+    );
+    assert_eq!(cancelled["scope"], "profile", "{cancelled}");
+    assert_eq!(
+        cancelled["receipt"]["operation_id"], operation_id,
+        "{cancelled}"
+    );
+    let terminal_state = cancelled["receipt"]["state"]
+        .as_str()
+        .unwrap_or_else(|| panic!("cancel must return the terminal receipt: {cancelled}"))
+        .to_owned();
+    assert!(
+        matches!(terminal_state.as_str(), "cancelled" | "complete"),
+        "{cancelled}"
+    );
+
+    let mut settled = tracedecay_command_without_daemon(home.path(), cwd.path());
+    settled
+        .args(["sessions", "refresh", "status"])
+        .args(selectors)
+        .args(["--handle", &handle]);
+    let settled = refresh_json(&run_with_timeout(settled, cli_timeout()), "settled status");
+    assert_eq!(
+        settled["receipt"]["operation_id"], operation_id,
+        "{settled}"
+    );
+    assert_eq!(settled["receipt"]["state"], terminal_state, "{settled}");
+
+    // A handle from another owner's scope never resolves: the same handle
+    // presented under a foreign profile is refused before any store is read.
+    let mut foreign = tracedecay_command_without_daemon(home.path(), cwd.path());
+    foreign.args(["sessions", "refresh", "status"]).args([
+        "--profile-id",
+        "profile.someone-else",
+        "--session-id",
+        "session.cli.profile-refresh",
+        "--provider",
+        "codex",
+        "--source",
+        "0",
+        "--target",
+        "0",
+        "--handle",
+        &handle,
+    ]);
+    let refused = run_with_timeout(foreign, cli_timeout());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a foreign profile must not read this refresh\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        stderr.contains("not_found_or_not_authorized") || stderr.contains("refused"),
+        "{stderr}"
+    );
+}
+
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {
     let project = canonical_temp_path(project);
     let shard_root = profile_shard_root(home);
