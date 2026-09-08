@@ -10,33 +10,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [lib]
 doctest = false
 
-[features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "tracedecay-daemon-identity/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-runtime-core/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-daemon-identity/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-daemon-identity/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-]
-
 [dependencies]
 dirs = "6"
 hex = "0.4"

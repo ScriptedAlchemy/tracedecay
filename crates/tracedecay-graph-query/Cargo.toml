@@ -24,40 +24,6 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-code-extraction/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-session-memory/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-code-extraction/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-code-extraction/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-]
 # Explicit opt-in: exposes the fixture-only `VerifiedGraphQuery`
 # constructors (`from_fixture_reader`, `with_source`) to dependent crates'
 # test builds. Never part of `default`.

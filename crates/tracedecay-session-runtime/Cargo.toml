@@ -11,77 +11,10 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "hotpath/tokio",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-code-index-runtime/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-host-admission/hotpath",
-    "tracedecay-lcm/hotpath",
-    "tracedecay-query/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-session-memory/hotpath",
-    "tracedecay-session-temporal-store/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-temporal-query/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-    "tracedecay-application/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-code-index-runtime/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-host-admission/hotpath-alloc",
-    "tracedecay-lcm/hotpath-alloc",
-    "tracedecay-query/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-code-index-runtime/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-host-admission/hotpath-cpu",
-    "tracedecay-lcm/hotpath-cpu",
-    "tracedecay-query/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
+# feature only selects the on-mode hotpath test/bench targets of this crate.
+hotpath = ["hotpath/hotpath", "hotpath/tokio"]
 # Cross-crate fixture surface for composition-root session-runtime tests:
 # worker pass internals and scheduler test hooks exercised by the root
 # crate's host-admission integration tests. Production code is never gated

@@ -7,46 +7,6 @@ license = "MIT"
 description = "Durable source-edit preview, apply, rollback, and reconciliation"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "hotpath/tokio",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-graph-query/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-graph-query/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-graph-query/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-]
-
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"

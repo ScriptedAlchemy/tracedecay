@@ -1,5 +1,7 @@
-//! Opt-in hotpath probes for the blocking SDK HTTP client.
+//! Hotpath probes for the blocking SDK HTTP client.
 //!
+//! Every macro here is a compile-time no-op until the binary selects the
+//! `hotpath/hotpath` backend, so the call sites need no crate feature.
 //! `hotpath::http!` wraps async reqwest 0.12 (`ClientWithMiddleware`) and
 //! cannot sit on `reqwest::blocking::Client` without changing the public
 //! blocking type. Header/connection time and body/decode time are therefore
@@ -39,7 +41,6 @@ pub(crate) fn http_execute<T>(
 
 #[inline(always)]
 pub(crate) fn finish<T>(result: Result<T, ClientError>) -> Result<T, ClientError> {
-    #[cfg(feature = "hotpath")]
     if let Err(error) = &result {
         record_client_error(error);
     }
@@ -50,16 +51,12 @@ pub(crate) fn finish<T>(result: Result<T, ClientError>) -> Result<T, ClientError
 pub(crate) fn finish_remote<T>(
     result: Result<T, RemoteClientError>,
 ) -> Result<T, RemoteClientError> {
-    #[cfg(feature = "hotpath")]
     if let Err(error) = &result {
         record_remote_error(error);
     }
     result
 }
 
-// Gated to match `finish` above, its only caller. `problem_kind_name` keeps the
-// wider gate because the unit test below exercises it directly.
-#[cfg(feature = "hotpath")]
 pub(crate) fn record_client_error(error: &ClientError) {
     let class = match error {
         ClientError::InvalidConfiguration(_) => "invalid_configuration",
@@ -75,8 +72,6 @@ pub(crate) fn record_client_error(error: &ClientError) {
     hotpath::val!("sdk.http.error_class").set(&class);
 }
 
-// Gated to match `finish_remote` above, its only caller.
-#[cfg(feature = "hotpath")]
 pub(crate) fn record_remote_error(error: &RemoteClientError) {
     let class = match error {
         RemoteClientError::Configuration(_) => "configuration",
@@ -86,7 +81,6 @@ pub(crate) fn record_remote_error(error: &RemoteClientError) {
     hotpath::val!("sdk.http.error_class").set(&class);
 }
 
-#[cfg(any(feature = "hotpath", test))]
 fn problem_kind_name(kind: &str) -> &'static str {
     match kind {
         "invalid_request" => "invalid_request",

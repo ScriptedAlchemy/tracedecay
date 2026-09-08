@@ -15,95 +15,11 @@ description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "hotpath/ureq-3",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-automation/hotpath",
-    "tracedecay-code-extraction/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-configuration/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-graph-query/hotpath",
-    "tracedecay-hooks/hotpath",
-    "tracedecay-host-integration/hotpath",
-    "tracedecay-lsp/hotpath",
-    "tracedecay-policy/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-query/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-semantic/hotpath",
-    "tracedecay-session-memory/hotpath",
-    "tracedecay-session-temporal-store/hotpath",
-    "tracedecay-lcm/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-temporal-query/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-automation/hotpath-alloc",
-    "tracedecay-code-extraction/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-configuration/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-graph-query/hotpath-alloc",
-    "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-host-integration/hotpath-alloc",
-    "tracedecay-lsp/hotpath-alloc",
-    "tracedecay-policy/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-query/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-semantic/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
-    "tracedecay-lcm/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-automation/hotpath-cpu",
-    "tracedecay-code-extraction/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-configuration/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-graph-query/hotpath-cpu",
-    "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-host-integration/hotpath-cpu",
-    "tracedecay-lsp/hotpath-cpu",
-    "tracedecay-policy/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-query/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-semantic/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
-    "tracedecay-lcm/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath", "hotpath/ureq-3"]
 default = []
 # Mirrors the root crate's `semantic-fastembed`: gates the embedded fastembed
 # provider wiring inside `semantic_runtime`.

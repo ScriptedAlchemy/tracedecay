@@ -67,166 +67,55 @@ include = [
 # `--all-features` is test-only because it includes `test-transport`.
 default = ["production"]
 
-# Opt-in profiling. Never in `default` and never in `production`: with no
-# profiling feature selected every hotpath macro expands to a no-op, so the
-# instrumented call sites below compile identically in both modes.
+# Opt-in profiling. Never in `default` and never in `production`.
+#
+# Hotpath 0.24 decides what every macro expands to from the features of the
+# single `hotpath` / `hotpath-macros` build that cargo unifies across the whole
+# dependency graph: with no profiling feature selected every macro is a no-op,
+# and once a binary selects `hotpath/hotpath` every `#[hotpath::measure]`,
+# `measure_block!`, `gauge!`, `future!`, ... in every crate is live — no
+# per-crate feature is involved. The crates listed below are the runtime owners
+# whose *compiled behaviour* changes under profiling (`cfg(feature = "hotpath")`
+# sites: allocation/lock/IO wrappers, observation sinks, the axum server layer,
+# the process guard); their thin features forward nowhere else. `tracedecay-sdk`
+# is the one exception: its build script compiles hotpath-instrumented crates in
+# the host context, so it mirrors every selected backend onto that side.
 #
 # `hotpath` alone gives wall-clock timing. The other three layer on top of it:
 # `hotpath-alloc` installs the counting global allocator, `hotpath-cpu` adds
 # on-CPU sampling, and `hotpath-mcp` exposes the live query server (port 6771
 # by default, `HOTPATH_MCP_PORT` overrides). `hotpath/tokio` is required by
-# `hotpath::tokio_runtime!`, which this binary registers with the explicit
-# runtime handle it builds in `async_main`.
-#
-# The per-crate passthroughs matter because the profiling features change what
-# `#[hotpath::measure]` expands to: a library crate compiled without them
-# reports no allocation or CPU samples even when the binary enables profiling.
+# `hotpath::tokio_runtime!` and the tokio lock wrappers; the daemon serves its
+# HTTP application surface with axum 0.8 and reaches GitHub through ureq 3, and
+# hotpath instruments both natively, so no second HTTP stack is introduced.
 hotpath = [
-    "tracedecay-domain/hotpath",
     "hotpath/hotpath",
     "hotpath/tokio",
-    # The daemon serves its HTTP application surface with axum 0.8 and reaches
-    # GitHub through ureq 3, and hotpath instruments both natively. Matching the
-    # versions we already depend on, so no second HTTP stack is introduced.
     "hotpath/axum-0-8",
     "hotpath/ureq-3",
-    "tracedecay-agent-hosts/hotpath",
-    "tracedecay-api/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-automation/hotpath",
+    "tracedecay-application/hotpath",
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
-    "tracedecay-code-index-retention/hotpath",
     "tracedecay-code-index-runtime/hotpath",
-    "tracedecay-configuration/hotpath",
+    "tracedecay-contracts/hotpath",
     "tracedecay-dashboard-api/hotpath",
-    "tracedecay-daemon-control/hotpath",
-    "tracedecay-daemon-identity/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-daemon-service/hotpath",
-    "tracedecay-framing/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
-    "tracedecay-graph-query/hotpath",
     "tracedecay-hooks/hotpath",
-    "tracedecay-host-admission/hotpath",
-    "tracedecay-lsp/hotpath",
-    "tracedecay-maintenance/hotpath",
+    "tracedecay-lcm/hotpath",
     "tracedecay-mcp/hotpath",
-    "tracedecay-policy/hotpath",
-    "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
-    "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-sdk/hotpath",
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
-    "tracedecay-session-memory/hotpath",
-    "tracedecay-session-runtime/hotpath",
-    "tracedecay-store-runtime/hotpath",
     "tracedecay-session-temporal-store/hotpath",
-    "tracedecay-lcm/hotpath",
     "tracedecay-sessions/hotpath",
-    "tracedecay-source-edit/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-temporal-query/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-    "tracedecay-application/hotpath",
+    "tracedecay-store-runtime/hotpath",
 ]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-agent-hosts/hotpath-alloc",
-    "tracedecay-api/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-automation/hotpath-alloc",
-    "tracedecay-automation-runtime/hotpath-alloc",
-    "tracedecay-code-extraction/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-code-index-retention/hotpath-alloc",
-    "tracedecay-code-index-runtime/hotpath-alloc",
-    "tracedecay-configuration/hotpath-alloc",
-    "tracedecay-dashboard-api/hotpath-alloc",
-    "tracedecay-daemon-control/hotpath-alloc",
-    "tracedecay-daemon-identity/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-daemon-service/hotpath-alloc",
-    "tracedecay-framing/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-graph-query/hotpath-alloc",
-    "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-host-admission/hotpath-alloc",
-    "tracedecay-lsp/hotpath-alloc",
-    "tracedecay-maintenance/hotpath-alloc",
-    "tracedecay-mcp/hotpath-alloc",
-    "tracedecay-policy/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-query/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-search-eval/hotpath-alloc",
-    "tracedecay-semantic/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-    "tracedecay-session-runtime/hotpath-alloc",
-    "tracedecay-store-runtime/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
-    "tracedecay-lcm/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-source-edit/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-agent-hosts/hotpath-cpu",
-    "tracedecay-api/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-automation/hotpath-cpu",
-    "tracedecay-automation-runtime/hotpath-cpu",
-    "tracedecay-code-extraction/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-code-index-retention/hotpath-cpu",
-    "tracedecay-code-index-runtime/hotpath-cpu",
-    "tracedecay-configuration/hotpath-cpu",
-    "tracedecay-dashboard-api/hotpath-cpu",
-    "tracedecay-daemon-control/hotpath-cpu",
-    "tracedecay-daemon-identity/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-daemon-service/hotpath-cpu",
-    "tracedecay-framing/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-graph-query/hotpath-cpu",
-    "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-host-admission/hotpath-cpu",
-    "tracedecay-lsp/hotpath-cpu",
-    "tracedecay-maintenance/hotpath-cpu",
-    "tracedecay-mcp/hotpath-cpu",
-    "tracedecay-policy/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-query/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-search-eval/hotpath-cpu",
-    "tracedecay-semantic/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-    "tracedecay-session-runtime/hotpath-cpu",
-    "tracedecay-store-runtime/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
-    "tracedecay-lcm/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-source-edit/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-sdk/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-sdk/hotpath-cpu"]
 # Binary-only: the live query server runs in this process, so no library crate
 # needs a passthrough for it.
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]

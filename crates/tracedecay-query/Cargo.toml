@@ -42,37 +42,11 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 zeroize = "1.9.0"
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-contracts/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-temporal-query/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-contracts/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-contracts/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath"]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
 test-helpers = ["tracedecay-temporal-query/test-helpers"]
