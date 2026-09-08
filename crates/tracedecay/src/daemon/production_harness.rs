@@ -872,6 +872,28 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    /// The mounted project's current configuration revision: the CAS token
+    /// every configuration mutation tool requires, so a journey can write a
+    /// project setting through the production `tracedecay_configuration_*`
+    /// surface instead of a private store path.
+    #[hotpath::skip]
+    pub async fn configuration_revision(&self, project_root: impl AsRef<Path>) -> Result<String> {
+        let project_root = project_root.as_ref().to_path_buf();
+        let graph = self.server(&project_root)?.cg().await;
+        let current = graph
+            .configuration_runtime()
+            .client()
+            .current()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "production-composition project '{}' has no current configuration: {error}",
+                    project_root.display()
+                ),
+            })?;
+        Ok(current.revision_id().as_str().to_owned())
+    }
+
     #[hotpath::measure(label = "daemon.harness.track_worktree_branch", future = true)]
     pub async fn track_worktree_branch(
         &self,
@@ -954,6 +976,21 @@ async fn wait_for_production_composition_code_index(
     scope: &tracedecay_application::ResolvedScope,
 ) -> Result<()> {
     let wait_started = Instant::now();
+    // A linked worktree under the default `sync.watch_linked_worktrees = false`
+    // carries the typed `LinkedWorktreeDisabled` admission: the route serves
+    // but never indexes, so no generation will ever publish for it. That is
+    // the same terminal state the project-open deferred owners answer with
+    // (`code_index_disabled_for_scope`); waiting for a publication here would
+    // always exhaust the bound and fail the composition open.
+    if invocation
+        .code_index_schedulers
+        .automatic_admission_for_scope(scope)
+        == Some(
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+        )
+    {
+        return Ok(());
+    }
     let publication = timeout(Duration::from_secs(20), async {
         loop {
             // Scope-aware readiness is the authenticated demand boundary that
