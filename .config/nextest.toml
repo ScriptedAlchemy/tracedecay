@@ -10,20 +10,11 @@ test-threads = 8
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 archive.include = [
-    # The Linux and Windows archives use the same perf profile as their
-    # prerequisite builds. Ordinary binaries and the compiled host fixture are
-    # not test executables, so nextest only carries them when listed here.
-    # One list serves both platforms because nextest has no per-platform
-    # include (nextest-rs/nextest#1460): each archive warns about the other
-    # platform's spellings, and the tests that execute these binaries
-    # (`common::search_eval_bin`, the host-CLI fixture provisioner) fail
-    # closed when their own platform's file is missing.
-    { path = "perf/tracedecay-search-eval", relative-to = "target", on-missing = "warn" },
-    { path = "perf/tracedecay-search-eval-direct", relative-to = "target", on-missing = "warn" },
-    { path = "perf/examples/tracedecay-host-cli-fixture", relative-to = "target", on-missing = "warn" },
-    { path = "perf/tracedecay-search-eval.exe", relative-to = "target", on-missing = "warn" },
-    { path = "perf/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "warn" },
-    { path = "perf/examples/tracedecay-host-cli-fixture.exe", relative-to = "target", on-missing = "warn" },
+    # Windows archives use the same perf profile as their prerequisite builds.
+    # Ordinary binaries and the compiled host fixture are not test executables.
+    { path = "perf/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/examples/tracedecay-host-cli-fixture.exe", relative-to = "target", on-missing = "error" },
 ]
 
 [profile.ci.junit]
