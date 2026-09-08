@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Daemon project-store and session-registry runtime for TraceDecay"
+description = "Canonical TraceDecay store runtime: project-store, shard, and session lifecycle over the database kernels"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [lib]

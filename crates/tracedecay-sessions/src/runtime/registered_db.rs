@@ -18,7 +18,7 @@ use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadConnection;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, IntoParams, Rows};
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
 /// Read-only SQL the session store can issue on a snapshot, read connection, or txn.

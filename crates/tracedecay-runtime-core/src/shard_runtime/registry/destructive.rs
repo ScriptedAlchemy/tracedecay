@@ -400,13 +400,13 @@ mod tests {
 
     use super::*;
     use crate::db::DatabaseAuthority;
-    use crate::store_runtime::registry::{
+    use crate::shard_runtime::registry::{
         PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, ProfileAuthorityPinResult,
         PublishedShardRuntime, ResolvedStoreLocator, ShardRuntimeBuildRequest,
         ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
         StoreRuntimeRegistryFuture, StoreRuntimeResolver,
     };
-    use crate::store_runtime::shard::ShardRuntime;
+    use crate::shard_runtime::shard::ShardRuntime;
 
     fn id<T>(value: &str) -> T
     where

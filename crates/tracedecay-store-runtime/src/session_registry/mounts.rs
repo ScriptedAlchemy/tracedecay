@@ -634,7 +634,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     Ok(runtime) => {
                         let runtime = Arc::new(runtime);
                         let graph_port: Arc<
-                            dyn tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1,
+                            dyn tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1,
                         > = runtime.clone();
                         let activation = task_database.bind_memory_graph_runtime(graph_port);
                         let reconciliation = activation

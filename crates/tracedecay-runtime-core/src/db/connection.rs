@@ -12,7 +12,7 @@ use tracedecay_store::{
 use crate::db::engine::{
     Connection, ReadConnection, ReadSnapshot, Transaction, TransactionBehavior,
 };
-use crate::store_runtime::registry::StoreRuntimeClientLease;
+use crate::shard_runtime::registry::StoreRuntimeClientLease;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{DatabaseAuthority, DatabaseAuthorityRole};

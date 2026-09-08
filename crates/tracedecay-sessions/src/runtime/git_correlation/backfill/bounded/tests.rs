@@ -8,7 +8,7 @@ use std::time::Duration;
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior, params,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 use super::*;
 use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;

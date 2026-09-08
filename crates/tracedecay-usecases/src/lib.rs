@@ -19,7 +19,7 @@
 //!
 //! Graph reads now go through the Grafeo-backed
 //! `tracedecay_global_db::VerifiedGraphRuntimePortV1` (defined in
-//! `tracedecay-runtime-core::store_runtime::verified_graph`), not a port
+//! `tracedecay_runtime_core::shard_runtime`), not a port
 //! owned by this crate — that landed after the one-shot crate split, when the
 //! SQLite graph authority was replaced by the embedded Grafeo runtime.
 //! Source-edit preview/apply still route through this crate's own task-local

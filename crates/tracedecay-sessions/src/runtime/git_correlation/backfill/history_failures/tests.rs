@@ -4,7 +4,7 @@ use std::time::Duration;
 use tracedecay_runtime_core::db::engine::{
     QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 use super::*;
 use crate::observation::ObservationCancellation;

@@ -18,7 +18,7 @@ use super::super::{DaemonSessionRuntimeRegistryV1, session_registry_error};
 
 pub(crate) struct MemoryGraphRuntimeTaskContext {
     identity: super::super::LocalProfileIdentityAuthorityV1,
-    registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
+    registry: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistry,
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
     incarnation: tracedecay_store::StoreIncarnationV1,
@@ -27,7 +27,7 @@ pub(crate) struct MemoryGraphRuntimeTaskContext {
 impl MemoryGraphRuntimeTaskContext {
     pub(crate) fn new(
         identity: super::super::LocalProfileIdentityAuthorityV1,
-        registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
+        registry: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistry,
         graph_registry: tracedecay_graph_db::GraphDbRegistry,
         graph_lifecycle_cancelled: Arc<AtomicBool>,
         incarnation: tracedecay_store::StoreIncarnationV1,
@@ -72,7 +72,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
     }
 }
 
-impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
+impl tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1
     for RetainedVerifiedGraphRuntimeV1
 {
     fn relational_binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {

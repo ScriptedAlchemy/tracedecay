@@ -118,7 +118,7 @@ pub struct RuntimeRegistryCheckpointBlockerSnapshot {
 
 impl RuntimeRegistrySnapshot {
     pub fn from_projection(
-        projection: tracedecay_runtime_core::store_runtime::telemetry::RuntimeTelemetryProjection,
+        projection: tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryProjection,
     ) -> Self {
         let aggregate = &projection.aggregate;
         let shards = projection
@@ -182,7 +182,7 @@ impl RuntimeRegistrySnapshot {
 
 impl RuntimeRegistryShardSnapshot {
     fn from_telemetry(
-        telemetry: &tracedecay_runtime_core::store_runtime::telemetry::ShardRuntimeTelemetry,
+        telemetry: &tracedecay_runtime_core::shard_runtime::telemetry::ShardRuntimeTelemetry,
     ) -> Self {
         Self {
             binding: telemetry.binding.clone(),
@@ -232,9 +232,9 @@ impl RuntimeRegistryShardSnapshot {
 }
 
 fn checkpoint_snapshot(
-    writer: &tracedecay_runtime_core::store_runtime::registry::PhysicalWriterRuntimeSnapshot,
+    writer: &tracedecay_runtime_core::shard_runtime::registry::PhysicalWriterRuntimeSnapshot,
 ) -> RuntimeRegistryCheckpointSnapshot {
-    use tracedecay_runtime_core::store_runtime::registry::{CheckpointOutcome, CheckpointPressure};
+    use tracedecay_runtime_core::shard_runtime::registry::{CheckpointOutcome, CheckpointPressure};
 
     let outcome = writer
         .checkpoint_status
@@ -272,9 +272,9 @@ fn checkpoint_snapshot(
 }
 
 fn checkpoint_outcome_wal_bytes(
-    outcome: Option<&tracedecay_runtime_core::store_runtime::registry::CheckpointOutcome>,
+    outcome: Option<&tracedecay_runtime_core::shard_runtime::registry::CheckpointOutcome>,
 ) -> Option<u64> {
-    use tracedecay_runtime_core::store_runtime::registry::CheckpointOutcome;
+    use tracedecay_runtime_core::shard_runtime::registry::CheckpointOutcome;
 
     outcome.and_then(|outcome| match outcome {
         CheckpointOutcome::BelowSoft { wal }
@@ -285,9 +285,9 @@ fn checkpoint_outcome_wal_bytes(
 }
 
 fn checkpoint_blocker_snapshot(
-    blocker: &tracedecay_runtime_core::store_runtime::registry::CheckpointBlocker,
+    blocker: &tracedecay_runtime_core::shard_runtime::registry::CheckpointBlocker,
 ) -> RuntimeRegistryCheckpointBlockerSnapshot {
-    use tracedecay_runtime_core::store_runtime::registry::CheckpointBlocker;
+    use tracedecay_runtime_core::shard_runtime::registry::CheckpointBlocker;
 
     match blocker {
         CheckpointBlocker::SnapshotLease { lease_id, age } => {
@@ -322,13 +322,13 @@ fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'
 }
 
 fn runtime_health_label(
-    health: tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth,
+    health: tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth,
 ) -> &'static str {
     match health {
-        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
-        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
-        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
-        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
+        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
+        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
+        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
+        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
     }
 }
 
@@ -336,8 +336,8 @@ fn runtime_health_label(
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tracedecay_runtime_core::store_runtime::registry::PhysicalWriterRuntimeSnapshot;
-    use tracedecay_runtime_core::store_runtime::registry::{
+    use tracedecay_runtime_core::shard_runtime::registry::PhysicalWriterRuntimeSnapshot;
+    use tracedecay_runtime_core::shard_runtime::registry::{
         CheckpointBlocker, CheckpointBlockers, CheckpointPressure, CheckpointWal,
     };
     use tracedecay_store::{

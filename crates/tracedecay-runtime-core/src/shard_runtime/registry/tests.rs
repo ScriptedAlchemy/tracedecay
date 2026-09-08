@@ -82,7 +82,7 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
             handles[0].health_snapshot().state,
             RuntimeMaintenanceStateV1::Ready
         );
-        eprintln!("store_runtime_open clients={clients} runtimes=1 locators=1 busy=0 locked=0");
+        eprintln!("shard_runtime_open clients={clients} runtimes=1 locators=1 busy=0 locked=0");
     }
 }
 

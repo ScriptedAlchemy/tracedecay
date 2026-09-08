@@ -30,11 +30,11 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::DatabaseAuthority;
 use tracedecay_runtime_core::memory::user::user_memory_db_path;
-use tracedecay_runtime_core::storage;
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
     StoreRuntimeRegistryFuture, StoreRuntimeResolver,
 };
+use tracedecay_runtime_core::storage;
 use tracedecay_sessions::runtime::user_sessions_db_path;
 use tracedecay_store::{
     BrainId, BrainNodeId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1,

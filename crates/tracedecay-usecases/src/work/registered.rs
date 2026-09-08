@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::store_runtime::{
+use tracedecay_runtime_core::shard_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
 };
 

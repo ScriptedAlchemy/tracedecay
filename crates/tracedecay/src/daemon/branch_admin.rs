@@ -1752,7 +1752,7 @@ fn ensure_no_cached_store_owners<Server>(
 }
 
 fn destructive_reservation_error(
-    error: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure,
+    error: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure,
 ) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("destructive store runtime reservation failed: {error:?}"),
