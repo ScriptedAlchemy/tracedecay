@@ -475,7 +475,9 @@ pub(super) async fn session_message_from_hydrated_bytes(
     expected_session: &str,
     bytes: &[u8],
 ) -> Result<SessionMessageRecord, HydrationError> {
-    let text = String::from_utf8(bytes.to_vec()).map_err(hydration_failure)?;
+    // Validate in place; the owned record text is built once, after the row
+    // binding below has accepted this occurrence, so refusals copy nothing.
+    let text = std::str::from_utf8(bytes).map_err(hydration_failure)?;
 
     let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
     let project_key = snapshot
@@ -591,7 +593,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
         role,
         timestamp,
         ordinal,
-        text,
+        text: text.to_owned(),
         kind,
         model,
         tool_names,
