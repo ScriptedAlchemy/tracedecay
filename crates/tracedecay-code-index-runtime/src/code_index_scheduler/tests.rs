@@ -14257,6 +14257,102 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
     registry.shutdown().await;
 }
 
+/// A text owner whose sealed source the fence has verified against the live
+/// tree is current even while the worker owns a pass: the read answers from
+/// source truth and leaves no follow-up wake. Treating every in-flight pass as
+/// staleness made a polling reader and the worker livelock — each read during
+/// a `Noop` pass posted a follow-up, the follow-up was another pass, and the
+/// owner was never called current although nothing moved (issue #1103). The
+/// same read during the same pass must still report a genuine edit stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_freshness_query_during_owner_work_is_current_when_source_is_unchanged() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off worktree");
+    let initial_text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    let initial = initial_text.metadata().manifest().generation_id.clone();
+    let snapshot = initial_text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+
+    let settled_deadline = Instant::now() + Duration::from_secs(10);
+    while registry
+        .reconcile_in_progress_for_test(fixture.path())
+        .await
+    {
+        assert!(
+            Instant::now() <= settled_deadline,
+            "initial graph-off mount never released its owner pass"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    // Stand in for a worker pass re-observing an unchanged tree: in-progress,
+    // scheduler mutex free, nothing moved on disk or in git.
+    let owner_pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+
+    let (latest, current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("the seated text owner keeps serving during owner work");
+    assert_eq!(latest.metadata().manifest().generation_id, initial);
+    assert!(
+        current,
+        "an unchanged source verified by the fence is current even while a pass is in flight"
+    );
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "a read the fence proved current leaves no follow-up wake behind"
+    );
+
+    // The same in-flight pass, now with a real edit the fence cannot vouch
+    // for: the read reports stale and leaves the coalesced follow-up.
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "external"]);
+    let (latest, current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("the retained text owner still serves the stale read");
+    assert_eq!(latest.metadata().manifest().generation_id, initial);
+    assert!(!current, "a moved source is stale, never current");
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "a stale read during owner work leaves the follow-up wake the pass needs"
+    );
+    drop(owner_pass);
+    drop(admission);
+    let next = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
+    assert_ne!(next.metadata().manifest().generation_id, initial);
+    registry.shutdown().await;
+}
+
 /// An explicit caller-pinned generation is served generation-bound and
 /// read-only: the freshness ladder is bypassed, so an out-of-band commit after
 /// indexing never mutates the served generation and never triggers a reconcile.
