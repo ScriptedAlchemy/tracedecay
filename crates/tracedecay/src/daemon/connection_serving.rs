@@ -8,6 +8,11 @@ use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::{DaemonInvocationService, Lease};
+use tracedecay_mcp::{
+    BrokerResponseLifecycle, BrokerSelectedResponseAuthority, BrokerSelectedResponseLease,
+    BrokerWorkDeliverySettlement,
+};
+use tracedecay_session_memory::context::CancellationToken;
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.
 ///
@@ -16,6 +21,51 @@ use tracedecay_daemon_service::{DaemonInvocationService, Lease};
 /// path as the daemon without adding a shipped benchmark API.
 #[cfg(feature = "rmcp-benchmark")]
 pub mod rmcp_benchmark;
+
+impl BrokerResponseLifecycle for crate::mcp::server::ProjectServerResponseLifecycle {
+    fn response_revoked(&self) -> &CancellationToken {
+        crate::mcp::server::ProjectServerResponseLifecycle::response_revoked(self)
+    }
+}
+
+impl BrokerSelectedResponseLease for crate::mcp::server::SelectedProjectResponseLease {
+    fn response_revoked(&self) -> &CancellationToken {
+        self.revoked()
+    }
+}
+
+impl BrokerSelectedResponseAuthority for crate::mcp::server::RmcpSelectedProjectResponseAuthority {
+    fn take_response(
+        &self,
+        id: Option<&serde_json::Value>,
+    ) -> std::io::Result<Option<Box<dyn BrokerSelectedResponseLease>>> {
+        self.take(id)
+            .map(|lease| {
+                lease.map(|lease| {
+                    Box::new(lease) as Box<dyn tracedecay_mcp::BrokerSelectedResponseLease>
+                })
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    }
+}
+
+impl BrokerWorkDeliverySettlement for crate::mcp::server::RmcpWorkDeliverySettlement {
+    fn attempt_for_request(
+        &self,
+        request: &serde_json::Value,
+    ) -> Option<tracedecay_domain::DeliverySettlementAttemptV1> {
+        crate::mcp::server::RmcpWorkDeliverySettlement::attempt_for_request(self, request)
+    }
+
+    fn settle(
+        &self,
+        attempt: tracedecay_domain::DeliverySettlementAttemptV1,
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+        drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) {
+        crate::mcp::server::RmcpWorkDeliverySettlement::settle(self, attempt, outcome, drop_reason);
+    }
+}
 
 type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,

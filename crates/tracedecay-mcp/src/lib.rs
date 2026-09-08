@@ -39,6 +39,7 @@
 
 pub mod analysis;
 pub mod application_output;
+mod broker_stream_transport;
 mod catalog_error;
 pub mod context_headings;
 pub mod handlers;
@@ -57,6 +58,10 @@ pub mod transport;
 pub mod workflow;
 
 pub use analysis::{is_ident_byte, line_number_at, skip_ascii_whitespace};
+pub use broker_stream_transport::{
+    BrokerResponseLifecycle, BrokerSelectedResponseAuthority, BrokerSelectedResponseLease,
+    BrokerStreamTransport, BrokerWorkDeliverySettlement,
+};
 pub use catalog_error::McpCatalogError;
 pub use context_headings::{
     CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
