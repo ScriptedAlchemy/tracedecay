@@ -43,29 +43,6 @@ class SupersededSelectionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.prune = load_script()
 
-    def test_older_kache_store_generations_on_the_same_ref_are_superseded(self) -> None:
-        entries = [
-            entry(1, "kache-store-clippy-Linux-v0.18.0-34217290139-1", "2026-09-08T12:00:00Z"),
-            entry(2, "kache-store-clippy-Linux-v0.18.0-34231734416-1", "2026-09-08T14:55:00Z"),
-            entry(3, "kache-store-clippy-Linux-v0.18.0-34231734416-2", "2026-09-08T15:30:00Z"),
-        ]
-        self.assertEqual(ids(self.prune.superseded(entries)), {1, 2})
-
-    def test_lanes_and_operating_systems_are_separate_lineages(self) -> None:
-        entries = [
-            entry(1, "kache-store-test-Linux-v0.18.0-34231734416-1", "2026-09-08T16:56:00Z"),
-            entry(2, "kache-store-test-macOS-v0.18.0-34231734416-1", "2026-09-08T17:39:00Z"),
-            entry(3, "kache-store-clippy-Linux-v0.18.0-34231734416-1", "2026-09-08T14:55:00Z"),
-        ]
-        self.assertEqual(self.prune.superseded(entries), [])
-
-    def test_a_kache_version_bump_is_a_new_lineage(self) -> None:
-        entries = [
-            entry(1, "kache-store-clippy-Linux-v0.18.0-34231734416-1", "2026-09-08T14:55:00Z"),
-            entry(2, "kache-store-clippy-Linux-v0.19.0-34265243847-1", "2026-09-08T19:04:00Z"),
-        ]
-        self.assertEqual(self.prune.superseded(entries), [])
-
     def test_older_rust_cache_lockfile_generations_are_superseded(self) -> None:
         entries = [
             entry(1, "v0-rust-ci-test-full-macOS-Darwin-arm64-d9e6e8c8-1ac70237", "2026-09-07T22:13:00Z"),
@@ -92,15 +69,15 @@ class SupersededSelectionTests(unittest.TestCase):
 
     def test_the_newest_by_creation_time_survives_regardless_of_id_order(self) -> None:
         entries = [
-            entry(9, "kache-store-clippy-Linux-v0.18.0-34231734416-2", "2026-09-08T15:00:00Z"),
-            entry(5, "kache-store-clippy-Linux-v0.18.0-34265243847-1", "2026-09-08T19:04:00Z"),
+            entry(9, "v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-26efddad", "2026-09-08T15:00:00Z"),
+            entry(5, "v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-6447760f", "2026-09-08T19:04:00Z"),
         ]
         self.assertEqual(ids(self.prune.superseded(entries)), {9})
 
     def test_refs_never_supersede_each_other(self) -> None:
         entries = [
-            entry(1, "kache-store-clippy-Linux-v0.18.0-34231734416-1", "2026-09-08T14:55:00Z", ref="refs/pull/707/merge"),
-            entry(2, "kache-store-clippy-Linux-v0.18.0-34255469973-1", "2026-09-08T17:38:00Z", ref="refs/pull/1113/merge"),
+            entry(1, "v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-26efddad", "2026-09-08T14:55:00Z", ref="refs/pull/707/merge"),
+            entry(2, "v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-6447760f", "2026-09-08T17:38:00Z", ref="refs/pull/1113/merge"),
             entry(3, "v0-rust-ci-dev-Linux-Linux-x64-a68045c9-6447760f", "2026-09-08T17:38:31Z", ref="refs/pull/1113/merge"),
             entry(4, "v0-rust-ci-dev-Linux-Linux-x64-a68045c9-76b20426", "2026-09-08T19:04:00Z", ref="refs/heads/master"),
         ]
@@ -112,10 +89,7 @@ class SupersededSelectionTests(unittest.TestCase):
         entries = [
             entry(1, "node-cache-Linux-x64-npm-1ed8dde241472ce0ab39ec3acb32b080219f890784b9d740b6860a6c5679ef2f", "2026-09-08T18:49:04Z"),
             entry(2, "node-cache-Linux-x64-npm-972714cd765b98492fe55266d9c2802cf04ffeb75647975a1ea26a7d48e75edb", "2026-09-08T18:49:08Z"),
-            entry(3, "kache-Linux-6d3904d9c9a2b42da5e13cc7815eed2c5d5a8f4853793076901a29531975c3d4", "2026-09-08T13:04:00Z"),
-            entry(4, "kache-Linux-0000000000000000000000000000000000000000000000000000000000000000", "2026-09-08T19:00:00Z"),
-            entry(5, "kache-store-test-macOS-v0.18.0-34231734416", "2026-09-08T17:39:00Z"),
-            entry(6, "v0-rust-ci-dev-Linux-Linux-x64-a68045c9", "2026-09-08T15:10:00Z"),
+            entry(3, "v0-rust-ci-dev-Linux-Linux-x64-a68045c9", "2026-09-08T15:10:00Z"),
         ]
         self.assertEqual(self.prune.superseded(entries), [])
 
@@ -136,8 +110,8 @@ class SupersededSelectionTests(unittest.TestCase):
         listing = {
             "total_count": 3,
             "actions_caches": [
-                entry(11, "kache-store-clippy-Linux-v0.18.0-34217290139-1", "2026-09-08T12:00:00Z"),
-                entry(12, "kache-store-clippy-Linux-v0.18.0-34231734416-1", "2026-09-08T14:55:00Z"),
+                entry(11, "v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-26efddad", "2026-09-08T12:00:00Z"),
+                entry(12, "v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-6447760f", "2026-09-08T14:55:00Z"),
                 entry(13, "node-cache-Linux-x64-npm-972714cd765b98492fe55266d9c2802cf04ffeb75647975a1ea26a7d48e75edb", "2026-09-08T18:49:08Z"),
             ],
         }
@@ -150,7 +124,7 @@ class SupersededSelectionTests(unittest.TestCase):
         )
         self.assertEqual(completed.stdout, "11\n")
         self.assertIn("1 of 3 cache entries superseded (1 MiB)", completed.stderr)
-        self.assertIn("kache-store-clippy-Linux-v0.18.0-34217290139-1", completed.stderr)
+        self.assertIn("v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-26efddad", completed.stderr)
 
     def test_command_with_nothing_to_prune_prints_nothing_on_stdout(self) -> None:
         completed = subprocess.run(
