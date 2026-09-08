@@ -9,27 +9,27 @@ use tracedecay_domain::{
     canonical_json_bytes, host_integration_catalog_v1, stock_host_capabilities,
 };
 
-const GOLDEN_CATALOG: &[u8] = include_bytes!("fixtures/integration_catalog_v1.json");
+const GOLDEN_CATALOG: &[u8] = include_bytes!("../fixtures/integration_catalog_v1.json");
 const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     (
         "claude",
-        include_str!("../../../tests/fixtures/host_events/claude/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/claude/baseline.json"),
     ),
     (
         "codex",
-        include_str!("../../../tests/fixtures/host_events/codex/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/codex/baseline.json"),
     ),
     (
         "cursor",
-        include_str!("../../../tests/fixtures/host_events/cursor/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/cursor/baseline.json"),
     ),
     (
         "hermes",
-        include_str!("../../../tests/fixtures/host_events/hermes/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/hermes/baseline.json"),
     ),
     (
         "kiro",
-        include_str!("../../../tests/fixtures/host_events/kiro/baseline.json"),
+        include_str!("../../../../tests/fixtures/host_events/kiro/baseline.json"),
     ),
 ];
 
