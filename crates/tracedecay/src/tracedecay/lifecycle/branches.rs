@@ -7,7 +7,6 @@ use crate::config::{
     db_filename, install_usecase_runtime_configuration_authority,
     open_runtime_configuration_for_registered_database_read_only,
 };
-use crate::project_store_runtime::ProjectStoreRuntimeHandle;
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -15,6 +14,7 @@ use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::DatabaseAccessMode;
 use tracedecay_runtime_core::storage::StoreLayout;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
@@ -140,7 +140,7 @@ impl TraceDecay {
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)?;
         let runtime_registry =
             crate::project_store_runtime::join_standalone_session_registry(identity).await?;
-        let profile_database = runtime_registry.port().profile_database().await?;
+        let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(
             project_root,
             &open_options,
@@ -156,7 +156,6 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .port()
             .project_sessions(project_id, enrollment_roots)
             .await?;
         Self::open_branch_with_registered_configuration(
@@ -179,7 +178,7 @@ impl TraceDecay {
         store_layout: StoreLayout,
         configuration_database: RegisteredGlobalDbLeaseV1,
         profile_database: RegisteredGlobalDbLeaseV1,
-        runtime_registry: impl Into<ProjectStoreRuntimeHandle>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         Self::open_branch_with_registered_configuration_access(
             project_root,
@@ -204,12 +203,11 @@ impl TraceDecay {
         store_layout: StoreLayout,
         configuration_database: RegisteredGlobalDbLeaseV1,
         profile_database: RegisteredGlobalDbLeaseV1,
-        runtime_registry: impl Into<ProjectStoreRuntimeHandle>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
         access_mode: DatabaseAccessMode,
         operation: &'static str,
         read_only: bool,
     ) -> Result<Self> {
-        let runtime_registry = runtime_registry.into();
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {
                 message: "no branch tracking configured — run `tracedecay branch add` first"
@@ -234,7 +232,7 @@ impl TraceDecay {
         }
 
         let db = Self::mount_project_graph(
-            runtime_registry.port(),
+            runtime_registry.as_ref(),
             project_root,
             &store_layout,
             operation,
