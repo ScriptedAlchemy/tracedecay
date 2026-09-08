@@ -21,7 +21,6 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger,
 };
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
-use tracedecay_automation_runtime::ports::project_runtime::ProjectRuntime as _;
 use tracedecay_contracts::now_micros;
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_identity::authority;
@@ -242,7 +241,7 @@ fn dashboard_managed_skill_command_port(
             execute_serialized_dashboard_automation(&writer, move || async move {
                 let cg = project_resolver(invocation.project_root.clone()).await?;
                 execute_dashboard_managed_skill_command(
-                    &cg.host_io(),
+                    &tracedecay_agent_hosts::host_io(),
                     &profile_root,
                     cg.project_root(),
                     invocation.command,

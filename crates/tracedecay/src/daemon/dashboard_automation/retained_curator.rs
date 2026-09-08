@@ -108,8 +108,13 @@ pub(crate) async fn execute_retained_memory_curator(
     let observer = observation_producer.map(|producer| {
         super::automation_run_observer(producer, project_root, "fact_store_curate")
     });
+    let automation_context = cg.automation_project_context().map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the automation project context could not be composed: {error}"
+        ))
+    })?;
     let retained_run = run_memory_curator_with_backend_for_retained_settlement(
-        cg,
+        &automation_context,
         &config,
         pinned.revision_id(),
         &backend,

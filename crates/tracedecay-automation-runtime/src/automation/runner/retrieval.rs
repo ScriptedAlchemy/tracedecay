@@ -26,7 +26,6 @@ use tracedecay_domain::{
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::LcmScope;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -768,9 +767,8 @@ pub async fn registered_project_automation_retrieval(
     Ok(registered_automation_retrieval_for_identity(database, identity).await)
 }
 
-pub(super) async fn production_project_automation_retrieval(
-    _cg: &TraceDecay,
-) -> Box<dyn AutomationSessionRetrieval> {
+pub(super) async fn production_project_automation_retrieval() -> Box<dyn AutomationSessionRetrieval>
+{
     unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
 }
 
