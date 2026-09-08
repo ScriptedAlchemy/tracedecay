@@ -235,20 +235,41 @@ async fn resolve_truncated_tool_payload(
     let handle = payload["handle"]
         .as_str()
         .unwrap_or_else(|| panic!("truncated search omitted retrieve handle: {payload}"));
-    let retrieved = tool(
-        socket,
-        handshake,
-        "tracedecay_retrieve",
-        json!({
-            "handle": handle,
-            "format": "json",
-        }),
-    )
-    .await;
-    retrieved["content"]
-        .as_str()
-        .and_then(|text| serde_json::from_str(text).ok())
-        .unwrap_or_else(|| panic!("truncated search handle did not retrieve JSON: {retrieved}"))
+    // Every retrieve page is clamped to the same response cap and reports
+    // `has_more` / `next_offset`; reassemble the stored body before parsing,
+    // exactly as an agent does.
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    loop {
+        let retrieved = tool(
+            socket,
+            handshake,
+            "tracedecay_retrieve",
+            json!({
+                "handle": handle,
+                "format": "json",
+                "offset": offset,
+            }),
+        )
+        .await;
+        content.push_str(retrieved["content"].as_str().unwrap_or_else(|| {
+            panic!("truncated search handle carried no content page: {retrieved}")
+        }));
+        if retrieved["has_more"] != json!(true) {
+            break;
+        }
+        let next_offset = retrieved["next_offset"].as_u64().unwrap_or_else(|| {
+            panic!("retrieve reported more pages without a next offset: {retrieved}")
+        });
+        assert!(
+            next_offset > offset,
+            "retrieve did not advance past offset {offset}: {retrieved}"
+        );
+        offset = next_offset;
+    }
+    serde_json::from_str(&content).unwrap_or_else(|error| {
+        panic!("truncated search handle did not retrieve JSON: {error}; content={content}")
+    })
 }
 
 pub async fn exact_symbol(
