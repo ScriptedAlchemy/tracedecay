@@ -49,6 +49,18 @@ const WAITER_WAKEUP_INTERVAL: Duration = Duration::from_millis(5);
 /// cold open is executing; warm acquisitions never read the kernel surface.
 const COLD_LOAD_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 
+/// One cold model open at a time per process, across every pool.
+///
+/// The resident bound on a cold open is measured on the whole process, so two
+/// overlapping opens — two routes of one project, two projects publishing
+/// together, two sessions of one pool — each observe the other's growth and
+/// both breach a ceiling a single open fits under. Taking turns keeps the
+/// measurement attributable to the open it bounds and caps the transient peak
+/// to one load. Waiting for a turn is admission, not load time: the load
+/// deadline starts when this open begins, and a turn is held only until the
+/// open returns or its own deadline/resident verdict fires.
+static COLD_LOAD_TURN: Mutex<()> = Mutex::new(());
+
 /// Process-resident sampler consulted while a cold model open is in flight.
 /// Production uses the canonical kernel sampler
 /// ([`sampled_process_resident_bytes_v1`]); tests inject scripted series.
@@ -532,9 +544,8 @@ where
             projected_resident.unwrap_or_else(|| panic!("resident reservation checked above"));
         drop(state);
 
-        let load_started = self.inner.clock.now();
         let load_deadline = Duration::from_millis(authority.load_deadline_ms());
-        let session = self.open_session_bounded(
+        let (session, load_elapsed) = self.open_session_bounded(
             authority,
             load_deadline,
             reserved_bytes,
@@ -543,7 +554,6 @@ where
         // Injected-clock recheck after a bounded open: a manual test clock can
         // report a longer load than the wall-time bound observed, and the
         // deadline verdict must follow the injected clock in that case too.
-        let load_elapsed = self.inner.clock.now().saturating_sub(load_started);
         if load_elapsed > load_deadline {
             let mut state = self.inner.lock_state();
             state.active -= 1;
@@ -797,7 +807,9 @@ where
     /// the open at its next stage boundary. An abandoned loader keeps the
     /// slot and byte reservation until the runtime actually returns (its
     /// memory is genuinely in use until then), then releases both and
-    /// discards the session.
+    /// discards the session. A successful open returns with its load time as
+    /// the pool clock measured it from the moment the load began — after its
+    /// turn was taken, so waiting for another load is never charged to it.
     #[hotpath::measure(label = "semantic.session_pool.open_bounded")]
     fn open_session_bounded(
         &self,
@@ -805,16 +817,21 @@ where
         load_deadline: Duration,
         reserved_bytes: u64,
         tracked_resident_before_open: u64,
-    ) -> Result<R::Session, SessionAcquireError> {
+    ) -> Result<(R::Session, Duration), SessionAcquireError> {
+        let _cold_load_turn = hotpath::measure_block!("semantic.session_pool.cold_load_turn", {
+            COLD_LOAD_TURN
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        });
         let (result_tx, result_rx) = channel::<Result<R::Session, EmbedError>>();
         let inner = Arc::clone(&self.inner);
         let loader_authority = authority.clone();
         let interruption = Arc::new(LoadInterruptionSignalV1::default());
         let loader_interruption = Arc::clone(&interruption);
         let wait_started = self.inner.clock.now();
-        // Growth is measured from the moment this load begins. Concurrent
-        // allocations by other work inflate the delta, so the bound is
-        // conservative under exactly the pathological overlap it guards.
+        // Growth is measured from the moment this load begins. Other cold
+        // opens wait their turn above; unrelated allocations still inflate the
+        // delta, so the bound is conservative under that overlap.
         let baseline_resident_bytes = (self.inner.resident_sampler)();
         let spawned = thread::Builder::new()
             .name("td-semantic-model-load".to_owned())
@@ -869,7 +886,9 @@ where
                 });
             }
             match result_rx.recv_timeout(remaining.min(COLD_LOAD_OBSERVATION_INTERVAL)) {
-                Ok(Ok(session)) => return Ok(session),
+                Ok(Ok(session)) => {
+                    return Ok((session, self.inner.clock.now().saturating_sub(wait_started)));
+                }
                 Ok(Err(err)) => {
                     self.release_reserved_slot(reserved_bytes);
                     return Err(SessionAcquireError::Open(err));

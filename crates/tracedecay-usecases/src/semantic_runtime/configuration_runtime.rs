@@ -288,7 +288,16 @@ async fn retrieval_profile_mutation_capability(
         .await
         .map_err(|error| match error {
             ConfigurationError::Unavailable => SemanticActivationCoordinationErrorV1::Unavailable,
-            _ => SemanticActivationCoordinationErrorV1::Rejected,
+            // Name the refusing authority and the revision it was asked to
+            // recheck against: the grant was minted for one configuration
+            // revision and the semantic state pins another whenever they have
+            // drifted apart, and a bare "rejected" hides which.
+            error => SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                "mutation authority recheck against configuration revision \
+                 {} (grant revision {}): {error}",
+                expected_revision.as_str(),
+                authority.receipt.expected_configuration_revision.as_str(),
+            )),
         })?;
     RetrievalProfileMutationCapabilityV1::from_current_authorization(authority, current)
         .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)

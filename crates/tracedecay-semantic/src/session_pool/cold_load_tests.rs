@@ -1,8 +1,13 @@
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+use tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1;
 
 use crate::fastembed_adapter::{
     AdmittedProjectionArtifactV1, EmbedError, EmbeddingRuntime, FakeEmbeddingRuntime,
@@ -145,10 +150,13 @@ impl EmbeddingRuntime for GatedOpenRuntime {
 
 #[test]
 fn load_deadline_fires_while_the_open_is_still_running() {
+    let (entered_tx, entered_rx) = channel();
     let (release, gate) = channel();
     let pool = SessionPool::new(
-        GatedOpenRuntime {
+        ReportingGatedOpenRuntime {
             inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
+            entered: entered_tx,
+            label: "deadline",
             gate: Mutex::new(gate),
         },
         SystemMonotonicClock::default(),
@@ -157,7 +165,12 @@ fn load_deadline_fires_while_the_open_is_still_running() {
     .expect("valid config");
     let authority = authority_with_load_deadline_ms(50);
 
+    // Release two seconds into the load itself: the open may first wait for
+    // another cold open's turn, and that wait is not load time.
     let releaser = thread::spawn(move || {
+        entered_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the gated open starts");
         thread::sleep(Duration::from_millis(2_000));
         release.send(()).expect("release the gated open");
     });
@@ -551,7 +564,25 @@ impl EmbeddingRuntime for AllocatingOpenRuntime {
 fn measured_resident_growth_beyond_the_ceiling_fails_typed_under_a_synthetic_corpus() {
     const MIB: u64 = 1 << 20;
     let (release, gate) = channel();
-    let pool = SessionPool::new(
+    // The kernel sampler reads the whole test process. Cold opens take turns,
+    // so this load starts right after another test's real model load returned
+    // — and that test drops its session inside this window, which would mask
+    // the synthetic growth behind a larger foreign release. Report growth from
+    // the lowest RSS seen instead, so only this load's own allocation moves
+    // the verdict while the kernel surface stays the one being read.
+    let baseline = Arc::new(AtomicU64::new(0));
+    let floor = Arc::new(AtomicU64::new(u64::MAX));
+    let sampler: ResidentBytesSamplerV1 = Arc::new(move || {
+        let now = sampled_process_resident_bytes_v1()?;
+        let _ = baseline.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+        let floor = floor.fetch_min(now, Ordering::SeqCst).min(now);
+        Some(
+            baseline
+                .load(Ordering::SeqCst)
+                .saturating_add(now.saturating_sub(floor)),
+        )
+    });
+    let pool = SessionPool::with_resident_sampler(
         AllocatingOpenRuntime {
             inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
             gate: Mutex::new(gate),
@@ -559,6 +590,7 @@ fn measured_resident_growth_beyond_the_ceiling_fails_typed_under_a_synthetic_cor
         },
         SystemMonotonicClock::default(),
         config(1, Duration::from_mins(1), 1 << 30),
+        sampler,
     )
     .expect("valid config");
     // 8 MiB declared resident ceiling; the synthetic build grows ~96 MiB.
@@ -588,4 +620,110 @@ fn measured_resident_growth_beyond_the_ceiling_fails_typed_under_a_synthetic_cor
     // Past its uncancellable stage, the loader observes the fired signal at
     // the next boundary, aborts, and releases the slot and reservation.
     expect_aborted_load_release(|| pool.stats());
+}
+
+/// Gated runtime that reports the moment its `open_session` starts, so a
+/// test can prove which cold opens are in flight at once.
+struct ReportingGatedOpenRuntime {
+    inner: FakeEmbeddingRuntime,
+    entered: Sender<&'static str>,
+    label: &'static str,
+    gate: Mutex<Receiver<()>>,
+}
+
+impl EmbeddingRuntime for ReportingGatedOpenRuntime {
+    type Session = FakeEmbeddingSession;
+
+    fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
+        self.inner.resident_bytes_reservation(authority)
+    }
+
+    fn verify_artifact_compatibility(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+    ) -> Result<(), EmbedError> {
+        self.inner.verify_artifact_compatibility(authority)
+    }
+
+    fn open_session(
+        &self,
+        authority: &AdmittedProjectionArtifactV1,
+        _interruption: &dyn SemanticExecutionAuthority,
+    ) -> Result<Self::Session, EmbedError> {
+        self.entered.send(self.label).expect("report open entry");
+        self.gate
+            .lock()
+            .expect("gate lock")
+            .recv()
+            .expect("gate release signal");
+        self.inner.open_session(
+            authority,
+            &crate::fastembed_adapter::ManualCancellation::new(),
+        )
+    }
+}
+
+/// Cold opens take turns across pools. The resident bound is measured on the
+/// whole process, so a second open that ran alongside the first would inflate
+/// the first's observed growth (and its own) with a load that is not its own;
+/// two routes of one project loading the same model both breached a ceiling
+/// each fits under alone.
+#[test]
+fn cold_opens_across_pools_take_turns() {
+    let (entered_tx, entered_rx) = channel();
+    let (release_first, first_gate) = channel();
+    let (release_second, second_gate) = channel();
+    // Flat RSS series: turn-taking, not measured growth, is under test.
+    let pool = |label, gate| {
+        SessionPool::with_resident_sampler(
+            ReportingGatedOpenRuntime {
+                inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
+                entered: entered_tx.clone(),
+                label,
+                gate: Mutex::new(gate),
+            },
+            SystemMonotonicClock::default(),
+            config(1, Duration::from_mins(1), 1 << 30),
+            Arc::new(|| Some(1 << 30)),
+        )
+        .expect("valid config")
+    };
+    let first = pool("first", first_gate);
+    let second = pool("second", second_gate);
+    let authority = authority_with_resident_ceiling(1 << 30, 30_000);
+
+    thread::scope(|scope| {
+        let first_open = scope.spawn(|| first.acquire(&authority));
+        assert_eq!(
+            entered_rx
+                .recv_timeout(Duration::from_secs(90))
+                .expect("the first cold open starts"),
+            "first"
+        );
+        let second_open = scope.spawn(|| second.acquire(&authority));
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a second cold open must wait for the in-flight one, not run beside it"
+        );
+        release_first.send(()).expect("release the first open");
+        first_open
+            .join()
+            .expect("first acquisition thread")
+            .expect("first cold session");
+        // Another test's cold open may take the freed turn first and hold it
+        // for up to its own load deadline; the second open follows it.
+        assert_eq!(
+            entered_rx
+                .recv_timeout(Duration::from_secs(90))
+                .expect("the second cold open starts once the first returned"),
+            "second"
+        );
+        release_second.send(()).expect("release the second open");
+        second_open
+            .join()
+            .expect("second acquisition thread")
+            .expect("second cold session");
+    });
+    assert_eq!(first.stats().sessions_opened, 1);
+    assert_eq!(second.stats().sessions_opened, 1);
 }

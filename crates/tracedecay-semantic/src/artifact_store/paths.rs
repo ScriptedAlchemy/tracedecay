@@ -68,6 +68,21 @@ impl ModelArtifactStore {
         self.artifacts_root().join(digest.as_str())
     }
 
+    /// The content digest an install directory is addressed by — the inverse
+    /// of [`Self::installed_directory`]. `None` for any path this inventory
+    /// does not address (a legacy `installs/` tree, staging, a foreign store).
+    pub fn installed_digest(&self, install_path: &Path) -> Option<Sha256DigestHex> {
+        let mut components = install_path
+            .strip_prefix(self.artifacts_root())
+            .ok()?
+            .components();
+        let leaf = match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(leaf)), None) => leaf.to_str()?,
+            _ => return None,
+        };
+        Sha256DigestHex::new(leaf.to_owned()).ok()
+    }
+
     #[cfg(test)]
     pub(super) fn artifact_path(&self, digest: &Sha256DigestHex) -> PathBuf {
         self.member_path(digest, ArtifactMemberRoleV1::Model)

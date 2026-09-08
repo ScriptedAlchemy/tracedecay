@@ -23,21 +23,16 @@ fn reconcile_embedding_artifact_leases(
     durable: &DurableLifecycleV1,
     now_unix: u64,
 ) -> Result<(), ModelLifecycleErrorV1> {
+    // Only inventory installs hold leases; the install directory is the
+    // inventory's content address, while the lifecycle digest names the catalog
+    // package for a scoped acquisition and a legacy private-root install.
     let digest_for = |state: Option<&SemanticModelLifecycleStateV1>| {
-        let Some(state) = state else {
-            return Ok(None);
-        };
-        let Some(path) = install_path_of(state) else {
-            return Ok(None);
-        };
-        let digest = Sha256DigestHex::new(state.artifact_digest().to_owned())
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        Ok::<_, ModelLifecycleErrorV1>(
-            (path == store.installed_directory(&digest)).then_some(digest),
-        )
+        state
+            .and_then(install_path_of)
+            .and_then(|path| store.installed_digest(path))
     };
-    let desired_active = digest_for(durable.state.as_ref())?;
-    let desired_rollback = digest_for(durable.previous_ready.as_ref())?
+    let desired_active = digest_for(durable.state.as_ref());
+    let desired_rollback = digest_for(durable.previous_ready.as_ref())
         .filter(|digest| Some(digest) != desired_active.as_ref());
     let current_active =
         store.artifact_digest_for_lease(active_lease, ArtifactLeaseKindV1::Active, now_unix)?;

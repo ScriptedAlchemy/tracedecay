@@ -595,7 +595,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                     authority.projection().embedding_key().inference_batch_size as usize,
                     authority.projection().embedding_key().inference_batch_bytes as usize,
                 )
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+                .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
                 drop(request.canonical_chunks);
                 let committed_batches = completed_batch_offset(resume, batches.len())?
                     .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
@@ -621,7 +621,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                         encoder,
                     )
                     .await
-                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+                    .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
                     if let Some(failure) = progress.failure() {
                         return Err(failure);
                     }

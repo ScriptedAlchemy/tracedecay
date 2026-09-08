@@ -76,10 +76,13 @@ pub(super) fn seed_distribution_fixture(
     std::fs::write(reference, &model.source.revision).expect("write revision reference");
 }
 
-pub(super) async fn install_project_distribution_fixture(
+/// The live lifecycle owner the composition's session registry retains for
+/// this project. The registry owns it, so a composition restart retires the
+/// previous instance: resolve again after every reopen before observing or
+/// mutating the model lifecycle.
+pub(super) async fn project_semantic_lifecycle(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
-    fixture_root: &Path,
 ) -> Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1> {
     let project_id = tracedecay_domain::ProjectId::new(
         harness
@@ -88,7 +91,7 @@ pub(super) async fn install_project_distribution_fixture(
             .expect("installed project identity"),
     )
     .expect("canonical project identity");
-    let lifecycle = harness
+    harness
         .resources
         .as_ref()
         .expect("live harness")
@@ -98,7 +101,22 @@ pub(super) async fn install_project_distribution_fixture(
         .expect("session registry")
         .project_semantic_lifecycle(&project_id)
         .await
-        .expect("installed project lifecycle");
+        .expect("installed project lifecycle")
+}
+
+pub(super) async fn install_project_distribution_fixture(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    fixture_root: &Path,
+) -> Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1> {
+    let lifecycle = project_semantic_lifecycle(harness, project).await;
+    let project_id = tracedecay_domain::ProjectId::new(
+        harness
+            .project_id(project)
+            .await
+            .expect("installed project identity"),
+    )
+    .expect("canonical project identity");
     let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(harness.profile_root())
         .join("projects")
         .join(project_id.as_str());
@@ -850,7 +868,7 @@ async fn semantic_runtime_status(
         .clone()
 }
 
-async fn wait_for_semantic_runtime_ready(
+pub(super) async fn wait_for_semantic_runtime_ready(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
@@ -1149,6 +1167,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     )
     .await
     .expect("restart production composition");
+    // The restarted composition's registry owns a new lifecycle instance over
+    // the same durable root; the pre-restart handle is retired. Every later
+    // injection and retry must reach the owner the daemon actually serves.
+    let lifecycle = project_semantic_lifecycle(&harness, &project).await;
     let restarted_runtime = timed_stage(
         "restart.await_runtime_ready",
         wait_for_semantic_runtime_ready(&harness, &project),
