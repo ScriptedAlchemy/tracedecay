@@ -10,17 +10,13 @@
 //! releases and vice versa.
 
 use std::fs::File;
-#[cfg(windows)]
-use std::io::Seek;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay_domain::canonical_text::sha256_hex;
 
 use tracedecay::cloud::{self, InstallMethod};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -134,11 +130,17 @@ fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
     }
 }
 
+/// The platform archive and checksum manifest of one GitHub release, with the
+/// byte sizes the release metadata advertises for each. Those sizes are the
+/// download ceilings: a body that runs past its advertised size, or ends
+/// short of it, is not the published asset.
 #[derive(Debug)]
 struct ReleaseDownload {
     asset_name: String,
     asset_url: String,
+    asset_size: u64,
     checksums_url: String,
+    checksums_size: u64,
 }
 
 /// Resolves both the platform archive and its checksum manifest from one
@@ -149,6 +151,7 @@ fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload
     struct Asset {
         name: String,
         browser_download_url: String,
+        size: u64,
     }
     #[derive(serde::Deserialize)]
     struct Release {
@@ -198,27 +201,117 @@ fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload
     Ok(ReleaseDownload {
         asset_name: archive.name.clone(),
         asset_url: archive.browser_download_url.clone(),
+        asset_size: archive.size,
         checksums_url: checksums.browser_download_url.clone(),
+        checksums_size: checksums.size,
     })
 }
 
-#[hotpath::measure(label = "cli.upgrade.download")]
-fn download_bytes(agent: &ureq::Agent, url: &str, description: &str) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    agent
+/// Streams `url` into `sink`, requiring exactly `advertised_len` bytes: the
+/// body is cut off the moment it runs past the size the release metadata
+/// advertises, and a body that ends short of it is a truncated download.
+/// Only a fixed transfer buffer is ever held in memory.
+fn download_exact(
+    agent: &ureq::Agent,
+    url: &str,
+    advertised_len: u64,
+    description: &str,
+    sink: &mut impl Write,
+) -> Result<()> {
+    let mut response = agent
         .get(url)
         .header("User-Agent", "tracedecay")
         .call()
         .map_err(|e| TraceDecayError::Config {
             message: format!("{description} download failed: {e}"),
-        })?
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("{description} download read failed: {error}"),
         })?;
-    Ok(bytes)
+    let mut body = response.body_mut().as_reader();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut received: u64 = 0;
+    loop {
+        let count = body
+            .read(&mut buffer)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("{description} download read failed: {error}"),
+            })?;
+        if count == 0 {
+            break;
+        }
+        received += count as u64;
+        if received > advertised_len {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "{description} exceeds the {advertised_len} bytes the release advertises; \
+                     refusing an unverified download"
+                ),
+            });
+        }
+        sink.write_all(&buffer[..count])
+            .map_err(io_err("cannot write downloaded bytes"))?;
+    }
+    if received != advertised_len {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{description} ended after {received} of the {advertised_len} bytes the release \
+                 advertises"
+            ),
+        });
+    }
+    sink.flush()
+        .map_err(io_err("cannot flush downloaded bytes"))
+}
+
+/// Writer that hashes every byte it forwards, so the archive digest is taken
+/// over exactly the bytes that reached the staging file.
+struct DigestingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> Write for DigestingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Downloads the checksum manifest, bounded by its advertised size.
+fn download_manifest(agent: &ureq::Agent, download: &ReleaseDownload) -> Result<Vec<u8>> {
+    let mut manifest = Vec::new();
+    download_exact(
+        agent,
+        &download.checksums_url,
+        download.checksums_size,
+        "checksum manifest",
+        &mut manifest,
+    )?;
+    Ok(manifest)
+}
+
+/// Streams the release archive into `archive`, bounded by its advertised
+/// size, and returns the lowercase hex SHA-256 of the bytes written.
+fn stream_archive(
+    agent: &ureq::Agent,
+    download: &ReleaseDownload,
+    archive: &mut File,
+) -> Result<String> {
+    let mut sink = DigestingWriter {
+        inner: archive,
+        hasher: Sha256::new(),
+    };
+    download_exact(
+        agent,
+        &download.asset_url,
+        download.asset_size,
+        "release archive",
+        &mut sink,
+    )?;
+    Ok(hex::encode(sink.hasher.finalize()))
 }
 
 fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
@@ -247,9 +340,7 @@ fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
     Ok(digest.to_ascii_lowercase())
 }
 
-#[hotpath::measure(label = "cli.upgrade.verify_sha256")]
-fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
-    let actual = sha256_hex(bytes);
+fn verify_sha256(actual: &str, expected: &str, asset_name: &str) -> Result<()> {
     if actual == expected {
         return Ok(());
     }
@@ -269,7 +360,19 @@ fn download_and_stage(
         .prefix("tracedecay-upgrade-")
         .tempdir()
         .map_err(io_err("cannot create upgrade staging directory"))?;
+    stage_release_in(scratch, download, members)
+}
 
+/// Streams the archive into an exclusively created file inside `scratch`,
+/// hashing as it lands, verifies the whole-archive digest against the
+/// release's checksum manifest, and only then rewinds that same file for
+/// extraction. `scratch` is owned by this attempt: it is removed with
+/// everything in it whenever this returns an error.
+fn stage_release_in(
+    scratch: TempDir,
+    download: &ReleaseDownload,
+    members: &[ReleaseMember],
+) -> Result<StagedRelease> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_mins(5)))
         .build()
@@ -277,20 +380,30 @@ fn download_and_stage(
 
     eprint!("  Downloading...");
 
-    let manifest = download_bytes(&agent, &download.checksums_url, "checksum manifest")?;
+    let manifest = download_manifest(&agent, download)?;
     let expected = expected_sha256(&manifest, &download.asset_name)?;
-    let raw = download_bytes(&agent, &download.asset_url, "release archive")?;
+    let mut archive = File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(scratch.path().join("archive"))
+        .map_err(io_err("cannot create staged archive"))?;
+    let actual = stream_archive(&agent, download, &mut archive)?;
 
-    eprintln!(" ({:.1} MiB)", raw.len() as f64 / 1_048_576.0);
-    verify_sha256(&raw, &expected, &download.asset_name)?;
+    eprintln!(" ({:.1} MiB)", download.asset_size as f64 / 1_048_576.0);
+    verify_sha256(&actual, &expected, &download.asset_name)?;
     eprintln!("  Checksum verified");
     eprint!("  Extracting...");
 
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(io_err("cannot rewind staged archive"))?;
+
     #[cfg(not(windows))]
-    extract_targz(io::Cursor::new(&raw[..]), scratch.path(), members)?;
+    extract_targz(io::BufReader::new(archive), scratch.path(), members)?;
 
     #[cfg(windows)]
-    extract_zip(io::Cursor::new(&raw[..]), scratch.path(), members)?;
+    extract_zip(io::BufReader::new(archive), scratch.path(), members)?;
 
     eprintln!(" Done");
     Ok(StagedRelease {
@@ -1258,11 +1371,11 @@ mod tests {
 
     #[test]
     fn release_archive_checksum_must_match_before_extraction() {
-        let bytes = b"verified archive bytes";
-        let digest = hex::encode(Sha256::digest(bytes));
+        let digest = hex::encode(Sha256::digest(b"verified archive bytes"));
+        let tampered = hex::encode(Sha256::digest(b"tampered"));
 
-        assert!(verify_sha256(bytes, &digest, "archive.tar.gz").is_ok());
-        assert!(verify_sha256(b"tampered", &digest, "archive.tar.gz").is_err());
+        assert!(verify_sha256(&digest, &digest, "archive.tar.gz").is_ok());
+        assert!(verify_sha256(&tampered, &digest, "archive.tar.gz").is_err());
     }
 
     #[test]
@@ -1462,16 +1575,18 @@ mod tests {
     #[cfg(unix)]
     mod release_bundle {
         use std::fs;
-        use std::io::Cursor;
+        use std::io::{Cursor, Read, Write};
+        use std::net::TcpListener;
         use std::os::unix::fs::PermissionsExt;
 
         use flate2::Compression;
         use flate2::write::GzEncoder;
+        use sha2::{Digest, Sha256};
         use tar::{Builder, EntryType, Header};
 
         use super::super::{
-            EXECUTABLE_MEMBER, ReleaseMember, ReleaseMemberKind, StagedRelease, extract_targz,
-            intended_member, publish_companions, publish_member,
+            EXECUTABLE_MEMBER, ReleaseDownload, ReleaseMember, ReleaseMemberKind, StagedRelease,
+            extract_targz, intended_member, publish_companions, publish_member, stage_release_in,
         };
 
         const RUNTIME: ReleaseMember = ReleaseMember {
@@ -1727,6 +1842,171 @@ mod tests {
                 leftovers.is_empty(),
                 "staging sibling leaked: {leftovers:?}"
             );
+        }
+
+        // ── Streamed download into owned staging ───────────────────────
+
+        const ASSET: &str = "tracedecay-v9.9.9-x86_64-linux.tar.gz";
+
+        /// Serves each `(path, body)` over plain HTTP/1.1 on a loopback port
+        /// for as long as the test process lives.
+        fn serve(responses: Vec<(&'static str, Vec<u8>)>) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let mut request = [0u8; 4096];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    let head = String::from_utf8_lossy(&request[..read]).into_owned();
+                    let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+                    let body = responses
+                        .iter()
+                        .find(|(served, _)| *served == path)
+                        .map_or(&[][..], |(_, body)| body.as_slice());
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                }
+            });
+            base
+        }
+
+        fn manifest_for(archive: &[u8]) -> Vec<u8> {
+            format!("{}  {ASSET}\n", hex::encode(Sha256::digest(archive))).into_bytes()
+        }
+
+        fn download(base: &str, asset_size: u64, checksums_size: u64) -> ReleaseDownload {
+            ReleaseDownload {
+                asset_name: ASSET.to_owned(),
+                asset_url: format!("{base}/archive"),
+                asset_size,
+                checksums_url: format!("{base}/SHA256SUMS"),
+                checksums_size,
+            }
+        }
+
+        /// A scratch directory inside a test-owned parent, so the test can
+        /// prove the attempt removed its own staging afterwards.
+        fn scratch_in(parent: &std::path::Path) -> tempfile::TempDir {
+            tempfile::Builder::new()
+                .prefix("tracedecay-upgrade-")
+                .tempdir_in(parent)
+                .unwrap()
+        }
+
+        fn is_empty_dir(path: &std::path::Path) -> bool {
+            fs::read_dir(path).unwrap().next().is_none()
+        }
+
+        #[test]
+        fn a_verified_archive_is_streamed_into_owned_scratch_and_staged() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let base = serve(vec![
+                ("/SHA256SUMS", manifest.clone()),
+                ("/archive", archive.clone()),
+            ]);
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64, manifest.len() as u64);
+
+            let staged =
+                stage_release_in(scratch_in(parent.path()), &download, &linux_members()).unwrap();
+
+            assert!(staged.scratch.path().starts_with(parent.path()));
+            assert_eq!(
+                fs::read(staged.scratch.path().join("archive")).unwrap(),
+                archive,
+                "the verified bytes are the ones extracted"
+            );
+            assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
+            assert_eq!(fs::read(staged.path_of(RUNTIME)).unwrap(), b"new-runtime");
+            drop(staged);
+            assert!(
+                is_empty_dir(parent.path()),
+                "the attempt must remove its own scratch on handoff"
+            );
+        }
+
+        #[test]
+        fn an_archive_running_past_its_advertised_size_is_refused() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let base = serve(vec![
+                ("/SHA256SUMS", manifest.clone()),
+                ("/archive", archive.clone()),
+            ]);
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64 - 1, manifest.len() as u64);
+
+            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
+                .unwrap_err();
+
+            assert!(error.to_string().contains("exceeds the"), "{error}");
+            assert!(
+                is_empty_dir(parent.path()),
+                "failed attempts release their scratch"
+            );
+        }
+
+        #[test]
+        fn a_truncated_archive_is_refused() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let base = serve(vec![
+                ("/SHA256SUMS", manifest.clone()),
+                ("/archive", archive.clone()),
+            ]);
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64 + 1, manifest.len() as u64);
+
+            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
+                .unwrap_err();
+
+            assert!(error.to_string().contains("ended after"), "{error}");
+            assert!(is_empty_dir(parent.path()));
+        }
+
+        #[test]
+        fn a_checksum_mismatch_refuses_before_extraction() {
+            let archive = complete_release();
+            let manifest = manifest_for(b"some other release");
+            let base = serve(vec![
+                ("/SHA256SUMS", manifest.clone()),
+                ("/archive", archive.clone()),
+            ]);
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64, manifest.len() as u64);
+
+            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
+                .unwrap_err();
+
+            assert!(error.to_string().contains("checksum mismatch"), "{error}");
+            assert!(is_empty_dir(parent.path()));
+        }
+
+        #[test]
+        fn an_oversized_checksum_manifest_is_refused() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let base = serve(vec![
+                ("/SHA256SUMS", manifest.clone()),
+                ("/archive", archive.clone()),
+            ]);
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64, manifest.len() as u64 - 1);
+
+            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
+                .unwrap_err();
+
+            assert!(
+                error.to_string().contains("checksum manifest exceeds"),
+                "{error}"
+            );
+            assert!(is_empty_dir(parent.path()));
         }
     }
 
