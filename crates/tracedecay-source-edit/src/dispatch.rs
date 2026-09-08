@@ -4,7 +4,6 @@ use tracedecay_contracts::{RequestContext, SourceEditRequest};
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::GraphCancellation;
 
-use tracedecay_application::tracedecay::{SourceEditGraphReadV1, SourceEditRuntime};
 use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
@@ -12,6 +11,7 @@ use tracedecay_graph_query::{
 };
 
 use super::outcome::SourceEditOutcome;
+use super::port::{SourceEditGraphReadV1, SourceEditRuntime};
 
 pub(super) struct SourceEditGraphReadAuthorityV1<'a> {
     pub(super) port: &'a dyn CodeGraphProjectionReadPort,
@@ -191,7 +191,6 @@ pub(super) async fn run_source_edit(
 mod tests {
     use std::sync::Arc;
 
-    use tracedecay_application::tracedecay::SourceEditGraphReadV1;
     use tracedecay_code_index::graph_projection::{
         CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
     };
@@ -205,6 +204,7 @@ mod tests {
     };
 
     use super::{SourceEditGraphReadAuthorityV1, admitted_graph};
+    use crate::port::SourceEditGraphReadV1;
     use crate::test_support::fixture_request;
 
     struct FixtureGraphPort {

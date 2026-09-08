@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
@@ -330,9 +329,13 @@ impl ProjectedChunkV1 {
 /// enabled independently by deriving an [`CodeExactProjectionAdapterV1`] with
 /// the central admission authority; constructing this lexical adapter alone
 /// never enables or mints exact proofs.
+///
+/// Metadata is shared, not owned: every scoped projection built over one
+/// generation reads the same immutable copy instead of cloning its logical
+/// path table per scope.
 #[derive(Clone, Debug)]
 pub struct CodeLexicalProjectionAdapterV1 {
-    metadata: CodeLexicalProjectionMetadataV1,
+    metadata: Arc<CodeLexicalProjectionMetadataV1>,
     rows: Arc<Vec<ProjectedChunkV1>>,
     postings: Arc<LexicalGenerationPostingsV1>,
 }
@@ -511,11 +514,12 @@ enum CodeLexicalProjectionBuildPhaseV1 {
 /// between bounded scheduler windows.
 #[derive(Debug)]
 pub struct CodeLexicalProjectionBuildV1 {
-    metadata: CodeLexicalProjectionMetadataV1,
+    metadata: Arc<CodeLexicalProjectionMetadataV1>,
     /// Parser-attested extracted qualified name per symbol occurrence. The
     /// sealed-page artifact path carries the same authority per chunk on its
-    /// symbol display; this is how the in-memory build receives it.
-    symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+    /// symbol display; this is how the in-memory build receives it. Shared so
+    /// scoped builds over one generation read one corpus-wide map.
+    symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
     chunks: Vec<Option<CodeSearchChunkV1>>,
     rows: Vec<ProjectedChunkV1>,
     postings: Option<LexicalGenerationPostingsBuildV1>,
@@ -527,28 +531,28 @@ pub struct CodeLexicalProjectionBuildV1 {
 
 impl CodeLexicalProjectionBuildV1 {
     pub fn new_admitted<C>(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<C>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: impl Into<Arc<BTreeMap<SymbolOccurrenceId, String>>>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
     {
         Self::new_inner(
-            metadata,
+            metadata.into(),
             chunks
                 .into_iter()
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
-            symbol_qualified_names,
+            symbol_qualified_names.into(),
             true,
         )
     }
 
     fn new_inner(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: Arc<CodeLexicalProjectionMetadataV1>,
         mut chunks: Vec<CodeSearchChunkV1>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
         extraction_admitted: bool,
     ) -> Result<Self, RetrievalPortError> {
         metadata.validate()?;
@@ -947,91 +951,53 @@ impl CodeLexicalProjectionAdapterV1 {
             .saturating_add(self.postings.retained_owned_bytes())
     }
 
-    /// Build a scoped projection with the same extracted symbol identity used
-    /// by sealed-page artifact preparation. Scope selection never substitutes
-    /// caller-supplied names for the published generation's parser authority.
-    pub fn new_published(
-        metadata: CodeLexicalProjectionMetadataV1,
-        generation: &CodeIndexPublishedGenerationV1,
-        allowed_files: &BTreeSet<FileOccurrenceId>,
-    ) -> Result<Self, RetrievalPortError> {
-        let deadline =
-            Instant::now() + Duration::from_micros(lexical_projection_build_deadline_micros(None));
-        if metadata.generation != generation.manifest().generation_id {
-            return Err(RetrievalPortError::GenerationMismatch);
-        }
-        let canonical_paths = generation
-            .snapshot()
-            .files
-            .iter()
-            .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
-            .collect();
-        if metadata.repository_id.as_ref() != Some(&generation.snapshot().repository)
-            || metadata.logical_paths != canonical_paths
-            || allowed_files
-                .iter()
-                .any(|file| !metadata.logical_paths.contains_key(file))
-        {
-            return Err(RetrievalPortError::Contract(
-                "lexical scope does not match the published generation".to_owned(),
-            ));
-        }
-        let admitted = generation.admitted_chunks().map_err(contract_error)?;
-        let chunks = admitted
-            .iter()
-            .filter(|chunk| allowed_files.contains(&chunk.chunk().anchor.file_occurrence_id))
-            .map(|chunk| chunk.chunk().clone())
-            .collect();
-        let symbol_qualified_names = generation
-            .symbols()
-            .symbols
-            .iter()
-            .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
-            .collect();
-        let mut build = CodeLexicalProjectionBuildV1::new_inner(
-            metadata,
-            chunks,
-            symbol_qualified_names,
-            true,
-        )?;
-        match build.advance_inner(usize::MAX, Some(deadline))? {
-            CodeLexicalProjectionBuildStepV1::Ready(projection) => Ok(*projection),
-            CodeLexicalProjectionBuildStepV1::Pending { .. } => Err(RetrievalPortError::Contract(
-                "unbounded lexical projection build did not complete".to_owned(),
-            )),
-        }
-    }
-
     pub fn new(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, RetrievalPortError> {
-        Self::new_inner(metadata, chunks, BTreeMap::new(), false, None)
+        Self::new_inner(
+            metadata.into(),
+            chunks,
+            Arc::new(BTreeMap::new()),
+            false,
+            None,
+        )
     }
 
+    /// The single shared-source constructor: `chunks` carry parser-backed
+    /// extraction admission and `symbol_qualified_names` the extractor's
+    /// qualified name for every symbol occurrence among them; the sealed-page
+    /// artifact path carries the same authority on its per-chunk symbol
+    /// display. Passing an empty map projects no qualified-name postings, so
+    /// qualified-symbol queries lose their exact recall.
+    ///
+    /// Both shared inputs are accepted as anything convertible to an `Arc`, so
+    /// a caller building one projection per scope over the same generation
+    /// hands every scope the same immutable metadata and name map instead of
+    /// cloning them per scope.
+    ///
     /// Hard-wires `deadline_micros = None` (crate 30s fallback); the daemon
     /// mount passes its own deadline to [`Self::new_admitted_with_deadline`].
-    ///
-    /// `symbol_qualified_names` carries the extractor's qualified name for
-    /// every symbol occurrence in `chunks`; the sealed-page artifact path
-    /// carries the same authority on its per-chunk symbol display. Passing an
-    /// empty map projects no qualified-name postings, so qualified-symbol
-    /// queries lose their exact recall.
     pub fn new_admitted<C>(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<C>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: impl Into<Arc<BTreeMap<SymbolOccurrenceId, String>>>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
     {
-        Self::new_admitted_with_deadline(metadata, chunks, symbol_qualified_names, None)
+        Self::new_admitted_with_deadline(
+            metadata.into(),
+            chunks,
+            symbol_qualified_names.into(),
+            None,
+        )
     }
 
     fn new_admitted_with_deadline<C>(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: Arc<CodeLexicalProjectionMetadataV1>,
         chunks: Vec<C>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError>
     where
@@ -1050,9 +1016,9 @@ impl CodeLexicalProjectionAdapterV1 {
     }
 
     fn new_inner(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: Arc<CodeLexicalProjectionMetadataV1>,
         chunks: Vec<CodeSearchChunkV1>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
         extraction_admitted: bool,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError> {
@@ -2021,9 +1987,9 @@ mod deadline_budget_tests {
     #[test]
     fn zero_deadline_is_immediate_budget_exceeded() {
         let error = CodeLexicalProjectionAdapterV1::new_inner(
-            dummy_metadata(),
+            Arc::new(dummy_metadata()),
             Vec::<CodeSearchChunkV1>::new(),
-            BTreeMap::new(),
+            Arc::new(BTreeMap::new()),
             true,
             Some(0),
         )

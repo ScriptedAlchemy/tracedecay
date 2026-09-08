@@ -60,8 +60,6 @@
 //! ```
 
 mod ast_grep;
-mod file_authority;
-mod plan;
 mod preview;
 mod primitives;
 mod rename;
@@ -74,14 +72,9 @@ mod reconcile_tests;
 #[cfg(test)]
 mod test_support;
 
-// `move_symbol.rs` (a sibling of this module) imports these edit authorities via
-// `use super::edits::{...}` — the re-exports below keep that import path
-// stable across the split, resolving each name at `crate::tracedecay::edits`
-// exactly as it did when they were all defined directly in `edits.rs`.
-pub(in crate::tracedecay) use plan::{
-    capture_planned_source_edit, publish_planned_source_edit, rollback_planned_source_edit_files,
-    validate_planned_source_edit,
-};
+// `move_symbol.rs` (a sibling of this module) imports these edit helpers via
+// `use super::edits::{...}`; the re-exports resolve each name at
+// `crate::tracedecay::edits`.
 pub(in crate::tracedecay) use preview::{
     LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,
     classify_leading_line, edit_success_message,

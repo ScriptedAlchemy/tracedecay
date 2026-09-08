@@ -424,6 +424,29 @@ fn real_lexical_source_fixture() -> RealLexicalSourceFixture {
     real_lexical_source_fixture_with_files(1)
 }
 
+/// The in-memory projection over every admitted chunk of `generation`,
+/// carrying the generation's own extracted qualified names — the same
+/// authority the sealed-page artifact path reads per chunk.
+fn generation_backed_projection(
+    metadata: CodeLexicalProjectionMetadataV1,
+    generation: &CodeIndexPublishedGenerationV1,
+) -> CodeLexicalProjectionAdapterV1 {
+    let chunks = generation
+        .admitted_chunks()
+        .expect("published generation admitted chunks")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let symbol_qualified_names = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+        .collect::<BTreeMap<_, _>>();
+    CodeLexicalProjectionAdapterV1::new_admitted(metadata, chunks, symbol_qualified_names)
+        .expect("generation-backed lexical projection")
+}
+
 /// One real production corpus with `file_count` TypeScript files. The first
 /// file keeps the original single-file identity; the rest share its token
 /// shape (identical per-field token counts) under distinct symbols so BM25
@@ -1452,13 +1475,7 @@ fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
     )]);
     let generation = CodeIndexPublishedGenerationV1::decode_sealed(&fixture.sealed)
         .expect("restore canonical generation");
-    let allowed_files = fixture.metadata.logical_paths.keys().cloned().collect();
-    let memory = CodeLexicalProjectionAdapterV1::new_published(
-        fixture.metadata.clone(),
-        &generation,
-        &allowed_files,
-    )
-    .expect("generation-backed lexical projection");
+    let memory = generation_backed_projection(fixture.metadata.clone(), &generation);
     let directory = tempfile::tempdir().expect("artifact directory");
     let path = directory.path().join("qualified.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -1797,14 +1814,10 @@ fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
     );
     let generation = CodeIndexPublishedGenerationV1::decode_sealed(&fixture.sealed)
         .expect("restore canonical generation");
-    let allowed_files = fixture.metadata.logical_paths.keys().cloned().collect();
-    let memory = CodeLexicalProjectionAdapterV1::new_published(
+    let memory = LexicalLane::new(generation_backed_projection(
         fixture.metadata.clone(),
         &generation,
-        &allowed_files,
-    )
-    .expect("generation-backed projection");
-    let memory = LexicalLane::new(memory);
+    ));
     let mut common = lexical_request("shared_candidate", &["shared_candidate"], &[], &[], 0, 8);
     common.generation = fixture.metadata.generation.clone();
     let baseline = complete(memory.retrieve_lexical(&common).expect("common term query"));

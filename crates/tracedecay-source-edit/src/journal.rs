@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -9,13 +9,15 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
+use tracedecay_runtime_core::storage::try_acquire_sidecar_lock;
 
-use tracedecay_application::tracedecay::SourceEditRuntime;
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::JOURNAL_VERSION;
 use super::digest::{load_record, persist_record, source_edit_recovery_digest};
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::PlannedSourceEditFile;
+use super::port::SourceEditRuntime;
 use super::verify::{application_contract_error, config_error, domain_error, io_error};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,7 +46,7 @@ pub(super) struct SourceEditJournalV1 {
     pub(super) predicted_state: Option<ManifestDigest>,
     pub(super) candidate_files: Vec<String>,
     #[serde(default)]
-    pub(super) recovery_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<PlannedSourceEditFile>,
     #[serde(default)]
     pub(super) recovery_digest: Option<ManifestDigest>,
     pub(super) request: SourceEditDurableRequestV1,
@@ -96,7 +98,7 @@ pub(super) struct SourceEditRollbackRecordV1 {
     pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) expected_state: ManifestDigest,
     pub(super) committed_state: ManifestDigest,
-    pub(super) recovery_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<PlannedSourceEditFile>,
     pub(super) recovery_digest: ManifestDigest,
     pub(super) record_digest: ManifestDigest,
 }
@@ -156,7 +158,7 @@ pub(super) struct ResolvedSourceEditPreview {
     pub(super) candidate_files: Vec<String>,
     pub(super) expected_state: Option<ManifestDigest>,
     pub(super) predicted_state: Option<ManifestDigest>,
-    pub(super) planned_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
+    pub(super) planned_files: Vec<PlannedSourceEditFile>,
 }
 
 impl SourceEditDurability {
@@ -169,11 +171,18 @@ impl SourceEditDurability {
         }
     }
 
+    /// Serializes every preview, apply, rollback, and reconciliation on this
+    /// store behind one exclusive lock file. The lock is released when the
+    /// returned handle drops; contention is a typed refusal, never a wait.
     #[hotpath::measure(label = "usecases.edit.lock")]
-    pub(super) fn lock(&self) -> Result<tracedecay_application::tracedecay::SyncLockGuard> {
-        tracedecay_application::tracedecay::try_acquire_sync_lock_at(
-            &self.root.join("source-edit.lock"),
-        )
+    pub(super) fn lock(&self) -> Result<File> {
+        let lock_path = self.root.join("source-edit.lock");
+        try_acquire_sidecar_lock(&lock_path)?.ok_or_else(|| TraceDecayError::SyncLock {
+            message: format!(
+                "could not lock sync lockfile: another source edit holds {}",
+                lock_path.display()
+            ),
+        })
     }
 
     pub(super) fn journal_path(&self) -> PathBuf {

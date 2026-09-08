@@ -5598,8 +5598,7 @@ dependencies = [
 [[package]]
 name = "tokensave-large-treesitters"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e12f9884955f347b1c7323f263020af2a097811fe1994e5d974ac46411b971b0"
+source = "git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9#102d0103b6fd093c1e5989cceede1ed9f08fe6a9"
 dependencies = [
  "arborium-kotlin",
  "arborium-lean",
@@ -6005,10 +6004,8 @@ dependencies = [
 name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
- "cap-fs-ext",
  "cap-std",
  "criterion",
- "fs2",
  "getrandom 0.2.17",
  "gix",
  "glob",
@@ -7075,13 +7072,15 @@ dependencies = [
 name = "tracedecay-source-edit"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "hotpath",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tracedecay-application",
  "tracedecay-code-index",
  "tracedecay-contracts",
  "tracedecay-domain",

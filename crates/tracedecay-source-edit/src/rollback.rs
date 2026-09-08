@@ -5,7 +5,6 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use tracedecay_application::tracedecay::SourceEditRuntime;
 use tracedecay_domain::errors::Result;
 
 use super::JOURNAL_VERSION;
@@ -18,6 +17,8 @@ use super::journal::{
     SourceEditJournalV1, same_source_edit_authority,
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::{PlannedSourceEditFile, rollback_planned_source_edit_files};
+use super::port::SourceEditRuntime;
 use super::reconcile::recover_source_edit_transaction;
 use super::records::{applied_record, durable_record, interrupted_record, unknown_record};
 use super::verify::{application_contract_error, application_problem, config_error};
@@ -49,7 +50,7 @@ fn rollback_journal(
     input_digest: &ManifestDigest,
     predicted_state: Option<ManifestDigest>,
     candidate_files: Vec<String>,
-    recovery_files: Vec<tracedecay_application::tracedecay::PlannedSourceEditFile>,
+    recovery_files: Vec<PlannedSourceEditFile>,
 ) -> Result<SourceEditJournalV1> {
     let recovery_digest = (!recovery_files.is_empty())
         .then(|| source_edit_recovery_digest(&recovery_files))
@@ -287,13 +288,11 @@ where
     let recovery_files = retained
         .recovery_files
         .iter()
-        .map(
-            |file| tracedecay_application::tracedecay::PlannedSourceEditFile {
-                relative_path: file.relative_path.clone(),
-                expected: file.intended.clone(),
-                intended: file.expected.clone(),
-            },
-        )
+        .map(|file| PlannedSourceEditFile {
+            relative_path: file.relative_path.clone(),
+            expected: file.intended.clone(),
+            intended: file.expected.clone(),
+        })
         .collect::<Vec<_>>();
     let mut journal = rollback_journal(
         operation,
@@ -319,11 +318,14 @@ where
         return Ok(record.into_live_application_result(outcome, None));
     }
 
-    let apply_result = hotpath::future!(
-        graph.apply_source_edit_rollback(&retained.recovery_files),
-        label = "usecases.edit.rollback.apply"
-    )
-    .await;
+    // A caller-requested rollback of a completed edit is a live operation, so
+    // the graph is resynchronized wholesale by the daemon-owned scheduler
+    // rather than reindexed file by file: a rollback may delete a file the edit
+    // created, and a deleted path has no bytes left to reindex.
+    let apply_result = hotpath::measure_block!(
+        "usecases.edit.rollback.apply",
+        rollback_planned_source_edit_files(graph.project_root(), &retained.recovery_files)
+    );
     let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if apply_result.is_err() || committed_state != retained.expected_state {
         if committed_state != journal.expected_state {

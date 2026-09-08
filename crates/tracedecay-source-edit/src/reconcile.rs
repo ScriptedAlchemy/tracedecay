@@ -8,7 +8,6 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use tracedecay_application::tracedecay::SourceEditRuntime;
 use tracedecay_domain::errors::Result;
 
 use super::JOURNAL_VERSION;
@@ -18,6 +17,8 @@ use super::journal::{
     SourceEditDurability, SourceEditJournalStateV1, SourceEditJournalV1, same_source_edit_authority,
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::{commit_source_edit_postimages, rollback_planned_source_edit_files};
+use super::port::SourceEditRuntime;
 use super::records::{
     applied_durable_record, applied_record, durable_record,
     persist_interrupted_reconciliation_attempt, reconciliation_attempt_record, unknown_record,
@@ -380,11 +381,10 @@ pub(super) async fn recover_source_edit_transaction(
     //     ever populated alongside `predicted_state` (see `execute.rs`), so a
     //     present predicted state is guaranteed here.
     if journal.predicted_state.as_ref() == Some(&observed_state) {
-        hotpath::future!(
-            graph.commit_source_edit_postimages(&journal.recovery_files),
-            label = "usecases.edit.recover.commit"
-        )
-        .await?;
+        hotpath::measure_block!(
+            "usecases.edit.recover.commit",
+            commit_source_edit_postimages(graph.project_root(), &journal.recovery_files)?
+        );
         let outcome = SourceEditOutcome::Reconciled {
             success: true,
             message: "source edit crash recovery confirmed the edit already committed to disk"
@@ -400,7 +400,7 @@ pub(super) async fn recover_source_edit_transaction(
     //     it is a torn partial multi-file write (iii) — some files published,
     //     others not — rolling back to a consistent pre-edit state lets the whole
     //     atomic plan be retried, but it discards the bytes of the files that did
-    //     publish, so we WARN first. `recover_source_edit_preimages` restores
+    //     publish, so we WARN first. `rollback_planned_source_edit_files` restores
     //     per file and REFUSES any foreign bytes outright, so it can only ever
     //     touch files it can prove hold either the preimage or the intended edit;
     //     genuinely unaccountable content fails recovery instead of being erased.
@@ -414,11 +414,10 @@ pub(super) async fn recover_source_edit_transaction(
              are being discarded"
         );
     }
-    hotpath::future!(
-        graph.recover_source_edit_preimages(&journal.recovery_files),
-        label = "usecases.edit.recover.preimage"
-    )
-    .await?;
+    hotpath::measure_block!(
+        "usecases.edit.recover.preimage",
+        rollback_planned_source_edit_files(graph.project_root(), &journal.recovery_files)?
+    );
     let restored_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if restored_state != journal.expected_state {
         return Err(config_error(
@@ -526,6 +525,7 @@ mod tests {
     use crate::test_support::*;
 
     use crate::digest::{planned_source_edit_state_digest, source_edit_recovery_digest};
+    use crate::plan::PlannedSourceEditFile;
     use std::fs;
     use tempfile::tempdir;
     use tracedecay_contracts::source_edit::EditResult;
@@ -568,7 +568,7 @@ mod tests {
         };
         let request = fixture_request();
         let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
-        journal.recovery_files = vec![tracedecay_application::tracedecay::PlannedSourceEditFile {
+        journal.recovery_files = vec![PlannedSourceEditFile {
             relative_path: "src/lib.rs".to_owned(),
             expected: Some("old".to_owned()),
             intended: Some("new".to_owned()),
@@ -865,7 +865,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[tracedecay_application::tracedecay::PlannedSourceEditFile {
+                &[PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("after".to_owned()),
@@ -930,7 +930,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[tracedecay_application::tracedecay::PlannedSourceEditFile {
+                &[PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("intended".to_owned()),
