@@ -221,10 +221,17 @@ fn run_acquisition_inner(
                 rollback_lease,
                 now_unix,
             )?;
+            // The lifecycle names the catalog package it installed, exactly as
+            // the download/verify states before it and the private-root path
+            // below do: that digest is the projection identity every vector
+            // generation and compatibility pin carries. The inventory's
+            // content address (which also hashes host-derived resource
+            // ceilings) stays private to the store and is recovered from the
+            // install directory when a lease or rollback needs it.
             guard.durable.state = Some(SemanticModelLifecycleStateV1::Installed {
                 model_id: model.model_id.clone(),
                 revision: model.source.revision.clone(),
-                artifact_digest: record.artifact_digest.to_string(),
+                artifact_digest: digest.clone(),
                 install_path: store.installed_directory(&record.artifact_digest),
             });
             if let Err(error) = persist_durable(root, &guard.durable) {
