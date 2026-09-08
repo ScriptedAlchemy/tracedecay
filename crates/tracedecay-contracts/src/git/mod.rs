@@ -35,7 +35,6 @@ pub use native_integration_surface::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
     native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
-    native_worktree_executable_binding_registry,
 };
 pub use public_wire::{
     DaemonGitHunkPreviewBindingV1, GitApplySurfaceRequest, GitBlameSurfaceRequest,
@@ -55,8 +54,7 @@ pub use stack_signal_expand::{
     GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandUnavailableV1,
 };
 pub use surface_catalog::{
-    git_surface_catalog_contribution, git_surface_executable_binding_registry,
-    git_surface_handler_descriptors, git_surface_operation,
+    git_surface_catalog_contribution, git_surface_handler_descriptors, git_surface_operation,
 };
 pub use transactions::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,

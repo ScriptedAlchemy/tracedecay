@@ -164,7 +164,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_derives",
     "tracedecay:tracedecay_diagnose",
     "tracedecay:tracedecay_diagnostics",
-    "tracedecay:tracedecay_diagnostics_read",
     "tracedecay:tracedecay_diff_context",
     "tracedecay:tracedecay_distribution",
     "tracedecay:tracedecay_doc_coverage",

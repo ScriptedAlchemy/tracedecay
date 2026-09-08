@@ -90,7 +90,9 @@ mod error;
 mod surface_binding;
 pub mod surface_contracts;
 
-pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
+pub(crate) use surface_binding::{
+    current_application_bindings, current_bindings, current_bindings_with_slug, surface_name,
+};
 
 pub use advisory::*;
 pub use authorization::{
@@ -107,10 +109,10 @@ pub use configuration::{
     ConfigurationProtectedPreviewRequestV1, ConfigurationRollbackApplyRequestV1,
     ConfigurationRollbackPreviewRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
     ConfigurationWireRequestV1, ConfigurationWriteCredentialRequestV1, ResolvedSetting,
-    SettingSummary, configuration_executable_binding_registry,
-    configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
-    configuration_surface_operation, configuration_surface_request_schema,
-    configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
+    SettingSummary, configuration_surface_catalog_contribution,
+    configuration_surface_handler_descriptors, configuration_surface_operation,
+    configuration_surface_request_schema, configuration_surface_result_schema,
+    configuration_wire_request_from_invocation_payload,
 };
 pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{
@@ -120,8 +122,8 @@ pub use context::{
     RequestId, ResolvedScope,
 };
 pub use context_scout::{
-    context_scout_executable_binding_registry, context_scout_surface_catalog_contribution,
-    context_scout_surface_handler_descriptors, context_scout_surface_operation,
+    context_scout_surface_catalog_contribution, context_scout_surface_handler_descriptors,
+    context_scout_surface_operation,
 };
 pub use diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,
@@ -168,9 +170,8 @@ pub use external_source::{
 pub use feedback::{
     FeedbackExpandRequestV1, FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1,
     FeedbackHandleRequestV1, FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort,
-    FeedbackReadService, feedback_http_executable_binding_registry,
-    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
-    feedback_surface_operation,
+    FeedbackReadService, feedback_surface_catalog_contribution,
+    feedback_surface_handler_descriptors, feedback_surface_operation,
 };
 pub use git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
@@ -201,7 +202,6 @@ pub use git::{
     git_surface_catalog_contribution, git_surface_handler_descriptors,
     is_canonical_repository_relative_path, native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
-    native_worktree_executable_binding_registry,
 };
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
@@ -286,8 +286,7 @@ pub use retained_surfaces::{
 pub use retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID,
-    application_catalog_contributions, code_search_executable_binding_registry,
-    primitive_http_executable_binding_registry,
+    application_catalog_contributions, application_operation_default_page_size,
 };
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
@@ -310,7 +309,10 @@ pub use retrieval::{
     callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
     callable_code_request_schema, callable_code_result_schema,
 };
-pub use sdk_catalog::sdk_executable_binding_registry;
+pub use sdk_catalog::{
+    application_http_executable_binding_registry, application_http_route_path,
+    sdk_executable_binding_registry,
+};
 pub use semantic_activation::{
     SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
 };

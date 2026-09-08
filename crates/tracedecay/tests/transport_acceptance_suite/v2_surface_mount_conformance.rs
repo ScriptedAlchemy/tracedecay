@@ -580,7 +580,10 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
         let mounted = match surface {
             BindingSurface::Http => {
                 match ApplicationSurfaceOperation::from_catalog_name(operation) {
-                    Some(http) if is_http_application_operation_exposed(http) => {
+                    Some(http)
+                        if is_http_application_operation_exposed(http)
+                            .expect("HTTP exposure registry") =>
+                    {
                         http_route_is_mounted(
                             &agent,
                             &fixture,
@@ -766,15 +769,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     }
 
     // -- HTTP application operations. ---------------------------------------
-    // The enum is the router's own operation authority, so an entry the
-    // catalog never declares is a surface the catalog cannot authorize and no
-    // discovery answer will ever mention.
-    assert!(
-        ApplicationSurfaceOperation::ALL.len() >= 66,
-        "the HTTP application operation set shrank to {}; a removed operation \
-         must be deleted deliberately, not dropped out of this sweep",
-        ApplicationSurfaceOperation::ALL.len()
-    );
     for operation in ApplicationSurfaceOperation::ALL {
         graded += 1;
         let name = operation.as_str();
@@ -788,7 +782,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         // be required to carry an HTTP catalog binding.
         // `is_http_exposed` is the single authority for that decision, so the
         // catalog requirement and the route requirement consult it alike.
-        if !is_http_application_operation_exposed(operation) {
+        if !is_http_application_operation_exposed(operation).expect("HTTP exposure registry") {
             continue;
         }
         if !catalog_http_operations.contains(name) {

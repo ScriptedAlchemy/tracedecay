@@ -5,8 +5,8 @@
 //! and the default binding shape in its own per-surface loop.
 
 use tracedecay_tool_catalog::{
-    BindingId, BindingStatus, BindingSurface, CapabilityId, ProtocolRevisionRange,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
+    ApplicationSurfaceOperation, BindingId, BindingStatus, BindingSurface, CapabilityId,
+    ProtocolRevisionRange, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use crate::error::ApplicationContractError;
@@ -57,6 +57,41 @@ pub(crate) fn current_bindings_with_slug(
             capability_id: capability_id.clone(),
             surface,
             operation: SurfaceOperationName::new(operation)?,
+            protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+            required_features: Vec::new(),
+            status: BindingStatus::Current,
+            alias_of: None,
+        })?);
+        binding_ids.push(binding_id);
+    }
+    Ok((bindings, binding_ids))
+}
+
+/// Bind one canonical application operation using its transport-owned spelling.
+///
+/// Catalog identity remains [`ApplicationSurfaceOperation::as_str`]. CLI and
+/// MCP use the operation's public tool spelling, which differs only for the
+/// established `tracedecay_diagnostics` surface.
+pub(crate) fn current_application_bindings(
+    capability_id: &CapabilityId,
+    operation: ApplicationSurfaceOperation,
+    surfaces: impl IntoIterator<Item = BindingSurface>,
+) -> Result<(Vec<SurfaceBindingV1>, Vec<BindingId>), ApplicationContractError> {
+    let surfaces = surfaces.into_iter();
+    let expected = surfaces.size_hint().0;
+    let mut bindings = Vec::with_capacity(expected);
+    let mut binding_ids = Vec::with_capacity(expected);
+    for surface in surfaces {
+        let binding_id = BindingId::new(format!(
+            "binding.{}.{}.v1",
+            surface_name(surface),
+            operation.as_str()
+        ))?;
+        bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+            binding_id: binding_id.clone(),
+            capability_id: capability_id.clone(),
+            surface,
+            operation: SurfaceOperationName::new(operation.name_for_surface(surface))?,
             protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
             required_features: Vec::new(),
             status: BindingStatus::Current,

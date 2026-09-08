@@ -49,7 +49,7 @@ use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
-    normalize_application_tool_args, observe_surface_argument_rejection,
+    adapt_application_tool_request, observe_surface_argument_rejection,
     parse_application_surface_request,
 };
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
@@ -300,14 +300,15 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
     project: Option<PathBuf>,
     raw_json: bool,
 ) -> Result<()> {
-    let tool_name = format!("tracedecay_{}", operation.as_str());
     let deadline = Instant::now()
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
-    let (request, requested_format) = cli_surface_invocation(&tool_name, tool_args, raw_json)
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
+    let (request, requested_format) =
+        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json).map_err(
+            |error| TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )?;
     dispatch_cli_application_surface(operation, request, project, requested_format, deadline).await
 }
 
@@ -319,7 +320,7 @@ fn cli_surface_invocation(
     tool_args: Value,
     raw_json: bool,
 ) -> std::result::Result<(Value, RequestedOutputFormat), ApplicationSurfaceAdapterError> {
-    let normalized = normalize_application_tool_args(tool_name, tool_args)?;
+    let normalized = adapt_application_tool_request(tool_name, tool_args)?;
     let requested_format = if raw_json {
         RequestedOutputFormat::Json
     } else {

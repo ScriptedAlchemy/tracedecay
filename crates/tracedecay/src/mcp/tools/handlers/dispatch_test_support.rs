@@ -417,7 +417,7 @@ pub(super) async fn concrete_dispatch_group_accepts(
             owned(dispatch_admin_tools(tool_name, cg, invalid_args, options).await)
         }
         McpToolDispatchGroup::Analysis => {
-            owned(dispatch_analysis_tools(tool_name, cg, invalid_args, None, None, options).await)
+            owned(dispatch_analysis_tools(tool_name, cg, invalid_args, None, options).await)
         }
         McpToolDispatchGroup::Git => {
             owned(dispatch_git_tools(tool_name, cg, invalid_args, options).await)

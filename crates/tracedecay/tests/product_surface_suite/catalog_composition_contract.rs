@@ -223,7 +223,8 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
         .iter()
         .filter(|(binding, _)| {
             match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
-                Some(operation) => !is_http_application_operation_exposed(operation),
+                Some(operation) => !is_http_application_operation_exposed(operation)
+                    .expect("HTTP exposure registry"),
                 None => RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
                     .is_none(),
             }

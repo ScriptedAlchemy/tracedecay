@@ -137,32 +137,24 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     );
 }
 
-/// `DiagnosticsRead` answers to two tool names, and the classifier only
-/// declines the surface for one of them. The deferred name must land on a
-/// group that owns a concrete handler; it previously resolved to nothing,
-/// so every executor-less server answered `unknown tool`.
+/// Diagnostics has one production owner regardless of whether the MCP server
+/// could attach a daemon executor; the canonical owner reports typed
+/// application transport unavailability when none is attached.
 #[test]
-fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
+fn diagnostics_always_reaches_the_application_surface_owner() {
     assert_eq!(
-        classify_mcp_tool_dispatch_group("tracedecay_diagnostics", true),
+        classify_mcp_tool_dispatch_group("tracedecay_diagnostics"),
         Some(McpToolDispatchGroup::ApplicationSurface),
     );
     assert_eq!(
-        classify_mcp_tool_dispatch_group("tracedecay_diagnostics", false),
-        Some(McpToolDispatchGroup::Analysis),
+        dispatch_group_for_tool("tracedecay_diagnostics"),
+        None,
+        "diagnostics must not retain a second analysis owner",
     );
     assert_eq!(
-        dispatch_group_for_tool("tracedecay_diagnostics"),
-        Some(McpToolDispatchGroup::Analysis),
-        "the deferred lookup has no other table to resolve against",
+        classify_mcp_tool_dispatch_group("tracedecay_diagnostics_read"),
+        None,
     );
-    for executor_available in [true, false] {
-        assert_eq!(
-            classify_mcp_tool_dispatch_group("tracedecay_diagnostics_read", executor_available),
-            Some(McpToolDispatchGroup::ApplicationSurface),
-            "the reviewed request shape has no in-process handler to fall back to",
-        );
-    }
 }
 
 #[tokio::test]
@@ -224,17 +216,14 @@ async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
 #[test]
 fn hotpath_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
     assert_eq!(
-        mcp_tool_hotpath_identity("tracedecay_search", false),
+        mcp_tool_hotpath_identity("tracedecay_search"),
         "tracedecay_search"
     );
     assert_eq!(
-        mcp_tool_hotpath_identity("attacker-controlled-unknown-name", false),
+        mcp_tool_hotpath_identity("attacker-controlled-unknown-name"),
         "unknown"
     );
-    assert_eq!(
-        mcp_tool_hotpath_identity("another-unknown-name", true),
-        "unknown"
-    );
+    assert_eq!(mcp_tool_hotpath_identity("another-unknown-name"), "unknown");
 }
 
 /// The MCP deadline horizon asks this predicate which reads walk git, so it
@@ -280,111 +269,92 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             "{} is advertised more than once",
             definition.name
         );
-        // Both executor states, because the classifier defers a tool to a
-        // different group when no application invocation executor is
-        // attached. Probing only the attached state let the deferred group
-        // resolve to nothing at all without failing this test.
-        for executor_available in [true, false] {
-            assert_eq!(
-                mcp_tool_hotpath_identity(&definition.name, executor_available),
-                definition.name,
-                "{} must retain exact bounded Hotpath identity",
-                definition.name
-            );
-            let group = classify_mcp_tool_dispatch_group(&definition.name, executor_available)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} has no production dispatch entry with executor_available={executor_available}",
-                        definition.name
-                    )
-                });
+        assert_eq!(
+            mcp_tool_hotpath_identity(&definition.name),
+            definition.name,
+            "{} must retain exact bounded Hotpath identity",
+            definition.name
+        );
+        let group = classify_mcp_tool_dispatch_group(&definition.name)
+            .unwrap_or_else(|| panic!("{} has no production dispatch entry", definition.name));
 
-            match group {
-                McpToolDispatchGroup::ApplicationSurface => assert!(
-                    ApplicationSurfaceOperation::from_tool_name(&definition.name).is_some(),
-                    "{} has no application-surface handler entry",
-                    definition.name
+        match group {
+            McpToolDispatchGroup::ApplicationSurface => assert!(
+                ApplicationSurfaceOperation::from_tool_name(&definition.name).is_some(),
+                "{} has no application-surface handler entry",
+                definition.name
+            ),
+            McpToolDispatchGroup::MultiRoot => assert!(
+                matches!(
+                    definition.name.as_str(),
+                    "tracedecay_multi_root_scope_set_read"
+                        | "tracedecay_multi_root_scope_set_compare_and_swap"
+                        | "tracedecay_multi_root_execute"
                 ),
-                McpToolDispatchGroup::MultiRoot => assert!(
-                    matches!(
-                        definition.name.as_str(),
-                        "tracedecay_multi_root_scope_set_read"
-                            | "tracedecay_multi_root_scope_set_compare_and_swap"
-                            | "tracedecay_multi_root_execute"
-                    ),
-                    "{} has no multi-root daemon handler entry",
-                    definition.name
-                ),
-                McpToolDispatchGroup::Work => assert!(
-                    crate::mcp::tools::binding::work_operation_for_tool(&definition.name).is_some(),
-                    "{} has no canonical Work operation entry",
-                    definition.name
-                ),
-                McpToolDispatchGroup::Workflow => assert!(
-                    crate::mcp::tools::binding::workflow_operation_for_tool(&definition.name)
-                        .is_some(),
-                    "{} has no canonical Workflow operation entry",
-                    definition.name
-                ),
-                McpToolDispatchGroup::RetainedApplication => {
-                    let composition = retained_mcp_composition().unwrap_or_else(|error| {
-                        panic!("{} catalog composition failed: {error}", definition.name)
+                "{} has no multi-root daemon handler entry",
+                definition.name
+            ),
+            McpToolDispatchGroup::Work => assert!(
+                crate::mcp::tools::binding::work_operation_for_tool(&definition.name).is_some(),
+                "{} has no canonical Work operation entry",
+                definition.name
+            ),
+            McpToolDispatchGroup::Workflow => assert!(
+                crate::mcp::tools::binding::workflow_operation_for_tool(&definition.name).is_some(),
+                "{} has no canonical Workflow operation entry",
+                definition.name
+            ),
+            McpToolDispatchGroup::RetainedApplication => {
+                let composition = retained_mcp_composition().unwrap_or_else(|error| {
+                    panic!("{} catalog composition failed: {error}", definition.name)
+                });
+                let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+                let operation = RetainedSurfaceOperation::from_tool_name(&definition.name)
+                    .unwrap_or_else(|| {
+                        panic!("{} has no retained-surface handler entry", definition.name)
                     });
-                    let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                    {
-                        let operation = RetainedSurfaceOperation::from_tool_name(&definition.name)
-                            .unwrap_or_else(|| {
-                                panic!("{} has no retained-surface handler entry", definition.name)
-                            });
-                        let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-                        let capability = composition
-                            .snapshot()
-                            .resolve_binding(
-                                &profile,
-                                BindingSurface::Mcp,
-                                &operation_name,
-                                1,
-                                &BTreeSet::new(),
-                            )
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "{} action {} catalog binding is not callable",
-                                    definition.name,
-                                    operation.as_str()
-                                )
-                            });
-                        let expected = retained_surface_application_operation(operation).unwrap();
-                        assert_eq!(capability.capability_id(), expected.capability_id());
-                        assert_eq!(capability.use_case_id(), expected.use_case_id());
-                        assert!(
-                            composition
-                                .bind_handler(capability.use_case_id(), &())
-                                .is_some(),
-                            "{} action {} application handler is not registered",
+                let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
+                let capability = composition
+                    .snapshot()
+                    .resolve_binding(
+                        &profile,
+                        BindingSurface::Mcp,
+                        &operation_name,
+                        1,
+                        &BTreeSet::new(),
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} action {} catalog binding is not callable",
                             definition.name,
                             operation.as_str()
-                        );
-                    }
-                }
-                group => {
-                    assert_eq!(
-                        dispatch_group_for_tool(&definition.name),
-                        Some(group),
-                        "{} does not resolve through the canonical MCP binding registry",
-                        definition.name
-                    );
-                    assert!(
-                        concrete_dispatch_group_accepts(
-                            group,
-                            &definition.name,
-                            &cg,
-                            options.clone()
                         )
+                    });
+                let expected = retained_surface_application_operation(operation).unwrap();
+                assert_eq!(capability.capability_id(), expected.capability_id());
+                assert_eq!(capability.use_case_id(), expected.use_case_id());
+                assert!(
+                    composition
+                        .bind_handler(capability.use_case_id(), &())
+                        .is_some(),
+                    "{} action {} application handler is not registered",
+                    definition.name,
+                    operation.as_str()
+                );
+            }
+            group => {
+                assert_eq!(
+                    dispatch_group_for_tool(&definition.name),
+                    Some(group),
+                    "{} does not resolve through the canonical MCP binding registry",
+                    definition.name
+                );
+                assert!(
+                    concrete_dispatch_group_accepts(group, &definition.name, &cg, options.clone())
                         .await,
-                        "{} has no concrete handler-family entry",
-                        definition.name
-                    );
-                }
+                    "{} has no concrete handler-family entry",
+                    definition.name
+                );
             }
         }
     }
@@ -395,13 +365,11 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
         "tracedecay_fact_store",
     ] {
         assert!(!advertised.contains(tool_name));
-        for executor_available in [true, false] {
-            assert_eq!(
-                classify_mcp_tool_dispatch_group(tool_name, executor_available),
-                None,
-                "{tool_name} must fail closed with executor_available={executor_available}"
-            );
-        }
+        assert_eq!(
+            classify_mcp_tool_dispatch_group(tool_name),
+            None,
+            "{tool_name} must fail closed"
+        );
         let rejected = handle_tool_call_with_registry_options(
             &cg,
             tool_name,

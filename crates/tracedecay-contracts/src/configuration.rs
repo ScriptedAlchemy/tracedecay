@@ -18,19 +18,18 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId,
-    PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
-    TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
+    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
+    LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
-use crate::current_bindings;
+use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -426,21 +425,9 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
     },
 ];
 
-pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
-    "configuration_list",
-    "configuration_explain",
-    "configuration_get",
-    "configuration_set",
-    "configuration_unset",
-    "configuration_batch",
-    "configuration_write_credential",
-    "configuration_observed_state",
-    "configuration_protected_preview",
-    "configuration_protected_apply",
-    "configuration_rollback_preview",
-    "configuration_rollback_apply",
-    "configuration_audit",
-];
+pub fn configuration_surface_operation_names() -> impl ExactSizeIterator<Item = &'static str> {
+    CONFIGURATION_SPECS.iter().map(|spec| spec.name)
+}
 
 pub fn configuration_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
@@ -449,8 +436,13 @@ pub fn configuration_surface_catalog_contribution()
 
     for spec in &CONFIGURATION_SPECS {
         let capability_id = CapabilityId::new(capability_id(spec.name))?;
+        let operation = ApplicationSurfaceOperation::from_catalog_name(spec.name).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "configuration surface operation",
+            },
+        )?;
         let (spec_bindings, binding_ids) =
-            current_bindings(&capability_id, spec.name, spec.surfaces.iter().copied())?;
+            current_application_bindings(&capability_id, operation, spec.surfaces.iter().copied())?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
@@ -464,61 +456,6 @@ pub fn configuration_surface_catalog_contribution()
     })?;
     let schemas = configuration_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
-}
-
-/// Daemon-owned public HTTP bindings for every shipped configuration use case.
-///
-/// The contribution above owns both manifest references and generated schema
-/// bodies. This registry adds only the concrete daemon service, codec, and
-/// externally mounted HTTP path consumed by first-party SDKs.
-pub fn configuration_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = configuration_surface_catalog_contribution()?;
-    let service_id = ServiceId::new("service.application.configuration")?;
-    let mut bindings = Vec::with_capacity(CONFIGURATION_SPECS.len());
-    for spec in &CONFIGURATION_SPECS {
-        let capability_id = CapabilityId::new(capability_id(spec.name))?;
-        let manifest = contribution
-            .capabilities()
-            .binary_search_by(|manifest| manifest.capability_id().cmp(&capability_id))
-            .ok()
-            .map(|index| &contribution.capabilities()[index])
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "configuration executable capability",
-            })?;
-        let schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "configuration executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "configuration HTTP binding",
-            })?;
-        let executable = ExecutableBindingV1::daemon_owned(
-            manifest,
-            OperationId::new(format!("operation.application.{}", spec.name))?,
-            service_id.clone(),
-            schema.request_schema().clone(),
-            schema.result_schema().clone(),
-            CodecBindingKey::new(format!(
-                "codec.application.configuration.{}.json.v1",
-                spec.name
-            ))?,
-            RouteExposureV1::Public {
-                binding_id: http_binding.binding_id().clone(),
-                route_path: format!("/application/configuration/{}", spec.name),
-            },
-        )?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(executable));
-    }
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
 fn configuration_executable_schemas(
@@ -799,7 +736,9 @@ fn handler_descriptor(
     spec: &ConfigurationSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     let result_schema = configuration_surface_result_schema(spec.name)?;
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        spec.name,
+        "service.application.configuration",
         application_operation(spec)?,
         configuration_surface_request_schema(spec.name)?,
         result_schema,
@@ -834,7 +773,7 @@ fn configuration_surface_schema(
     operation: &str,
     direction: &str,
 ) -> Result<SchemaRef, ApplicationContractError> {
-    if !CONFIGURATION_SURFACE_OPERATION_NAMES.contains(&operation) {
+    if !configuration_surface_operation_names().any(|candidate| candidate == operation) {
         return Err(ApplicationContractError::Inconsistent {
             field: "configuration surface operation",
         });
