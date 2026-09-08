@@ -3285,8 +3285,10 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         ..test_handshake_defaults()
     };
 
-    // Project composition admits through its own capacity gate. The global
-    // store writer does not block route publication and cannot hold this open.
+    // Project composition admits through its own capacity gate (the
+    // `admit_route` phase of `production_project_server`, before the open
+    // counts an attempt). The global store writer does not block route
+    // publication and cannot hold this open.
     let capacity_gate =
         super::super::project_open_capacity_gate(engine.project_open_gates.as_ref()).await;
     let capacity_admission = capacity_gate.lock().await;
