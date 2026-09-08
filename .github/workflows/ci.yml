@@ -48,9 +48,9 @@ jobs:
   # builds from the merge ref: the smoke only needs an executable `tracedecay`,
   # and building a second one from the head cost a cold
   # `cargo build -p tracedecay-cli` that never fit this job's budget (runs
-  # 34217290139 and 34231734416: kache and rust-cache both missed, the build
-  # was cancelled after 29 minutes while `debug-cli` finished the same build
-  # in 30-31 minutes and published it).
+  # 34217290139 and 34231734416: the build was cancelled after 29 minutes
+  # while `debug-cli` finished the same build in 30-31 minutes and published
+  # it).
   pr-dogfood:
     name: PR checkout dogfood
     needs: [scope-gate, debug-cli]
@@ -108,18 +108,10 @@ jobs:
       # cache is capped at 10 GB and was full of per-job copies of the same
       # dependencies (`pr-dogfood` and `dashboard` each built this graph too),
       # which evicted the test lanes' caches between runs and made every test
-      # run a cold build.
-      #
-      # No kache store for the workspace crates: this build writes 4.3 GB
-      # into the store (run 34231734416: 3.4 GB hardlinked + 0.9 GB copied)
-      # against a 512 MiB LRU ceiling, so what survived to be saved was the
-      # last-compiled tail — `tracedecay`, `tracedecay-application`, the
-      # binary — exactly the crates a push changes, and the restore hit
-      # 0 of 973 crates. Its 977 MB entry was re-saved on every push, part of
-      # the 9.6 GB per push that evicted the lockfile-keyed dependency caches
-      # this job and the test lanes do restore, and kache's memory-weighted
-      # permit pool held the four cores to 1.5 compiles in flight (46 min of
-      # compile work, 40 min waiting for a permit, 31m33s wall).
+      # run a cold build. Only the lockfile-keyed dependency cache is kept:
+      # the workspace crates are exactly what a push changes, so caching
+      # their outputs per run re-saved ~1 GB per push for a restore that hit
+      # nothing.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
@@ -287,31 +279,13 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       # rust-cache carries the dependency graph, keyed by toolchain and
-      # lockfile; the workspace crates are compiled fresh every run. There is
-      # deliberately no kache compiler store here. Both lanes ran one for a
-      # day (c002e7b1d) and it is what put the macOS lane past its 180 min:
-      #
-      # - The perf-profile test graph writes 15.7 GB (macOS) / 17.8 GB (Linux)
-      #   into the store per build against a 2 GiB LRU ceiling, so the entry
-      #   saved was whatever survived the last GC — the root crate's test
-      #   binaries, which every push changes. Restores hit 25/428 crates and
-      #   avoided 24 s of compile on a cold run (34168826002, macOS) and
-      #   45/430 crates, 6 min, on the Linux run that restored the previous
-      #   push's store (34231734416); that run's macOS lane restored a 2.6 GB
-      #   store and still compiled for 154m35s. Holding the compile would
-      #   need ~16 GB per lane of a 10 GB repository budget.
-      # - kache's scheduler takes a memory-weighted permit per compile from a
-      #   pool of `available_parallelism()` slots: a crate whose last build
-      #   peaked above 1 GiB RSS takes all three of macos-14's, above 1.5 GiB
-      #   all four of ubuntu-latest's, and an unmeasured link takes two. The
-      #   perf-profile graph ran serialized: kache's own report for the macOS
-      #   run 34168826002 shows 2.6 h of compile work and 5.0 h waiting for a
-      #   permit, 7.7 h of wrapper time = 3 cores x the 155 min the build
-      #   took, i.e. one compile in flight; Linux 34231734416: 2.2 h compile,
-      #   5.4 h permit wait, 4 cores x 116 min, 1.1 in flight. Before kache
-      #   the same libs reached the root crate in 18.6 min on the macOS
-      #   runner and compiled it in 5.2 min (34161919969, warm dependencies);
-      #   under kache 40.2 min and 9.5 min (34168826002).
+      # lockfile; the workspace crates are compiled fresh every run. No
+      # per-run compiler store: the perf-profile test graph writes 15.7 GB
+      # (macOS) / 17.8 GB (Linux) of outputs per build, which no store inside
+      # the repository's 10 GB cache budget can hold, so a per-run store only
+      # ever kept the root crate's test binaries — the outputs every push
+      # changes — while its 2-3 GB save per push evicted the dependency caches
+      # this lane does restore.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
@@ -394,7 +368,7 @@ jobs:
       # `dashboard_api_test` declares `required-features = ["test-transport"]`,
       # which `cargo test-ci` does not enable, so the hosted selection above
       # never builds or runs it. It used to be the `dashboard` job's own
-      # dev-profile `nextest run` in a 512 MiB kache lane: with the repository
+      # dev-profile `nextest run` in its own job: with the repository
       # cache at its 10 GB cap every restore missed and the cold build took
       # 22-26 minutes against a 25-minute budget (runs 34217290139 and
       # 34231734416 were cancelled). Here the graph is already compiled.
@@ -706,25 +680,12 @@ jobs:
         with:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
-      - name: Enable kache
-        id: kache
-        uses: ./.github/actions/kache
-        with:
-          lane: clippy
-          max-size: 1GiB
 
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check lean build
         run: cargo check -p tracedecay --no-default-features --locked
-
-      - name: Save kache store
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ steps.kache.outputs.store-path }}
-          key: ${{ steps.kache.outputs.cache-key }}
 
   # Additive visibility lint. Not a required check yet — introduce Hawk, then
   # promote once the workspace is clean under `-D warnings`.

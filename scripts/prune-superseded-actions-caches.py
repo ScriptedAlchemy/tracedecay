@@ -7,16 +7,12 @@ prints one cache id per line for every entry that can no longer be restored
 because a newer entry with the same restore lineage exists on the same ref.
 
 A lineage is the part of a key the workflow restores by prefix:
+Swatinem/rust-cache saves `v0-rust-<prefix>-<env hash>-<lockfile hash>` and
+restores `v0-rust-<prefix>-<env hash>-` by prefix, never across an env hash,
+so both an older lockfile generation and an older toolchain generation are
+unreachable.
 
-* `.github/actions/kache` saves `kache-store-<lane>-<os>-<version>-<run>-<attempt>`
-  and restores the newest `kache-store-<lane>-<os>-<version>-` entry, so every
-  older run's store on the ref is dead weight the moment a newer one lands.
-* Swatinem/rust-cache saves `v0-rust-<prefix>-<env hash>-<lockfile hash>` and
-  restores `v0-rust-<prefix>-<env hash>-` by prefix, never across an env
-  hash, so both an older lockfile generation and an older toolchain
-  generation are unreachable.
-
-Keys outside these two shapes (setup-node's `node-cache-…`, arbitrary
+Keys outside that shape (setup-node's `node-cache-…`, arbitrary
 `actions/cache` keys) are left alone: the same prefix can legitimately carry
 several live entries there (one per lockfile a different job hashes).
 """
@@ -30,10 +26,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-LINEAGES = (
-    re.compile(r"^(?P<lineage>kache-store-.+-v\d+(?:\.\d+)*)-\d+-\d+$"),
-    re.compile(r"^(?P<lineage>v0-rust-.+)-[0-9a-f]{8}-[0-9a-f]{8}$"),
-)
+LINEAGES = (re.compile(r"^(?P<lineage>v0-rust-.+)-[0-9a-f]{8}-[0-9a-f]{8}$"),)
 
 
 def lineage_of(key: str) -> str | None:
