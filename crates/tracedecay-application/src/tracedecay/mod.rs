@@ -1,9 +1,5 @@
 //! Narrow root-owned store authorities used by transport-neutral use cases.
 
-mod runtime_port;
-
-pub use runtime_port::{ProjectStoreRuntimeV1, RuntimeFuture};
-
 use std::path::PathBuf;
 
 use serde::Serialize;
