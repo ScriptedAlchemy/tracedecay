@@ -53,7 +53,6 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.post_tool_use")]
 pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
-    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
@@ -71,7 +70,6 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             &decision,
-            started,
         )
         .await
     {
@@ -90,7 +88,6 @@ pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
         &output,
-        started,
     )
     .await
     {

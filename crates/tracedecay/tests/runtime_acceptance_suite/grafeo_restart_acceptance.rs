@@ -459,10 +459,11 @@ async fn get_selected_project_fact(
         }),
     )
     .await;
-    // A selector opens the target's read-only memory authority without
-    // replacing the caller's admitted project runtime or capability scope.
-    assert_eq!(envelope["scope"]["project_id"], admitted_project_id);
+    // A selector opens the target's read-only memory authority from the
+    // caller's admitted runtime, and the evidence envelope names the project
+    // whose store actually answered rather than the admitting project (#899).
     assert_ne!(admitted_project_id, project_id);
+    assert_eq!(envelope["scope"]["project_id"], project_id);
     let fact = available_fact(&application_payload(&envelope, "evidence")["fact"]);
     assert_eq!(fact["fact_id"], fact_id);
     assert_eq!(fact["owner"]["kind"], "project");

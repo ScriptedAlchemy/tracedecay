@@ -1969,48 +1969,72 @@ assert ctx.skills[0][1].name == "SKILL.md"
     );
 }
 
+/// The shared skill and the Hermes skill teach the same retrieval ladder, but
+/// they carry different depth by design: the repository skill names the
+/// operations and the wire fields an agent must preserve and leaves argument
+/// defaults to the live tool schemas, while the Hermes template is the full
+/// manual its host installs.
 #[test]
 fn generated_skill_mirrors_session_context_retrieval_contract() {
     let template = host_sources::HERMES_SKILL_MD;
     let installed =
         std::fs::read_to_string(SHARED_INSTALL.plugin_dir.join("skills/tracedecay/SKILL.md"))
             .unwrap();
-    let required_markers = [
+    // Every host skill must route to these operations and preserve these
+    // response fields: they are the retrieval contract, not tool manual text.
+    let shared_markers = [
         "tracedecay_message_search",
-        "`provider=all`",
-        "`catch_up=false`",
-        "`limit=10`",
         "lcm_grep",
         "lcm_load_session",
         "lcm_describe",
         "lcm_expand",
         "lcm_expand_query",
-        "`temporal_mode=current`",
-        "`temporal_mode=forensic`",
         "`next_cursor`",
-        "same target, source limit, and content slice",
         "`coverage`",
         "`anchors`",
-        "needs_synthesis=true",
-        "host must synthesize",
+        "needs_synthesis",
         "tracedecay_sessions_for",
         "tracedecay_workflows",
-        "`limit=20`",
         "tracedecay_session_refresh",
+    ];
+    // Argument defaults and worked guidance belong to the Hermes manual only;
+    // the repository skill defers them to the registered tool schemas.
+    let hermes_manual_markers = [
+        "`provider=all`",
+        "`catch_up=false`",
+        "`limit=10`",
+        "`temporal_mode=current`",
+        "`temporal_mode=forensic`",
+        "same target, source limit, and content slice",
+        "needs_synthesis=true",
+        "host must synthesize",
+        "`limit=20`",
         "`begin`",
         "`status`",
         "`cancel`",
     ];
 
-    for (label, skill) in [
+    let hermes_markers: Vec<&str> = shared_markers
+        .iter()
+        .chain(hermes_manual_markers.iter())
+        .copied()
+        .collect();
+    let repository_skill =
+        include_str!("../../../../plugin/skills/managing-session-context/SKILL.md");
+    for (label, skill, markers) in [
         (
             "repository managing-session-context skill",
-            include_str!("../../../../plugin/skills/managing-session-context/SKILL.md"),
+            repository_skill,
+            &shared_markers[..],
         ),
-        ("Hermes template", template),
-        ("installed Hermes skill snapshot", installed.as_str()),
+        ("Hermes template", template, &hermes_markers[..]),
+        (
+            "installed Hermes skill snapshot",
+            installed.as_str(),
+            &hermes_markers[..],
+        ),
     ] {
-        for marker in required_markers {
+        for marker in markers {
             assert!(
                 skill.contains(marker),
                 "{label} should document session retrieval marker {marker:?}",

@@ -7862,11 +7862,17 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// reconcile, without posting a worker wake. Callers that own a separate
     /// cadence authority use this split form so they can record the arrival
     /// before making the worker runnable.
+    ///
+    /// The ladder judges movement from source truth only: Git metadata and the
+    /// stat witness. It deliberately does not compare the cancellation epoch
+    /// against the last reconciled epoch — every epoch advance is paired with
+    /// its own worker wake (a hook hint, an overflow, an observed change), so
+    /// that pending pass is already the remedy. Treating a hint-advanced epoch
+    /// as movement here made a concurrent query escalate the targeted hint
+    /// pass into an overflow rescan and relabel the arrival as its own.
     pub fn freshness_probe_requires_reconcile(&mut self) -> bool {
         let freshness = self.freshness_fence.snapshot();
         if !freshness.verified_against_source
-            || freshness.freshness_unknown
-            || self.epoch.load(Ordering::Acquire) != freshness.reconciled_source_epoch
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
                 .differs_from(&freshness.git_metadata)
         {

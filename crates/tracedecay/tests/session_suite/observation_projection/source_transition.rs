@@ -18,6 +18,11 @@ use super::{
     receipt, table_count,
 };
 
+/// Consolidation alias over the canonical Cline fixture's unaliased message
+/// (`record.projection-cline.0`): the authority audit admits only
+/// `consolidated/<lineage>/<unaliased message id>` bindings.
+const RETAINED_CLINE_ALIAS: &str = "consolidated/retained/record.projection-cline.0";
+
 fn native_successor(
     old: &DurableObservationV1,
     stream: ClineTranscriptStream,
@@ -119,11 +124,18 @@ async fn native_stream_projection_replaces_retained_effects_and_rebuilds_without
         let old_write = canonical_write(old.clone());
         let old_cursor = old_write.next_cursor().clone();
         store.persist_observation(old_write.clone()).await.unwrap();
+        // A retained alias is a consolidation output binding, so it must carry
+        // the shape the authority audit admits at every reopen:
+        // `consolidated/<lineage>/<unaliased message id>`.
         let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
         conn.execute(
         "INSERT INTO observation_projection_aliases (projector_version, observation_id, output_provider, output_message_id)
-         VALUES (?1, ?2, 'cline', 'retained.cline.message')",
-        rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION, old.observation_id().as_str()],
+         VALUES (?1, ?2, 'cline', ?3)",
+        rusqlite::params![
+            tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
+            old.observation_id().as_str(),
+            RETAINED_CLINE_ALIAS,
+        ],
     ).unwrap();
         drop(conn);
         store
@@ -140,7 +152,7 @@ async fn native_stream_projection_replaces_retained_effects_and_rebuilds_without
             .unwrap();
         let raw_ids = projected_raw_store_ids_for_provider(&tmp, "cline").await;
         assert_eq!(raw_ids.len(), 1);
-        assert_eq!(raw_ids[0].0, "retained.cline.message");
+        assert_eq!(raw_ids[0].0, RETAINED_CLINE_ALIAS);
         let original_effect = temporal_effect_receipt(&tmp, old.observation_id().as_str());
         let next = native_successor(&old, ClineTranscriptStream::ApiHistory);
         let next_usage = native_successor(&usage, ClineTranscriptStream::UiMessages);
