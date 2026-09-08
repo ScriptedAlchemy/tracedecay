@@ -1,5 +1,5 @@
-//! CLI build script: renders the terminal logo, resolves the source
-//! provenance baked into the binary, and embeds the dashboard bundle.
+//! CLI build script: resolves the source provenance baked into the binary and
+//! embeds the dashboard bundle.
 //!
 //! This is the only build script in the workspace that watches the repository
 //! or embeds dashboard assets; the composition library (`crates/tracedecay`)
@@ -64,19 +64,6 @@ const DASHBOARD_DIST_PATH_ENV: &str = "TRACEDECAY_DASHBOARD_DIST_PATH";
 /// worktree sharing that tree shares the attestation; a tree without a
 /// matching marker cannot attest the current lockfile and is reinstalled.
 const LOCKFILE_MARKER: &str = ".tracedecay-lockfile-sha256";
-
-fn generate_logo() -> Result<(), Box<dyn Error>> {
-    let out_path = Path::new("src/resources/logo.ansi");
-    let logo_bytes = include_bytes!("src/resources/logo.png");
-    let ansi = logo_art::image_to_ansi(logo_bytes, 90);
-    // Only rewrite when the content differs: `cargo package` verification
-    // rejects packages whose build script modifies files in the source dir.
-    if !matches!(fs::read(out_path), Ok(current) if current == ansi.as_bytes()) {
-        fs::write(out_path, ansi)?;
-    }
-    println!("cargo::rerun-if-changed=src/resources/logo.png");
-    Ok(())
-}
 
 /// The embedded dashboard bundle: manifest-validated relative paths, the
 /// `include_bytes!` root the generated module uses (a compile-time env var
@@ -346,8 +333,6 @@ fn generated_module(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    generate_logo()?;
-
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let repository_root = manifest_dir.join(REPOSITORY_ROOT_FROM_CRATE);
 

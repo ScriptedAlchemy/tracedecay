@@ -337,6 +337,8 @@ async fn handle_status_command_within(
     });
     hotpath::measure_block!("cli.status.render", {
         if should_print_status_logo(short, stdout_is_terminal) {
+            // Tracked render of resources/logo.png; regenerate with
+            // scripts/render-logo-ansi.sh when the artwork changes.
             print!("{}", include_str!("resources/logo.ansi"));
         }
         let branch_info = daemon_status

@@ -289,6 +289,5 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fau
 ignored = ["fs2"]
 
 [build-dependencies]
-logo-art = "0.2"
 serde_json = "1"
 sha2 = "0.11"
