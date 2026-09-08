@@ -367,6 +367,7 @@ jobs:
       # the binaries in the test graph, so this step compiles that graph once
       # and everything below it is a cache hit.
       - name: Build workspace binaries and tests for the test lane
+        id: build-test-graph
         run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
 
       - name: Build host-CLI test fixture
@@ -391,6 +392,30 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # `dashboard_api_test` declares `required-features = ["test-transport"]`,
+      # which `cargo test-ci` does not enable, so the hosted selection above
+      # never builds or runs it. It used to be the `dashboard` job's own
+      # dev-profile `nextest run` in a 512 MiB kache lane: with the repository
+      # cache at its 10 GB cap every restore missed and the cold build took
+      # 22-26 minutes against a 25-minute budget (runs 34217290139 and
+      # 34231734416 were cancelled). Here the graph is already compiled.
+      # `tracedecay/test-transport` changes the resolved features of only
+      # `tracedecay`, `-application`, `-agent-hosts` and `-host-admission`
+      # (every crate below them already carries the feature through this
+      # package's dev-dependencies), so `--test dashboard_api_test` recompiles
+      # those four libraries plus their dependents and links one test binary —
+      # about 13 minutes on this runner for the same chain in the dev-cli
+      # build (run 34231734416). One OS carries it, like the feature-gate
+      # check below: the transport seam does not vary by host and macOS is
+      # the lane closest to its budget. This verdict stays independent of the
+      # suite's, as it was in its own job, so it runs after a red `Run tests`
+      # but not after a build that failed to compile the graph it extends.
+      # `--no-tests=fail` so a dropped feature cannot select zero tests and
+      # report green.
+      - name: Run dashboard integration tests
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.build-test-graph.outcome == 'success' }}
+        run: cargo test-ci --locked --features tracedecay/test-transport --test dashboard_api_test --no-tests=fail
 
       # This parity test must execute separate feature-off/on binaries. Copy
       # each result immediately so the second Cargo resolution cannot replace
@@ -419,7 +444,8 @@ jobs:
       # code still compiles, and the acceptance suites behind `test-transport`
       # spawn daemons, so running them here would change this lane's cost and
       # flakiness profile. Enable them as a real test lane separately once
-      # they are confirmed green.
+      # they are confirmed green (`dashboard_api_test`, green in CI since it
+      # had its own job, already runs above).
       #
       # These are dev-profile check builds, a graph this lane shares with
       # nothing else, and feature wiring does not vary by host, so one OS
@@ -826,41 +852,6 @@ jobs:
           (cd app-dist && find . -type f | sort | xargs sha256sum) > /tmp/dashboard-dist.sha
           npm run build
           (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-dev-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Enable kache
-        id: kache
-        uses: ./.github/actions/kache
-        with:
-          lane: dev-dashboard
-          max-size: 512MiB
-
-      - name: Run dashboard integration tests
-        run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
-
-      - name: Save kache store
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ steps.kache.outputs.store-path }}
-          key: ${{ steps.kache.outputs.cache-key }}
 
   hermes-integration:
     name: Hermes integration (stock)
