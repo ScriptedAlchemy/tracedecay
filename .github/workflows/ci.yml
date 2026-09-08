@@ -109,18 +109,22 @@ jobs:
       # dependencies (`pr-dogfood` and `dashboard` each built this graph too),
       # which evicted the test lanes' caches between runs and made every test
       # run a cold build.
+      #
+      # No kache store for the workspace crates: this build writes 4.3 GB
+      # into the store (run 34231734416: 3.4 GB hardlinked + 0.9 GB copied)
+      # against a 512 MiB LRU ceiling, so what survived to be saved was the
+      # last-compiled tail — `tracedecay`, `tracedecay-application`, the
+      # binary — exactly the crates a push changes, and the restore hit
+      # 0 of 973 crates. Its 977 MB entry was re-saved on every push, part of
+      # the 9.6 GB per push that evicted the lockfile-keyed dependency caches
+      # this job and the test lanes do restore, and kache's memory-weighted
+      # permit pool held the four cores to 1.5 compiles in flight (46 min of
+      # compile work, 40 min waiting for a permit, 31m33s wall).
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-dev-${{ runner.os }}
           cache-on-failure: true
-
-      - name: Enable kache
-        id: kache
-        uses: ./.github/actions/kache
-        with:
-          lane: dev-cli
-          max-size: 512MiB
 
       - name: Build tracedecay binary
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
@@ -132,13 +136,6 @@ jobs:
           path: target/debug/tracedecay
           if-no-files-found: error
           retention-days: 1
-
-      - name: Save kache store
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ steps.kache.outputs.store-path }}
-          key: ${{ steps.kache.outputs.cache-key }}
 
   commit-messages:
     name: Commit Messages
