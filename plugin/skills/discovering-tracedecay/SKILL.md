@@ -21,11 +21,25 @@ Project identity is registry-owned. Resolve project/store selectors through the
 supported project and storage surfaces; a linked worktree retains its exact
 snapshot while sharing the registered project identity. Cross-project reads must
 select that project's store, never alias whichever project is active. Multi-root
-queries use a saved scope set and its returned identity.
+queries use a saved scope set and its returned identity; replacing the set is a
+compare-and-swap (`tracedecay_multi_root_scope_set_compare_and_swap`) against
+the identity a read returned.
 
 Configuration preview/apply and credential management have separate authorities.
-Use returned preview identities and the designated credential write operation;
-never turn a read or a display label into mutation authority.
+Ordinary mutation is `tracedecay_configuration_set`,
+`tracedecay_configuration_unset`, or `tracedecay_configuration_batch`; protected
+and rollback changes consume their returned preview identity through
+`tracedecay_configuration_protected_apply` and
+`tracedecay_configuration_rollback_apply`. Credential material crosses only
+`tracedecay_configuration_write_credential`; never turn a read or a display
+label into mutation authority.
+
+Context Scout generation is daemon-owned. Pause and resume
+(`tracedecay_context_scout_pause`, `tracedecay_context_scout_resume`) require
+the exact configuration revision; cancel, claim, delivery, and feedback
+(`tracedecay_context_scout_cancel`, `tracedecay_context_scout_claim`,
+`tracedecay_context_scout_delivery`, `tracedecay_context_scout_feedback`)
+consume the daemon-returned exact address and typed work, claim, or receipt.
 
 For an incompatible sealed lexical cursor, use the supported synchronization
 recovery for derived index staging. Storage reset is a different operation and
