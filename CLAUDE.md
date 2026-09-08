@@ -1,7 +1,7 @@
 # Claude Notes
 
-See `AGENTS.md` at the repo root — it is the single source of agent guidance
-for this project (layout, build/test commands, commit conventions).
+See [AGENTS.md](AGENTS.md) for repository guidance.
 
-Run plain `cargo <subcommand>` — cargo-conductor brokers it. Do not prefix
-with `kache` or set `CARGO_TARGET_DIR`. See "Build & test" in `AGENTS.md`.
+Run plain `cargo <subcommand>` through the configured build broker. Do not prefix
+with `kache` or set `CARGO_TARGET_DIR`; use the installed cargo-hauler guidance
+when submitting or waiting on builds.

@@ -1,6 +1,6 @@
 ---
 name: exploring-code
-description: 'Locate a symbol, find where behavior lives, or explain how a flow works across files in an indexed repo. Covers which evidence answers which question (text, symbol, or concept), coverage and freshness caveats, and anchored continuation. Reading a file you already know needs no workflow.'
+description: Locate symbols or explain cross-file behavior in an indexed repository; known-file reads can proceed directly.
 ---
 
 # Exploring code

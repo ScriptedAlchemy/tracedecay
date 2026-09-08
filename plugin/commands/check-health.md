@@ -15,4 +15,4 @@ Produce a read-only code-health scorecard for the whole repo, or `$ARGUMENTS` if
 
 This reports and prioritizes; it does not edit.
 
-Output: the composite score + weak dimensions, the worst offenders (complexity, duplication, god files, doc gaps, panic sites, test-risk), and a prioritized fix list. If any result includes a `tracedecay_metrics:` line, report the savings.
+Output: the composite score + weak dimensions, the worst offenders (complexity, duplication, god files, doc gaps, panic sites, test-risk), and a prioritized fix list.

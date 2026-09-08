@@ -12,4 +12,4 @@ Interpret `$ARGUMENTS` as the target (e.g. "pr", "changelog", a base ref, or "st
 
 This drafts text only — leave `git commit` / `gh pr create` to the user unless they explicitly ask.
 
-Output: the drafted commit / PR / changelog text. If any result includes a `tracedecay_metrics:` line, report the savings.
+Output: the drafted commit / PR / changelog text.

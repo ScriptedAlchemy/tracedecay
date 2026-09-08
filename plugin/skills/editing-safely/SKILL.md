@@ -1,6 +1,6 @@
 ---
 name: editing-safely
-description: 'Planning or performing a rename, signature or field change, symbol move, or a helper that may already exist. Covers finding every call, constructor, and write site first, graph blind spots (macros, generated code, string dispatch), and atomic apply with rollback. Local edits need no workflow.'
+description: Perform structural renames, signature or field changes, symbol moves, or consolidation with TraceDecay mutation operations.
 ---
 
 # Editing safely

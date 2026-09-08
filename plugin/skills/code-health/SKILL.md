@@ -1,6 +1,6 @@
 ---
 name: code-health
-description: 'An overall quality, architecture, coupling, duplication, or test-risk read of a project or directory. Covers the health dimensions to start from, treating scores as leads and confirming redundancy findings, and generation-bound before/after deltas. Daemon or registry failures are operational diagnostics.'
+description: Assess project or directory architecture, coupling, duplication, and structural test risk using TraceDecay evidence.
 ---
 
 # Code health

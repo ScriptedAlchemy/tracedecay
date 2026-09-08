@@ -31,4 +31,3 @@ execute shell commands. Never query `.tracedecay` databases directly.
 ## Return
 
 - The composite score, weak dimensions, ranked offenders, and a prioritized fix list with concrete files + qualified symbol names.
-- If any result includes a `tracedecay_metrics:` line, report the savings to the user.

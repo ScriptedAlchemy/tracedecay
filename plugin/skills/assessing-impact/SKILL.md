@@ -1,6 +1,6 @@
 ---
 name: assessing-impact
-description: 'What breaks if a symbol, signature, or set of files changes, and which tests to re-run. Covers dependents versus executed coverage, when a passing affected-test selection counts as evidence, and diff-scoped versus symbol-scoped impact. Call relationships alone are tracing-functions; diff review is reviewing-changes.'
+description: Assess dependents and relevant tests for a proposed symbol, signature, file, or working-tree change.
 ---
 
 # Assessing impact

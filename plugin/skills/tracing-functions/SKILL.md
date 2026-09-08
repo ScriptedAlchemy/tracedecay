@@ -1,6 +1,6 @@
 ---
 name: tracing-functions
-description: 'Who calls X, what X calls, or the path between two symbols. Covers resolving names to exact symbols, trait and dynamic dispatch that text search misses, bounded depth, and reporting coverage gaps instead of "no callers". Locating a symbol is exploring-code.'
+description: Trace callers, callees, or a call path between symbols, accounting for ambiguous names and indexed coverage.
 ---
 
 # Tracing functions
