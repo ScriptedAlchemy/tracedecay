@@ -58,7 +58,7 @@ pub(super) fn publication_by_idempotency(
                 receipt.validate().map_err(invalid)?;
                 let expected_id =
                     tracedecay_store::derive_evidence_assembly_publication_receipt_id_v1(
-                        &receipt.identity_projection(idempotency_key.clone()),
+                        &receipt.identity_projection(idempotency_key),
                     )
                     .map_err(invalid)?;
                 if &receipt.owner != owner

@@ -162,15 +162,16 @@ pub fn write_fixture_for_project(
         projection_output_ordinal: 0,
         sanitized_byte_range: SanitizedObservationByteRangeV1::new(0, 8).unwrap(),
     };
+    let projector_version = tracedecay_domain::ComponentVersion::new("projector.fixture").unwrap();
     let occurrence_id = derive_source_occurrence_id_v1(&SourceOccurrenceIdentityProjectionV1 {
-        owner: owner.owner.clone(),
-        timeline: timeline.clone(),
-        exact_source_anchor: source.clone(),
+        owner: &owner.owner,
+        timeline: &timeline,
+        exact_source_anchor: &source,
         source_order: 7,
-        coordinate: coordinate.clone(),
+        coordinate: &coordinate,
         occurrence_kind: SourceOccurrenceKindV1::Message,
-        relations: Vec::new(),
-        projector_version: tracedecay_domain::ComponentVersion::new("projector.fixture").unwrap(),
+        relations: &[],
+        projector_version: &projector_version,
     })
     .unwrap();
     let occurrence_anchor = anchor(
@@ -188,15 +189,15 @@ pub fn write_fixture_for_project(
         coordinate,
         occurrence_kind: SourceOccurrenceKindV1::Message,
         relations: Vec::new(),
-        projector_version: tracedecay_domain::ComponentVersion::new("projector.fixture").unwrap(),
+        projector_version: projector_version.clone(),
         sanitization: sanitization(),
         knowledge_time: UtcMicros(1),
         valid_time: Some(UtcMicros(1)),
     };
     let occurrence_set_id = derive_canonical_source_occurrence_set_id_v1(
         &CanonicalSourceOccurrenceSetIdentityProjectionV1 {
-            owner: owner.owner.clone(),
-            canonical_members: vec![occurrence_id.clone()],
+            owner: &owner.owner,
+            canonical_members: std::slice::from_ref(&occurrence_id),
         },
     )
     .unwrap();
@@ -216,20 +217,22 @@ pub fn write_fixture_for_project(
         last_source_order: 7,
         occurrence_ids: vec![occurrence_id.clone()],
     };
+    let horizon = EvidenceSpanHorizonV1 {
+        knowledge_through: UtcMicros(1),
+        valid_through: Some(UtcMicros(1)),
+        contains_unknown_valid_time: false,
+    };
+    let span_catalog_binding = EvidenceSpanCatalogBindingV1::SourceCapability {
+        binding: catalog_binding(),
+    };
     let span_id = derive_evidence_span_id_v1(&EvidenceSpanIdentityProjectionV1 {
-        owner: owner.owner.clone(),
-        occurrence_set_id: occurrence_set_id.clone(),
-        ordered_runs: vec![run.clone()],
-        exact_source_anchors: vec![source.clone()],
-        projector_version: tracedecay_domain::ComponentVersion::new("projector.fixture").unwrap(),
-        horizon: EvidenceSpanHorizonV1 {
-            knowledge_through: UtcMicros(1),
-            valid_through: Some(UtcMicros(1)),
-            contains_unknown_valid_time: false,
-        },
-        catalog_binding: EvidenceSpanCatalogBindingV1::SourceCapability {
-            binding: catalog_binding(),
-        },
+        owner: &owner.owner,
+        occurrence_set_id: &occurrence_set_id,
+        ordered_runs: std::slice::from_ref(&run),
+        exact_source_anchors: std::slice::from_ref(&source),
+        projector_version: &projector_version,
+        horizon: &horizon,
+        catalog_binding: &span_catalog_binding,
     })
     .unwrap();
     let span_anchor = anchor(
@@ -244,15 +247,9 @@ pub fn write_fixture_for_project(
         occurrence_set_id: occurrence_set_id.clone(),
         runs: vec![run],
         exact_source_anchors: vec![source.clone()],
-        projector_version: tracedecay_domain::ComponentVersion::new("projector.fixture").unwrap(),
-        horizon: EvidenceSpanHorizonV1 {
-            knowledge_through: UtcMicros(1),
-            valid_through: Some(UtcMicros(1)),
-            contains_unknown_valid_time: false,
-        },
-        catalog_binding: EvidenceSpanCatalogBindingV1::SourceCapability {
-            binding: catalog_binding(),
-        },
+        projector_version,
+        horizon: horizon.clone(),
+        catalog_binding: span_catalog_binding,
     };
     let member_receipts = vec![EvidenceSpanMemberReceiptBindingV1 {
         occurrence_id: occurrence_id.clone(),
@@ -260,22 +257,17 @@ pub fn write_fixture_for_project(
     }];
     let projection_receipt_id = derive_evidence_span_projection_receipt_id_v1(
         &EvidenceSpanProjectionReceiptIdentityProjectionV1 {
-            span_id: span_id.clone(),
-            projector_snapshot: "projector.snapshot.fixture".to_owned(),
-            projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
-            projection_watermark: VectorWatermark::default(),
-            source_watermark: ManifestDigest::new(DIGEST).unwrap(),
-            member_receipts: member_receipts.clone(),
-            ordered_occurrence_ids: vec![occurrence_id.clone()],
-            exact_source_anchors: vec![source.clone()],
+            span_id: &span_id,
+            projector_snapshot: "projector.snapshot.fixture",
+            projection_generation: &ProjectionGenerationId::new("projection.fixture").unwrap(),
+            projection_watermark: &VectorWatermark::default(),
+            source_watermark: &ManifestDigest::new(DIGEST).unwrap(),
+            member_receipts: &member_receipts,
+            ordered_occurrence_ids: std::slice::from_ref(&occurrence_id),
+            exact_source_anchors: std::slice::from_ref(&source),
         },
     )
     .unwrap();
-    let horizon = EvidenceSpanHorizonV1 {
-        knowledge_through: UtcMicros(1),
-        valid_through: Some(UtcMicros(1)),
-        contains_unknown_valid_time: false,
-    };
     let request_digest = PrivacyBoundRequestDigestV1::derive(
         owner.owner.privacy_domain_id().clone(),
         owner.key_epoch,
@@ -303,19 +295,19 @@ pub fn write_fixture_for_project(
     };
     let contribution_id =
         derive_retriever_contribution_id_v1(&RetrieverContributionIdentityProjectionV1 {
-            owner: owner.clone(),
-            retriever: retriever.clone(),
-            catalog_binding: catalog_binding(),
-            request_digest: request_digest.clone(),
-            scope_resolution_id: ScopeResolutionId::new("scope.fixture").unwrap(),
+            owner: &owner,
+            retriever: &retriever,
+            catalog_binding: &catalog_binding(),
+            request_digest: &request_digest,
+            scope_resolution_id: &ScopeResolutionId::new("scope.fixture").unwrap(),
             temporal_mode: tracedecay_domain::TemporalModeV1::Current,
-            watermarks: watermarks.clone(),
-            horizon: horizon.clone(),
-            occurrence_set_id: occurrence_set_id.clone(),
-            span_id: span_id.clone(),
-            span_anchor_id: span_anchor.anchor_id().clone(),
-            exact_source_anchors: vec![source.clone()],
-            coverage: CoverageReportV1::default(),
+            watermarks: &watermarks,
+            horizon: &horizon,
+            occurrence_set_id: &occurrence_set_id,
+            span_id: &span_id,
+            span_anchor_id: span_anchor.anchor_id(),
+            exact_source_anchors: std::slice::from_ref(&source),
+            coverage: &CoverageReportV1::default(),
         })
         .unwrap();
     let contribution_anchor = anchor(
@@ -384,9 +376,7 @@ pub fn write_fixture_for_project(
     };
     write.receipt.assembly_digest = write.compute_assembly_digest().unwrap();
     write.receipt.publication_receipt_id = derive_evidence_assembly_publication_receipt_id_v1(
-        &write
-            .receipt
-            .identity_projection(write.idempotency_key.clone()),
+        &write.receipt.identity_projection(&write.idempotency_key),
     )
     .unwrap();
     write.validate().unwrap();
