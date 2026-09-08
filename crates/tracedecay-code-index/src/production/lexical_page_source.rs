@@ -35,7 +35,11 @@ const MAX_LEXICAL_GENERATION_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 /// Concurrent exact-read/decode window. Same 64 MiB retain cap as one
 /// lexical page batch, so prefetch cannot exceed a window the builder
 /// already admits for staged pages.
-const LEXICAL_FILE_PREFETCH_BYTES_V1: u64 = 64 * 1024 * 1024;
+/// Bound on the sealed file bytes read ahead of one decode window: the
+/// lexical source's admitted-file prefetch and the partitioned decoder's
+/// segment window share it so neither holds more than this in raw segment
+/// bytes while the pool decodes them.
+pub(super) const LEXICAL_FILE_PREFETCH_BYTES_V1: u64 = 64 * 1024 * 1024;
 
 type PersistedSealedLexicalCursorFields = (
     String,
@@ -2971,45 +2975,61 @@ fn admit_validated_file_parts(
             }
         }
         let imports = artifacts.imports.clone();
-        let chunks = exact_authority
-            .admit_all(artifacts.chunks.chunks.clone())
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        let mut serialized_chunks = Vec::with_capacity(chunks.len());
-        let mut serialized_displays = Vec::with_capacity(chunks.len());
-        for chunk in &chunks {
-            serialized_chunks.push(serde_json::to_vec(chunk.chunk()).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed lexical chunk serialization failed: {error}"
-                ))
-            })?);
-            let serialized_display = match chunk.chunk().anchor.symbol_occurrence_id.as_ref() {
-                Some(occurrence) => Some(
-                    serde_json::to_vec(symbol_displays.get(occurrence).ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed lexical symbol chunk has no parser-attested display identity"
-                                .to_owned(),
-                        )
-                    })?)
-                    .map_err(|error| {
+        let chunks = hotpath::measure_block!(
+            "code_index.restore.file_admit.exact_admission",
+            exact_authority
+                .admit_all(artifacts.chunks.chunks.clone())
+                .map_err(CodeIndexProductionErrorV1::Chunk)
+        )?;
+        let (serialized_chunks, serialized_displays, serialized_imports) = hotpath::measure_block!(
+            "code_index.restore.file_admit.serialize",
+            {
+                let mut serialized_chunks = Vec::with_capacity(chunks.len());
+                let mut serialized_displays = Vec::with_capacity(chunks.len());
+                for chunk in &chunks {
+                    serialized_chunks.push(serde_json::to_vec(chunk.chunk()).map_err(|error| {
                         CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed lexical symbol display serialization failed: {error}"
+                            "sealed lexical chunk serialization failed: {error}"
                         ))
-                    })?,
-                ),
-                None => None,
-            };
-            serialized_displays.push(serialized_display);
-        }
-        let serialized_imports = imports
-            .iter()
-            .map(|evidence| {
-                serde_json::to_vec(evidence).map_err(|error| {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "sealed lexical import serialization failed: {error}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    })?);
+                    let serialized_display =
+                        match chunk.chunk().anchor.symbol_occurrence_id.as_ref() {
+                            Some(occurrence) => Some(
+                                serde_json::to_vec(symbol_displays.get(occurrence).ok_or_else(
+                                    || {
+                                        CodeIndexProductionErrorV1::Contract(
+                                            "sealed lexical symbol chunk has no parser-attested display identity"
+                                                .to_owned(),
+                                        )
+                                    },
+                                )?)
+                                .map_err(|error| {
+                                    CodeIndexProductionErrorV1::Contract(format!(
+                                        "sealed lexical symbol display serialization failed: {error}"
+                                    ))
+                                })?,
+                            ),
+                            None => None,
+                        };
+                    serialized_displays.push(serialized_display);
+                }
+                let serialized_imports = imports
+                    .iter()
+                    .map(|evidence| {
+                        serde_json::to_vec(evidence).map_err(|error| {
+                            CodeIndexProductionErrorV1::Contract(format!(
+                                "sealed lexical import serialization failed: {error}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, CodeIndexProductionErrorV1>((
+                    serialized_chunks,
+                    serialized_displays,
+                    serialized_imports,
+                ))
+            }
+        )?;
         Ok(AdmittedSealedLexicalFileV1 {
             chunks,
             serialized_chunks,
