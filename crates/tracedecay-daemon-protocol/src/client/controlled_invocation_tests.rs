@@ -66,10 +66,20 @@ fn invocation_client(
     endpoint: crate::transport::DaemonEndpoint,
     instance_id: &str,
 ) -> DaemonInvocationClient {
+    invocation_client_for(
+        DaemonConnection::unauthenticated_for_test(endpoint),
+        instance_id,
+    )
+}
+
+fn invocation_client_for(
+    connection: DaemonConnection,
+    instance_id: &str,
+) -> DaemonInvocationClient {
     let profile = tempfile::tempdir().expect("profile");
     let profile_root = profile.path().to_path_buf();
     DaemonInvocationClient::for_connection_for_test(
-        DaemonConnection::unauthenticated_for_test(endpoint),
+        connection,
         DaemonHandshake {
             project_path: Some(profile_root.clone()),
             scope_prefix: None,
@@ -100,6 +110,50 @@ fn client_activity(client: &DaemonInvocationClient) -> (usize, usize) {
             .in_flight
             .load(std::sync::atomic::Ordering::Acquire),
     )
+}
+
+/// Idle streams currently parked in the client's shared connection pool.
+fn idle_pool_size(client: &DaemonInvocationClient) -> usize {
+    client
+        .pool
+        .idle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
+}
+
+/// A liveness probe standing in for the authority record: current until the
+/// test rotates it, then every check reports the daemon restarted.
+struct RotatingAuthority {
+    rotated: AtomicBool,
+}
+
+impl crate::connection::DaemonLivenessProbe for RotatingAuthority {
+    fn ensure_live(&self, request_label: &str) -> tracedecay_domain::errors::Result<()> {
+        if self.rotated.load(Ordering::SeqCst) {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "daemon restarted while request '{request_label}' was awaiting a response"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn rotating_authority_client(
+    endpoint: crate::transport::DaemonEndpoint,
+    instance_id: &str,
+) -> (DaemonInvocationClient, Arc<RotatingAuthority>) {
+    let authority = Arc::new(RotatingAuthority {
+        rotated: AtomicBool::new(false),
+    });
+    let probe: Arc<dyn crate::connection::DaemonLivenessProbe> = authority.clone();
+    let client = invocation_client_for(
+        DaemonConnection::unauthenticated_for_test(endpoint).with_liveness(probe),
+        instance_id,
+    );
+    (client, authority)
 }
 
 async fn write_unavailable_response(
@@ -597,8 +651,12 @@ async fn two_hundred_invocations_use_at_most_eight_connections_without_leaks() {
     server.await.expect("bounded pool server task");
 }
 
+/// A daemon restart closes every pooled stream at once and rotates the
+/// authority record. That rotation — not the first transport failure by
+/// itself — is what drains the pool, so the next request handshakes exactly
+/// one fresh connection instead of failing once per dead idle stream.
 #[tokio::test]
-async fn transport_failure_purges_other_idle_connections_before_reconnect() {
+async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_reconnect() {
     const FIRST_WARM_ID: &str = "request.pool.restart.warm-first";
     const SECOND_WARM_ID: &str = "request.pool.restart.warm-second";
     const FAILED_ID: &str = "request.pool.restart.failed";
@@ -686,7 +744,7 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
         assert_eq!(recovered_request.request_id, RECOVERED_ID);
         write_unavailable_response(&mut recovered_writer, RECOVERED_ID).await;
     });
-    let client = invocation_client(endpoint, "client.pool.restart");
+    let (client, authority) = rotating_authority_client(endpoint, "client.pool.restart");
 
     let (first_warm, second_warm) = tokio::join!(
         client.invoke(invocation_request(
@@ -701,12 +759,7 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
     first_warm.expect("first warm invocation");
     second_warm.expect("second warm invocation");
     assert_eq!(
-        client
-            .pool
-            .idle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
+        idle_pool_size(&client),
         2,
         "concurrent warmup must leave two idle pooled connections"
     );
@@ -715,6 +768,7 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
         .send(())
         .expect("request warm connection close");
     warm_closed.await.expect("warm connections closed");
+    authority.rotated.store(true, Ordering::SeqCst);
 
     client
         .invoke(invocation_request(
@@ -723,6 +777,11 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
         ))
         .await
         .expect_err("first invocation after restart must observe transport failure");
+    assert_eq!(
+        idle_pool_size(&client),
+        0,
+        "a rotated daemon authority must drain every idle stream before the next request"
+    );
     client
         .invoke(invocation_request(
             RECOVERED_ID,
@@ -1593,5 +1652,155 @@ async fn semantic_qualification_cancellation_controls_the_same_payload_request()
         .expect("typed semantic qualification cancellation");
     assert_eq!(reason, "semantic_qualification_cancelled");
     assert!(!retryable);
+    server.abort();
+}
+
+/// A daemon whose answer is selected by request id: `warm.*` requests wait at
+/// the warm-up barrier before answering (so concurrent warm requests must each
+/// occupy their own connection), `fail.*` requests close their connection
+/// unanswered, `refuse.*` requests answer with a handshake refusal frame, and
+/// anything else answers normally.
+fn spawn_pool_daemon(
+    listener: crate::transport::BrokerListener,
+    warm_up: Arc<tokio::sync::Barrier>,
+) -> (tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let server = tokio::spawn(async move {
+        loop {
+            let stream = listener.accept().await.expect("accept pooled invocation");
+            server_accepts.fetch_add(1, Ordering::SeqCst);
+            let warm_up = Arc::clone(&warm_up);
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                lines
+                    .next_line()
+                    .await
+                    .expect("read pooled handshake")
+                    .expect("pooled handshake");
+                while let Some(line) = lines.next_line().await.expect("read pooled invocation") {
+                    let request: DaemonInvocationRequest =
+                        serde_json::from_str(&line).expect("typed pooled invocation");
+                    let request_id = request.request_id.clone();
+                    if request_id.starts_with("warm.") {
+                        warm_up.wait().await;
+                    } else if request_id.starts_with("fail.") {
+                        return;
+                    } else if request_id.starts_with("refuse.") {
+                        let refusal =
+                            crate::handshake::DaemonHandshakeRefusal::for_rejected_authentication(
+                                "0.1.0-test+rotated",
+                            )
+                            .to_line()
+                            .expect("refusal line");
+                        writer
+                            .write_all(format!("{refusal}\n").as_bytes())
+                            .await
+                            .expect("write refusal");
+                        writer.flush().await.expect("flush refusal");
+                        return;
+                    }
+                    write_unavailable_response(&mut writer, &request_id).await;
+                }
+            });
+        }
+    });
+    (server, accepts)
+}
+
+/// Settles two concurrent requests so the pool holds two idle streams.
+async fn warm_pool_with_two_streams(client: &DaemonInvocationClient, accepts: &AtomicUsize) {
+    let (first, second) = tokio::join!(
+        client.invoke(invocation_request(
+            "warm.1",
+            deadline_after(Duration::from_secs(5))
+        )),
+        client.invoke(invocation_request(
+            "warm.2",
+            deadline_after(Duration::from_secs(5))
+        )),
+    );
+    first.expect("first warm-up invocation");
+    second.expect("second warm-up invocation");
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        idle_pool_size(client),
+        2,
+        "settled requests must return their streams to idle"
+    );
+}
+
+#[tokio::test]
+async fn request_local_failure_retires_only_its_own_pooled_stream() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind pooled invocation listener");
+    let (server, accepts) = spawn_pool_daemon(listener, Arc::new(tokio::sync::Barrier::new(2)));
+    let client = invocation_client(endpoint, "client.pool.discard-one");
+    warm_pool_with_two_streams(&client, &accepts).await;
+
+    let error = client
+        .invoke(invocation_request(
+            "fail.1",
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect_err("a connection closed before its response must fail the request");
+    assert!(
+        error
+            .to_string()
+            .contains("closed the invocation connection"),
+        "the failure must name the closed stream: {error}"
+    );
+    assert_eq!(
+        idle_pool_size(&client),
+        1,
+        "a request-local failure retires only the stream that failed"
+    );
+
+    client
+        .invoke(invocation_request(
+            "reuse.1",
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect("invocation over the surviving idle stream");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        2,
+        "the surviving idle stream must be reused instead of reconnecting"
+    );
+    assert_eq!(idle_pool_size(&client), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn handshake_refusal_drains_the_whole_pool() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind pooled invocation listener");
+    let (server, accepts) = spawn_pool_daemon(listener, Arc::new(tokio::sync::Barrier::new(2)));
+    let client = invocation_client(endpoint, "client.pool.handshake-refusal");
+    warm_pool_with_two_streams(&client, &accepts).await;
+
+    let error = client
+        .invoke(invocation_request(
+            "refuse.1",
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect_err("a refused handshake must fail the request");
+    let (code, _, _) = error
+        .project_route_context()
+        .expect("the refusal must stay typed");
+    assert_eq!(code, super::DAEMON_AUTHENTICATION_REJECTED);
+    assert_eq!(
+        idle_pool_size(&client),
+        0,
+        "a credential rotation must drain every idle stream"
+    );
     server.abort();
 }

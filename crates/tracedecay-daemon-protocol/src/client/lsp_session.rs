@@ -188,9 +188,10 @@ impl DaemonLspSessionClient {
         // Reconnect exists because the pinned connection is already known
         // broken: an interrupted invocation took its transport out of the
         // lease. Reusing it would fail every reconnect with `Unavailable`, so
-        // retire the lease without returning it to the pool — its drop also
-        // discards any idle sibling that shared the same failed daemon
-        // process — and resume the session over a freshly handshaked one.
+        // retire the lease without returning it to the pool — the failed
+        // invocation already settled whether the daemon generation changed,
+        // so idle siblings are drained only when it did — and resume the
+        // session over a freshly handshaked one.
         drop(self.connection.take());
         let (mut connection, _in_flight) = self
             .invocation
