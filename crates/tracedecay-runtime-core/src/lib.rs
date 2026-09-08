@@ -105,7 +105,6 @@ pub mod runtime_identity;
 pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;
-pub mod store;
 pub mod sync;
 pub mod text;
 pub mod timeutil;

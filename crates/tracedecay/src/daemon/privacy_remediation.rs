@@ -126,7 +126,7 @@ mod tests {
 
     use super::{remediation_read_control, remediation_write_control};
     use tracedecay_daemon_identity::profile_identity;
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
     fn secret() -> String {

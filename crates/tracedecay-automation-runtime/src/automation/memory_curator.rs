@@ -28,7 +28,7 @@ use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
 };

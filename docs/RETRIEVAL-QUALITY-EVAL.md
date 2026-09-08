@@ -6,7 +6,7 @@ records which of the previously-identified quality risks still hold against
 the current implementation.
 
 The retrieval pipeline described here lives in
-`crates/tracedecay-runtime-core/src/store/memory/{candidates.rs,scoring.rs,search.rs}`
+`crates/tracedecay-session-memory/src/fact_store/{candidates.rs,scoring.rs,search.rs}`
 — async, transaction-scoped, `project_memory_*`-prefixed functions operating
 over the `memory_v2_*` SQLite tables
 (`crates/tracedecay-runtime-core/src/db/memory_v2/schema/`). This is a full

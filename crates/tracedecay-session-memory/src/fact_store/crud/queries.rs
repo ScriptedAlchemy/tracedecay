@@ -9,14 +9,14 @@ use super::super::primitives::{
     storage_error, storage_message,
 };
 use super::{Projection, anchor_matches, commit_fact_tx};
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::build_qmark_placeholders;
-use crate::db::engine::{Value, params};
 use tracedecay_domain::{
     Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
     RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::build_qmark_placeholders;
+use tracedecay_runtime_core::db::engine::{Value, params};
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
     FactContradictionStateV1, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
@@ -28,7 +28,7 @@ use tracedecay_store::{
 const CURRENT_FACTS_BATCH_SIZE: usize = 400;
 
 #[hotpath::measure(label = "runtime_core.memory.query_current")]
-pub(in crate::store::memory) async fn query_current_facts_tx(
+pub(in crate::fact_store) async fn query_current_facts_tx(
     snapshot: &Transaction<'_>,
     query: &CurrentFactsQuery,
 ) -> FactStoreResult<Vec<StoredFactV1>> {
@@ -141,7 +141,7 @@ pub(in crate::store::memory) async fn query_current_facts_tx(
     Ok(facts)
 }
 
-pub(in crate::store::memory) async fn query_fact_current_tx(
+pub(in crate::fact_store) async fn query_fact_current_tx(
     snapshot: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -150,7 +150,7 @@ pub(in crate::store::memory) async fn query_fact_current_tx(
     load_current_fact_tx(snapshot, &key, owner, fact_id).await
 }
 
-pub(in crate::store::memory) async fn query_fact_current_response_tx(
+pub(in crate::fact_store) async fn query_fact_current_response_tx(
     snapshot: &Transaction<'_>,
     query: &FactCurrentQuery,
 ) -> FactStoreResult<FactCurrentResponseV1> {
@@ -170,7 +170,7 @@ pub(in crate::store::memory) async fn query_fact_current_response_tx(
     ))
 }
 
-pub(in crate::store::memory) async fn load_current_fact_tx(
+pub(in crate::fact_store) async fn load_current_fact_tx(
     snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     typed_owner: &FactOwnerV1,
@@ -225,7 +225,7 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
 }
 
 fn stored_fact_from_current_row(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     typed_owner: &FactOwnerV1,
 ) -> FactStoreResult<Option<StoredFactV1>> {
     let stored_id = FactId::new(row_string(row, 0, QUERY_OPERATION)?)?;
@@ -263,7 +263,7 @@ fn stored_fact_from_current_row(
     .map(Some)
 }
 
-pub(in crate::store::memory) async fn query_fact_as_of_tx(
+pub(in crate::fact_store) async fn query_fact_as_of_tx(
     snapshot: &Transaction<'_>,
     query: &FactAsOfQuery,
 ) -> FactStoreResult<Option<StoredFactV1>> {
@@ -310,7 +310,7 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
     stored_fact_from_projection_tx(snapshot, query.owner(), query.fact_id(), projection).await
 }
 
-pub(in crate::store::memory) async fn query_fact_before_supersession_tx(
+pub(in crate::fact_store) async fn query_fact_before_supersession_tx(
     snapshot: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -407,7 +407,7 @@ async fn stored_fact_from_projection_tx(
     .map(Some)
 }
 
-pub(in crate::store::memory) async fn query_fact_as_of_response_tx(
+pub(in crate::fact_store) async fn query_fact_as_of_response_tx(
     snapshot: &Transaction<'_>,
     query: &FactAsOfQuery,
 ) -> FactStoreResult<FactAsOfResponseV1> {
@@ -457,14 +457,14 @@ async fn load_assertion_payload_tx(
     from_json(&row_string(&row, 0, QUERY_OPERATION)?, QUERY_OPERATION).map(Some)
 }
 
-pub(in crate::store::memory) async fn query_fact_lineage_tx(
+pub(in crate::fact_store) async fn query_fact_lineage_tx(
     snapshot: &Transaction<'_>,
     query: &FactLineageQuery,
 ) -> FactStoreResult<Vec<FactLineageEventV1>> {
     query_fact_lineage_inner_tx(snapshot, query, None).await
 }
 
-pub(in crate::store::memory) async fn query_fact_lineage_controlled_tx(
+pub(in crate::fact_store) async fn query_fact_lineage_controlled_tx(
     snapshot: &Transaction<'_>,
     query: &FactLineageQuery,
     read_control: &FactReadControl,
@@ -544,7 +544,7 @@ async fn query_fact_lineage_inner_tx(
     Ok(events)
 }
 
-pub(in crate::store::memory) async fn query_fact_lineage_response_tx(
+pub(in crate::fact_store) async fn query_fact_lineage_response_tx(
     snapshot: &Transaction<'_>,
     query: &FactLineageQuery,
 ) -> FactStoreResult<FactLineageResponseV1> {
@@ -644,8 +644,8 @@ async fn query_fact_response_metadata_tx(
 /// substituting a constant for a measurement.
 ///
 /// [`FactReadOperationV1`]: tracedecay_store::FactReadOperationV1
-/// [`Database`]: crate::db::Database
-pub(in crate::store::memory) async fn fact_response_metadata_tx(
+/// [`Database`]: tracedecay_runtime_core::db::Database
+pub(in crate::fact_store) async fn fact_response_metadata_tx(
     snapshot: &Transaction<'_>,
     typed_owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -923,7 +923,7 @@ fn classify_fact_coverage(
     FactQueryCoverageV1::new(visible, hidden, unknown, redacted)
 }
 
-pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
+pub(in crate::fact_store) async fn get_retrieval_anchor_tx(
     snapshot: &Transaction<'_>,
     query: &RetrievalAnchorQuery,
 ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
@@ -969,7 +969,7 @@ pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
 
 impl DatabaseFactStore<'_> {
     #[hotpath::skip]
-    pub(in crate::store::memory) async fn commit_batch(
+    pub(in crate::fact_store) async fn commit_batch(
         &self,
         batch: &FactWriteBatch,
         write_control: &FactWriteControl,
@@ -1023,7 +1023,7 @@ impl DatabaseFactStore<'_> {
                 // settled yet. Acceptance harnesses park exactly here to make a
                 // budget that expires after the commit point reproducible.
                 #[cfg(feature = "test-transport")]
-                crate::store::memory::commit_barrier::wait_after_durable_fact_commit().await;
+                crate::fact_store::commit_barrier::wait_after_durable_fact_commit().await;
             } else {
                 transaction
                     .rollback()

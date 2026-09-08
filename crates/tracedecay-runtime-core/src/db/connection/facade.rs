@@ -12,13 +12,13 @@ impl DatabaseWriterConnection<'_> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.conn.execute_batch(sql).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
@@ -27,7 +27,7 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn execute_engine<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
@@ -36,7 +36,7 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn query_engine<P>(
         &self,

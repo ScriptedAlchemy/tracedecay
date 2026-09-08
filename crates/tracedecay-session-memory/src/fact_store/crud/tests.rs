@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use crate::db::engine::params;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use crate::store::memory::{DatabaseFactStore, FactWriteControl};
+use crate::fact_store::{DatabaseFactStore, FactWriteControl};
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tracedecay_domain::{
     Confidence, DomainError, FactCategoryV1, FactEventId, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, LocatorDigest, ProvenanceId, UtcMicros,
 };
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_store::{
     FactReadControl, FactStore, FactStoreError, FactWriteBatch, ProjectMemoryFactAddCommandV1,
     ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,

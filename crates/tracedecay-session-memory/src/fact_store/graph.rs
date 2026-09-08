@@ -20,8 +20,8 @@ use tracedecay_store::{
     StoreShardScopeV1,
 };
 
-use crate::db::engine::params;
-use crate::db::{Database, DatabaseMemoryTransaction};
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction};
 
 use super::envelope::finish_read_snapshot;
 use super::graph_manifest::{
@@ -311,16 +311,16 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
             }
         }
     }) {
-        crate::db::MemoryGraphReconciliationTaskScheduleV1::Scheduled => {
+        tracedecay_runtime_core::db::MemoryGraphReconciliationTaskScheduleV1::Scheduled => {
             super::ProjectMemoryGraphReconciliationScheduleV1::Scheduled
         }
-        crate::db::MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled => {
+        tracedecay_runtime_core::db::MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled => {
             super::ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
         }
-        crate::db::MemoryGraphReconciliationTaskScheduleV1::Retiring => {
+        tracedecay_runtime_core::db::MemoryGraphReconciliationTaskScheduleV1::Retiring => {
             super::ProjectMemoryGraphReconciliationScheduleV1::Retiring
         }
-        crate::db::MemoryGraphReconciliationTaskScheduleV1::Closed => {
+        tracedecay_runtime_core::db::MemoryGraphReconciliationTaskScheduleV1::Closed => {
             super::ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
         }
     }
@@ -473,7 +473,7 @@ async fn verified_head_matching(
 
 fn issue_memory_graph_operation(
     db: &Database,
-) -> FactStoreResult<crate::db::MemoryGraphRuntimeOperationV1> {
+) -> FactStoreResult<tracedecay_runtime_core::db::MemoryGraphRuntimeOperationV1> {
     db.issue_memory_graph_runtime_operation()
         .map_err(|_| FactStoreError::GraphUnavailable)
 }
@@ -964,7 +964,7 @@ fn ensure_projected_fact_exists(
 }
 
 #[cfg(test)]
-pub(in crate::store::memory) async fn relation_kinds_from_canonical_source_for_test(
+pub(in crate::fact_store) async fn relation_kinds_from_canonical_source_for_test(
     db: &Database,
     owner: &FactOwnerV1,
     read_control: &FactReadControl,
@@ -1068,7 +1068,7 @@ async fn hydrate_page(
 }
 
 #[cfg(test)]
-pub(in crate::store::memory) async fn hydrate_roots_from_canonical_source_for_test(
+pub(in crate::fact_store) async fn hydrate_roots_from_canonical_source_for_test(
     db: &Database,
     owner: FactOwnerV1,
     roots: &[FactId],
@@ -1229,10 +1229,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::db::engine::params;
-    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use crate::store::memory::DatabaseFactStore;
-    use crate::store::memory::crud::{initial_batch, sanitize_payload};
+    use crate::fact_store::DatabaseFactStore;
+    use crate::fact_store::crud::{initial_batch, sanitize_payload};
+    use tracedecay_runtime_core::db::engine::params;
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     async fn database(label: &str) -> (TempDir, Database) {
         let directory = tempdir().expect("create graph telemetry fixture directory");

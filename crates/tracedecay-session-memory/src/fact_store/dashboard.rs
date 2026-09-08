@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
-use crate::memory::encoding::HolographicEncoder;
-use crate::memory::entities::normalize_entity;
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::memory::encoding::HolographicEncoder;
+use tracedecay_runtime_core::memory::entities::normalize_entity;
 
 use tracedecay_domain::{FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1};
 use tracedecay_store::{

@@ -15,8 +15,8 @@ use tracedecay_store::{
     ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
 };
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::{params, params_from_iter};
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::{params, params_from_iter};
 
 use super::super::crud::{
     add_project_memory_fact_tx, commit_batch_tx, remove_project_memory_fact_tx, sanitize_payload,
@@ -551,7 +551,7 @@ async fn correction_assertion_payload_tx(
 }
 
 #[hotpath::measure(label = "runtime_core.memory.curation_apply")]
-pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
+pub(in crate::fact_store) async fn apply_project_memory_fact_curation_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactCurationBatchV1,
 ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
@@ -904,7 +904,7 @@ async fn replay_merge(
     Ok(outcome.into_replayed())
 }
 
-pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
+pub(in crate::fact_store) async fn merge_project_memory_facts_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactMergeCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {

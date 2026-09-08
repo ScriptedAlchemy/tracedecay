@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::Value;
-use crate::memory::entities::normalize_entity;
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::memory::entities::normalize_entity;
 
 use tracedecay_domain::{Confidence, FactCategoryV1, FactId, FactOwnerV1};
 use tracedecay_store::{

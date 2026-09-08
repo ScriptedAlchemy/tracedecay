@@ -329,6 +329,7 @@ test-transport = [
     "test-helpers",
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
+    "tracedecay-session-memory/test-transport",
     "tracedecay-agent-hosts/test-transport",
     "tracedecay-automation-runtime/test-transport",
     "tracedecay-dashboard-api/test-transport",

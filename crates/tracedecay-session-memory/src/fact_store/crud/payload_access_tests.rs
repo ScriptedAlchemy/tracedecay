@@ -10,10 +10,10 @@ use tracedecay_store::{
     ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
 };
 
-use crate::db::engine::params;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use crate::store::memory::{DatabaseFactStore, FactWriteControl};
+use crate::fact_store::{DatabaseFactStore, FactWriteControl};
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 
 async fn database() -> (TempDir, Database) {
     let directory = tempfile::tempdir().expect("payload-access fixture directory");

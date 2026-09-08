@@ -293,7 +293,7 @@ fn memory_curator_review_contract_contains_no_local_similarity_authority() {
 async fn memory_curator_review_skips_an_unavailable_graph_when_no_facts_are_eligible() {
     use std::sync::Arc;
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
     let temp = tempfile::tempdir().unwrap();
     let database_path = temp.path().join("empty-memory.db");

@@ -13,17 +13,17 @@ use super::{
     DEFAULT_TRUST, commit_fact_tx, query_fact_before_supersession_tx,
     query_fact_lineage_controlled_tx,
 };
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
-use crate::privacy::{
-    MemoryFactSanitizationV1, sanitize_memory_fact_payload, verify_memory_fact_sanitization,
-};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
     FactOwnerV1, FactPayloadV1, PayloadAccessState, ProvenanceId, RetentionClass,
     SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros,
+};
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::privacy::{
+    MemoryFactSanitizationV1, sanitize_memory_fact_payload, verify_memory_fact_sanitization,
 };
 use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactLineageQuery, FactReadControl, FactStoreError,
@@ -43,7 +43,7 @@ fn ensure_optional_project_memory_read_active(
     }
 }
 
-pub(in crate::store::memory) async fn list_project_memory_facts_controlled_tx(
+pub(in crate::fact_store) async fn list_project_memory_facts_controlled_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactListQueryV1,
     read_control: &FactReadControl,
@@ -224,7 +224,7 @@ async fn list_project_memory_facts_inner_tx(
     ProjectMemoryFactPageV1::new(query.owner().clone(), facts, next)
 }
 
-pub(in crate::store::memory) async fn get_project_memory_fact_controlled_tx(
+pub(in crate::fact_store) async fn get_project_memory_fact_controlled_tx(
     transaction: &Transaction<'_>,
     target: &ProjectMemoryFactIdV1,
     read_control: &FactReadControl,
@@ -241,14 +241,14 @@ pub(in crate::store::memory) async fn get_project_memory_fact_controlled_tx(
     Ok(projection)
 }
 
-pub(in crate::store::memory) async fn find_project_memory_fact_by_content_digest_tx(
+pub(in crate::fact_store) async fn find_project_memory_fact_by_content_digest_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactContentDigestQueryV1,
 ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
     find_project_memory_fact_by_content_digest_inner_tx(transaction, query, None).await
 }
 
-pub(in crate::store::memory) async fn find_project_memory_fact_by_content_digest_controlled_tx(
+pub(in crate::fact_store) async fn find_project_memory_fact_by_content_digest_controlled_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactContentDigestQueryV1,
     read_control: &FactReadControl,
@@ -335,7 +335,7 @@ async fn find_project_memory_fact_by_content_digest_inner_tx(
     }
 }
 
-pub(in crate::store::memory) async fn project_memory_fact_history_controlled_tx(
+pub(in crate::fact_store) async fn project_memory_fact_history_controlled_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactHistoryQueryV1,
     read_control: &FactReadControl,
@@ -370,12 +370,12 @@ pub(in crate::store::memory) async fn project_memory_fact_history_controlled_tx(
     Ok(history)
 }
 
-pub(in crate::store::memory) struct SanitizedPayload {
-    pub(in crate::store::memory) payload: FactPayloadV1,
-    pub(in crate::store::memory) access: PayloadAccessState,
+pub(in crate::fact_store) struct SanitizedPayload {
+    pub(in crate::fact_store) payload: FactPayloadV1,
+    pub(in crate::fact_store) access: PayloadAccessState,
 }
 
-pub(in crate::store::memory) fn payload_metadata(metadata: &Value) -> Value {
+pub(in crate::fact_store) fn payload_metadata(metadata: &Value) -> Value {
     let mut metadata = metadata.clone();
     if let Some(object) = metadata.as_object_mut() {
         object.remove("automation_run_id");
@@ -383,7 +383,7 @@ pub(in crate::store::memory) fn payload_metadata(metadata: &Value) -> Value {
     metadata
 }
 
-pub(in crate::store::memory) fn sanitize_payload(
+pub(in crate::fact_store) fn sanitize_payload(
     content: &str,
     category: FactCategoryV1,
     tags: &[String],
@@ -407,7 +407,7 @@ pub(in crate::store::memory) fn sanitize_payload(
     payload_from_parts(payload, category, receipt).map(Some)
 }
 
-pub(in crate::store::memory) fn verified_payload(
+pub(in crate::fact_store) fn verified_payload(
     content: &str,
     category: FactCategoryV1,
     tags: &[String],
@@ -423,7 +423,7 @@ pub(in crate::store::memory) fn verified_payload(
     payload_from_parts(payload, category, receipt)
 }
 
-pub(in crate::store::memory) fn payload_material(
+pub(in crate::fact_store) fn payload_material(
     content: &str,
     category: FactCategoryV1,
     tags: &[String],
@@ -544,7 +544,7 @@ fn payload_from_parts(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::store::memory) fn initial_batch(
+pub(in crate::fact_store) fn initial_batch(
     owner: &FactOwnerV1,
     operation_id: &ProvenanceId,
     payload: FactPayloadV1,
@@ -619,7 +619,7 @@ pub(in crate::store::memory) fn initial_batch(
     .with_identity_material(identity)
 }
 
-pub(in crate::store::memory) async fn commit_batch_tx(
+pub(in crate::fact_store) async fn commit_batch_tx(
     transaction: &Transaction<'_>,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<(FactCommitReceipt, bool)> {

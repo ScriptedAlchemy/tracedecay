@@ -11,9 +11,9 @@ use tracedecay_store::{
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1, ProjectMemoryFactStore,
 };
 
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use crate::store::memory::DatabaseFactStore;
+use crate::fact_store::DatabaseFactStore;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 
 async fn database(label: &str) -> (TempDir, Database) {
     let directory = tempdir().expect("create automatic fact read-control fixture directory");

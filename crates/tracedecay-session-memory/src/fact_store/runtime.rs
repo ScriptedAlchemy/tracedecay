@@ -19,7 +19,7 @@ use tracedecay_store::{
 };
 
 use super::Database;
-use crate::db::DatabaseRuntimeClientV1;
+use tracedecay_runtime_core::db::DatabaseRuntimeClientV1;
 
 const COMMIT_OPERATION: &str = "commit fact through storage runtime";
 const CURRENT_OPERATION: &str = "query current fact through storage runtime";
@@ -310,7 +310,7 @@ fn build_read_request(
         serialized_admission_bytes(&command, operation_name)?,
         request_control(
             suffix,
-            crate::tracedecay::saturating_utc_now(),
+            tracedecay_runtime_core::tracedecay::saturating_utc_now(),
             operation_name,
         )?,
     )
@@ -324,7 +324,7 @@ fn build_submit_request(
     command_digest: &str,
     idempotency_key: &str,
 ) -> FactStoreResult<RuntimeSubmitRequestV1> {
-    let admitted_at = crate::tracedecay::saturating_utc_now();
+    let admitted_at = tracedecay_runtime_core::tracedecay::saturating_utc_now();
     let suffix = digest_suffix(command_digest, COMMIT_OPERATION)?;
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!("operation.memory-fact.{suffix}"))
@@ -513,7 +513,9 @@ mod tests {
         StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
     };
 
-    use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
+    use tracedecay_runtime_core::db::{
+        DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
 
     use super::*;
 
@@ -694,7 +696,7 @@ mod tests {
         ));
         assert!(matches!(
             runtime.dispatch_submit(submit, submit_probe).await,
-            Err(crate::shard_runtime::registry::StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            Err(tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "submit through database client",
                 ..
             })

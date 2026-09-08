@@ -16,9 +16,9 @@ use tracedecay_store::{
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactStore,
 };
 
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::store::memory::DatabaseFactStore;
-use crate::store::memory::crud::{initial_batch, sanitize_payload};
+use crate::fact_store::DatabaseFactStore;
+use crate::fact_store::crud::{initial_batch, sanitize_payload};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 async fn database(label: &str) -> (TempDir, Database) {
     let directory = tempdir().expect("create dashboard read-control fixture directory");

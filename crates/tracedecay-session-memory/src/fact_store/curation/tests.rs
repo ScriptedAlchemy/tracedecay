@@ -20,15 +20,15 @@ use tracedecay_store::{
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactStore,
 };
 
-use crate::db::engine::params;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use crate::store::memory::crud::{initial_batch, load_current_fact_tx, sanitize_payload};
-use crate::store::memory::graph::relation_kinds_from_canonical_source_for_test;
-use crate::store::memory::primitives::{
+use crate::fact_store::crud::{initial_batch, load_current_fact_tx, sanitize_payload};
+use crate::fact_store::graph::relation_kinds_from_canonical_source_for_test;
+use crate::fact_store::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, row_optional_string, row_string,
 };
-use crate::store::memory::{DatabaseFactStore, FactWriteControl};
+use crate::fact_store::{DatabaseFactStore, FactWriteControl};
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 
 use super::apply::{apply_project_memory_fact_curation_tx, curation_receipt_from_value};
 
@@ -259,6 +259,8 @@ async fn request(
     .expect("canonical relation curation request")
 }
 
+// Test fixture builder: each parameter is one axis the curation tests vary.
+#[allow(clippy::too_many_arguments)]
 async fn normalize_request(
     db: &Database,
     owner: &FactOwnerV1,

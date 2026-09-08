@@ -290,7 +290,7 @@ pub(crate) async fn record_dashboard_automatic_fact(
     use tracedecay_automation_runtime::automation::automatic_facts::{
         AutomaticFactState, record_session_automatic_facts,
     };
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
 
     let owner = dashboard_fixture_project_owner(cg);
@@ -344,7 +344,7 @@ pub(crate) async fn delete_dashboard_automatic_fact(
     cg: &TraceDecay,
     receipt: &DashboardAutomaticFactReceipt,
 ) {
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::{MemoryApplication, MemoryOperationContext};
 
     let owner = dashboard_fixture_project_owner(cg);
@@ -381,7 +381,7 @@ pub(crate) async fn seed_dashboard_fact(
     tags: &[&str],
     entities: &[&str],
 ) -> FactId {
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::{
         MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
     };
@@ -463,7 +463,7 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) -> DashboardMemoryFixtu
             None,
         ),
     ] {
-        use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+        use tracedecay_session_memory::fact_store::DatabaseFactStore;
         use tracedecay_session_memory::memory::{MemoryApplication, MemoryOperationContext};
         use tracedecay_store::{ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactIdV1};
 
@@ -498,7 +498,7 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) -> DashboardMemoryFixtu
             .await
             .unwrap_or_else(|error| panic!("seed dashboard feedback: {error:?}"));
     }
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
     use tracedecay_store::{FactReadControl, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
     let near_duplicate_fact_id = fact_ids[1].clone();

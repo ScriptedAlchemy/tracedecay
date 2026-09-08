@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::build_qmark_placeholders;
-use crate::db::engine::{Value, params};
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::build_qmark_placeholders;
+use tracedecay_runtime_core::db::engine::{Value, params};
 
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactCurationActionV1, FactEventId, FactId, FactIdentityMaterialV1,

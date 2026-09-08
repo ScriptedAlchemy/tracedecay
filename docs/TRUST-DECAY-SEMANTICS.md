@@ -9,9 +9,9 @@ An earlier version of this document was written against a single-crate
 schema, and MCP/dashboard modules under `src/mcp` / `src/dashboard` — none of
 which exist anymore. The relevant logic is now split across
 `crates/tracedecay-runtime-core/src/memory/trust.rs` (trust constants and
-bucketing), `crates/tracedecay-runtime-core/src/store/memory/scoring.rs`
-(the ranking-time decay formula), `crates/tracedecay-runtime-core/src/store/
-memory/crud/{commands.rs,feedback.rs,lineage.rs}` (the writers of trust),
+bucketing), `crates/tracedecay-session-memory/src/fact_store/scoring.rs`
+(the ranking-time decay formula), `crates/tracedecay-session-memory/src/
+fact_store/crud/{commands.rs,feedback.rs,lineage.rs}` (the writers of trust),
 and the `memory_v2_*` tables in
 `crates/tracedecay-runtime-core/src/db/memory_v2/schema/`. The policy
 conclusion this document previously reached still holds, and is restated
@@ -100,7 +100,7 @@ none runs on a schedule.
 ## 3. Where temporal decay is actually applied: retrieval, dynamically
 
 The only live decay is in recall ranking, in
-`crates/tracedecay-runtime-core/src/store/memory/scoring.rs`:
+`crates/tracedecay-session-memory/src/fact_store/scoring.rs`:
 
 ```rust
 pub(super) fn project_memory_temporal_decay(updated_at: UtcMicros, now: UtcMicros) -> f64 {

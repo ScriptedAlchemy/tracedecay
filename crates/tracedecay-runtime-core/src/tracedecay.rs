@@ -29,6 +29,6 @@ pub fn current_timestamp() -> i64 {
 /// A pre-epoch clock reads as zero and an overflowing microsecond count as
 /// `i64::MAX`. This is the kernel-local equivalent of
 /// `tracedecay_contracts::clock::now_micros`.
-pub(crate) fn saturating_utc_now() -> UtcMicros {
+pub fn saturating_utc_now() -> UtcMicros {
     UtcMicros(i64::try_from(wall_clock_since_epoch().as_micros()).unwrap_or(i64::MAX))
 }

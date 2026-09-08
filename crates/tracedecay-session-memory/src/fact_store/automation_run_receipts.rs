@@ -1,8 +1,8 @@
 //! Exact owner/run recovery reads over canonical memory receipts.
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, ProvenanceId, RunId};
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
     ProjectMemoryAutomationRunReceiptsV1, ProjectMemoryFactCurationReceiptV1,

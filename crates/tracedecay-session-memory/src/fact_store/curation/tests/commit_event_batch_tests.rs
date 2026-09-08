@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::store::memory::curation::apply::load_commit_events_tx;
+use crate::fact_store::curation::apply::load_commit_events_tx;
 
 /// Enough synthetic lineage events to force `load_commit_events_tx` past a single
 /// `COMMIT_EVENT_BATCH` chunk and past the historical 999-variable `SQLite`

@@ -8,14 +8,14 @@ use super::super::scoring::{
     project_memory_fact_vector, project_memory_jaccard, project_memory_millionths,
     project_memory_tokens,
 };
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
-use crate::memory::diff::{
+use tracedecay_domain::{FactId, FactOwnerV1};
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::memory::diff::{
     ADD_COMPARISON_REPORT_FLOOR_MILLIONTHS, NEAR_DUPLICATE_SCORE_MILLIONTHS,
     POSSIBLE_CONFLICT_SCORE_MILLIONTHS, contains_negation_cue, normalized_equivalent,
 };
-use crate::memory::encoding::{HolographicEncoder, HolographicEncodingError};
-use tracedecay_domain::{FactId, FactOwnerV1};
+use tracedecay_runtime_core::memory::encoding::{HolographicEncoder, HolographicEncodingError};
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryFactProjectionV1, ProjectMemoryFactV1,
 };

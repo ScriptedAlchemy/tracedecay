@@ -1,10 +1,10 @@
 use tracedecay_store::FactStoreError;
 
-use crate::db::engine::params;
-use crate::store::memory::graph::{
+use crate::fact_store::graph::{
     hydrate_roots_from_canonical_source_for_test, relation_kinds_from_canonical_source_for_test,
 };
-use crate::store::memory::primitives::PROJECT_MEMORY_WRITE_OPERATION;
+use crate::fact_store::primitives::PROJECT_MEMORY_WRITE_OPERATION;
+use tracedecay_runtime_core::db::engine::params;
 
 use super::{Fixture, accepting_read_control};
 

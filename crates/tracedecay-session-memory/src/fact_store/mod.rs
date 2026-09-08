@@ -1,6 +1,6 @@
 //! Database-backed authority for append-only facts, evidence, and provenance.
 
-use crate::db::Database;
+use tracedecay_runtime_core::db::Database;
 
 use tracedecay_domain::RunId;
 use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2};
@@ -94,9 +94,9 @@ mod search;
 mod status;
 
 #[cfg(test)]
-use crate::db::engine::params;
-#[cfg(test)]
 use primitives::OwnerKey;
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::params;
 
 /// Canonical fact authority over one already-open, authority-bound database.
 ///
@@ -870,8 +870,8 @@ impl ProjectMemoryGraphStore for DatabaseFactStore<'_> {
 }
 
 /// The single owned-or-borrowed handle shape for the shared project-memory
-/// database. Every project-memory route — the core fact-store accessors in
-/// [`crate::tracedecay::facts`] and the MCP memory handlers alike — resolves
+/// database. Every project-memory route — the root crate's `tracedecay::facts`
+/// fact-store accessors and the MCP memory handlers alike — resolves
 /// through this one type and its `db_path() == graph_db_path` routing
 /// predicate, instead of each maintaining its own near-duplicate enum kept in
 /// sync only by hand.

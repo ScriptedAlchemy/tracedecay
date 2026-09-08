@@ -7,12 +7,12 @@ use super::super::primitives::{
 };
 use super::super::privacy_purge::assertion_payload_exists_tx;
 use super::DEFAULT_TRUST;
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactCurationActionV1, FactEventId, FactEvidenceId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, PayloadAccessState, UtcMicros,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
 };
@@ -329,12 +329,12 @@ pub(super) async fn event_matches(
 }
 
 #[derive(Clone)]
-pub(in crate::store::memory) struct Projection {
-    pub(in crate::store::memory) access: PayloadAccessState,
-    pub(in crate::store::memory) trust: Confidence,
-    pub(in crate::store::memory) active_assertion_id: Option<FactAssertionId>,
-    pub(in crate::store::memory) last_event_id: Option<FactEventId>,
-    pub(in crate::store::memory) updated_at: UtcMicros,
+pub(in crate::fact_store) struct Projection {
+    pub(in crate::fact_store) access: PayloadAccessState,
+    pub(in crate::fact_store) trust: Confidence,
+    pub(in crate::fact_store) active_assertion_id: Option<FactAssertionId>,
+    pub(in crate::fact_store) last_event_id: Option<FactEventId>,
+    pub(in crate::fact_store) updated_at: UtcMicros,
 }
 
 impl Projection {
@@ -504,7 +504,7 @@ pub(super) async fn publish_current_projection(
     Ok(())
 }
 
-pub(in crate::store::memory) async fn load_current_projection(
+pub(in crate::fact_store) async fn load_current_projection(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,

@@ -195,7 +195,7 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
     interrupted.store(false, Ordering::Release);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(
@@ -509,7 +509,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     seed_session_evidence(&cg).await;
     let seed_memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let seeded = record_session_automatic_facts(
@@ -722,7 +722,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts: Vec<_> = list_automatic_fact_receipts(
@@ -936,7 +936,7 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
 
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -1121,7 +1121,7 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
 
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(
@@ -1144,7 +1144,7 @@ async fn session_automatic_facts_replay_same_run_idempotently() {
     let owner = project_memory_owner(&cg);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         owner,
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));

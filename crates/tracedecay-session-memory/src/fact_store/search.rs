@@ -2,12 +2,12 @@
 
 use std::collections::BTreeSet;
 
-use crate::memory::entities::normalize_entity;
+use tracedecay_runtime_core::memory::entities::normalize_entity;
 
-use crate::db::build_qmark_placeholders;
-use crate::db::engine::Value;
-use crate::db::{Database, DatabaseMemoryTransaction as Transaction};
 use serde::{Deserialize, Serialize};
+use tracedecay_runtime_core::db::build_qmark_placeholders;
+use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction as Transaction};
 
 use tracedecay_domain::{Confidence, DomainError, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_store::{
@@ -46,7 +46,7 @@ use super::scoring::{
     project_memory_millionths, project_memory_score_millionths, project_memory_temporal_decay,
     project_memory_term_coverage, project_memory_tokens,
 };
-use crate::memory::encoding::{HolographicEncoder, HolographicQueryVector};
+use tracedecay_runtime_core::memory::encoding::{HolographicEncoder, HolographicQueryVector};
 
 /// Raw score components retained so the `why` explanation string is only
 /// formatted for hits that survive the zero-score and threshold filters.

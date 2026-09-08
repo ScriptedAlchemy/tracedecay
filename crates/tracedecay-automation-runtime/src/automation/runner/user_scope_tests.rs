@@ -21,7 +21,7 @@ use crate::automation::run_ledger::AutomationRunStatus;
 use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplicationError;
 use tracedecay_session_memory::memory::{
     MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,

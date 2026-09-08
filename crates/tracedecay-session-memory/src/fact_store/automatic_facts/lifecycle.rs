@@ -12,12 +12,12 @@ use super::{
     project_memory_automatic_fact_receipt_record_tx, project_memory_automatic_fact_request_value,
     project_memory_automatic_fact_state_label,
 };
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     FactAssertionId, FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryAutomaticFactEffectV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
@@ -98,7 +98,7 @@ fn automatic_fact_receipt_apply_id(
     ProvenanceId::new(apply_id.to_owned()).map_err(FactStoreError::from)
 }
 
-pub(in crate::store::memory) async fn project_memory_replay_automatic_fact_tx(
+pub(in crate::fact_store) async fn project_memory_replay_automatic_fact_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &ProjectMemoryOperationReceiptV1,
@@ -115,7 +115,7 @@ pub(in crate::store::memory) async fn project_memory_replay_automatic_fact_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::store::memory) async fn project_memory_record_automatic_fact_receipt_tx(
+pub(in crate::fact_store) async fn project_memory_record_automatic_fact_receipt_tx(
     transaction: &Transaction<'_>,
     apply_id: &ProvenanceId,
     request: &ProjectMemoryFactAddCommandV1,
@@ -170,7 +170,7 @@ pub(in crate::store::memory) async fn project_memory_record_automatic_fact_recei
     Ok(())
 }
 
-pub(in crate::store::memory) async fn project_memory_existing_automatic_fact_receipt_tx(
+pub(in crate::fact_store) async fn project_memory_existing_automatic_fact_receipt_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
@@ -195,7 +195,7 @@ pub(in crate::store::memory) async fn project_memory_existing_automatic_fact_rec
     project_memory_automatic_fact_receipt_record_tx(transaction, owner, &existing_id).await
 }
 
-pub(in crate::store::memory) async fn project_memory_lookup_automatic_fact_operation_tx(
+pub(in crate::fact_store) async fn project_memory_lookup_automatic_fact_operation_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactAddCommandV1,
     request_digest: &str,
@@ -216,7 +216,7 @@ pub(in crate::store::memory) async fn project_memory_lookup_automatic_fact_opera
         .map(Some)
 }
 
-pub(in crate::store::memory) async fn project_memory_record_automatic_fact_operation_tx(
+pub(in crate::fact_store) async fn project_memory_record_automatic_fact_operation_tx(
     transaction: &Transaction<'_>,
     receipt: &ProjectMemoryAutomaticFactReceiptV1,
     request_digest: &str,

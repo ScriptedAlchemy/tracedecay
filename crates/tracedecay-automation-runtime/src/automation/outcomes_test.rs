@@ -398,7 +398,7 @@ async fn seed_applied_fact_database(database_path: &Path) -> tracedecay_runtime_
     use crate::automation::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
     use tracedecay_domain::FactOwnerV1;
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
 
     crate::register_test_schema_installer();
@@ -445,7 +445,7 @@ async fn seed_applied_fact_database(database_path: &Path) -> tracedecay_runtime_
 #[tokio::test]
 async fn concurrent_refreshes_preserve_both_snapshot_halves() {
     use tracedecay_domain::FactOwnerV1;
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
 
     let _database_guard = OUTCOME_PERSISTENCE_DB_TEST_LOCK.lock().await;
@@ -476,7 +476,7 @@ async fn concurrent_refreshes_preserve_both_snapshot_halves() {
 #[tokio::test]
 async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     use tracedecay_domain::FactOwnerV1;
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
 
     let _database_guard = OUTCOME_PERSISTENCE_DB_TEST_LOCK.lock().await;

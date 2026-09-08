@@ -6942,6 +6942,7 @@ dependencies = [
 name = "tracedecay-session-memory"
 version = "0.1.0"
 dependencies = [
+ "amari-holographic",
  "fs2",
  "hex",
  "hotpath",
@@ -6959,6 +6960,7 @@ dependencies = [
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-lcm",
  "tracedecay-query",
  "tracedecay-runtime-core",
@@ -6967,6 +6969,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]

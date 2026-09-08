@@ -4,14 +4,14 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use crate::store::memory::{DatabaseFactStore, FactWriteControl};
+use crate::fact_store::{DatabaseFactStore, FactWriteControl};
 use serde_json::json;
 use tempfile::{TempDir, tempdir};
 use tracedecay_domain::{
     Confidence, DomainError, FactCategoryV1, FactId, FactOwnerV1, ProvenanceId,
 };
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_store::{
     FactReadControl, FactStoreError, ProjectMemoryFactAddCommandV1,
     ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,

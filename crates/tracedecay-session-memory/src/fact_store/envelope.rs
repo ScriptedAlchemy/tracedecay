@@ -3,11 +3,11 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::db::engine::params;
-use crate::db::{Database, DatabaseMemoryTransaction as Transaction};
 use serde_json::Value;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction as Transaction};
 use tracedecay_store::{FactStoreError, FactStoreResult, FactWriteControl};
 
 use super::DatabaseFactStore;
@@ -274,7 +274,7 @@ async fn execute_project_memory_write<T: Send + 'static>(
             // yet. Acceptance harnesses park exactly here to make a budget that
             // expires after the commit point reproducible.
             #[cfg(feature = "test-transport")]
-            crate::store::memory::commit_barrier::wait_after_durable_fact_commit().await;
+            crate::fact_store::commit_barrier::wait_after_durable_fact_commit().await;
             Ok(value)
         }
         Err(error) => match transaction.rollback().await {
@@ -296,7 +296,7 @@ mod write_control_tests {
 
     use tempfile::TempDir;
 
-    use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
     use super::*;
 

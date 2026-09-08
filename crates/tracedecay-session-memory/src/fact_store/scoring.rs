@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::memory::encoding::{
+use tracedecay_runtime_core::memory::encoding::{
     HolographicEncoder, HolographicEncodingError, HolographicQueryVector,
 };
 
@@ -307,7 +307,7 @@ mod tests {
         project_memory_normalize_fts5_ranks, project_memory_score_millionths,
         project_memory_temporal_decay, project_memory_tokens,
     };
-    use crate::memory::encoding::HolographicEncoder;
+    use tracedecay_runtime_core::memory::encoding::HolographicEncoder;
 
     fn domain_id<T>(value: &str) -> T
     where

@@ -5,13 +5,13 @@ use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_READ_OPERATION, ensure_project_memory_read_active, from_json, row_i64,
     row_optional_string, row_string, storage_error, storage_message, to_json,
 };
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionId, FactCategoryV1, FactEventId, FactId, FactOwnerV1,
     ProvenanceId, SanitizationReceiptV1, UtcMicros,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
     ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
@@ -50,7 +50,7 @@ fn automatic_fact_optional_string(
     }
 }
 
-pub(in crate::store::memory) fn project_memory_automatic_fact_request_value(
+pub(in crate::fact_store) fn project_memory_automatic_fact_request_value(
     request: &ProjectMemoryFactAddCommandV1,
 ) -> Value {
     json!({
@@ -182,7 +182,7 @@ fn automatic_fact_request_from_value(
     .into_command(operation_id)
 }
 
-pub(in crate::store::memory) fn project_memory_automatic_fact_state_label(
+pub(in crate::fact_store) fn project_memory_automatic_fact_state_label(
     state: ProjectMemoryAutomaticFactStateV1,
 ) -> &'static str {
     match state {
@@ -202,7 +202,7 @@ fn automatic_fact_state(value: &str) -> FactStoreResult<ProjectMemoryAutomaticFa
     }
 }
 
-pub(in crate::store::memory) async fn project_memory_automatic_fact_receipt_record_tx(
+pub(in crate::fact_store) async fn project_memory_automatic_fact_receipt_record_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
@@ -306,7 +306,7 @@ pub(in crate::store::memory) async fn project_memory_automatic_fact_receipt_reco
     .map(Some)
 }
 
-pub(in crate::store::memory) async fn get_project_memory_automatic_fact_receipt_tx(
+pub(in crate::fact_store) async fn get_project_memory_automatic_fact_receipt_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
@@ -319,7 +319,7 @@ pub(in crate::store::memory) async fn get_project_memory_automatic_fact_receipt_
     Ok(receipt)
 }
 
-pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipts_tx(
+pub(in crate::fact_store) async fn list_project_memory_automatic_fact_receipts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     state: Option<ProjectMemoryAutomaticFactStateV1>,

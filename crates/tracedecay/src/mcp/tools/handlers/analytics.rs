@@ -29,8 +29,8 @@ use crate::tracedecay::current_timestamp;
 use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 use super::support::tool_json_with_md;
 use tracedecay_mcp::ToolResult;

@@ -3,8 +3,8 @@
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
 use serde::{Serialize, de::DeserializeOwned};
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 
 use tracedecay_domain::{FactCategoryV1, FactOwnerV1, PayloadAccessState, UtcMicros};
 use tracedecay_store::{FactReadControl, FactStoreError, FactStoreResult};
@@ -125,7 +125,7 @@ pub(super) fn from_json<T: DeserializeOwned>(
 }
 
 pub(super) fn row_string(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<String> {
@@ -134,7 +134,7 @@ pub(super) fn row_string(
 }
 
 pub(super) fn row_optional_string(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<Option<String>> {
@@ -143,7 +143,7 @@ pub(super) fn row_optional_string(
 }
 
 pub(super) fn row_i64(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<i64> {
@@ -152,7 +152,7 @@ pub(super) fn row_i64(
 }
 
 pub(super) fn row_optional_i64(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<Option<i64>> {
@@ -161,7 +161,7 @@ pub(super) fn row_optional_i64(
 }
 
 pub(super) fn row_optional_f64(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<Option<f64>> {
@@ -170,7 +170,7 @@ pub(super) fn row_optional_f64(
 }
 
 pub(super) fn row_f64(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<f64> {
@@ -181,7 +181,7 @@ pub(super) fn row_f64(
 pub(super) async fn row_exists(
     transaction: &Transaction<'_>,
     sql: &str,
-    values: impl crate::db::engine::IntoParams,
+    values: impl tracedecay_runtime_core::db::engine::IntoParams,
 ) -> FactStoreResult<bool> {
     let mut rows = transaction
         .query(sql, values)

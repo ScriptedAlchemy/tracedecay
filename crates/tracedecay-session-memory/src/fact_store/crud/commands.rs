@@ -17,15 +17,15 @@ use super::{
     find_project_memory_fact_by_content_digest_tx, initial_batch, load_current_fact_tx,
     load_current_projection, payload_metadata, sanitize_payload, verified_payload,
 };
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
-use crate::db::tombstone_fact_derivatives_tx;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1,
     FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1, FactLineageEventV1,
     FactOwnerV1, FactPayloadV1, PayloadAccessState, UtcMicros,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::tombstone_fact_derivatives_tx;
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
@@ -351,7 +351,7 @@ pub(super) async fn project_memory_commit_receipt_from_operation_tx(
     Ok(canonical)
 }
 
-pub(in crate::store::memory) async fn load_mutable_project_memory_fact_tx(
+pub(in crate::fact_store) async fn load_mutable_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     target: &ProjectMemoryFactIdV1,
 ) -> FactStoreResult<StoredFactV1> {
@@ -443,7 +443,7 @@ async fn project_memory_replay_add_tx(
     }
 }
 
-pub(in crate::store::memory) async fn add_project_memory_fact_tx(
+pub(in crate::fact_store) async fn add_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactAddCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
@@ -639,7 +639,7 @@ async fn project_memory_replay_update_tx(
     )
 }
 
-pub(in crate::store::memory) async fn update_project_memory_fact_tx(
+pub(in crate::fact_store) async fn update_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactUpdateCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
@@ -793,7 +793,7 @@ async fn project_memory_replay_remove_tx(
     }
 }
 
-pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
+pub(in crate::fact_store) async fn remove_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactRemoveCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
@@ -961,7 +961,7 @@ async fn project_memory_replay_supersede_tx(
     }
 }
 
-pub(in crate::store::memory) async fn supersede_project_memory_fact_tx(
+pub(in crate::fact_store) async fn supersede_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactSupersedeCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1> {

@@ -12,6 +12,7 @@ pub mod anchor_resolution;
 pub mod context;
 pub mod event_lane;
 pub mod external_source_store;
+pub mod fact_store;
 pub mod memory;
 pub mod memory_mapping;
 pub mod memory_mutation;

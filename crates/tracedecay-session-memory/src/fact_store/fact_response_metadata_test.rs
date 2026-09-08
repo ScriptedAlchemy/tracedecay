@@ -16,12 +16,12 @@
 
 use super::*;
 
-use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 use tempfile::tempdir;
 use tracedecay_domain::{
     FactCurationActionV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventKindV1, FactLineageEventV1, PayloadAccessState, UtcMicros,
 };
+use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_store::{FactContradictionStateV1, FactCurrentQuery, FactQueryCoverageV1};
 
 fn profile_fact_id(operation: &str) -> FactId {

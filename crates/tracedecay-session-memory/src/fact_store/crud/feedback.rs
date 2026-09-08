@@ -28,15 +28,15 @@ use super::{
     project_memory_update_feedback_projection_tx, query_fact_lineage_controlled_tx,
     query_fact_lineage_tx, sanitize_payload,
 };
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
-use crate::db::publish_fact_feedback_finding_tx;
-use crate::privacy::sanitize_provider_metadata_text;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2, UtcMicros,
 };
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::publish_fact_feedback_finding_tx;
+use tracedecay_runtime_core::privacy::sanitize_provider_metadata_text;
 use tracedecay_store::{
     FactCommitOutcome, FactLineageCursor, FactLineageQuery, FactReadControl, FactStoreError,
     FactStoreResult, FactWriteBatch, ProjectMemoryAutomaticFactApplyDispositionV1,
@@ -265,7 +265,7 @@ async fn project_memory_replay_feedback_tx(
     )
 }
 
-pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
+pub(in crate::fact_store) async fn record_project_memory_fact_feedback_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactFeedbackCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1> {
@@ -385,7 +385,7 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
     )
 }
 
-pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
+pub(in crate::fact_store) async fn project_memory_fact_feedback_history_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactFeedbackHistoryQueryV1,
     read_control: &FactReadControl,
@@ -476,7 +476,7 @@ pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
     ProjectMemoryFactFeedbackHistoryV1::new(query.target().owner().clone(), events, next_after)
 }
 
-pub(in crate::store::memory) async fn inspect_project_memory_fact_controlled_tx(
+pub(in crate::fact_store) async fn inspect_project_memory_fact_controlled_tx(
     transaction: &Transaction<'_>,
     target: &ProjectMemoryFactIdV1,
     read_control: &FactReadControl,
@@ -604,7 +604,7 @@ pub(super) struct CommitAttempt {
     pub(super) wrote: bool,
 }
 
-pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
+pub(in crate::fact_store) async fn apply_project_memory_automatic_fact_tx(
     transaction: &Transaction<'_>,
     apply_id: ProvenanceId,
     request: &ProjectMemoryFactAddCommandV1,

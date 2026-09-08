@@ -12,8 +12,8 @@ use tracedecay_store::{
     ProjectMemoryFactLinkV1, ProjectMemoryFactNormalizeTagsV1, StoredFactV1,
 };
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 
 use super::super::crud::{commit_batch_tx, load_current_fact_tx, sanitize_payload};
 use super::super::primitives::{
@@ -193,7 +193,7 @@ pub(super) fn normalize_tags(tags: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub(in crate::store::memory) async fn available_curation_fact_tx(
+pub(in crate::fact_store) async fn available_curation_fact_tx(
     transaction: &Transaction<'_>,
     target: &ProjectMemoryFactIdV1,
 ) -> FactStoreResult<StoredFactV1> {
@@ -212,7 +212,7 @@ pub(in crate::store::memory) async fn available_curation_fact_tx(
     Ok(fact)
 }
 
-pub(in crate::store::memory) async fn curation_evidence_ids_tx(
+pub(in crate::fact_store) async fn curation_evidence_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     evidence: &[tracedecay_store::ProjectMemoryFactCurationReviewRefV1],

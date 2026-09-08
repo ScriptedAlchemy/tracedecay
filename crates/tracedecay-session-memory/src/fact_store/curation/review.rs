@@ -4,8 +4,8 @@ use tracedecay_store::{
     ProjectMemoryFactCurationOperationV1, ProjectMemoryFactIdV1,
 };
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
+use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::engine::params;
 
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, row_string, storage_error, storage_message,

@@ -17,11 +17,11 @@ use tracedecay_store::{
     ProjectMemoryFactUpdatePatchV1, derive_project_memory_fact_curation_child_operation_id,
 };
 
-use crate::db::engine::params;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use crate::store::memory::primitives::{OwnerKey, row_string};
-use crate::store::memory::{DatabaseFactStore, FactWriteControl};
+use crate::fact_store::primitives::{OwnerKey, row_string};
+use crate::fact_store::{DatabaseFactStore, FactWriteControl};
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 
 struct Fixture {
     database: Database,
@@ -214,12 +214,8 @@ async fn operation_receipt_count(fixture: &Fixture, operation_ids: &[&Provenance
             .expect("next receipt count")
             .expect("receipt count");
         count += usize::try_from(
-            crate::store::memory::primitives::row_i64(
-                &row,
-                0,
-                "read destructive curation receipts",
-            )
-            .expect("receipt count value"),
+            crate::fact_store::primitives::row_i64(&row, 0, "read destructive curation receipts")
+                .expect("receipt count value"),
         )
         .expect("nonnegative receipt count");
     }

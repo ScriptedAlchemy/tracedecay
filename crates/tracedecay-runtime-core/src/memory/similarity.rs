@@ -7,7 +7,7 @@
 //! classifier so those two surfaces cannot drift.
 //!
 //! This is **not** the project-memory fact-search tokenizer
-//! (`store::memory::scoring::project_memory_tokens`). Search keeps path-like
+//! (`tracedecay_session_memory::fact_store::scoring::project_memory_tokens`). Search keeps path-like
 //! punctuation (`/`, `:`, `.`) as token characters and does not strip
 //! stopwords, so FTS queries and Jaccard scoring can match identifiers
 //! such as `crate::foo` and `src/lib.rs`. Unifying the two would change
