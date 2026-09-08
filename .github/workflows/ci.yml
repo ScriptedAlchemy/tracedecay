@@ -518,31 +518,6 @@ jobs:
             -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
             --no-tests=fail
 
-      # Compile-only gate for the features this lane does not enable. Both are
-      # otherwise built for the first time at release (`--all-features`), so
-      # anything that breaks them merges green and is discovered at tag time.
-      # That is not hypothetical: `tests/mcp_suite/support.rs` called
-      # `fs::create_dir_all` without importing `std::fs`, which made ten
-      # `required-features = ["test-transport"]` targets unbuildable, and
-      # nothing reported it.
-      #
-      # `check --all-targets` rather than `nextest run`: the point is that the
-      # code still compiles, and the acceptance suites behind `test-transport`
-      # spawn daemons, so running them here would change this lane's cost and
-      # flakiness profile. Enable them as a real test lane separately once
-      # they are confirmed green (`dashboard_api_test`, green in CI since it
-      # had its own job, already runs above).
-      #
-      # These are dev-profile check builds, a graph this lane shares with
-      # nothing else, and feature wiring does not vary by host, so one OS
-      # carries the gate. The macOS runner compiles at roughly half the Linux
-      # speed (run 34138693824: 62 min vs 33 min for the same binaries build)
-      # and is the lane closest to its budget.
-      - name: Check feature-gated surfaces compile
-        run: |
-          cargo check --workspace --all-targets --features test-transport --locked
-          cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
-
   # Four shards: the suite's serial test time was 160 min for 15,485 tests in
   # run 34231734416 (junit report), 21.7 min of wall time under the `ci`
   # profile's 8 threads. Replaying that report's durations through the same
@@ -639,9 +614,9 @@ jobs:
           retention-days: 1
 
   # The one `Test Linux` verdict, as when a single job carried the suite: the
-  # build's own tests (dashboard integration, hotpath parity, feature-gate
-  # compile) and every shard must pass. It also folds the shard reports back
-  # into the `nextest-junit-Linux` artifact the single job published.
+  # build's own tests (dashboard integration, hotpath parity) and every shard
+  # must pass. It also folds the shard reports back into the
+  # `nextest-junit-Linux` artifact the single job published.
   linux-test:
     name: Test Linux
     if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -942,6 +917,52 @@ jobs:
         with:
           path: ${{ steps.kache.outputs.store-path }}
           key: ${{ steps.kache.outputs.cache-key }}
+
+  # Compile-only gate for the features the test lanes do not enable. Both are
+  # otherwise built for the first time at release (`--all-features`), so
+  # anything that breaks them merges green and is discovered at tag time.
+  # That is not hypothetical: `tests/mcp_suite/support.rs` called
+  # `fs::create_dir_all` without importing `std::fs`, which made ten
+  # `required-features = ["test-transport"]` targets unbuildable, and
+  # nothing reported it.
+  #
+  # `check --all-targets` rather than `nextest run`: the point is that the
+  # code still compiles, and the acceptance suites behind `test-transport`
+  # spawn daemons, so running them would change a test lane's cost and
+  # flakiness profile. Enable them as a real test lane separately once they
+  # are confirmed green (`dashboard_api_test`, green in CI since it had its
+  # own job, runs in `linux-build`).
+  #
+  # Its own job, not a tail on the Linux build: these are dev-profile check
+  # builds, a graph the perf-profile test lanes share nothing with, so there
+  # is no compiled tree to reuse and nothing to gain from waiting for one.
+  # As the last steps of the Linux test job they ran only after a green
+  # suite — never once on this branch — and would have held the Linux shards
+  # back by their own duration. Here the verdict lands independently at
+  # about clippy's cost: the cold `cargo clippy --workspace --all-targets`
+  # took 13.7 min (run 34231734416), the second check re-resolves only the
+  # crates the hotpath features touch (clippy's lean re-check: 2.7 min).
+  # Feature wiring does not vary by host, so one OS carries the gate. No
+  # cache: it is off every lane's critical path, and another lineage would
+  # compete for the 10 GB budget the test lanes' dependency caches are
+  # already evicted from.
+  feature-gates:
+    name: Feature gates
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Check feature-gated surfaces compile
+        run: |
+          cargo check --workspace --all-targets --features test-transport --locked
+          cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
 
   # Additive visibility lint. Not a required check yet — introduce Hawk, then
   # promote once the workspace is clean under `-D warnings`.
