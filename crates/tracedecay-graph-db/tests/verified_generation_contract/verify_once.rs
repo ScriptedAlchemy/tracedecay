@@ -130,7 +130,8 @@ fn publishing_and_closing_writes_the_verified_marker() {
 }
 
 /// The point of the whole exercise: a restart over bytes that did not change
-/// re-checks a stat instead of re-hashing a generation.
+/// re-checks the container header the engine loaded instead of re-hashing a
+/// generation.
 #[test]
 fn a_restart_over_unchanged_bytes_hits_the_marker_and_enumerates_nothing() {
     let mut published = publish_one("marker:hit");
@@ -202,29 +203,24 @@ fn a_byte_flip_under_a_stale_marker_is_still_caught() {
     );
 }
 
-/// The identity gate on its own, with corruption held out of it.
+/// The identity gate is about the container the engine loads, not the file
+/// the path happens to name.
 ///
-/// Republishing the container byte-for-byte through a fresh inode leaves rows
-/// that verify perfectly and a marker whose recorded identity no longer
-/// matches the file. That must be a miss: the marker is refused, the full
-/// proof runs over the rows, and recovery succeeds. This is the "identity
-/// changes -> full hash" half of the contract, isolated from the question of
-/// which layer notices bad bytes.
+/// Republishing the container byte-for-byte through a fresh inode -- a
+/// backup restore, an atomic replace by a copy -- changes every OS-level file
+/// identity and none of the bytes. The engine reads the same header from the
+/// same bytes, so the marker written against them still applies: the proof it
+/// records ran over exactly these rows. What the marker binds to is what the
+/// engine reports about the container it opened; a replacement holding
+/// *different* rows is refused by the same comparison (see
+/// `runtime::marker_binding_tests`).
 #[test]
-fn a_container_with_a_new_identity_is_re_proven_even_though_its_bytes_verify() {
+fn a_byte_identical_container_through_a_fresh_inode_is_the_same_container() {
     let mut published = publish_one("marker:reinoded");
     let container = support::graph_path(published.temp.path());
     let staged = container.with_extension("grafeo-copy");
 
-    // Same bytes, new file identity. Windows `copy` preserves LastWriteTime,
-    // so length plus mtime can match the stale marker; only a durable file
-    // identity (inode / volume+file-id) distinguishes the replacement.
-    let original_mtime = fs::metadata(&container).unwrap().modified().unwrap();
     fs::copy(&container, &staged).unwrap();
-    let staged_file = fs::OpenOptions::new().write(true).open(&staged).unwrap();
-    staged_file.set_modified(original_mtime).unwrap();
-    staged_file.sync_all().unwrap();
-    drop(staged_file);
     fs::rename(&staged, &container).unwrap();
 
     let _ = take_graph_db_verification_counters();
@@ -232,14 +228,13 @@ fn a_container_with_a_new_identity_is_re_proven_even_though_its_bytes_verify() {
 
     let counters = take_graph_db_verification_counters();
     assert_eq!(
-        counters.marker_hits, 0,
-        "a marker must not vouch for a container it was not written against"
+        counters.full_verifications, 0,
+        "the same bytes must not be re-hashed because their inode changed, saw {counters:?}"
     );
     assert!(
-        counters.full_verifications >= 1,
-        "an unrecognised container must be proven from its rows, saw {counters:?}"
+        counters.marker_hits >= 1,
+        "the marker written against these bytes must still resolve them, saw {counters:?}"
     );
-    assert!(counters.full_verification_bytes > 0);
 }
 
 /// A marker naming some other digest cannot make that digest acceptable.

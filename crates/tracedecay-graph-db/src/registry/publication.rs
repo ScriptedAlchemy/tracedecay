@@ -2175,7 +2175,7 @@ impl GraphDbRegistry {
         // digest without canonicalizing the full manifest a second time.
         // Through the marker-aware entry point, not the free function: an
         // open over container bytes an earlier open already proved resolves
-        // by stat instead of re-streaming every row, and either outcome is
+        // by marker instead of re-streaming every row, and either outcome is
         // recorded. Corruption still fails here exactly as the full proof
         // would - `expected` comes from the relational head, never a marker.
         match database.verify_activated_generation(&identity, &head.recovered_digest, &check) {
@@ -3016,7 +3016,7 @@ mod historical_publication_reuse_tests {
         assert_eq!(resumed.snapshot.generation(), &fixture.generation);
         // One proof, whichever kind. Before the duplicate-proof fix this
         // enumerated the stored rows twice; since verify-once, an open over
-        // unchanged container bytes settles it by stat instead. Either way the
+        // unchanged container bytes settles it by marker instead. Either way the
         // invariant under test is that the work happens exactly once.
         let counters = crate::take_graph_db_verification_counters();
         assert_eq!(
@@ -3068,7 +3068,7 @@ mod historical_publication_reuse_tests {
         assert_eq!(
             sealed_copy_marker_hits(),
             1,
-            "the artifact's own verify-once marker resolves the adoption proof by stat"
+            "the artifact's own verify-once marker resolves the adoption proof without re-streaming"
         );
     }
 

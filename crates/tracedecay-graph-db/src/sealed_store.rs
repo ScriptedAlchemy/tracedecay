@@ -147,8 +147,8 @@ pub(crate) fn open_direct_sealed_generation(
         )
     };
     // Same marker-aware proof as registry adoption: a boot that reopens the
-    // exact bytes an earlier open already proved resolves by stat, and a
-    // fresh or moved container pays the full row proof and files the marker.
+    // exact bytes an earlier open already proved resolves by marker, and a
+    // fresh or changed container pays the full row proof and files the marker.
     if let Err(error) = sealed_copy_proof(&database, &identity, expected, check) {
         let _ = database.close();
         return Err(match error {
@@ -1380,15 +1380,15 @@ fn open_sealed_store(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
     }
-    // Lazily: installing a sealed reader must not cost a whole in-memory
-    // graph. grafeo's store is heap resident, so an eager open here replayed
-    // the artifact's entire block log into RAM for every generation this
-    // process ever sealed — five retained generations meant five whole graphs
-    // (#799), and one published worktree scope meant one more (#830). The
-    // proof below resolves by stat whenever the verify-once marker covers
-    // these exact container bytes, so a retained-but-unread generation now
-    // materializes nothing at all; anything that does read it reopens the
-    // same container through `ensure_opened` on first use.
+    // Lazily: installing a sealed reader must not retain a whole in-memory
+    // graph. grafeo's store is heap resident, so an eager open here kept the
+    // artifact's entire block log in RAM for every generation this process
+    // ever sealed — five retained generations meant five whole graphs (#799),
+    // and one published worktree scope meant one more (#830). The proof below
+    // opens the engine once, resolves by marker whenever the verify-once
+    // marker covers the exact container the engine loaded, and the engine is
+    // released again immediately after; anything that reads the generation
+    // later reopens the same container through `ensure_opened`.
     let database = GraphDb::open_lazy_with_store_state(
         sealed_artifact_database_options(database_path),
         PersistentGraphStoreState::Existing,
@@ -1397,11 +1397,12 @@ fn open_sealed_store(
     // Prove the compacted, reopened store serves exactly the sealed rows
     // before it answers a single read. The artifact is immutable after its
     // build, so a proof established by an earlier open of these exact
-    // container bytes stands: the marker beside the artifact resolves it by
-    // stat, and anything else — a missing or foreign marker, or a container
-    // whose file identity moved — falls back to the full row proof and files
-    // the marker for the next open. `expected` still comes from the
-    // relational authority, exactly as on the staging container.
+    // container bytes stands: the marker beside the artifact resolves it
+    // against the container the engine opened, and anything else — a missing
+    // or foreign marker, or a container whose identity moved — falls back to
+    // the full row proof and files the marker for the next open. `expected`
+    // still comes from the relational authority, exactly as on the staging
+    // container.
     let canonical_bytes = match sealed_copy_proof(&database, identity, expected, &|| Ok(())) {
         Ok(canonical_bytes) => canonical_bytes,
         Err(error) => {
@@ -1413,10 +1414,10 @@ fn open_sealed_store(
         }
     };
     database.mark_sealed_read_only();
-    // A full proof had to materialize the engine to stream the rows. The
-    // proof is filed now, so the engine is pure resident cost until a read
-    // actually arrives: release it and let the first read reopen. A marker
-    // hit never opened it, and hibernation is then a no-op.
+    // The proof materialized the engine, whether it streamed the rows or
+    // resolved by marker against the container that engine opened. The proof
+    // is filed now, so the engine is pure resident cost until a read actually
+    // arrives: release it and let the first read reopen.
     if let Err(error) = database.hibernate_if_lazy() {
         let _ = database.close();
         return Err(sealed_store_failure("post-proof hibernation failed", error));
@@ -1433,10 +1434,11 @@ fn open_sealed_store(
 }
 
 /// Resolves the recovered-digest proof for a reopened sealed copy: by the
-/// artifact's own verify-once marker when the container bytes are the ones an
-/// earlier proof ran over, by the full row-streaming proof otherwise. A full
-/// proof files the marker so the next open of unchanged bytes resolves by
-/// stat. Returns the canonical byte count the proof covers.
+/// artifact's own verify-once marker when the container the engine opened is
+/// the one an earlier proof ran over, by the full row-streaming proof
+/// otherwise. A full proof files the marker so the next open of unchanged
+/// bytes resolves by marker. Returns the canonical byte count the proof
+/// covers.
 fn sealed_copy_proof(
     database: &GraphDb,
     identity: &GraphGenerationManifestIdentity,
@@ -1444,6 +1446,9 @@ fn sealed_copy_proof(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<u64, GraphDbError> {
     let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+    // The marker is consulted only against the container the resident engine
+    // loaded, so the engine has to be open before the lookup can answer.
+    database.ensure_opened()?;
     if let Some(canonical_bytes) = database.inner.markers.lookup(&locator, expected.as_str()) {
         database.inner.markers.record_fresh(&locator);
         #[cfg(test)]
@@ -1465,16 +1470,16 @@ fn sealed_copy_proof(
         .inner
         .markers
         .record_proven(&locator, expected.as_str(), canonical_bytes);
-    // Published now as well as at close, because both identities matter. An
-    // open session writes only the sidecar WAL (index catalog entries), so
-    // the container bytes stay exactly the ones this proof ran over for as
-    // long as this process serves them: publishing here lets every further
-    // open of the artifact in the same boot — the direct-sealed recover and
-    // the registry adoption were each paying this proof — resolve by stat.
-    // The close-time publish then re-records the checkpointed container for
-    // the next boot. A marker is a cache of completed proofs; failing to
-    // write one costs the next open a re-proof and nothing else.
-    if let Err(error) = database.inner.markers.publish() {
+    // Published now as well as at close, because both identities matter. A
+    // read-only engine never checkpoints, so the container stays exactly the
+    // one this engine opened for as long as this process serves it:
+    // publishing under that identity lets every further open of the artifact
+    // in the same boot — the direct-sealed recover and the registry adoption
+    // were each paying this proof — resolve by marker. The close-time publish
+    // then re-records the container as the closed handle reports it for the
+    // next boot. A marker is a cache of completed proofs; failing to write one
+    // costs the next open a re-proof and nothing else.
+    if let Err(error) = database.inner.markers.publish_resident() {
         let _ = error;
     }
     crate::hotpath_observe::record_sealed_copy_verification(
