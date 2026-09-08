@@ -19,16 +19,14 @@ impl RegisteredWorkTopologyV1 {
         authority: &tracedecay_domain::WorkAuthority,
         cancelled: Arc<AtomicBool>,
     ) -> Result<
-        tracedecay_runtime_core::work_topology::WorkTopologyStore,
-        tracedecay_runtime_core::work_topology::WorkTopologyError,
+        crate::work::work_topology::WorkTopologyStore,
+        crate::work::work_topology::WorkTopologyError,
     > {
         let events = self
             .source
             .load_authority_events(authority)
             .map_err(|error| {
-                tracedecay_runtime_core::work_topology::WorkTopologyError::Unavailable(
-                    error.to_string(),
-                )
+                crate::work::work_topology::WorkTopologyError::Unavailable(error.to_string())
             })?;
         let check = || {
             if cancelled.load(Ordering::Acquire) {
@@ -37,7 +35,7 @@ impl RegisteredWorkTopologyV1 {
                 Ok(())
             }
         };
-        tracedecay_runtime_core::work_topology::WorkTopologyStore::publish_from_events(
+        crate::work::work_topology::WorkTopologyStore::publish_from_events(
             &events,
             &check,
             |manifest, key| {

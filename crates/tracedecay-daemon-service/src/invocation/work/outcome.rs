@@ -1,6 +1,7 @@
 //! Work invocation response, evidence, and effect construction.
 
 use serde::Serialize;
+use tracedecay_application::work::work_topology::WorkTopologyError;
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblem, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantSnapshot,
@@ -11,7 +12,6 @@ use tracedecay_contracts::{
     WorkProjectionApplicationError, WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
-use tracedecay_runtime_core::work_topology::WorkTopologyError;
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use tracedecay_daemon_protocol::{

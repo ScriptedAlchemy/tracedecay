@@ -1,6 +1,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use tracedecay_application::work::work_topology::{
+    WORK_TOPOLOGY_PROJECTOR_REVISION_V1, WorkTopologyError, WorkTopologyProjectionV1,
+    WorkTopologyStore, build_work_topology_manifest_checked, work_topology_idempotency_key,
+    work_topology_namespace, work_topology_projection_identity,
+};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
     WorkCommandId, WorkEvent, WorkEventKind, WorkVersion, WorktreeId,
@@ -8,11 +13,6 @@ use tracedecay_domain::{
 use tracedecay_graph_db::{
     GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision, NeverCancelled,
     VerifiedGraphSnapshot,
-};
-use tracedecay_runtime_core::work_topology::{
-    WORK_TOPOLOGY_PROJECTOR_REVISION_V1, WorkTopologyError, WorkTopologyProjectionV1,
-    WorkTopologyStore, build_work_topology_manifest_checked, work_topology_idempotency_key,
-    work_topology_namespace, work_topology_projection_identity,
 };
 
 fn digest(label: char) -> ManifestDigest {
