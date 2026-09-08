@@ -200,7 +200,30 @@ where
     }
 }
 
+/// Runs the resumable authority audit behind a heap boundary.
+///
+/// The audit below is the widest state machine in schema convergence: its
+/// checkpoint cursors and audited counts stay live across every stepped
+/// transaction, and each step descends through the projection derivation
+/// chain. Callers embed only the pointer, so rustc lays out the audit as its
+/// own root instead of nesting it inside the admission futures that await it
+/// (with the `hotpath` feature every measured `async fn` on that path adds
+/// three more wrapper layers, and the nested layout overflowed the query depth
+/// limit).
 pub(crate) async fn ensure_authority_invariants(
+    provider: &(impl AuthorityInvariantTransactionProvider + Sync),
+    force_exhaustive: bool,
+    is_fresh: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    Box::pin(converge_authority_invariants(
+        provider,
+        force_exhaustive,
+        is_fresh,
+    ))
+    .await
+}
+
+async fn converge_authority_invariants(
     provider: &(impl AuthorityInvariantTransactionProvider + Sync),
     force_exhaustive: bool,
     is_fresh: bool,

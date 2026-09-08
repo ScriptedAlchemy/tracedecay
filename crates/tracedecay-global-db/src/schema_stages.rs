@@ -441,8 +441,22 @@ struct RegisteredSchemaAdmissionClassification {
 /// shared by initialization admission and existing-store attach. Each
 /// authority surfaces its own typed reset state; nothing here mutates the
 /// store.
+///
+/// The classification and installation phases below each run behind a heap
+/// boundary so the admission futures that await them embed only a pointer:
+/// every authority's admission check descends through its own contract
+/// validation, and with the `hotpath` feature each measured `async fn` on the
+/// path adds three more wrapper layers, so nesting the phase state machines
+/// inside the attach chain overflowed rustc's layout query depth limit.
 #[hotpath::measure(future = true, label = "global_db.schema.query.classify")]
 async fn classify_registered_schema_admission(
+    connection: &impl QueryExecutor,
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
+    Box::pin(classify_registered_schema_authorities(connection, binding)).await
+}
+
+async fn classify_registered_schema_authorities(
     connection: &impl QueryExecutor,
     binding: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
@@ -584,8 +598,27 @@ pub async fn ensure_registered_schema_for_admission(
 /// Installs (or idempotently re-ensures) every registered schema stage inside
 /// the caller's admission transaction. Callers classify admission first, so
 /// this stage runs only for stores classified fresh or exactly current.
+///
+/// Heap boundary: see [`classify_registered_schema_admission`].
 #[hotpath::measure(future = true, label = "global_db.schema.persist.install")]
 async fn install_registered_schema_stages(
+    transaction: &(impl Executor + Sync),
+    configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
+    temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
+    workflow_admission: WorkflowSchemaAdmission,
+    force_exhaustive: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    Box::pin(install_registered_schema_stage_sequence(
+        transaction,
+        configuration_fresh,
+        temporal_admission,
+        workflow_admission,
+        force_exhaustive,
+    ))
+    .await
+}
+
+async fn install_registered_schema_stage_sequence(
     transaction: &(impl Executor + Sync),
     configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
