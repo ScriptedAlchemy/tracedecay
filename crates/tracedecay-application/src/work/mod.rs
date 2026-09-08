@@ -7,6 +7,7 @@
 
 mod registered;
 pub mod work_topology;
+pub mod workflow_topology;
 
 pub use registered::{
     RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1, RegisteredWorkTopologyV1,

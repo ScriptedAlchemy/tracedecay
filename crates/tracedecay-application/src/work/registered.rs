@@ -59,19 +59,19 @@ impl RegisteredWorkflowTopologyV1 {
         definition_version: u64,
         cancelled: Arc<AtomicBool>,
     ) -> Result<
-        tracedecay_runtime_core::workflow_topology::WorkflowTopologyStore,
-        tracedecay_runtime_core::workflow_topology::WorkflowTopologyError,
+        crate::work::workflow_topology::WorkflowTopologyStore,
+        crate::work::workflow_topology::WorkflowTopologyError,
     > {
         let definition = self
             .source
             .load_definition_source(definition_id, definition_version)
             .map_err(|error| {
-                tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
-                    format!("{error:?}"),
-                )
+                crate::work::workflow_topology::WorkflowTopologyError::Unavailable(format!(
+                    "{error:?}"
+                ))
             })?
             .ok_or_else(|| {
-                tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
+                crate::work::workflow_topology::WorkflowTopologyError::Unavailable(
                     "workflow definition source is missing".to_owned(),
                 )
             })?;
@@ -82,7 +82,7 @@ impl RegisteredWorkflowTopologyV1 {
                 Ok(())
             }
         };
-        tracedecay_runtime_core::workflow_topology::WorkflowTopologyStore::publish_from_definition(
+        crate::work::workflow_topology::WorkflowTopologyStore::publish_from_definition(
             &definition,
             &check,
             |manifest, key| {

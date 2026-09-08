@@ -115,7 +115,6 @@ pub mod weak_registry;
 pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
-pub mod workflow_topology;
 pub mod worktree;
 
 /// Ports the kernel exposes so the root crate can inject subsystems that stay
