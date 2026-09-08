@@ -1,7 +1,7 @@
 import { defineConfig } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
 
-// Canonical dashboard build. build.rs embeds this app-dist output into the
+// Canonical dashboard build. build.rs embeds this build's output into the
 // binary served at `/`, including every client-routed workspace.
 export default defineConfig({
   plugins: [pluginReact()],
@@ -15,7 +15,10 @@ export default defineConfig({
     template: './src/app/index.html',
   },
   output: {
-    distPath: { root: 'app-dist' },
+    // The CLI build script points this at a staging directory it owns, so a
+    // Rust build never writes to — or races `rsbuild dev` for — the
+    // checkout-global app-dist. Unset, every other producer keeps app-dist.
+    distPath: { root: process.env['TRACEDECAY_DASHBOARD_DIST_PATH'] ?? 'app-dist' },
     cleanDistPath: true,
     manifest: {
       filename: 'asset-manifest.json',

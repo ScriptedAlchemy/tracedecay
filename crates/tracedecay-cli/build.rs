@@ -11,9 +11,16 @@
 //! moves and must be load-bearing. This script must never watch
 //! `dashboard/app-dist`, which Rsbuild cleans and rewrites: only frontend
 //! source and configuration inputs are watched.
+//!
+//! A build script has one rerun set, and the source-provenance watcher covers
+//! the whole repository, so a Rust-only edit reruns this script too. The
+//! frontend is therefore not rebuilt because the script ran: it is rebuilt
+//! only when the content fingerprint of [`DASHBOARD_BUILD_INPUTS`] differs
+//! from the one recorded beside the bundle in `OUT_DIR`.
 
 use std::{
     error::Error,
+    ffi::OsStr,
     fmt::Write as _,
     fs, io,
     path::{Path, PathBuf},
@@ -22,6 +29,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+#[path = "build-support/dashboard_bundle.rs"]
+mod dashboard_bundle;
 #[path = "build-support/dashboard_manifest.rs"]
 mod dashboard_manifest;
 #[path = "build-support/source_provenance.rs"]
@@ -41,11 +50,20 @@ const DASHBOARD_BUILD_INPUTS: &[&str] = &[
 /// repository root, in a checkout.
 const REPOSITORY_ROOT_FROM_CRATE: &str = "../..";
 
-/// Fixed cross-tool bundle digest contract (`scripts/check-dashboard-bundle.py`
-/// implements the same algorithm): sha256 over this prefix, then for each
-/// manifest-validated relative path in sorted order the UTF-8 path bytes, one
-/// 0x00 byte, the file byte length as u64 little-endian, then the file bytes.
-const BUNDLE_DIGEST_PREFIX: &[u8] = b"tracedecay-dashboard-bundle-v1\0";
+/// Bundle store under `OUT_DIR`: `<store>/staging` while a producer writes,
+/// `<store>/<digest>` once validated, plus the build record.
+const BUNDLE_STORE_DIR: &str = "dashboard-bundle";
+
+/// Rsbuild reads this to redirect its output away from the checkout-global
+/// `dashboard/app-dist` (see `dashboard/rsbuild.config.ts`).
+const DASHBOARD_DIST_PATH_ENV: &str = "TRACEDECAY_DASHBOARD_DIST_PATH";
+
+/// Written into `dashboard/node_modules` after a successful `npm ci`: the
+/// sha256 of the `package-lock.json` that installation satisfied. The marker
+/// lives beside the installed tree so every target directory and linked
+/// worktree sharing that tree shares the attestation; a tree without a
+/// matching marker cannot attest the current lockfile and is reinstalled.
+const LOCKFILE_MARKER: &str = ".tracedecay-lockfile-sha256";
 
 fn generate_logo() -> Result<(), Box<dyn Error>> {
     let out_path = Path::new("src/resources/logo.ansi");
@@ -61,34 +79,56 @@ fn generate_logo() -> Result<(), Box<dyn Error>> {
 }
 
 /// The embedded dashboard bundle: manifest-validated relative paths, the
-/// `include_bytes!` root the generated module uses, and the cross-tool bundle
-/// digest that becomes the HTTP cache tag.
+/// `include_bytes!` root the generated module uses (a compile-time env var
+/// plus a path under it), and the cross-tool bundle digest that becomes the
+/// HTTP cache tag.
 struct EmbeddedDashboard {
     asset_paths: Vec<String>,
-    include_root: &'static str,
+    include_env: &'static str,
+    include_root: String,
     digest_hex: String,
 }
 
-/// Builds (or verifies) and embeds the dashboard bundle.
+impl EmbeddedDashboard {
+    fn staged(bundle: dashboard_bundle::StagedBundle) -> Self {
+        Self {
+            asset_paths: bundle.asset_paths,
+            include_env: "OUT_DIR",
+            include_root: format!("/{BUNDLE_STORE_DIR}/{}", bundle.digest_hex),
+            digest_hex: bundle.digest_hex,
+        }
+    }
+}
+
+/// Prepares and embeds the dashboard bundle.
 ///
-/// Checkout mode builds the frontend with Rsbuild — or, when
-/// `TRACEDECAY_SKIP_DASHBOARD_BUILD` is set, verifies the existing app-dist
-/// against the digest `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` names, so a skip
-/// can never embed unproven bytes. Packaged crates carry a staged
-/// `dashboard/app-dist` whose integrity Cargo's package checksums already
-/// guarantee. A missing or invalid app-dist always fails the build; there is
-/// no empty-assets fallback.
-fn embed_dashboard(manifest_dir: &Path) -> Result<EmbeddedDashboard, Box<dyn Error>> {
+/// Checkout mode embeds an immutable, digest-named copy under `OUT_DIR`, never
+/// the checkout-global `dashboard/app-dist` that `rsbuild dev` and other
+/// target directories rewrite. The frontend is rebuilt — straight into the
+/// store's staging directory — only when the fingerprint of its inputs
+/// differs from the recorded one; `npm ci` runs only when the installed tree
+/// cannot attest the current `package-lock.json`. When
+/// `TRACEDECAY_SKIP_DASHBOARD_BUILD` is set the prebuilt `dashboard/app-dist`
+/// is staged instead and must match the digest
+/// `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` names, so a skip can never embed
+/// unproven bytes. Packaged crates carry a staged `dashboard/app-dist` whose
+/// integrity Cargo's package checksums already guarantee. A missing or invalid
+/// bundle always fails the build; there is no empty-assets fallback.
+fn embed_dashboard(
+    manifest_dir: &Path,
+    out_dir: &Path,
+) -> Result<EmbeddedDashboard, Box<dyn Error>> {
     let package_local_dashboard = manifest_dir.join("dashboard");
     if package_local_dashboard.is_dir() {
         // Packaged-crate mode: release packaging staged the bundle into the
         // crate directory and Cargo's checksums are the integrity authority.
         let app_dist = package_local_dashboard.join("app-dist");
         let asset_paths = dashboard_manifest::dashboard_asset_paths(&app_dist)?;
-        let digest_hex = bundle_digest(&app_dist, &asset_paths)?;
+        let digest_hex = dashboard_bundle::bundle_digest(&app_dist, &asset_paths)?;
         return Ok(EmbeddedDashboard {
             asset_paths,
-            include_root: "/dashboard/app-dist",
+            include_env: "CARGO_MANIFEST_DIR",
+            include_root: "/dashboard/app-dist".to_owned(),
             digest_hex,
         });
     }
@@ -114,41 +154,86 @@ fn embed_dashboard(manifest_dir: &Path) -> Result<EmbeddedDashboard, Box<dyn Err
     println!("cargo::rerun-if-env-changed=TRACEDECAY_SKIP_DASHBOARD_BUILD");
     println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_BUNDLE_SHA256");
 
-    let app_dist = dashboard.join("app-dist");
+    let store = out_dir.join(BUNDLE_STORE_DIR);
+    fs::create_dir_all(&store)
+        .map_err(|error| format!("failed to create {}: {error}", store.display()))?;
+
     if std::env::var_os("TRACEDECAY_SKIP_DASHBOARD_BUILD").is_some() {
         // Skip-without-proof is not allowed: the skipper must name the digest
-        // of the bundle it expects this build to embed.
+        // of the bundle it expects this build to embed. Once that bundle is
+        // staged, later reruns reuse it without reading app-dist again.
         let expected = required_bundle_digest_env()?;
-        let asset_paths = dashboard_manifest::dashboard_asset_paths(&app_dist)?;
-        let digest_hex = bundle_digest(&app_dist, &asset_paths)?;
-        if digest_hex != expected {
+        if let Some(bundle) = dashboard_bundle::open(&store, &expected)? {
+            return Ok(EmbeddedDashboard::staged(bundle));
+        }
+        let app_dist = dashboard.join("app-dist");
+        let bundle = dashboard_bundle::stage_copy(&store, &app_dist)?;
+        if bundle.digest_hex != expected {
             return Err(format!(
-                "TRACEDECAY_SKIP_DASHBOARD_BUILD is set but the existing dashboard bundle \
-                 at {} has digest {digest_hex}, not the expected \
+                "TRACEDECAY_SKIP_DASHBOARD_BUILD is set but the prebuilt dashboard bundle \
+                 at {} has digest {}, not the expected \
                  TRACEDECAY_DASHBOARD_BUNDLE_SHA256={expected}; rebuild the dashboard or \
                  fix the expected digest",
                 app_dist.display(),
+                bundle.digest_hex,
             )
             .into());
         }
-        return Ok(EmbeddedDashboard {
-            asset_paths,
-            include_root: "/../../dashboard/app-dist",
-            digest_hex,
-        });
+        return Ok(EmbeddedDashboard::staged(bundle));
     }
 
-    if !dashboard.join("node_modules").is_dir() {
-        run_npm(&dashboard, &["ci"])?;
+    // Fingerprint before building: an input edited mid-build then records a
+    // fingerprint that no longer matches, and the next rerun rebuilds.
+    let inputs_fingerprint =
+        dashboard_bundle::inputs_fingerprint(&repository_root, DASHBOARD_BUILD_INPUTS)?;
+    if let Some(record) = dashboard_bundle::read_build_record(&store)
+        && record.inputs_fingerprint == inputs_fingerprint
+        && let Some(bundle) = dashboard_bundle::open(&store, &record.bundle_digest)?
+    {
+        return Ok(EmbeddedDashboard::staged(bundle));
     }
-    run_npm(&dashboard, &["run", "build"])?;
-    let asset_paths = dashboard_manifest::dashboard_asset_paths(&app_dist)?;
-    let digest_hex = bundle_digest(&app_dist, &asset_paths)?;
-    Ok(EmbeddedDashboard {
-        asset_paths,
-        include_root: "/../../dashboard/app-dist",
-        digest_hex,
-    })
+
+    ensure_dashboard_dependencies(&dashboard)?;
+    let staging = dashboard_bundle::prepare_staging(&store)
+        .map_err(|error| format!("failed to prepare {}: {error}", store.display()))?;
+    run_npm(
+        &dashboard,
+        &["run", "build"],
+        &[(DASHBOARD_DIST_PATH_ENV, staging.as_os_str())],
+    )?;
+    let bundle = dashboard_bundle::promote(&store)?;
+    dashboard_bundle::write_build_record(
+        &store,
+        &dashboard_bundle::BuildRecord {
+            inputs_fingerprint,
+            bundle_digest: bundle.digest_hex.clone(),
+        },
+    )
+    .map_err(|error| {
+        format!(
+            "failed to record the dashboard build in {}: {error}",
+            store.display()
+        )
+    })?;
+    Ok(EmbeddedDashboard::staged(bundle))
+}
+
+/// Runs `npm ci` unless `node_modules` carries the marker of the current
+/// `package-lock.json`. Existence of a `node_modules` directory alone proves
+/// nothing about which lockfile it satisfies.
+fn ensure_dashboard_dependencies(dashboard: &Path) -> Result<(), Box<dyn Error>> {
+    let lockfile = dashboard.join("package-lock.json");
+    let lockfile_bytes = fs::read(&lockfile)
+        .map_err(|error| format!("failed to read {}: {error}", lockfile.display()))?;
+    let lockfile_digest = dashboard_bundle::hex(&Sha256::digest(&lockfile_bytes));
+    let marker = dashboard.join("node_modules").join(LOCKFILE_MARKER);
+    if matches!(fs::read_to_string(&marker), Ok(recorded) if recorded.trim() == lockfile_digest) {
+        return Ok(());
+    }
+    run_npm(dashboard, &["ci"], &[])?;
+    fs::write(&marker, format!("{lockfile_digest}\n"))
+        .map_err(|error| format!("failed to write {}: {error}", marker.display()))?;
+    Ok(())
 }
 
 fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
@@ -181,31 +266,10 @@ fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
     Ok(expected)
 }
 
-fn bundle_digest(
-    app_dist: &Path,
-    sorted_relative_paths: &[String],
-) -> Result<String, Box<dyn Error>> {
-    let mut hasher = Sha256::new();
-    hasher.update(BUNDLE_DIGEST_PREFIX);
-    for relative in sorted_relative_paths {
-        let bytes = fs::read(app_dist.join(relative)).map_err(|error| {
-            format!("failed to read dashboard asset {relative} for the bundle digest: {error}")
-        })?;
-        hasher.update(relative.as_bytes());
-        hasher.update([0u8]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(&bytes);
-    }
-    let mut hex = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    Ok(hex)
-}
-
-fn run_npm(dir: &Path, args: &[&str]) -> io::Result<()> {
+fn run_npm(dir: &Path, args: &[&str], envs: &[(&str, &OsStr)]) -> io::Result<()> {
     let status = Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
         .args(args)
+        .envs(envs.iter().copied())
         .current_dir(dir)
         .status()
         .map_err(|error| {
@@ -270,8 +334,9 @@ fn generated_module(
         let _ = writeln!(
             code,
             "        tracedecay_api::StaticDashboardAsset {{ path: {relative:?}, \
-             contents: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {include_path:?})), \
-             content_type: {content_type:?} }},"
+             contents: include_bytes!(concat!(env!({:?}), {include_path:?})), \
+             content_type: {content_type:?} }},",
+            dashboard.include_env,
         );
     }
     let _ = writeln!(code, "    ],");
@@ -318,11 +383,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let dashboard = embed_dashboard(&manifest_dir)?;
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
+    let dashboard = embed_dashboard(&manifest_dir, &out_dir)?;
     let code = generated_module(&provenance, &dashboard)?;
 
-    let out_dir = std::env::var("OUT_DIR")?;
-    let out = Path::new(&out_dir).join("product_runtime_generated.rs");
+    let out = out_dir.join("product_runtime_generated.rs");
     if !matches!(fs::read_to_string(&out), Ok(current) if current == code) {
         fs::write(&out, code)?;
     }

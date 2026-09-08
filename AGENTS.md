@@ -55,13 +55,19 @@ unauthorized external action after completing independent, authorized work.
   reason to ossify CI or test names. Otherwise pass the full path
   (`module::path::test_name`) and confirm the reported count is non-zero before
   treating a run as evidence.
-- `dashboard/app-dist/` is gitignored build output; only the CLI build script
-  (`crates/tracedecay-cli/build.rs`) embeds it, so a fresh checkout/worktree
-  must build the dashboard (or seed the directory) before building
-  `tracedecay-cli` — library crates no longer touch it.
-  `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` skips the npm rebuild only when
-  `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` carries the existing bundle's digest
-  (`python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+- `dashboard/app-dist/` is gitignored build output for `rsbuild dev`, CI,
+  and release packaging. The CLI build script (`crates/tracedecay-cli/build.rs`)
+  is the only embedder and never embeds `app-dist` itself: it builds the
+  frontend into an immutable, digest-named bundle under its own `OUT_DIR`
+  (`dashboard-bundle/<digest>`), rebuilding only when the content fingerprint
+  of the frontend inputs changes and running `npm ci` only when
+  `dashboard/node_modules` lacks the marker for the current
+  `package-lock.json`. A Rust-only edit never reruns npm, and a concurrent
+  `rsbuild dev` cannot wipe compiler inputs; ordinary builds need no
+  environment. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` stages a prebuilt
+  `dashboard/app-dist` instead of building (CI artifacts, seeded worktrees)
+  and requires `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` to carry that bundle's
+  digest (`python3 scripts/check-dashboard-bundle.py dashboard/app-dist
   --print-digest`); a missing or mismatched digest fails the build.
   Create linked worktrees with `scripts/agent-worktree.sh`
   (it locks the lane). Clean up only via `scripts/worktree-gc.sh` or by the
