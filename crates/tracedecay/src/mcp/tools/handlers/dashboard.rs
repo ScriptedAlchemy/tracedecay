@@ -781,21 +781,22 @@ pub(super) async fn handle_dashboard(
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
-            let retained_server = retained_project_server_resolver
-                .as_ref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "retained dashboard project server resolver is unavailable"
-                        .to_string(),
-                })?
-                .resolve(
-                    crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
-                        cg.project_root().to_path_buf(),
-                    ),
-                )
-                .await?
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "retained dashboard project server is unavailable".to_string(),
+            let retained_server_resolver =
+                retained_project_server_resolver.as_ref().ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "retained dashboard project server resolver is unavailable"
+                            .to_string(),
+                    }
                 })?;
+            let retained_server = retained_server_resolver(
+                crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
+                    cg.project_root().to_path_buf(),
+                ),
+            )
+            .await?
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "retained dashboard project server is unavailable".to_string(),
+            })?;
             if let Some(expected_profile_id) = daemon_user_profile_id.as_ref()
                 && retained_server
                     .profile_identity()

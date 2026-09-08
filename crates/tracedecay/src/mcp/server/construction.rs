@@ -63,25 +63,8 @@ pub(crate) type RetainedProjectServerFuture = Pin<
             + 'static,
     >,
 >;
-/// Named project-server resolution port.
-///
-/// The composition root installs a daemon-built implementor that returns the
-/// retained `McpServer`. Construction and routed handlers resolve through
-/// this trait instead of naming a `Fn` alias.
-pub(crate) trait McpProjectServerResolvePort: Send + Sync {
-    fn resolve(&self, request: RetainedProjectGraphRequest) -> RetainedProjectServerFuture;
-}
-
-impl<F> McpProjectServerResolvePort for F
-where
-    F: Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static,
-{
-    fn resolve(&self, request: RetainedProjectGraphRequest) -> RetainedProjectServerFuture {
-        self(request)
-    }
-}
-
-pub(crate) type RetainedProjectServerResolver = Arc<dyn McpProjectServerResolvePort>;
+pub(crate) type RetainedProjectServerResolver =
+    Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static>;
 
 pub(crate) fn install_retained_project_server_resolver(
     resolve: impl Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static,
@@ -99,7 +82,7 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
         let resolver = Arc::clone(&resolver);
         let expected_profile_id = expected_profile_id.clone();
         Box::pin(async move {
-            let server = resolver.resolve(request).await?;
+            let server = resolver(request).await?;
             let graph = match server {
                 Some(server) => {
                     let profile_matches = server
