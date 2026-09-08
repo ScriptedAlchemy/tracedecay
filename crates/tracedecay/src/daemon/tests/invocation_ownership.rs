@@ -6,9 +6,10 @@ use std::pin::Pin;
 use std::process::Command;
 
 use tempfile::TempDir;
+use tracedecay_contracts::retained_surfaces::{MemoryStatusRequestV1, RetainedSurfaceRequestV1};
 use tracedecay_contracts::{
-    ApplicationProblemKind, CancellationContext, Deadline, WorkGraphReadRequestV1,
-    WorkProductSelectionScopeV1,
+    ApplicationProblemKind, CancellationContext, Deadline, ProblemTerminality, RetryDirective,
+    WorkGraphReadRequestV1, WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -25,7 +26,9 @@ use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_contracts::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
-use tracedecay_daemon_service::{DaemonInvocationProblem, ProjectRuntimePublicationStateV1};
+use tracedecay_daemon_service::{
+    DaemonInvocationProblem, ProjectRuntimePublicationStateV1, RegisteredRetainedRuntime,
+};
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -38,6 +41,24 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 async fn committed_fixture(
+    label: &str,
+) -> (
+    TempDir,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
+    DaemonEngine,
+    DaemonHandshake,
+) {
+    let (temp, database_scope, engine, handshake) = unopened_committed_fixture(label).await;
+    engine
+        .project_server(&handshake)
+        .await
+        .expect("committed invocation project open");
+    (temp, database_scope, engine, handshake)
+}
+
+/// [`committed_fixture`] before its project open, for journeys that must
+/// observe the open in flight.
+async fn unopened_committed_fixture(
     label: &str,
 ) -> (
     TempDir,
@@ -70,10 +91,6 @@ async fn committed_fixture(
     };
     let database_scope = enter_test_daemon_database_scope(&profile_root, label);
     let engine = test_daemon_engine_for_profile(&profile_root);
-    engine
-        .project_server(&handshake)
-        .await
-        .expect("committed invocation project open");
     (temp, database_scope, engine, handshake)
 }
 
@@ -318,4 +335,137 @@ async fn unregistered_project_invocation_reports_truthful_unavailable() {
         "an unregistered project must remain truthfully unavailable: {response:?}"
     );
     engine.shutdown_all().await;
+}
+
+fn memory_status_request(request_id: &str) -> DaemonInvocationRequest {
+    let observed_at = tracedecay_contracts::clock::now_micros();
+    DaemonInvocationRequest::retained_application(
+        request_id,
+        RetainedSurfaceRequestV1::MemoryStatus(MemoryStatusRequestV1 {
+            memory_scope: None,
+            project_selector: None,
+        }),
+        observed_at,
+        Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
+            .expect("daemon invocation deadline"),
+        CancellationContext::active(format!("cancel.{request_id}"))
+            .expect("daemon invocation cancellation"),
+    )
+}
+
+/// The core route is admitted before the full server's owner phase registers
+/// the retained runtime. Hold that phase open — the configuration registration
+/// pause sits in the same owner phase, just ahead of the retained registration
+/// — and prove that a retained request landing in the window reads as the
+/// owner still mounting, retryable, and never as a scope that has no retained
+/// runtime. Once the phase completes the same request is answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retained_invocation_while_owners_mount_is_retryable_not_unmounted() {
+    let (_temp, _database_scope, engine, handshake) =
+        unopened_committed_fixture("retained-invocation-while-owners-mount").await;
+    let canonical_project = handshake
+        .project_path
+        .as_deref()
+        .expect("project alias")
+        .canonicalize()
+        .expect("canonical project root");
+    let registration = engine
+        .invocation
+        .service
+        .pause_configuration_runtime_registration(canonical_project.clone())
+        .await;
+    let opening_engine = engine.clone();
+    let opening_handshake = handshake.clone();
+    let opening =
+        tokio::spawn(async move { opening_engine.project_server(&opening_handshake).await });
+    tokio::time::timeout(
+        std::time::Duration::from_mins(1),
+        registration.before_registration,
+    )
+    .await
+    .expect("project open must reach the owner registration gate")
+    .expect("owner registration gate sender");
+    assert_eq!(
+        engine
+            .invocation
+            .service
+            .project_runtimes
+            .publication_state(&canonical_project),
+        Some(ProjectRuntimePublicationStateV1::Warming),
+        "the admitted route must still be publishing its owners"
+    );
+    assert!(
+        !engine
+            .invocation
+            .service
+            .project_runtimes
+            .holds::<RegisteredRetainedRuntime>(&canonical_project)
+            .await,
+        "the gate must hold the open ahead of the retained registration"
+    );
+
+    let mounting = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        memory_status_request("request.retained.while-mounting"),
+    )
+    .await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = &mounting.outcome else {
+        panic!(
+            "a retained request during owner mounting must answer a typed problem: {mounting:?}"
+        );
+    };
+    assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+    assert_eq!(problem.terminality(), ProblemTerminality::PreAdmission);
+    assert_eq!(problem.retry(), RetryDirective::AfterDelay);
+    let diagnostic = problem
+        .diagnostic()
+        .expect("a mounting retained owner carries a diagnostic");
+    assert_eq!(diagnostic.code, "application.surface.unavailable");
+    assert!(
+        !diagnostic
+            .message
+            .contains("no retained runtime is registered"),
+        "a mounting route must not claim its scope has no retained runtime: {}",
+        diagnostic.message
+    );
+
+    registration
+        .allow_registration
+        .send(())
+        .expect("release owner registration");
+    tokio::time::timeout(
+        std::time::Duration::from_mins(1),
+        registration.after_registration,
+    )
+    .await
+    .expect("owner registration must publish")
+    .expect("owner registration publication sender");
+    registration
+        .allow_return
+        .send(())
+        .expect("release project-open owner setup");
+    opening
+        .await
+        .expect("project-open task")
+        .expect("project opens once its owners are registered");
+
+    let served = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        memory_status_request("request.retained.after-mounting"),
+    )
+    .await;
+    assert!(
+        matches!(
+            served.outcome,
+            DaemonInvocationOutcome::RetainedApplication { .. }
+        ),
+        "the same retained request must be answered once the owner phase completes: {served:?}"
+    );
+    let shutdown = engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "the retained owner must shut down cleanly: {shutdown:?}"
+    );
 }
