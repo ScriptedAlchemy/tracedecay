@@ -71,6 +71,9 @@ use tracedecay_contracts::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
     FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
 };
+use tracedecay_contracts::feedback::{
+    FeedbackAdvisoryCycleSurfaceRequestV1, TestResultsSurfaceRequestV1,
+};
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 pub use tracedecay_contracts::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
@@ -115,7 +118,6 @@ const DEFAULT_PAGE_SIZE: u32 = 10;
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
-const MAX_REQUEST_HANDLE_BYTES: usize = 256;
 
 /// Transport keys every surface adapter accepts but no reviewed application
 /// request schema declares. `format` selects the rendered output and
@@ -192,43 +194,6 @@ fn compatibility_diagnostics_request(
 
 pub type FeedbackSurfaceRequest = tracedecay_contracts::feedback::FeedbackHandleRequestV1;
 
-/// Canonical explicit advisory trigger. Project/root/scope/provider identities and
-/// the resulting read handle are all minted by the authenticated daemon.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FeedbackAdvisoryCycleSurfaceRequest {
-    pub document_uri: String,
-}
-
-impl FeedbackAdvisoryCycleSurfaceRequest {
-    fn validate(&self) -> Result<(), ApplicationSurfaceAdapterError> {
-        if self.document_uri.is_empty()
-            || self.document_uri.trim() != self.document_uri
-            || self.document_uri.len() > MAX_REQUEST_HANDLE_BYTES * 16
-            || self.document_uri.chars().any(char::is_control)
-        {
-            return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AffectedTestsSurfaceRequest {
-    pub request_handle: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FeedbackImpactSurfaceRequest {
-    pub request_handle: String,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TestResultsSurfaceRequest {}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ApplicationSurfaceRequest {
     GitRead(GitReadSurfaceRequest),
@@ -236,11 +201,11 @@ pub enum ApplicationSurfaceRequest {
     GitApply(GitApplySurfaceRequest),
     GitHubStackSignalExpand(GitHubStackSignalExpandSurfaceRequest),
     NativeIntegration(NativeIntegrationSurfaceRequest),
+    /// Every handle-addressed feedback read, including impact and affected
+    /// tests: the operation selects the daemon route, the handle is the body.
     Feedback(FeedbackSurfaceRequest),
-    FeedbackAdvisoryCycle(FeedbackAdvisoryCycleSurfaceRequest),
-    FeedbackImpact(FeedbackImpactSurfaceRequest),
-    AffectedTests(AffectedTestsSurfaceRequest),
-    TestResults(TestResultsSurfaceRequest),
+    FeedbackAdvisoryCycle(FeedbackAdvisoryCycleSurfaceRequestV1),
+    TestResults(TestResultsSurfaceRequestV1),
     CallableCode(CallableCodeSurfaceRequest),
     PrimitiveCode(PrimitiveCodeSurfaceRequest),
     Primitive(PrimitiveRequest),
@@ -2014,18 +1979,12 @@ impl ApplicationSurfaceRequest {
                         | ApplicationSurfaceOperation::FeedbackGet
                         | ApplicationSurfaceOperation::FeedbackExpand
                         | ApplicationSurfaceOperation::FeedbackList
+                        | ApplicationSurfaceOperation::FeedbackImpact
+                        | ApplicationSurfaceOperation::AffectedTests
                 )
                 | (
                     Self::FeedbackAdvisoryCycle(_),
                     ApplicationSurfaceOperation::FeedbackAdvisoryCycle
-                )
-                | (
-                    Self::FeedbackImpact(_),
-                    ApplicationSurfaceOperation::FeedbackImpact
-                )
-                | (
-                    Self::AffectedTests(_),
-                    ApplicationSurfaceOperation::AffectedTests
                 )
                 | (
                     Self::TestResults(_),
@@ -2344,20 +2303,6 @@ pub fn parse_application_surface_request(
             parse_native_integration_surface_request(operation, value)
                 .map(ApplicationSurfaceRequest::NativeIntegration)
         }
-        ApplicationSurfaceOperation::AffectedTests => {
-            let request: AffectedTestsSurfaceRequest = serde_json::from_value(value)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-            FeedbackSurfaceRequest::new(request.request_handle.clone())
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?;
-            Ok(ApplicationSurfaceRequest::AffectedTests(request))
-        }
-        ApplicationSurfaceOperation::FeedbackImpact => {
-            let request: FeedbackImpactSurfaceRequest = serde_json::from_value(value)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-            FeedbackSurfaceRequest::new(request.request_handle.clone())
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?;
-            Ok(ApplicationSurfaceRequest::FeedbackImpact(request))
-        }
         ApplicationSurfaceOperation::TestResults => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::TestResults)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
@@ -2590,7 +2535,9 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::FeedbackDiagnostics
         | ApplicationSurfaceOperation::FeedbackGet
         | ApplicationSurfaceOperation::FeedbackExpand
-        | ApplicationSurfaceOperation::FeedbackList => {
+        | ApplicationSurfaceOperation::FeedbackList
+        | ApplicationSurfaceOperation::FeedbackImpact
+        | ApplicationSurfaceOperation::AffectedTests => {
             let request: FeedbackSurfaceRequest = serde_json::from_value(value)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
             Ok(ApplicationSurfaceRequest::Feedback(
@@ -2599,9 +2546,11 @@ pub fn parse_application_surface_request(
             ))
         }
         ApplicationSurfaceOperation::FeedbackAdvisoryCycle => {
-            let request: FeedbackAdvisoryCycleSurfaceRequest = serde_json::from_value(value)
+            let request: FeedbackAdvisoryCycleSurfaceRequestV1 = serde_json::from_value(value)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-            request.validate()?;
+            request
+                .validate()
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
             Ok(ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request))
         }
     }
@@ -2826,26 +2775,6 @@ pub async fn execute_application_surface(
                 tracedecay_daemon_protocol::DaemonInvocationRequest::feedback_advisory_cycle(
                     request_id.as_str(),
                     request.document_uri,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::FeedbackImpact(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
-                    request_id.as_str(),
-                    ApplicationSurfaceOperation::FeedbackImpact,
-                    request.request_handle,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::AffectedTests(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
-                    request_id.as_str(),
-                    ApplicationSurfaceOperation::AffectedTests,
-                    request.request_handle,
                     observed_at,
                     deadline,
                     cancellation_context,
@@ -3524,24 +3453,24 @@ async fn invoke_application_adapter_request(
     let binding_id = binding.binding_id;
     let result_contract = ResultContractRef::from_schema(&binding.result_schema);
     let request_id = request.request_id;
-    let body = apply_http_page_to_surface_body(operation, request.body, &request.page);
-    let application_request = match parse_application_surface_request(operation, body) {
-        Ok(request) => request,
-        Err(error) => {
-            observe_surface_argument_rejection(
-                Some(executor),
-                surface,
-                operation,
-                &request_id,
-                &error,
-            )
-            .await;
-            return Ok(CanonicalInvocationResult::new(
-                binding_id,
-                Err(http_adapter_problem(result_contract, request_id, error)?),
-            ));
-        }
-    };
+    let application_request =
+        match parse_http_application_surface_request(operation, request.body, &request.page) {
+            Ok(request) => request,
+            Err(error) => {
+                observe_surface_argument_rejection(
+                    Some(executor),
+                    surface,
+                    operation,
+                    &request_id,
+                    &error,
+                )
+                .await;
+                return Ok(CanonicalInvocationResult::new(
+                    binding_id,
+                    Err(http_adapter_problem(result_contract, request_id, error)?),
+                ));
+            }
+        };
     let input = match application_surface_dispatch_input_with_controls(
         operation,
         request_id.clone(),
@@ -3639,6 +3568,24 @@ fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProje
         ApplicationSurfaceOperation::DiagnosticsRead => HttpPageProjection::BodyPageControls,
         _ => HttpPageProjection::Unpaged,
     }
+}
+
+/// Decodes one HTTP request body into the canonical surface request.
+///
+/// HTTP is the one transport that carries page controls outside the body (the
+/// `page_size` / `cursor` query), so they are projected into the body first;
+/// CLI and MCP argument objects already carry them and reach
+/// [`parse_application_surface_request`] directly. Every transport therefore
+/// decodes into the same [`ApplicationSurfaceRequest`].
+pub fn parse_http_application_surface_request(
+    operation: ApplicationSurfaceOperation,
+    body: Value,
+    page: &PageRequest,
+) -> Result<ApplicationSurfaceRequest, ApplicationSurfaceAdapterError> {
+    parse_application_surface_request(
+        operation,
+        apply_http_page_to_surface_body(operation, body, page),
+    )
 }
 
 fn apply_http_page_to_surface_body(
