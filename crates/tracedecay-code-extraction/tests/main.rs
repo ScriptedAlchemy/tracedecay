@@ -38,6 +38,8 @@ mod lua;
 mod markdown;
 #[cfg(feature = "lang-markdown")]
 mod markdown_modern_grammar;
+#[cfg(feature = "lang-metal")]
+mod metal;
 #[cfg(feature = "lang-msbasic2")]
 mod msbasic2;
 #[cfg(feature = "lang-nix")]
