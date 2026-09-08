@@ -19,12 +19,10 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_runtime_core::branch_meta::BranchMeta;
-#[cfg(unix)]
-use tracedecay_runtime_core::storage::profile_sharded_data_root;
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, default_profile_project_id, profile_sharded_layout,
-    write_repository_identity_marker, write_store_manifest,
+    StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
+    profile_sharded_layout, write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 
