@@ -9,7 +9,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::RetentionConfig;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
@@ -25,8 +24,6 @@ mod graph_replay;
 #[cfg(test)]
 mod vector_retention_tests;
 use graph_replay::{defer_graph_replay_pool_busy, log_code_generation_retention_degraded};
-
-const MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY: usize = 256;
 
 struct ScopeRootProofInputsV1 {
     live_roots: std::collections::BTreeSet<PathBuf>,
@@ -532,7 +529,10 @@ pub(in crate::daemon) async fn run_code_generation_retention(
         return CodeGenerationRetentionOutcomeV1::Failed;
     }
     let layout = graph.hook_store_layout();
-    let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
+    let store_root = tracedecay_code_index_retention::code_index_generations::code_index_store_root(
+        &layout.data_root,
+        &layout.project_root,
+    );
     // A store directory that never materialized has nothing to sweep. A store
     // *without* an active pointer is different: it is crash debris from a
     // publish that never reached its pointer write (an OOM-killed rebuild is
@@ -602,7 +602,10 @@ async fn apply_code_generation_retention(
         prepare_next_code_generation_retention_cancellable,
     };
     let layout = graph.hook_store_layout();
-    let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
+    let store_root = tracedecay_code_index_retention::code_index_generations::code_index_store_root(
+        &layout.data_root,
+        &layout.project_root,
+    );
     // Retired generations stay reachable for graph replay through the replay
     // pool; retention hard-links each one there before its release event
     // becomes durable, and the replay reconciler deletes pool entries once
@@ -1048,69 +1051,6 @@ async fn apply_code_generation_retention(
     }
 }
 
-fn git_worktree_root_inventory(
-    project_root: &Path,
-) -> Result<
-    (
-        std::collections::BTreeSet<PathBuf>,
-        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1,
-    ),
-    &'static str,
-> {
-    let repository = gix::open(project_root).map_err(|_| "git_repository_unavailable")?;
-    let linked = repository
-        .worktrees()
-        .map_err(|_| "git_worktree_inventory_unavailable")?;
-    if linked.len() >= MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY {
-        return Err("git_worktree_inventory_exceeds_bound");
-    }
-
-    let mut exact_roots = std::collections::BTreeSet::from([project_root.to_path_buf()]);
-    if let Ok(main) = repository.main_repo()
-        && let Some(worktree) = main.worktree()
-    {
-        exact_roots.insert(worktree.base().to_path_buf());
-    }
-    let mut linked_material = Vec::with_capacity(linked.len());
-    for worktree in linked {
-        let base = worktree
-            .base()
-            .map_err(|_| "git_worktree_root_unavailable")?;
-        linked_material.push((
-            worktree.git_dir().to_string_lossy().into_owned(),
-            base.to_string_lossy().into_owned(),
-        ));
-        exact_roots.insert(base);
-    }
-    if exact_roots.is_empty() || exact_roots.len() > MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY {
-        return Err("git_worktree_inventory_invalid");
-    }
-    let terminal_count =
-        u64::try_from(exact_roots.len()).map_err(|_| "git_worktree_count_overflow")?;
-    let material = (
-        "tracedecay.git-worktree-root-inventory.v1",
-        repository.common_dir().to_string_lossy().into_owned(),
-        linked_material,
-        exact_roots
-            .iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-    );
-    let digest = tracedecay_domain::canonical_sha256(&material)
-        .map_err(|_| "git_worktree_inventory_digest_failed")?;
-    let receipt =
-        tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
-            revision: digest.as_str().to_owned(),
-            terminal_count,
-            digest: digest.as_str().to_owned(),
-        };
-    let mut roots = std::collections::BTreeSet::new();
-    for root in exact_roots {
-        insert_live_root_variants(&mut roots, &root);
-    }
-    Ok((roots, receipt))
-}
-
 async fn collect_scope_root_proof_inputs(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -1159,14 +1099,20 @@ async fn collect_scope_root_proof_inputs(
         };
     let mut live_roots = std::collections::BTreeSet::new();
     for root in enrolled_roots {
-        insert_live_root_variants(&mut live_roots, &root);
+        tracedecay_code_index_retention::code_index_generations::insert_live_root_variants(
+            &mut live_roots,
+            &root,
+        );
     }
 
     let project_root = graph.project_root().to_path_buf();
-    let (git_roots, git_receipt) =
-        tokio::task::spawn_blocking(move || git_worktree_root_inventory(&project_root))
-            .await
-            .map_err(|_| "git_worktree_inventory_task_panicked")??;
+    let (git_roots, git_receipt) = tokio::task::spawn_blocking(move || {
+        tracedecay_code_index_retention::code_index_generations::git_worktree_scope_root_inventory(
+            &project_root,
+        )
+    })
+    .await
+    .map_err(|_| "git_worktree_inventory_task_panicked")??;
     live_roots.extend(git_roots);
 
     let mounted = schedulers.scope_retention_mounted_roots().await?;
@@ -1187,7 +1133,10 @@ async fn collect_scope_root_proof_inputs(
             digest: mounted_digest.as_str().to_owned(),
         };
     for root in mounted {
-        insert_live_root_variants(&mut live_roots, &root);
+        tracedecay_code_index_retention::code_index_generations::insert_live_root_variants(
+            &mut live_roots,
+            &root,
+        );
     }
     if live_roots.is_empty() {
         return Err("scope_live_root_inventory_empty");
@@ -1305,7 +1254,10 @@ pub(super) async fn run_code_index_scope_reconciliation(
     };
 
     let layout = graph.hook_store_layout();
-    let store_root = code_index_scope_store_root(&layout.data_root);
+    let store_root =
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_store_root(
+            &layout.data_root,
+        );
     if !store_root.is_dir() {
         return true;
     }
@@ -1724,7 +1676,10 @@ pub(super) async fn run_code_index_scope_reconciliation(
         &revalidated_inputs.vector_sources,
     );
 
-    let execute_root = code_index_scope_store_root(&layout.data_root);
+    let execute_root =
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_store_root(
+            &layout.data_root,
+        );
     let intent_scope = candidate.scope_hash.clone();
     let intent_source_scope = source_scope.clone();
     let proof_for_execute = revalidated_proof.clone();
@@ -1802,40 +1757,6 @@ pub(super) async fn run_code_index_scope_reconciliation(
     }
 }
 
-/// Bounded read-only projection of gix's registered worktree roots.
-///
-/// Scope directories under one `data_root` all belong to one repository: linked
-/// worktrees share a git common directory and therefore one project store, and
-/// differ only by the per-worktree canonical root the scope hash is derived
-/// Apply never uses this projection by itself: scope collection combines it
-/// with durable project enrollment, mounted leases, configuration roots,
-/// vector dependencies, and the exact source binding in one proof receipt.
-///
-/// Every failure is an `Err`, never a smaller set: a truncated live set is
-/// indistinguishable from stranding and would authorize deletion.
-pub(super) fn resolve_live_code_index_roots(
-    project_root: &Path,
-) -> Result<std::collections::BTreeSet<PathBuf>, &'static str> {
-    git_worktree_root_inventory(project_root).map(|(roots, _)| roots)
-}
-
-/// Record both the literal path and its symlink-resolved form. The scope hash
-/// is taken over the canonical root string recorded at publication time, and a
-/// live root spelled differently must never be mistaken for a dead one.
-fn insert_live_root_variants(roots: &mut std::collections::BTreeSet<PathBuf>, root: &Path) {
-    roots.insert(root.to_path_buf());
-    if let Ok(resolved) = std::fs::canonicalize(root) {
-        roots.insert(resolved);
-    }
-}
-
-/// The shared `code-index-v1/` parent that holds every scope root for one
-/// repository. Scope reconciliation operates here; generation retention
-/// operates one level down.
-pub(super) fn code_index_scope_store_root(data_root: &Path) -> PathBuf {
-    data_root.join("code-index-v1")
-}
-
 /// Durable failure visibility for scope reconciliation. Every refusal names why
 /// so a fail-closed pass is never mistaken for "nothing was stranded".
 fn log_code_index_scope_reconciliation_degraded(failure: &str) {
@@ -1848,342 +1769,11 @@ fn log_code_index_scope_reconciliation_degraded(failure: &str) {
     );
 }
 
-/// The exact per-project code-index store root this cadence sweeps.
-///
-/// This must stay the scoped root the scheduler publishes into and Doctor
-/// reports on. A cadence pointed at any other directory would find no sealed
-/// generations and silently reclaim nothing, which is the failure this pass
-/// exists to end.
-pub(super) fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
-    tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root(
-        &code_index_scope_store_root(data_root),
-        project_root,
-    )
-}
-
-#[hotpath::measure(label = "daemon.git.maintenance.session_retention", future = true)]
-pub(super) async fn run_session_retention(
-    database: &tracedecay_global_db::RegisteredGlobalDb,
-    config: &RetentionConfig,
-) -> bool {
-    let now = match now_secs_i64() {
-        Ok(now) => now,
-        Err(failure) => {
-            log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "session_retention".to_owned()),
-                    ("failure", failure.to_owned()),
-                ],
-            );
-            return false;
-        }
-    };
-    let mut succeeded = true;
-
-    if config.session_lcm.enabled {
-        match database
-            .run_session_lcm_retention(
-                "all",
-                None,
-                &config.session_lcm,
-                tracedecay_lcm::RetentionMode::Apply,
-                now,
-            )
-            .await
-        {
-            Ok(report) => {
-                let reclaimed = report.bytes_reclaimed();
-                succeeded &= report.errors.is_empty();
-                if reclaimed > 0 || !report.errors.is_empty() {
-                    log_daemon_event(
-                        "retention_session_lcm",
-                        &[
-                            ("store", "mounted_sessions".to_string()),
-                            ("bytes_reclaimed", reclaimed.to_string()),
-                            ("errors", report.errors.len().to_string()),
-                        ],
-                    );
-                }
-            }
-            Err(_) => {
-                succeeded = false;
-                log_daemon_event(
-                    "retention_degraded",
-                    &[
-                        ("pass", "session_lcm".to_string()),
-                        ("failure", "retention_pass_failed".to_string()),
-                    ],
-                );
-            }
-        }
-    }
-
-    if config.observation.enabled {
-        match database
-            .run_observation_retention(
-                None,
-                &config.observation,
-                tracedecay_global_db::observation::retention::RetentionMode::Apply,
-                now,
-            )
-            .await
-        {
-            Ok(report) => {
-                let reclaimed = report.bytes_reclaimed();
-                succeeded &= report.errors.is_empty();
-                if reclaimed > 0 || !report.errors.is_empty() {
-                    log_daemon_event(
-                        "retention_observation",
-                        &[
-                            ("store", "mounted_sessions".to_string()),
-                            ("bytes_reclaimed", reclaimed.to_string()),
-                            ("errors", report.errors.len().to_string()),
-                        ],
-                    );
-                }
-            }
-            Err(_) => {
-                succeeded = false;
-                log_daemon_event(
-                    "retention_degraded",
-                    &[
-                        ("pass", "observation".to_string()),
-                        ("failure", "retention_pass_failed".to_string()),
-                    ],
-                );
-            }
-        }
-    }
-
-    succeeded &= run_observability_analytics_retention(database, "mounted_sessions").await;
-
-    if let Some(compaction) = &config.compaction {
-        succeeded &= run_compaction(
-            RetainedCompactionStore::Registered(database),
-            "mounted_sessions",
-            compaction,
-        )
-        .await;
-    }
-    succeeded
-}
-
-#[hotpath::measure(
-    label = "daemon.git.maintenance.observability_retention",
-    future = true
-)]
-pub(super) async fn run_observability_analytics_retention(
-    database: &tracedecay_global_db::RegisteredGlobalDb,
-    store: &'static str,
-) -> bool {
-    let now = match now_secs_i64() {
-        Ok(now) => now,
-        Err(failure) => {
-            // An unreadable clock must defer the pass, never fabricate a
-            // pruning horizon.
-            log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "observability_analytics".to_string()),
-                    ("failure", failure.to_string()),
-                ],
-            );
-            return false;
-        }
-    };
-    match database.prune_observability_events(now).await {
-        Ok(receipt) => {
-            if receipt.expired_detail > 0 || receipt.expired_rollup > 0 {
-                log_daemon_event(
-                    "retention_observability_analytics",
-                    &[
-                        ("store", store.to_owned()),
-                        ("expired_detail", receipt.expired_detail.to_string()),
-                        ("expired_rollup", receipt.expired_rollup.to_string()),
-                    ],
-                );
-            }
-            true
-        }
-        Err(_) => {
-            log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "observability_analytics".to_owned()),
-                    ("failure", "retention_pass_failed".to_owned()),
-                ],
-            );
-            false
-        }
-    }
-}
-
-pub(super) async fn run_global_compaction(
-    database: &tracedecay_global_db::RegisteredGlobalDb,
-    config: &CompactionThresholdConfig,
-) -> bool {
-    run_compaction(
-        RetainedCompactionStore::Registered(database),
-        "global.db",
-        config,
-    )
-    .await
-}
-
-pub(super) async fn run_project_compaction(
-    database: &tracedecay_runtime_core::db::Database,
-    config: &CompactionThresholdConfig,
-) -> bool {
-    run_compaction(
-        RetainedCompactionStore::Project(database),
-        crate::config::DB_FILENAME,
-        config,
-    )
-    .await
-}
-
-enum RetainedCompactionStore<'a> {
-    Registered(&'a tracedecay_global_db::RegisteredGlobalDb),
-    Project(&'a tracedecay_runtime_core::db::Database),
-}
-
-impl RetainedCompactionStore<'_> {
-    #[hotpath::skip]
-    async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
-        match self {
-            Self::Registered(database) => database.storage_page_counts().await,
-            Self::Project(database) => database.storage_page_counts().await,
-        }
-    }
-
-    #[hotpath::skip]
-    async fn run_bounded_incremental_compaction(
-        &self,
-        max_pages: u64,
-    ) -> tracedecay_domain::errors::Result<()> {
-        match self {
-            Self::Registered(database) => {
-                database.run_bounded_incremental_compaction(max_pages).await
-            }
-            Self::Project(database) => database.run_incremental_vacuum(max_pages).await,
-        }
-    }
-}
-
-/// Samples the store's free-page ratio and, when the owner-configured threshold
-/// is met, schedules a bounded incremental vacuum in the deferred background
-/// lane. The placement is structurally forbidden from competing
-/// with foreground writes; the page cap keeps the reclaim off the hot path.
-#[hotpath::measure(label = "daemon.git.maintenance.compaction", future = true)]
-async fn run_compaction(
-    store: RetainedCompactionStore<'_>,
-    store_name: &'static str,
-    config: &CompactionThresholdConfig,
-) -> bool {
-    let Ok((page_size, page_count, freelist)) = store.storage_page_counts().await else {
-        log_daemon_event(
-            "retention_degraded",
-            &[
-                ("pass", "compaction".to_string()),
-                ("failure", "store_size_sample_failed".to_string()),
-            ],
-        );
-        return false;
-    };
-    let Ok(scheduled) = compaction_is_scheduled(page_size, page_count, freelist, config) else {
-        return false;
-    };
-    if !scheduled {
-        return true;
-    }
-    let pages = config.max_pages_per_tick.max(1);
-    let freelist_before = freelist;
-    if store
-        .run_bounded_incremental_compaction(u64::from(pages))
-        .await
-        .is_err()
-    {
-        log_daemon_event(
-            "retention_degraded",
-            &[
-                ("pass", "compaction".to_string()),
-                ("failure", "incremental_vacuum_failed".to_string()),
-            ],
-        );
-        return false;
-    }
-    let Ok((_, _, freelist_after)) = store.storage_page_counts().await else {
-        log_daemon_event(
-            "retention_degraded",
-            &[
-                ("pass", "compaction".to_string()),
-                ("failure", "post_compaction_sample_failed".to_string()),
-            ],
-        );
-        return false;
-    };
-    log_compaction(store_name, freelist_before, freelist_after);
-    true
-}
-
-fn compaction_is_scheduled(
-    page_size: u64,
-    page_count: u64,
-    freelist: u64,
-    config: &CompactionThresholdConfig,
-) -> Result<bool, ()> {
-    use tracedecay_contracts::storage::compaction::CompactionTriggerPolicyV1;
-    use tracedecay_contracts::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
-    use tracedecay_contracts::storage::telemetry::StoreSizeSampleV1;
-    use tracedecay_domain::UtcMicros;
-
-    if page_size == 0 || page_count == 0 {
-        return Ok(false);
-    }
-    let store_key = StoreKeyV1::new("store.db").map_err(|_| ())?;
-    let page_size_bytes = u32::try_from(page_size).map_err(|_| ())?;
-    let sample = StoreSizeSampleV1 {
-        store: store_key,
-        page_size_bytes,
-        page_count,
-        freelist_pages: freelist,
-        observed_at: UtcMicros(
-            now_secs_i64()
-                .map_err(|_| ())?
-                .checked_mul(1_000_000)
-                .ok_or(())?,
-        ),
-    };
-    let threshold = FreePageRatioV1::new(config.free_page_ratio_threshold).map_err(|_| ())?;
-    let policy = CompactionTriggerPolicyV1 {
-        free_page_ratio_threshold: threshold,
-        minimum_reclaimable_bytes: StorageByteSizeV1(config.minimum_reclaimable_bytes),
-    };
-    policy
-        .decide(&sample)
-        .map(|decision| decision.is_scheduled())
-        .map_err(|_| ())
-}
-
-fn log_compaction(store_name: &'static str, freelist_before: u64, freelist_after: u64) {
-    log_daemon_event(
-        "retention_compaction",
-        &[
-            ("store", store_name.to_string()),
-            (
-                "freed_pages",
-                freelist_before.saturating_sub(freelist_after).to_string(),
-            ),
-        ],
-    );
-}
-
 /// Runs bounded incremental-vacuum compaction over every tracked branch
-/// database other than the one `cg` currently has mounted (that store already
-/// goes through [`run_project_compaction`]). Best-effort and independent per
-/// file: a busy or failing branch database never blocks the rest, but keeps
-/// the maintenance cadence retry-eligible — see
+/// database other than the one `cg` currently has mounted (the maintenance
+/// owner compacts that store through its live-runtime authority). Best-effort
+/// and independent per file: a busy or failing branch database never blocks
+/// the rest, but keeps the maintenance cadence retry-eligible — see
 /// `src/retention/branch_compaction.rs` for the compaction policy itself.
 #[hotpath::measure(label = "daemon.git.maintenance.branch_compaction", future = true)]
 pub(super) async fn run_branch_compaction(
@@ -2260,185 +1850,4 @@ pub(super) fn branch_compaction_succeeded(
     report: &tracedecay_maintenance::retention::branch_compaction::BranchCompactionReport,
 ) -> bool {
     !report.policy_invalid && report.skipped.is_empty()
-}
-
-#[cfg(test)]
-mod observability_retention_tests {
-    use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn session_maintenance_calls_observability_analytics_retention() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
-            "daemon-observability-retention",
-        )
-        .await;
-        harness
-            .registered
-            .append_observability_event(&AnalyticsEventInsert {
-                provider: "tracedecay-observability".to_owned(),
-                project_id: "scope:retention".to_owned(),
-                session_id: None,
-                timestamp: 0,
-                event_kind: "retrieval.query.completed.v1".to_owned(),
-                hook_name: None,
-                tool_name: None,
-                tool_category: None,
-                skill_name: None,
-                hint_category: None,
-                hint_id: Some("retention:event:1".to_owned()),
-                outcome: Some("succeeded".to_owned()),
-                metadata_json: Some(
-                    serde_json::json!({
-                        "retention_class": "optional_local_detail30d"
-                    })
-                    .to_string(),
-                ),
-            })
-            .await
-            .expect("append old observability detail");
-        let mut config = RetentionConfig::default();
-        config.session_lcm.enabled = false;
-        config.observation.enabled = false;
-        config.compaction = None;
-
-        assert!(run_session_retention(&harness.registered, &config).await);
-        let rows = harness
-            .registered
-            .query_analytics_events(&AnalyticsEventQuery {
-                provider: Some("tracedecay-observability".to_owned()),
-                project_id: Some("scope:retention".to_owned()),
-                limit: 10,
-                ..AnalyticsEventQuery::default()
-            })
-            .await
-            .expect("query retained observability detail");
-        assert!(
-            rows.is_empty(),
-            "maintenance must invoke analytics retention"
-        );
-    }
-}
-
-#[cfg(test)]
-mod code_index_root_alignment_tests {
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-
-    use super::{
-        code_index_scope_store_root, code_index_store_root, resolve_live_code_index_roots,
-    };
-
-    #[test]
-    fn code_generation_retention_sweeps_the_scheduler_store_root() {
-        let data_root = PathBuf::from("/profile/projects/alpha");
-        let project_root = PathBuf::from("/work/alpha");
-
-        let swept = code_index_store_root(&data_root, &project_root);
-        let published =
-            tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
-                &data_root.join("code-index-v1"),
-                &project_root,
-            );
-
-        assert_eq!(
-            swept, published,
-            "retention cadence must sweep the scheduler's scoped generation root"
-        );
-        assert!(
-            swept.starts_with(data_root.join("code-index-v1")),
-            "generation sweep must stay inside the project's code-index store"
-        );
-        assert_ne!(
-            swept,
-            data_root.join("code-index-v1"),
-            "sweep root must be the per-project scoped subdirectory, not the shared parent"
-        );
-    }
-
-    #[test]
-    fn scope_reconciliation_operates_on_the_shared_code_index_parent() {
-        let data_root = PathBuf::from("/profile/projects/alpha");
-        let project_root = PathBuf::from("/work/alpha");
-
-        let parent = code_index_scope_store_root(&data_root);
-        let scoped = code_index_store_root(&data_root, &project_root);
-
-        assert_eq!(parent, data_root.join("code-index-v1"));
-        assert_eq!(
-            scoped.parent(),
-            Some(parent.as_path()),
-            "the scoped sweep root must be a direct child of the reconciled parent"
-        );
-    }
-
-    fn scope_fixture_git(root: &Path, args: &[&str]) {
-        let status = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .current_dir(root)
-        .args(args)
-        .status()
-        .expect("run git fixture command");
-        assert!(status.success(), "git fixture command failed: {args:?}");
-    }
-
-    #[test]
-    fn live_code_index_roots_cover_every_linked_worktree() {
-        use tracedecay_code_index_retention::code_index_generations::code_index_scope_hash;
-
-        let tmp = tempfile::TempDir::new().expect("repository root");
-        let primary = tmp.path().join("primary");
-        let linked = tmp.path().join("linked");
-        std::fs::create_dir_all(&primary).expect("create primary checkout");
-        scope_fixture_git(&primary, &["init", "-q", "-b", "main"]);
-        scope_fixture_git(&primary, &["config", "user.name", "TraceDecay Test"]);
-        scope_fixture_git(
-            &primary,
-            &["config", "user.email", "tracedecay@example.invalid"],
-        );
-        std::fs::write(primary.join("README.md"), b"fixture").expect("seed repository file");
-        scope_fixture_git(&primary, &["add", "."]);
-        scope_fixture_git(&primary, &["commit", "-qm", "fixture"]);
-        scope_fixture_git(
-            &primary,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "linked",
-                linked.to_str().expect("worktree path"),
-            ],
-        );
-
-        let roots = resolve_live_code_index_roots(&primary)
-            .expect("git's own worktree registry is readable");
-
-        let hashes = roots
-            .iter()
-            .map(|root| code_index_scope_hash(root))
-            .collect::<std::collections::BTreeSet<_>>();
-        for root in [&primary, &linked] {
-            let canonical = std::fs::canonicalize(root).expect("canonical worktree root");
-            assert!(
-                hashes.contains(&code_index_scope_hash(&canonical)),
-                "every live worktree root must be represented in the live scope set: {}",
-                canonical.display()
-            );
-        }
-    }
-
-    #[test]
-    fn live_code_index_roots_fail_closed_outside_a_repository() {
-        let tmp = tempfile::TempDir::new().expect("non-repository root");
-
-        assert!(
-            resolve_live_code_index_roots(tmp.path()).is_err(),
-            "an unresolvable repository must never produce a smaller live set"
-        );
-    }
 }

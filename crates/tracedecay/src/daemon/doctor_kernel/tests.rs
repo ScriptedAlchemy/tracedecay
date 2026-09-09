@@ -5,9 +5,8 @@
 //! owned here at the composition root.
 
 use tracedecay_contracts::doctor::{
-    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1,
-    IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerReadV1, LanguageServerStateV1,
-    ObservabilityReadV1, ObservabilityStateV1,
+    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, IngestRefusalCountV1,
+    LanguageServerReadV1, LanguageServerStateV1, ObservabilityReadV1, ObservabilityStateV1,
 };
 use tracedecay_contracts::{
     ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
@@ -135,37 +134,6 @@ fn synchronous_table_growth_is_bounded_by_observed_store_size() {
 }
 
 #[test]
-fn synchronous_exhaustive_scans_are_bounded_before_work_starts() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let small = tmp.path().join("small");
-    std::fs::create_dir(&small).unwrap();
-    std::fs::write(small.join("payload"), b"small").unwrap();
-    assert!(permits_synchronous_exhaustive_scan(&small));
-
-    let large = tmp.path().join("large");
-    std::fs::create_dir(&large).unwrap();
-    std::fs::File::create(large.join("payload"))
-        .unwrap()
-        .set_len(MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES + 1)
-        .unwrap();
-    assert!(!permits_synchronous_exhaustive_scan(&large));
-}
-
-#[test]
-fn synchronous_session_retention_includes_sqlite_sidecars() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let database = tmp.path().join("sessions.db");
-    std::fs::write(&database, b"small").unwrap();
-    assert!(permits_synchronous_session_retention_backlog(&database));
-
-    std::fs::File::create(tmp.path().join("sessions.db-wal"))
-        .unwrap()
-        .set_len(MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES + 1)
-        .unwrap();
-    assert!(!permits_synchronous_session_retention_backlog(&database));
-}
-
-#[test]
 fn language_server_engine_states_preserve_live_degradation() {
     use tracedecay_lsp::analyzer::broker::EngineState;
 
@@ -252,76 +220,6 @@ fn retained_or_unreported_observation_history_is_not_absent() {
         }
     );
 }
-
-#[test]
-fn refusal_censuses_merge_by_provider_and_reason() {
-    use tracedecay_global_db::observation::{
-        ObservationRefusalCensusV1, ObservationRefusalCountV1,
-    };
-
-    let merged = ingest_refusal_read_from_censuses(&[
-        ObservationRefusalCensusV1::Observed {
-            refusals: vec![ObservationRefusalCountV1 {
-                provider: "cursor".to_owned(),
-                reason: "admission_refused".to_owned(),
-                count: 100,
-            }],
-        },
-        ObservationRefusalCensusV1::Observed {
-            refusals: vec![
-                ObservationRefusalCountV1 {
-                    provider: "cursor".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 60,
-                },
-                ObservationRefusalCountV1 {
-                    provider: "codex".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 27,
-                },
-            ],
-        },
-    ]);
-
-    assert_eq!(
-        merged,
-        IngestRefusalCensusReadV1::Observed {
-            refusals: vec![
-                IngestRefusalCountV1 {
-                    provider: "codex".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 27,
-                },
-                IngestRefusalCountV1 {
-                    provider: "cursor".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 160,
-                },
-            ],
-        }
-    );
-}
-
-#[test]
-fn one_unavailable_refusal_census_makes_the_merged_read_unknown() {
-    use tracedecay_global_db::observation::{
-        ObservationRefusalCensusV1, ObservationRefusalCountV1,
-    };
-
-    let merged = ingest_refusal_read_from_censuses(&[
-        ObservationRefusalCensusV1::Observed {
-            refusals: vec![ObservationRefusalCountV1 {
-                provider: "cursor".to_owned(),
-                reason: "admission_refused".to_owned(),
-                count: 1,
-            }],
-        },
-        ObservationRefusalCensusV1::Unavailable,
-    ]);
-
-    assert_eq!(merged, IngestRefusalCensusReadV1::Unknown);
-}
-
 #[tokio::test]
 async fn composed_report_carries_real_states_and_enumerates_coverage() {
     use std::collections::BTreeSet;
