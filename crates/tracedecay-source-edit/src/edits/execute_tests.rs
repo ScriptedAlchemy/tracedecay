@@ -13,7 +13,7 @@ use super::test_support::{
     CancelBeforeEffectAuthorization, FixtureSourceEditAuthorization, fixture_authorization,
     fixture_graph, fixture_request, fixture_request_for_edit, fixture_symbol_code_graph, git,
 };
-use tracedecay_source_edit::{
+use crate::{
     SourceEditEffectControlV1, execute_source_edit, execute_source_edit_rollback,
     execute_source_edit_with_control, preview_source_edit_expected_state,
 };
@@ -43,7 +43,7 @@ async fn preview_apply_replay_and_expected_state_cas_preserve_exact_bytes() {
             "fixture",
         ],
     );
-    let (graph, code_graph, _database_scope) = fixture_graph(project.path()).await;
+    let (graph, code_graph) = fixture_graph(project.path()).await;
     let operation = source_edit_operation(SourceEditKind::StrReplace).unwrap();
     let request = fixture_request();
     let authorization = fixture_authorization(&request);
@@ -141,7 +141,7 @@ async fn dry_run_cancellation_before_admission_skips_preview() {
     let project = tempdir().unwrap();
     fs::create_dir_all(project.path().join("src")).unwrap();
     fs::write(project.path().join("src/lib.rs"), b"old").unwrap();
-    let (graph, code_graph, _database_scope) = fixture_graph(project.path()).await;
+    let (graph, code_graph) = fixture_graph(project.path()).await;
     let mut request = fixture_request();
     request.edit = request.edit.clone().with_dry_run(true);
     let operation = source_edit_operation(request.edit.kind()).unwrap();
@@ -173,7 +173,7 @@ async fn live_cancellation_before_effect_keeps_source_unchanged_and_is_durable()
     let project = tempdir().unwrap();
     fs::create_dir_all(project.path().join("src")).unwrap();
     fs::write(project.path().join("src/lib.rs"), b"old").unwrap();
-    let (graph, code_graph, _database_scope) = fixture_graph(project.path()).await;
+    let (graph, code_graph) = fixture_graph(project.path()).await;
     let mut request = fixture_request();
     request.expected_state = preview_source_edit_expected_state(
         &graph,
@@ -244,7 +244,7 @@ async fn move_symbol_rollback_restores_exact_preimages_without_semantic_inverse_
             "fixture",
         ],
     );
-    let (graph, _, _database_scope) = fixture_graph(project.path()).await;
+    let (graph, _) = fixture_graph(project.path()).await;
     let code_graph = fixture_symbol_code_graph(
         "src/lib.rs",
         std::str::from_utf8(original_source).unwrap(),

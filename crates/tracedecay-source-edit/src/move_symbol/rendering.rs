@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use super::super::edits::{
+use crate::edits::{
     LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,
     classify_leading_line, splice_lines,
 };

@@ -34,11 +34,11 @@ use tracedecay_graph_query::{
     VerifiedCodeGraphRead,
 };
 
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_source_edit::{
-    SourceEditApplicationResult, SourceEditOutcome, execute_source_edit,
-    preview_source_edit_expected_state,
+use crate::{
+    EditDiagnosticRecord, SourceEditApplicationResult, SourceEditFuture, SourceEditOutcome,
+    SourceEditRuntimePort, execute_source_edit, preview_source_edit_expected_state,
 };
+use tracedecay_runtime_core::storage::{StoreLayout, default_profile_sharded_layout};
 
 pub(super) const SHA256_A: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -233,74 +233,47 @@ pub(super) fn fixture_symbol_code_graph(
     FixtureCodeGraphReadPort::ready(hermetic.verified_store(&generation).unwrap())
 }
 
+pub(super) struct FixtureSourceEditRuntime {
+    project_root: std::path::PathBuf,
+    store_layout: StoreLayout,
+}
+
+impl SourceEditRuntimePort for FixtureSourceEditRuntime {
+    fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    fn store_layout(&self) -> &StoreLayout {
+        &self.store_layout
+    }
+
+    fn run_diagnostics<'a>(
+        &'a self,
+        _file: &'a str,
+    ) -> SourceEditFuture<'a, Vec<EditDiagnosticRecord>> {
+        Box::pin(async {
+            Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                "source_edit_diagnostics_unavailable",
+                true,
+                "source-edit verification requires the daemon-owned LSP diagnostics authority",
+            ))
+        })
+    }
+}
+
 pub(super) async fn fixture_graph(
     project_root: &Path,
-) -> (
-    TraceDecay,
-    FixtureCodeGraphReadPort,
-    tracedecay_runtime_core::db::DaemonDatabaseScope,
-) {
+) -> (FixtureSourceEditRuntime, FixtureCodeGraphReadPort) {
     let profile_root = project_root.join(".tracedecay-test-profile");
-    let open_options = TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
-    };
-    let identity =
-        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
-    let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-        identity.profile_root(),
-        1,
-        "source-edit-owner-test-runtime",
-    )
-    .unwrap();
-    let runtime_registry = crate::project_store_runtime::open_project_store_runtime(identity)
-        .await
-        .unwrap();
-    let profile_database = runtime_registry.profile_database().await.unwrap();
-    let store_layout = TraceDecay::resolve_first_touch_configuration_layout(
-        project_root,
-        &open_options,
-        profile_database.as_ref(),
-    )
-    .await
-    .unwrap();
-    let project_id = ProjectId::new(
-        store_layout
-            .identity
-            .project_id
-            .clone()
-            .expect("fixture layout has a project identity"),
-    )
-    .unwrap();
-    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
-        project_root,
-        project_id.as_str(),
-    )
-    .unwrap();
-    let configuration_database = runtime_registry
-        .project_sessions(
-            project_id,
-            vec![
-                project_root.to_path_buf(),
-                store_layout.project_root.clone(),
-            ],
-        )
-        .await
-        .unwrap();
-    let graph = TraceDecay::init_with_registered_configuration(
-        project_root,
-        open_options,
-        store_layout,
-        configuration_database,
-        profile_database,
-        runtime_registry,
-    )
-    .await
-    .unwrap();
+    fs::create_dir_all(&profile_root).unwrap();
+    let store_layout = default_profile_sharded_layout(project_root, &profile_root).unwrap();
+    fs::create_dir_all(&store_layout.data_root).unwrap();
     (
-        graph,
+        FixtureSourceEditRuntime {
+            project_root: project_root.to_path_buf(),
+            store_layout,
+        },
         FixtureCodeGraphReadPort::unavailable(),
-        database_scope,
     )
 }
 
@@ -475,9 +448,8 @@ impl SourceEditAuthorizationPort for CancelBeforeEffectAuthorization {
 
 pub(super) struct EffectUnknownFixture {
     pub(super) project: TempDir,
-    pub(super) graph: TraceDecay,
+    pub(super) graph: FixtureSourceEditRuntime,
     pub(super) code_graph: FixtureCodeGraphReadPort,
-    pub(super) _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     pub(super) request: SourceEditEffectRequestV1,
     pub(super) authorization: FixtureSourceEditAuthorization,
     pub(super) result: SourceEditApplicationResult,
@@ -594,7 +566,7 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
             "fixture",
         ],
     );
-    let (graph, _, database_scope) = fixture_graph(project.path()).await;
+    let (graph, _) = fixture_graph(project.path()).await;
     let code_graph = fixture_symbol_code_graph(
         "src/locked/a.rs",
         std::str::from_utf8(MOVE_SOURCE_PREIMAGE).unwrap(),
@@ -683,7 +655,6 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         project,
         graph,
         code_graph,
-        _database_scope: database_scope,
         request,
         authorization,
         result,

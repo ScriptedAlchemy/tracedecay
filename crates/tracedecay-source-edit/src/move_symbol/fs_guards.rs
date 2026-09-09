@@ -131,8 +131,7 @@ mod tests {
         unix_fs::symlink(&target, &alias).unwrap();
 
         let write_path = write_path_preserving_final_symlink(&alias, "test").unwrap();
-        tracedecay_agent_hosts::agents::safe_write_text_file(&write_path, "fn new() {}\n", None)
-            .unwrap();
+        std::fs::write(&write_path, "fn new() {}\n").unwrap();
 
         assert!(
             std::fs::symlink_metadata(&alias)

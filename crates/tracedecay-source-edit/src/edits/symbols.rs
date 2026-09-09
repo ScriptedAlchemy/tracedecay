@@ -1,9 +1,9 @@
 //! Generation-pinned symbol resolution for symbol-aware source edits.
 
+use crate::SourceEditGraphReadV1;
 use tracedecay_code_index::graph_projection::{CodeGraphProjectionError, CodeGraphSymbolSummaryV1};
 use tracedecay_domain::{SourceSpan, SymbolOccurrenceId};
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
-use tracedecay_source_edit::SourceEditGraphReadV1;
 
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -11,20 +11,20 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 const MAX_EDIT_SYMBOL_MATCHES: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::tracedecay) struct EditSymbolV1 {
-    pub(in crate::tracedecay) occurrence: SymbolOccurrenceId,
-    pub(in crate::tracedecay) kind: NodeKind,
-    pub(in crate::tracedecay) name: String,
-    pub(in crate::tracedecay) qualified_name: String,
-    pub(in crate::tracedecay) file_path: String,
-    pub(in crate::tracedecay) source_span: SourceSpan,
-    pub(in crate::tracedecay) start_line: u32,
-    pub(in crate::tracedecay) line_span: u32,
-    pub(in crate::tracedecay) visibility: Visibility,
+pub(crate) struct EditSymbolV1 {
+    pub(crate) occurrence: SymbolOccurrenceId,
+    pub(crate) kind: NodeKind,
+    pub(crate) name: String,
+    pub(crate) qualified_name: String,
+    pub(crate) file_path: String,
+    pub(crate) source_span: SourceSpan,
+    pub(crate) start_line: u32,
+    pub(crate) line_span: u32,
+    pub(crate) visibility: Visibility,
 }
 
 impl EditSymbolV1 {
-    pub(in crate::tracedecay) fn line_bounds(&self, source: &str) -> Result<(usize, usize)> {
+    pub(crate) fn line_bounds(&self, source: &str) -> Result<(usize, usize)> {
         let start = usize::try_from(self.source_span.start_byte).map_err(|error| {
             symbol_evidence_unavailable(format!("symbol start offset exceeds this host: {error}"))
         })?;
@@ -85,9 +85,7 @@ fn symbol_evidence_unavailable(detail: impl Into<String>) -> TraceDecayError {
     )
 }
 
-pub(in crate::tracedecay) fn edit_symbol_from_summary(
-    summary: &CodeGraphSymbolSummaryV1,
-) -> Result<EditSymbolV1> {
+pub(crate) fn edit_symbol_from_summary(summary: &CodeGraphSymbolSummaryV1) -> Result<EditSymbolV1> {
     let metadata = summary
         .metadata
         .as_ref()
@@ -135,7 +133,7 @@ pub(in crate::tracedecay) fn edit_symbol_from_summary(
 /// module qualifiers resolve as a suffix of the candidate's path-expanded
 /// segment chain.
 #[hotpath::measure(label = "edits.resolve_symbol")]
-pub(in crate::tracedecay) fn resolve_symbol_for_edit(
+pub(crate) fn resolve_symbol_for_edit(
     graph: &SourceEditGraphReadV1,
     symbol: &str,
 ) -> Result<EditSymbolV1> {

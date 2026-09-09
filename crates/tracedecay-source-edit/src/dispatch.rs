@@ -78,8 +78,7 @@ pub(super) async fn run_source_edit(
             dry_run,
             ..
         } => SourceEditOutcome::Edit(
-            graph
-                .str_replace(&path, &old_str, &new_str, dry_run)
+            crate::edits::str_replace(graph.project_root(), &path, &old_str, &new_str, dry_run)
                 .await?,
         ),
         SourceEditRequest::MultiStrReplace {
@@ -93,9 +92,13 @@ pub(super) async fn run_source_edit(
                 .map(|(old, new)| (old.as_str(), new.as_str()))
                 .collect::<Vec<_>>();
             SourceEditOutcome::MultiEdit(
-                graph
-                    .multi_str_replace(&path, &replacements, dry_run)
-                    .await?,
+                crate::edits::multi_str_replace(
+                    graph.project_root(),
+                    &path,
+                    &replacements,
+                    dry_run,
+                )
+                .await?,
             )
         }
         SourceEditRequest::InsertAt {
@@ -106,9 +109,15 @@ pub(super) async fn run_source_edit(
             dry_run,
             ..
         } => SourceEditOutcome::Insert(
-            graph
-                .insert_at(&path, &anchor, &content, before, dry_run)
-                .await?,
+            crate::edits::insert_at(
+                graph.project_root(),
+                &path,
+                &anchor,
+                &content,
+                before,
+                dry_run,
+            )
+            .await?,
         ),
         SourceEditRequest::AstGrepRewrite {
             path,
@@ -117,9 +126,14 @@ pub(super) async fn run_source_edit(
             dry_run,
             ..
         } => SourceEditOutcome::AstGrep(
-            graph
-                .ast_grep_rewrite(&path, &pattern, &rewrite, dry_run)
-                .await?,
+            crate::edits::ast_grep_rewrite(
+                graph.project_root(),
+                &path,
+                &pattern,
+                &rewrite,
+                dry_run,
+            )
+            .await?,
         ),
         SourceEditRequest::ReplaceSymbol {
             symbol,
@@ -127,14 +141,14 @@ pub(super) async fn run_source_edit(
             dry_run,
             ..
         } => SourceEditOutcome::Edit(
-            graph
-                .replace_symbol(
-                    admitted_graph(&graph_read).await?,
-                    &symbol,
-                    &new_source,
-                    dry_run,
-                )
-                .await?,
+            crate::edits::replace_symbol(
+                graph.project_root(),
+                admitted_graph(&graph_read).await?,
+                &symbol,
+                &new_source,
+                dry_run,
+            )
+            .await?,
         ),
         SourceEditRequest::InsertAtSymbol {
             symbol,
@@ -143,15 +157,15 @@ pub(super) async fn run_source_edit(
             dry_run,
             ..
         } => SourceEditOutcome::Insert(
-            graph
-                .insert_at_symbol(
-                    admitted_graph(&graph_read).await?,
-                    &symbol,
-                    &content,
-                    &position,
-                    dry_run,
-                )
-                .await?,
+            crate::edits::insert_at_symbol(
+                graph.project_root(),
+                admitted_graph(&graph_read).await?,
+                &symbol,
+                &content,
+                &position,
+                dry_run,
+            )
+            .await?,
         ),
         SourceEditRequest::MoveSymbol {
             symbol,
@@ -159,15 +173,15 @@ pub(super) async fn run_source_edit(
             dry_run,
             update_references,
         } => SourceEditOutcome::Move(
-            graph
-                .move_symbol(
-                    admitted_graph(&graph_read).await?,
-                    &symbol,
-                    &dest_file,
-                    dry_run,
-                    update_references,
-                )
-                .await?,
+            crate::move_symbol::move_symbol(
+                graph.project_root(),
+                admitted_graph(&graph_read).await?,
+                &symbol,
+                &dest_file,
+                dry_run,
+                update_references,
+            )
+            .await?,
         ),
         SourceEditRequest::RenameSymbol {
             binding,
@@ -175,14 +189,14 @@ pub(super) async fn run_source_edit(
             dry_run,
             ..
         } => SourceEditOutcome::Rename(Box::new(
-            graph
-                .rename_symbol(
-                    admitted_graph(&graph_read).await?,
-                    &binding,
-                    &new_name,
-                    dry_run,
-                )
-                .await?,
+            crate::edits::rename_symbol(
+                graph.project_root(),
+                admitted_graph(&graph_read).await?,
+                &binding,
+                &new_name,
+                dry_run,
+            )
+            .await?,
         )),
     })
 }
