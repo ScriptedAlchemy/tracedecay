@@ -2976,7 +2976,7 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
 }
 
 #[tokio::test]
-async fn corrupt_append_intent_is_repaired_before_project_memory_open_failure() {
+async fn recovery_defers_unavailable_memory_without_blocking_external_or_terminal_effects() {
     let temp = tempfile::tempdir().expect("tempdir");
     let fixture_name = "corrupt-intent-before-memory-open";
     let project_root = temp.path().join(format!("{fixture_name}-project"));
@@ -2992,6 +2992,33 @@ async fn corrupt_append_intent_is_repaired_before_project_memory_open_failure() 
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
         .expect("pending memory recovery");
     reserve_or_replay_blocking(&journal_path, admission).expect("reserved memory recovery");
+    let external = external_admission_for_recovery_project(
+        &cg,
+        "run.read-only-external",
+        "request.read-only-external",
+        "read-only-external",
+    );
+    let external_path = canonical_journal_path(&dashboard_root, &external.request.run_id);
+    recovery_index::add_pending_blocking(&dashboard_root, &external_path, &external)
+        .expect("external index");
+    reserve_or_replay_blocking(&external_path, external).expect("external reservation");
+    let terminal = external_admission_for_recovery_project(
+        &cg,
+        "run.read-only-terminal",
+        "request.read-only-terminal",
+        "read-only-terminal",
+    );
+    let terminal_path = canonical_journal_path(&dashboard_root, &terminal.request.run_id);
+    recovery_index::add_pending_blocking(&dashboard_root, &terminal_path, &terminal)
+        .expect("terminal index");
+    reserve_or_replay_blocking(&terminal_path, terminal.clone()).expect("terminal reservation");
+    persist_recovered_terminal_blocking(
+        &terminal_path,
+        &terminal,
+        AutomationSettledTerminal::Problem(terminal.recovery_problem().clone()),
+        None,
+    )
+    .expect("terminal journal");
     let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
     let corrupt = b"corrupt-before-memory-open";
     write_private_test_file(&intent_path, corrupt);
@@ -3006,7 +3033,7 @@ async fn corrupt_append_intent_is_repaired_before_project_memory_open_failure() 
     )
     .await
     .expect("open read-only recovery project");
-    let error = recovery_composition::reconcile_reserved_automation_effects_for_project(
+    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &read_only,
         &dashboard_root,
         &tracedecay_contracts::CancellationSignal::active(
@@ -3015,9 +3042,24 @@ async fn corrupt_append_intent_is_repaired_before_project_memory_open_failure() 
         .expect("recovery cancellation"),
     )
     .await
-    .expect_err("project memory open must fail after append-intent repair");
+    .expect("memory failure must defer only the memory journal");
 
-    assert!(error.to_string().contains("open read-only"));
+    assert_eq!(report.inspected, 3);
+    assert_eq!(report.deferred, 1);
+    assert_eq!(report.indeterminate, 1);
+    assert_eq!(report.already_terminal, 1);
+    assert!(
+        read_indexed_record_blocking(&external_path)
+            .expect("external journal")
+            .expect("external terminal")
+            .is_terminal()
+    );
+    assert!(
+        !read_indexed_record_blocking(&journal_path)
+            .expect("memory journal")
+            .expect("reserved memory")
+            .is_terminal()
+    );
     assert!(!intent_path.exists());
     assert_eq!(
         std::fs::read_dir(dashboard_root.join("automation_run_append_intent_quarantine"))

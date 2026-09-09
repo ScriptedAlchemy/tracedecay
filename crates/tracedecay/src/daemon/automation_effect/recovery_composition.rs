@@ -28,27 +28,51 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
         AutomationEffectRecoveryPreparation::Complete(report) => return Ok(report),
         AutomationEffectRecoveryPreparation::Pending(preparation) => preparation,
     };
-    let context = project.automation_project_context()?;
+    let owner = project.project_memory_owner()?;
+    let FactOwnerV1::Project { project_id } = &owner else {
+        return Err(
+            tracedecay_automation_runtime::automation::effect_runtime::contract_error(
+                "automation recovery requires a project owner",
+            ),
+        );
+    };
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         project.project_root(),
-        context.project_id(),
+        project_id,
     )
     .map_err(|error| {
         tracedecay_automation_runtime::automation::effect_runtime::contract_error(format!(
             "automation recovery scope is invalid: {error:?}"
         ))
     })?;
-    let memory = MemoryApplication::new(
-        FactOwnerV1::Project {
-            project_id: context.project_id().clone(),
-        },
-        DatabaseFactStore::new(&context.project_memory_database),
+    // External effects and durable terminals do not require project memory.
+    let read_receipts = |run_id, read_control| {
+        let owner = owner.clone();
+        async move {
+            let database = project.open_project_store_db().await?;
+            let memory = MemoryApplication::new(owner, DatabaseFactStore::new(&database)).map_err(
+                |error| {
+                    tracedecay_automation_runtime::automation::effect_runtime::contract_error(
+                        format!("automation recovery memory authority is invalid: {error}"),
+                    )
+                },
+            )?;
+            memory
+                .project_memory_automation_run_receipts(run_id, &read_control)
+                .await
+                .map_err(|error| {
+                    tracedecay_automation_runtime::automation::effect_runtime::contract_error(
+                        format!("canonical memory automation receipt recovery failed: {error}"),
+                    )
+                })
+        }
+    };
+    reconcile_prepared_automation_effects_for_project(
+        preparation,
+        read_receipts,
+        &owner,
+        cancellation,
+        &scope,
     )
-    .map_err(|error| {
-        tracedecay_automation_runtime::automation::effect_runtime::contract_error(format!(
-            "automation recovery memory authority is invalid: {error}"
-        ))
-    })?;
-    reconcile_prepared_automation_effects_for_project(preparation, &memory, cancellation, &scope)
-        .await
+    .await
 }

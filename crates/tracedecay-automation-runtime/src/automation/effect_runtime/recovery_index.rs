@@ -1,5 +1,6 @@
 //! Bounded pending-index authority for automatic-effect crash recovery.
 
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,8 +19,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RunId};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
-use tracedecay_session_memory::memory::MemoryApplication;
-use tracedecay_store::{FactReadControl, ProjectMemoryFactStore};
+use tracedecay_store::{FactReadControl, ProjectMemoryAutomationRunReceiptsV1};
 
 use super::journal::{self, DurableAutomationAdmission};
 use super::projection::project_recovered_committed_receipts;
@@ -99,19 +99,25 @@ pub async fn prepare_reserved_automation_effect_recovery(
     ))
 }
 
+/// Opens receipt authority only for reserved memory effects; failures defer that
+/// journal without preventing external or terminal recovery in the same batch.
 #[hotpath::measure(label = "daemon.automation.effect.reconcile", future = true)]
-pub async fn reconcile_prepared_automation_effects_for_project<A: ProjectMemoryFactStore>(
+pub async fn reconcile_prepared_automation_effects_for_project<F, Fut>(
     preparation: PreparedAutomationEffectRecovery,
-    memory: &MemoryApplication<A>,
+    read_receipts: F,
+    owner: &tracedecay_domain::FactOwnerV1,
     cancellation: &CancellationSignal,
     scope: &ResolvedScope,
-) -> Result<AutomationEffectRecoveryReport> {
+) -> Result<AutomationEffectRecoveryReport>
+where
+    F: Fn(RunId, FactReadControl) -> Fut + Sync,
+    Fut: Future<Output = Result<ProjectMemoryAutomationRunReceiptsV1>> + Send,
+{
     let PreparedAutomationEffectRecovery {
         dashboard_root,
         transitions,
     } = preparation;
-    let owner = memory.owner().clone();
-    let tracedecay_domain::FactOwnerV1::Project { project_id } = &owner else {
+    let tracedecay_domain::FactOwnerV1::Project { project_id } = owner else {
         return Err(contract_error(
             "automation recovery requires a project owner",
         ));
@@ -133,7 +139,7 @@ pub async fn reconcile_prepared_automation_effects_for_project<A: ProjectMemoryF
         report.inspected += 1;
         match reconcile_indexed_retirement_transition(
             &dashboard_root,
-            &owner,
+            owner,
             &scope,
             &operation,
             &transition,
@@ -166,10 +172,10 @@ pub async fn reconcile_prepared_automation_effects_for_project<A: ProjectMemoryF
         }
         report.inspected += 1;
         match reconcile_indexed_automation_effect(
-            memory,
+            &read_receipts,
             &dashboard_root,
             cancellation,
-            &owner,
+            owner,
             &scope,
             &operation,
             &indexed,
@@ -322,15 +328,19 @@ async fn reconcile_indexed_retirement_transition(
     })?
 }
 
-async fn reconcile_indexed_automation_effect<A: ProjectMemoryFactStore>(
-    memory: &MemoryApplication<A>,
+async fn reconcile_indexed_automation_effect<F, Fut>(
+    read_receipts: &F,
     dashboard_root: &Path,
     cancellation: &CancellationSignal,
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
     operation: &tracedecay_contracts::ApplicationOperation,
     indexed: &IndexedJournal,
-) -> Result<EntryRecoveryOutcome> {
+) -> Result<EntryRecoveryOutcome>
+where
+    F: Fn(RunId, FactReadControl) -> Fut + Sync,
+    Fut: Future<Output = Result<ProjectMemoryAutomationRunReceiptsV1>> + Send,
+{
     if indexed.project_id != scope.project_id || indexed.scope_digest != scope.scope_digest {
         return Ok(EntryRecoveryOutcome::Deferred);
     }
@@ -489,14 +499,12 @@ async fn reconcile_indexed_automation_effect<A: ProjectMemoryFactStore>(
     }
     let read_cancellation = cancellation.clone();
     let read_control = FactReadControl::new(Arc::new(move || read_cancellation.is_cancelled()));
-    let recovered = memory
-        .project_memory_automation_run_receipts(admission.request.run_id.clone(), &read_control)
-        .await
-        .map_err(|error| {
-            contract_error(format!(
-                "canonical memory automation receipt recovery failed: {error}"
-            ))
-        })?;
+    let recovered = read_receipts(admission.request.run_id.clone(), read_control).await?;
+    if recovered.owner() != owner {
+        return Err(contract_error(
+            "recovered memory receipts do not match the project owner",
+        ));
+    }
     if cancellation.is_cancelled() {
         return Ok(EntryRecoveryOutcome::Cancelled);
     }
@@ -1359,8 +1367,6 @@ mod tests {
 
     use super::*;
     use tracedecay_domain::{FactOwnerV1, RepositoryId, WorktreeId};
-    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
     fn recovery_scope(project_id: &str) -> ResolvedScope {
         ResolvedScope::new(
@@ -1382,25 +1388,10 @@ mod tests {
     #[tokio::test]
     async fn prepared_recovery_rejects_non_project_memory_owner() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let database_path = temp.path().join("memory.db");
-        crate::register_test_schema_installer();
-        let authority =
-            DatabaseAuthority::acquire_test(&database_path, "automation recovery owner guard")
-                .expect("database authority");
-        let (database, _runtime) = Database::publish_test_runtime(
-            &database_path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .expect("memory database");
-        let memory =
-            MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
-                .expect("profile memory");
-
         let error = reconcile_prepared_automation_effects_for_project(
             prepared_recovery(temp.path()),
-            &memory,
+            |_, _| async { panic!("owner validation must precede memory access") },
+            &FactOwnerV1::Profile,
             &CancellationSignal::active("cancellation.non-project-owner").expect("cancellation"),
             &recovery_scope("project.recovery-guard"),
         )
@@ -1417,29 +1408,12 @@ mod tests {
     #[tokio::test]
     async fn prepared_recovery_rejects_memory_owner_scope_mismatch() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let database_path = temp.path().join("memory.db");
-        crate::register_test_schema_installer();
-        let authority =
-            DatabaseAuthority::acquire_test(&database_path, "automation recovery scope guard")
-                .expect("database authority");
-        let (database, _runtime) = Database::publish_test_runtime(
-            &database_path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .expect("memory database");
-        let memory = MemoryApplication::new(
-            FactOwnerV1::Project {
-                project_id: ProjectId::new("project.other").expect("other project"),
-            },
-            DatabaseFactStore::new(&database),
-        )
-        .expect("project memory");
-
         let error = reconcile_prepared_automation_effects_for_project(
             prepared_recovery(temp.path()),
-            &memory,
+            |_, _| async { panic!("scope validation must precede memory access") },
+            &FactOwnerV1::Project {
+                project_id: ProjectId::new("project.other").expect("project"),
+            },
             &CancellationSignal::active("cancellation.owner-scope-mismatch").expect("cancellation"),
             &recovery_scope("project.recovery-guard"),
         )
