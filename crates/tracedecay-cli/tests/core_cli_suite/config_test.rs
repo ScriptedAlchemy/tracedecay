@@ -1,5 +1,7 @@
 use tempfile::TempDir;
-use tracedecay::config::*;
+use tracedecay_configuration::{
+    TraceDecayConfig, get_config_path, is_excluded, is_excluded_dir, is_in_gitignore, load_config,
+};
 
 #[test]
 fn default_config_excludes_generated_vendor_cache_trees_and_gitignore_on() {

@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use crate::clock::now_secs_i64;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::log_maintenance_event;
-use crate::retention::branch_compaction::CompactionThresholdConfig;
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::MaintenanceTickOutcome;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_semantic_contracts::SemanticConfig;
 
 mod graph_replay;

@@ -543,7 +543,7 @@ impl DaemonToolDispatch {
         // the user profile into an accidental project handshake.
         let explicitly_targeted = explicit_project.is_some();
         let project_path = match explicit_project {
-            Some(path) => Some(tracedecay::config::resolve_path(Some(path))),
+            Some(path) => Some(tracedecay_configuration::resolve_path(Some(path))),
             None => std::env::current_dir()
                 .ok()
                 .and_then(|cwd| implicit_tool_project_path(&cwd)),

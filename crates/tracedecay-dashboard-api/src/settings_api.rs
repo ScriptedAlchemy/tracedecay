@@ -32,9 +32,9 @@ use crate::application::settings_control::{
     TelemetrySettingsPatchV1, context_scout_settings_are_enabled, effective_context_scout_settings,
     preview_project_settings,
 };
-use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
+use tracedecay_configuration::config::TraceDecayConfig;
 use tracedecay_configuration::{
     DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
     parse_duration_millis, plan_user_settings_mutation,
