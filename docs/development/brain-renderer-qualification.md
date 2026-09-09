@@ -233,3 +233,26 @@ ForceAtlas2 exact-coordinate parity, measured-field bypass, malformed results,
 worker failure, unmount cancellation, and late results after a topology change.
 The built-browser check supplies the separate evidence that the real worker
 bundle and cancellation path operate correctly.
+
+## Final-paint attribution and dense marker sizing
+
+A separate production trace on the same 5,000-node/4,999-relation fixture,
+without an event burst, isolated worker-message arrival through the second
+paint. The interval was 1,372 ms. Its largest native browser compositor
+`Commit` occupied 839 ms wall time but 35.9 ms thread CPU; overlapping GPU tasks
+occupied 661/142 ms wall time with 2.8/1.9 ms CPU. Worker-message handling was
+369 ms wall time and 310 ms CPU. These are browser compositor events, not React
+commit timings. The underlying resource or driver wait is not established,
+and this observation does not justify a Sigma replacement or an application
+installation rewrite. Raw evidence is `worker-final-install-timeline.json`,
+its summary, and matching profiles under `/fast/tmp/td-graph-worker-compare/`.
+
+The dense screenshot did expose an independent sizing defect: the minimum
+body scale stayed at 0.32 even when available area required a smaller marker.
+At a 970×720 canvas with 5,000 equal-degree symbols this yielded 4.48 px radii.
+The minimum now contracts with the existing area-derived roominess, yielding
+about 1.85 px radii in that case. Roomy fields retain their existing sizing;
+topology, coordinates, force settings, camera, and exact DOM identity are
+unchanged. The focused regression fails with the old floor and passes with
+the correction: quartering canvas area halves radius while preserving every
+node position. All 16 layout tests and dashboard typecheck pass.
