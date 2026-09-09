@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use serde_json::Value;
 use tracedecay_contracts::{
@@ -240,11 +240,17 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     let result = hotpath::future!(
         crate::daemon::retained_owner::execute_profile_retained_application(
             crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
-                runtime_registry: Some(runtime_registry),
+                profile_sessions: Some(runtime_registry.profile_sessions().await?),
                 session_identity: authority.session_identity().clone(),
                 configuration_digest: authority.configuration_digest().clone(),
                 lcm_authority,
                 session_refresh,
+                memory: Some(Arc::new(
+                    tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::profile(
+                        runtime_registry,
+                        authority.configuration_digest().clone(),
+                    ),
+                )),
             },
             authority,
             typed_request,

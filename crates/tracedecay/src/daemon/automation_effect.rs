@@ -33,7 +33,6 @@ use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_store::FactReadControl;
 
-use crate::daemon::retained_owner::receipts::{PreparedRetainedEffect, prepare_retained_effect};
 use tracedecay_automation_runtime::automation::effect_runtime::journal::{
     AutomationRecoveryBinding, AutomationReservationClaim, DurableAutomationAdmission,
     DurableSettlementClassification, ReservationResult, abandon_reservation_blocking,
@@ -56,6 +55,7 @@ use tracedecay_automation_runtime::automation::effect_runtime::{
     finalize_terminal_housekeeping, journal, recovered_partial_terminal, remove_pending_blocking,
     retirement,
 };
+use tracedecay_contracts::retained_receipts::{PreparedRetainedEffect, prepare_retained_effect};
 use tracedecay_daemon_service::{DaemonInvocationService, RegisteredRetainedRequestContextError};
 use tracedecay_domain::errors::Result;
 
