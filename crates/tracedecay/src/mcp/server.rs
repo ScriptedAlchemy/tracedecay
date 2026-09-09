@@ -1013,6 +1013,7 @@ impl McpServer {
                 match SessionRetrievalServingIdentityV1::resolve_project(
                     project_id,
                     &serving_db,
+                    cg.serving_branch(),
                     cg.project_root(),
                     profile.profile_id(),
                     &registered.binding().shard_id,
