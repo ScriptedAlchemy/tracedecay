@@ -248,6 +248,7 @@ mod database_owner_registry;
 use database_owner_registry::DatabaseOwnerRegistry;
 pub(crate) mod dashboard_automation;
 #[cfg(feature = "test-transport")]
+#[path = "../tests/common/dashboard_configuration_test_runtime.rs"]
 mod dashboard_configuration_test_runtime;
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay_consumer;

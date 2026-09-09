@@ -66,7 +66,7 @@ const HISTORICAL_RESULT_PATH: &str = "benchmark_data/session-temporal/result-pro
 const HISTORICAL_RESULT_FILE_NAME: &str = "result-provisional.json";
 const HISTORICAL_HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
 const RUNNER_PATH: &str = "scripts/run-session-temporal-benchmark.sh";
-const HARNESS_PATH: &str = "crates/tracedecay/src/session_temporal_benchmark.rs";
+const HARNESS_PATH: &str = "crates/tracedecay/benches/session_temporal/harness.rs";
 const SOURCE_MODE_CLEAN: &str = "clean_git_worktree_v1";
 const SANITIZATION_RECEIPT_PATH: &str =
     "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json";
@@ -84,13 +84,13 @@ const NATIVE_CODEX_FIXTURES: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/codex/session_meta.input.json",
         include_str!(
-            "../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
+            "../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
         ),
     ),
     (
         "tests/fixtures/provider_normalization/codex/agent_message.input.json",
         include_str!(
-            "../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
+            "../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
         ),
     ),
 ];
