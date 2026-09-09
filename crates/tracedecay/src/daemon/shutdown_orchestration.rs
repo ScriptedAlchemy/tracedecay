@@ -492,28 +492,35 @@ async fn run_daemon_shutdown(
     // and graph_db.registry.close_retained measure the work underneath it.
     let store_close_deadline = budget.store_close();
     let store_close_started = tokio::time::Instant::now();
-    log_shutdown_phase(
-        "store_close",
-        "start",
-        store_close_started,
-        store_close_deadline,
-    );
-    let terminal = hotpath::measure_block!("daemon.shutdown.store_close", {
-        let _draining = DrainingGauge::arm("daemon.shutdown.draining.store_close");
-        if project_servers.timed_out_count() == 0 {
+    let terminal = if project_servers.timed_out_count() == 0 {
+        log_shutdown_phase(
+            "store_close",
+            "start",
+            store_close_started,
+            store_close_deadline,
+        );
+        let receipt = hotpath::measure_block!("daemon.shutdown.store_close", {
+            let _draining = DrainingGauge::arm("daemon.shutdown.draining.store_close");
             prepare_shutdown_owner_phases(plan.terminal_owner_phases)
                 .join(store_close_deadline)
                 .await
-        } else {
-            ShutdownReceipt::timed_out(store_close_deadline, "memory_graph_reconciliation")
-        }
-    });
-    log_shutdown_phase(
-        "store_close",
-        "complete",
-        store_close_started,
-        store_close_deadline,
-    );
+        });
+        log_shutdown_phase(
+            "store_close",
+            "complete",
+            store_close_started,
+            store_close_deadline,
+        );
+        receipt
+    } else {
+        log_shutdown_phase(
+            "store_close",
+            "skipped",
+            store_close_started,
+            store_close_deadline,
+        );
+        ShutdownReceipt::timed_out(store_close_deadline, "memory_graph_reconciliation")
+    };
     background.extend(terminal);
     let receipt = DaemonShutdownReceipt {
         in_flight,
@@ -670,69 +677,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_reaper_phases_emit_start_and_complete_receipts() {
-        let _ = super::super::take_captured_daemon_event_lines();
-        let lifecycle = DaemonLifecycle::default();
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        let _receipt = coordinate_daemon_shutdown(&lifecycle, deadline, async move {
-            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                ShutdownTaskReceipt::default()
-            })
-            .with_terminal_owner_phases(vec![vec![ShutdownOwner::new(
-                "memory_graph_reconciliation",
-                || {},
-                async {},
-            )]])
-        })
-        .await;
-
-        let lines = super::super::take_captured_daemon_event_lines();
-        assert_eq!(
-            shutdown_phase_outcomes(&lines),
-            [
-                "project_servers_start",
-                "project_servers_complete",
-                "store_close_start",
-                "store_close_complete",
-            ],
-            "{lines:?}"
-        );
-        for line in &lines {
-            if !line.contains("outcome=project_servers_") && !line.contains("outcome=store_close_")
-            {
-                continue;
-            }
-            assert!(
-                line.contains("elapsed_ms="),
-                "phase receipt must carry elapsed_ms: {line}"
-            );
-            assert!(
-                line.contains("deadline_remaining_ms="),
-                "phase receipt must carry deadline_remaining_ms: {line}"
-            );
-        }
-    }
-
-    fn shutdown_phase_outcomes(lines: &[String]) -> Vec<&str> {
-        lines
-            .iter()
-            .filter_map(|line| {
-                if !line.contains("event=daemon_shutdown") {
-                    return None;
-                }
-                line.split_whitespace().find_map(|field| {
-                    field.strip_prefix("outcome=").filter(|outcome| {
-                        matches!(
-                            *outcome,
-                            "project_servers_start"
-                                | "project_servers_complete"
-                                | "store_close_start"
-                                | "store_close_complete"
-                        )
+    async fn post_reaper_phase_receipts_reach_stderr() {
+        const CHILD_MODE: &str = "TRACEDECAY_SHUTDOWN_RECEIPT_TEST";
+        if let Ok(mode) = std::env::var(CHILD_MODE) {
+            let timed_out = mode == "timed_out";
+            let closed = Arc::new(AtomicBool::new(false));
+            let terminal_closed = Arc::clone(&closed);
+            let lifecycle = DaemonLifecycle::default();
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            let receipt =
+                coordinate_daemon_shutdown(&lifecycle, deadline, async move {
+                    DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), move |_| async move {
+                        if timed_out {
+                            ShutdownTaskReceipt::timed_out("project_server")
+                        } else {
+                            ShutdownTaskReceipt::default()
+                        }
                     })
+                    .with_terminal_owner_phases(vec![vec![
+                        ShutdownOwner::new("memory_graph_reconciliation", || {}, async move {
+                            terminal_closed.store(true, Ordering::Release);
+                        }),
+                    ]])
                 })
-            })
-            .collect()
+                .await;
+            assert_eq!(closed.load(Ordering::Acquire), !timed_out);
+            assert_eq!(receipt.background.unfinished().is_empty(), !timed_out);
+            return;
+        }
+
+        for (mode, expected) in [
+            (
+                "complete",
+                vec![
+                    "project_servers_start",
+                    "project_servers_complete",
+                    "store_close_start",
+                    "store_close_complete",
+                ],
+            ),
+            (
+                "timed_out",
+                vec![
+                    "project_servers_start",
+                    "project_servers_complete",
+                    "store_close_skipped",
+                ],
+            ),
+        ] {
+            // A child process exercises the production stderr sink, including formatting.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "daemon::shutdown_orchestration::tests::post_reaper_phase_receipts_reach_stderr", "--nocapture"])
+                .env(CHILD_MODE, mode)
+                .output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let phases: Vec<_> = stderr
+                .lines()
+                .filter(|line| {
+                    line.starts_with("[tracedecay] event=daemon_shutdown ")
+                        && (line.contains("outcome=project_servers_")
+                            || line.contains("outcome=store_close_"))
+                })
+                .collect();
+            let outcomes: Vec<_> = phases
+                .iter()
+                .map(|line| {
+                    assert!(line.contains("elapsed_ms="), "{line}");
+                    assert!(line.contains("deadline_remaining_ms="), "{line}");
+                    line.split_whitespace()
+                        .find_map(|field| field.strip_prefix("outcome="))
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(outcomes, expected, "{stderr}");
+        }
     }
 
     #[tokio::test]
