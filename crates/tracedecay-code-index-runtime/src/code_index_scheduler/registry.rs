@@ -6684,10 +6684,8 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn shutdown(&self) {
         self.cancel();
         let cold_mount_completions = self.cold_mount_reservation_completions();
-        let mut retiring_guard = self.retiring.lock().await;
+        let mut retiring = self.retiring.lock().await;
         let mounted = std::mem::take(&mut *self.mounted.lock().await);
-        let retiring = std::mem::take(&mut *retiring_guard);
-        drop(retiring_guard);
         self.test_attribution_authorities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6697,25 +6695,26 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree.serving_generation_changed.send_replace(());
             worktree.wake.notify_one();
         }
-        for (_, mut worktree) in mounted {
-            let _ = hotpath::future!(
-                &mut worktree.task,
-                label = "daemon.code_index.shutdown.mounted_join"
-            )
-            .await;
-            hotpath::measure_block!("daemon.code_index.shutdown.mounted_release", drop(worktree));
-        }
-        for (_, mut worktree) in retiring {
-            let _ = hotpath::future!(
-                &mut worktree.task,
-                label = "daemon.code_index.shutdown.retiring_join"
-            )
-            .await;
+        // Mount admission refuses roots already retiring. Keep each owner in
+        // that same registry while awaiting its worker: cancellation of this
+        // waiter must not detach an in-flight blocking reconcile or lose the
+        // handle a later shutdown needs to join.
+        retiring.extend(mounted);
+        while let Some(root) = retiring.keys().next().cloned() {
+            if let Some(worktree) = retiring.get_mut(&root) {
+                let _ = hotpath::future!(
+                    &mut worktree.task,
+                    label = "daemon.code_index.shutdown.worker_join"
+                )
+                .await;
+            }
             hotpath::measure_block!(
-                "daemon.code_index.shutdown.retiring_release",
-                drop(worktree)
+                "daemon.code_index.shutdown.owner_release",
+                drop(retiring.remove(&root))
             );
         }
+        // Cold mounts take `retiring` at their final admission fence.
+        drop(retiring);
         for mut completion in cold_mount_completions {
             let _ = completion.changed().await;
         }
