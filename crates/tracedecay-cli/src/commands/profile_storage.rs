@@ -369,6 +369,10 @@ fn handle_reset_authority(
         report.cleared_native_source_cursor_rows
     );
     println!(
+        "  cleared {} observation-derived external-source receipt row(s)",
+        report.cleared_external_source_rows
+    );
+    println!(
         "the authority content re-derives from the preserved transcripts at the \
          next daemon open"
     );
