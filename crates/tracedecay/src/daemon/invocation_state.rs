@@ -47,7 +47,7 @@ pub(crate) struct DaemonInvocationState {
     pub(super) github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
+    query_authority_provider: tracedecay_daemon_service::DaemonQueryAuthorityProviderV1,
     work_federated_query_authority: Arc<dyn WorkFederatedQueryAuthorityPortV1>,
     semantic_projection_scheduler:
         tracedecay_application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
@@ -74,7 +74,7 @@ impl DaemonInvocationState {
         let service =
             DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
         let query_authority_provider =
-            query_authority_provider::DaemonQueryAuthorityProviderV1::default();
+            tracedecay_daemon_service::DaemonQueryAuthorityProviderV1::default();
         let work_federated_query_authority = Arc::new(DaemonWorkFederatedQueryAuthorityV1 {
             schedulers: code_index_schedulers.clone(),
             provider: query_authority_provider.clone(),
@@ -446,8 +446,8 @@ impl DaemonInvocationState {
         state: crate::config::retrieval::RetrievalProfileStateV1,
         cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
     ) -> std::result::Result<
-        query_authority_provider::QueryAuthorityProviderStatusV1,
-        query_authority_provider::QueryAuthorityUpdateErrorV1,
+        tracedecay_daemon_service::QueryAuthorityProviderStatusV1,
+        tracedecay_daemon_service::QueryAuthorityUpdateErrorV1,
     > {
         let status = self
             .query_authority_provider
@@ -457,7 +457,7 @@ impl DaemonInvocationState {
             &state,
         ) {
             return Err(
-                query_authority_provider::QueryAuthorityUpdateErrorV1::ActivationNotCurrent,
+                tracedecay_daemon_service::QueryAuthorityUpdateErrorV1::ActivationNotCurrent,
             );
         }
         Ok(status)
@@ -470,7 +470,7 @@ impl DaemonInvocationState {
     ) -> Arc<dyn tracedecay_application::semantic_runtime::RetrievalProfileActivationObserverV1>
     {
         Arc::new(
-            query_authority_provider::DaemonQueryActivationRegistrarV1::new(
+            tracedecay_daemon_service::DaemonQueryActivationRegistrarV1::new(
                 self.query_authority_provider.clone(),
                 self.code_index_schedulers.clone(),
                 project_root.to_path_buf(),
@@ -1167,7 +1167,7 @@ fn parse_multi_root_operation(
 #[derive(Clone)]
 struct DaemonWorkFederatedQueryAuthorityV1 {
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
+    provider: tracedecay_daemon_service::DaemonQueryAuthorityProviderV1,
 }
 
 impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {

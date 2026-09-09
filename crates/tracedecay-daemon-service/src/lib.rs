@@ -63,6 +63,7 @@ mod mcp_project_registry;
 mod mcp_workflow_index;
 pub mod project_owner_registration;
 pub mod project_runtime;
+pub mod query_authority_provider;
 pub mod query_mcp_admission;
 pub mod remote_protocol;
 pub mod request_cancellation;
@@ -115,6 +116,10 @@ pub use project_runtime::{
     RegisteredObservabilityProducerV1, RegisteredSemanticOwnerTaskV1,
     SemanticOwnerRegistrationSignalsV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
+};
+pub use query_authority_provider::{
+    DaemonQueryActivationRegistrarV1, DaemonQueryAuthorityProviderV1,
+    QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1,
 };
 pub use query_mcp_admission::{
     QUERY_MCP_READ_CAPABILITY_V1, QueryMcpAdmissionUnavailableV1, QueryMcpReadAdmissionProviderV1,
