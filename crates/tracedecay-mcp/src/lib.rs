@@ -4,10 +4,9 @@
 //! This crate owns daemon-free MCP surface: JSON-RPC contracts, concrete
 //! stdio/channel/replay transports, tool definitions, response truncation,
 //! canonical application-result presentation, request-deadline decoding,
-//! tool-error classification, hook-event plan decoding, and construction
-//! ports that need MCP-adjacent types. Server construction, connection
-//! lifecycle adapters, and handlers that reach daemon internals stay in the
-//! composition root.
+//! tool-error classification, hook-event plan decoding, connection scheduling,
+//! typed RMCP adaptation, and request lifecycle state. Product dependency
+//! construction and handlers that reach daemon internals stay above this crate.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -49,6 +48,7 @@ pub mod lifecycle;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
+pub mod server;
 pub mod tool_call_deadline;
 pub mod tool_errors;
 pub mod tools;

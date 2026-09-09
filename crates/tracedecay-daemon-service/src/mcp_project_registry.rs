@@ -23,13 +23,13 @@ use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 
 #[derive(Clone)]
-pub(crate) struct DaemonProjectRegistryReadService {
+pub struct DaemonProjectRegistryReadService {
     registry: RegisteredGlobalDbLeaseV1,
 }
 
 impl DaemonProjectRegistryReadService {
     #[hotpath::skip]
-    pub(crate) const fn new(registry: RegisteredGlobalDbLeaseV1) -> Self {
+    pub const fn new(registry: RegisteredGlobalDbLeaseV1) -> Self {
         Self { registry }
     }
 

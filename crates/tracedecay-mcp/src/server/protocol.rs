@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 
 /// Every JSON-RPC method surface the MCP server understands. This is the
-/// single source of truth for [`McpServer::handle_request`] dispatch.
+/// single source of truth for MCP request dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum McpMethod {
+pub enum McpMethod {
     Initialize,
     /// `initialized` / `notifications/initialized` — compatibility no-ops.
     InitializedAck,
@@ -19,7 +19,7 @@ pub(crate) enum McpMethod {
     Unknown,
 }
 
-pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
+pub fn classify_mcp_method(method: &str) -> McpMethod {
     if method == tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
         return McpMethod::HookEvent;
     }
@@ -36,35 +36,10 @@ pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
     }
 }
 
-/// The steering instructions advertised from the `initialize` handshake of a
-/// healthy server.
-pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
-    "tracedecay is a code-graph MCP server. \
-    Start with tracedecay_context for any code exploration task \
-    — it returns relevant symbols, relationships, and code \
-    snippets for a natural-language query. Use tracedecay_search \
-    to find specific symbols by name. Discovery and analysis \
-    tools are read-only and safe to call in parallel. Edit \
-    and session-memory tools can mutate local project state \
-    and declare readOnlyHint=false. \
-    Every tool is also available from the shell: ",
-    tracedecay_agent_hosts::cli_fallback_args_invocation_lit!(),
-    " \
-    — run `tracedecay tool` to list tools, \
-    `tracedecay tool <name> --help` for parameters). If an MCP \
-    call errors, times out, or this server disconnects, fall \
-    back to that CLI instead of querying .tracedecay databases \
-    directly or abandoning tracedecay. \
-    When a tool result contains a `tracedecay_metrics:` line, \
-    report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
-);
-
-/// The `initialize` result payload. Fallible because the advertised server
-/// version reads the registered product runtime.
-pub(crate) fn initialize_result(
-    instructions: &str,
-) -> Result<Value, crate::product_runtime::ProductRuntimeError> {
-    Ok(json!({
+/// The `initialize` result payload for product metadata supplied by the
+/// composition root.
+pub fn initialize_result(version: &str, instructions: &str) -> Value {
+    json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
             "tools": {
@@ -75,14 +50,14 @@ pub(crate) fn initialize_result(
         },
         "serverInfo": {
             "name": "tracedecay",
-            "version": crate::version::build_version()?
+            "version": version
         },
         "instructions": instructions,
-    }))
+    })
 }
 
 /// The `resources/list` result payload.
-pub(crate) fn resources_list_result() -> Value {
+pub fn resources_list_result() -> Value {
     json!({
         "resources": [
             {

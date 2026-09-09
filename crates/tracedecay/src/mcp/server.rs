@@ -1,7 +1,7 @@
 //! MCP server that reads JSON-RPC 2.0 messages from stdin and writes
 //! responses to stdout.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -18,7 +18,6 @@ use crate::mcp::tool_analytics::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_framing::is_wire_oversized_io_error;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
@@ -48,50 +47,68 @@ use tracedecay_session_memory::session::SessionRefreshServicePort;
 
 mod connection;
 mod construction;
-mod dispatch_envelope;
-mod dispatch_settlement;
 mod hook_dispatch;
 mod hook_writes;
 mod ledger;
 mod lifecycle;
-mod live_transcript_refresh;
 mod project_open_access;
-mod project_registry;
-mod protocol;
-mod read_coalescing;
 mod requests;
 pub use requests::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 mod rmcp;
 mod routing;
 mod session_refresh;
-mod staleness;
 mod status_resource;
-mod workflow_index;
-
-pub(crate) use project_registry::DaemonProjectRegistryReadService;
-pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
-use dispatch_envelope::{McpDispatchRequest, ToolCallParams};
-use dispatch_settlement::RetainedDispatchAuthority;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
-pub(crate) use lifecycle::{
-    McpBackgroundTaskOwner, ProjectServerResponseLifecycle, StartupCatchUpMachineV1,
-    VersionCheckState,
-};
-pub(crate) use live_transcript_refresh::{
-    LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
-};
-pub(crate) use protocol::*;
-use read_coalescing::*;
+pub(crate) use lifecycle::VersionCheckState;
 pub(crate) use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
     RmcpWorkDeliverySettlement,
 };
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
-pub(crate) use staleness::*;
+use tracedecay_daemon_service::{DaemonProjectRegistryReadService, DaemonWorkflowIndexReadService};
+pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
+use tracedecay_mcp::server::{
+    IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest, RetainedDispatchAuthority,
+    StartupCatchUpMachineV1, ToolCallParams, join_required_live_transcript_refresh,
+    needs_lazy_sync_before_dispatch,
+};
+pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
+
+/// The steering instructions advertised from the `initialize` handshake of a
+/// healthy server.
+pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
+    "tracedecay is a code-graph MCP server. \
+    Start with tracedecay_context for any code exploration task \
+    — it returns relevant symbols, relationships, and code \
+    snippets for a natural-language query. Use tracedecay_search \
+    to find specific symbols by name. Discovery and analysis \
+    tools are read-only and safe to call in parallel. Edit \
+    and session-memory tools can mutate local project state \
+    and declare readOnlyHint=false. \
+    Every tool is also available from the shell: ",
+    tracedecay_agent_hosts::cli_fallback_args_invocation_lit!(),
+    " \
+    — run `tracedecay tool` to list tools, \
+    `tracedecay tool <name> --help` for parameters). If an MCP \
+    call errors, times out, or this server disconnects, fall \
+    back to that CLI instead of querying .tracedecay databases \
+    directly or abandoning tracedecay. \
+    When a tool result contains a `tracedecay_metrics:` line, \
+    report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
+);
+
+pub(crate) fn initialize_result(
+    instructions: &str,
+) -> std::result::Result<Value, crate::product_runtime::ProductRuntimeError> {
+    Ok(tracedecay_mcp::server::initialize_result(
+        crate::version::build_version()?,
+        instructions,
+    ))
+}
 
 pub struct ServerStats {
     started_at: Instant,
@@ -110,8 +127,6 @@ impl ServerStats {
         }
     }
 }
-
-use tracedecay_mcp::transport::write_wire_oversized_rejection;
 
 /// Future returned by a [`CodeIndexHookSink`] invocation. Resolves to `true`
 /// when a mounted worktree scheduler accepted the touched paths.
@@ -397,7 +412,7 @@ pub struct McpServer {
     /// use it as the default path filter. `None` when cwd == project root.
     scope_prefix: Option<String>,
     /// Retains the single shutdown coordinator independently of its waiters.
-    shutdown: connection::McpShutdownCompletion,
+    shutdown: tracedecay_daemon_service::ShutdownCoordinatorV1,
     /// When true, every `tools/call` response gains a `_meta.duration_us`
     /// field measuring the handler's pure execution time. Toggled by
     /// `tracedecay serve --timings`. Off by default to keep responses clean.
@@ -494,7 +509,7 @@ pub struct McpServer {
     project_server_live: Option<Arc<AtomicBool>>,
     /// The transport-visible response lifecycle for a retained project route.
     project_server_lifecycle: ProjectServerResponseLifecycle,
-    dispatch_authority: RetainedDispatchAuthority,
+    dispatch_authority: RetainedDispatchAuthority<McpServer>,
 }
 
 #[derive(Clone)]
@@ -1141,7 +1156,7 @@ impl McpServer {
             }),
             pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
-            shutdown: connection::McpShutdownCompletion::default(),
+            shutdown: tracedecay_daemon_service::ShutdownCoordinatorV1::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
             last_staleness_check_at: AtomicI64::new(0),
             worktree_mismatch,

@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex, Weak};
 use serde_json::Value;
 use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 
-use crate::mcp::tools::mcp_dispatch_contract;
-use tracedecay_mcp::ToolResult;
+use crate::ToolResult;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -26,7 +25,7 @@ struct ReadCoalescingInner {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct IdenticalReadCoalescer {
+pub struct IdenticalReadCoalescer {
     inner: Arc<ReadCoalescingInner>,
 }
 
@@ -36,7 +35,7 @@ enum ReadFlightState {
     Abandoned,
 }
 
-pub(super) struct ReadFlight {
+pub struct ReadFlight {
     // A flight exists for one in-flight request only. Instrumenting this
     // per-request lock retains profiler histograms after the flight is gone;
     // follower_wait and the coalescer methods provide stable timing instead.
@@ -45,12 +44,12 @@ pub(super) struct ReadFlight {
     active_followers: Arc<AtomicU64>,
 }
 
-pub(super) enum ReadFlightClaim {
+pub enum ReadFlightClaim {
     Leader(ReadFlightLeader),
     Follower(Arc<ReadFlight>),
 }
 
-pub(super) struct ReadFlightLeader {
+pub struct ReadFlightLeader {
     key: ReadFlightKey,
     flight: Arc<ReadFlight>,
     owner: Weak<ReadCoalescingInner>,
@@ -77,15 +76,15 @@ impl Drop for ReadFollowerWaitGuard {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ReadCoalescingSnapshot {
-    pub(super) leaders: u64,
-    pub(super) followers: u64,
-    pub(super) active_followers: u64,
-    pub(super) active_flights: usize,
+pub struct ReadCoalescingSnapshot {
+    pub leaders: u64,
+    pub followers: u64,
+    pub active_followers: u64,
+    pub active_flights: usize,
 }
 
 impl IdenticalReadCoalescer {
-    pub(super) fn claim(
+    pub fn claim(
         &self,
         engine_identity: &str,
         tool_name: &str,
@@ -114,7 +113,7 @@ impl IdenticalReadCoalescer {
         })
     }
 
-    pub(super) fn snapshot(&self) -> ReadCoalescingSnapshot {
+    pub fn snapshot(&self) -> ReadCoalescingSnapshot {
         let active_flights = {
             self.inner.flights.retain_live();
             self.inner.flights.len()
@@ -130,7 +129,7 @@ impl IdenticalReadCoalescer {
 
 impl ReadFlight {
     #[hotpath::measure(label = "mcp.server.read_coalescing.follower_wait", future = true)]
-    pub(super) async fn wait(&self) -> Option<Arc<ToolResult>> {
+    pub async fn wait(&self) -> Option<Arc<ToolResult>> {
         let _active = ReadFollowerWaitGuard::enter(Arc::clone(&self.active_followers));
         loop {
             let completed = self.completed.notified();
@@ -149,7 +148,7 @@ impl ReadFlight {
 }
 
 impl ReadFlightLeader {
-    pub(super) fn complete(mut self, result: ToolResult) -> ToolResult {
+    pub fn complete(mut self, result: ToolResult) -> ToolResult {
         self.finished = true;
         self.remove_registration();
         // Deregistration closes this flight to new followers (a later
@@ -193,7 +192,10 @@ impl Drop for ReadFlightLeader {
     }
 }
 
-pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
+pub fn tool_allows_identical_read_coalescing(
+    tool_name: &str,
+    tool_is_read_only: impl FnOnce(&str) -> bool,
+) -> bool {
     if matches!(
         tool_name,
         "tracedecay_search"
@@ -213,8 +215,7 @@ pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
     ) {
         return false;
     }
-    mcp_dispatch_contract(tool_name)
-        .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
+    tool_is_read_only(tool_name)
 }
 
 fn read_flight_key(
@@ -242,7 +243,7 @@ fn read_flight_key(
 mod tests {
     use serde_json::json;
 
-    use super::super::*;
+    use super::*;
 
     #[tokio::test]
     async fn identical_reads_share_one_in_flight_result() {
@@ -267,7 +268,7 @@ mod tests {
         };
 
         let waiter = tokio::spawn(async move { follower.wait().await });
-        leader.complete(tracedecay_mcp::ToolResult::new(
+        leader.complete(crate::ToolResult::new(
             json!({"content": [{"type": "text", "text": "shared"}]}),
             vec!["src/daemon.rs".to_string()],
         ));
@@ -441,13 +442,17 @@ mod tests {
             "tracedecay_dsm",
         ] {
             assert!(
-                !tool_allows_identical_read_coalescing(controlled_read),
+                !tool_allows_identical_read_coalescing(controlled_read, |_| true),
                 "{controlled_read} has caller-specific cancellation and deadline controls"
             );
         }
-        assert!(tool_allows_identical_read_coalescing("tracedecay_outline"));
+        assert!(tool_allows_identical_read_coalescing(
+            "tracedecay_outline",
+            |_| true,
+        ));
         assert!(!tool_allows_identical_read_coalescing(
-            "tracedecay_str_replace"
+            "tracedecay_str_replace",
+            |_| false,
         ));
     }
 }
