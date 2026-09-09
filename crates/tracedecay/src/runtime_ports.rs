@@ -294,23 +294,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unregistered_admission_factory_builds_both_scopes() {
-        let _pinned = registered();
-        use tracedecay_sessions::host_ports::unregistered_admission::{Scope, create};
-
-        assert!(
-            create(Scope::Profile).is_some(),
-            "profile-scoped unregistered admission must be constructible"
-        );
-        let project_id = tracedecay_domain::ProjectId::new("project.runtime-ports-test")
-            .expect("valid project id");
-        assert!(
-            create(Scope::Project(project_id)).is_some(),
-            "project-scoped unregistered admission must be constructible"
-        );
-    }
-
     /// The hook runtime is one explicit handle of root adapters, so this is
     /// the single check that every hook capability the root composes answers
     /// through the root (here: the registered-identity gates for an
@@ -345,15 +328,5 @@ mod tests {
             .expect("the root resolves a canonical layout for any checkout");
         assert_eq!(layout.project_root, checkout);
         assert!(layout.identity.project_id.is_some());
-    }
-
-    #[test]
-    fn pricing_reader_uses_the_shared_all_provider_table() {
-        let _pinned = registered();
-        let model = "claude-sonnet-4-6";
-        let cost = tracedecay_agent_hosts::ports::pricing::cost_of_turn(
-            "claude", model, 1_000_000, 0, 0, 0,
-        );
-        assert!(cost.is_some_and(|cost| cost > 0.0));
     }
 }

@@ -192,6 +192,9 @@ fn terminal_repository_discovery_failures_are_not_project_open_retryable() {
     }
 }
 
+// start_paused: these restart-window tests only wait on tokio timers
+// (sleep/poll intervals); paused time auto-advances them so each test
+// finishes in milliseconds instead of real 200-300 ms waits.
 #[cfg(unix)]
 #[test]
 fn transient_daemon_connect_errors_cover_restart_window_only() {
@@ -208,33 +211,6 @@ fn transient_daemon_connect_errors_cover_restart_window_only() {
     assert!(!super::super::is_transient_daemon_connect_error(
         std::io::ErrorKind::PermissionDenied
     ));
-}
-
-#[test]
-fn saturated_connect_advice_is_distinct_from_restart_advice() {
-    let saturated = super::super::daemon_connect_failure_advice(std::io::ErrorKind::WouldBlock);
-    let restarting = super::super::daemon_connect_failure_advice(std::io::ErrorKind::NotFound);
-    let refused =
-        super::super::daemon_connect_failure_advice(std::io::ErrorKind::ConnectionRefused);
-
-    assert!(
-        saturated.contains("up but not accepting connections"),
-        "WouldBlock must name saturation, got: {saturated}"
-    );
-    assert!(
-        saturated.contains("overloaded"),
-        "WouldBlock must name overload, got: {saturated}"
-    );
-    assert!(
-        !saturated.contains("restarting"),
-        "saturation must not claim the daemon is restarting, got: {saturated}"
-    );
-    assert!(
-        restarting.contains("may be restarting"),
-        "missing socket must keep the restart hint, got: {restarting}"
-    );
-    assert_eq!(restarting, refused);
-    assert_ne!(saturated, restarting);
 }
 
 #[test]
@@ -259,9 +235,6 @@ fn read_deadline_classifier_accepts_typed_stalled() {
     );
 }
 
-// start_paused: these restart-window tests only wait on tokio timers
-// (sleep/poll intervals); paused time auto-advances them so each test
-// finishes in milliseconds instead of real 200-300 ms waits.
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {

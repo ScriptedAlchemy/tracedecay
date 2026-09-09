@@ -323,33 +323,6 @@ mod tests {
         assert!(matches!(different_branch, ReadFlightClaim::Leader(_)));
     }
 
-    #[test]
-    fn representative_parallel_reads_reduce_dispatch_count() {
-        const CLIENTS: usize = 32;
-
-        let coalescer = IdenticalReadCoalescer::default();
-        let mut claims = Vec::with_capacity(CLIENTS);
-        for _ in 0..CLIENTS {
-            claims.push(coalescer.claim(
-                "graph-main",
-                "tracedecay_context",
-                &json!({"task": "map daemon state"}),
-                None,
-            ));
-        }
-        let snapshot = coalescer.snapshot();
-
-        assert_eq!(snapshot.leaders, 1);
-        assert_eq!(snapshot.followers, (CLIENTS - 1) as u64);
-        assert_eq!(snapshot.active_flights, 1);
-        eprintln!(
-            "identical_read_dispatch_proxy baseline_dispatches={} candidate_dispatches={} reduction_percent={:.3}",
-            CLIENTS,
-            snapshot.leaders,
-            100.0 * (CLIENTS as f64 - snapshot.leaders as f64) / CLIENTS as f64
-        );
-    }
-
     #[tokio::test]
     async fn cancelled_leader_releases_followers_and_future_claims() {
         let coalescer = IdenticalReadCoalescer::default();

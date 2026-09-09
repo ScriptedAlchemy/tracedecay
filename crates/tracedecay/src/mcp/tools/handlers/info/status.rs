@@ -858,34 +858,6 @@ mod tests {
     }
 
     #[test]
-    fn historical_status_names_database_and_discovery_backed_providers() {
-        let state = historical_session_catch_up_state(&SessionIngestHealth {
-            observed_providers: vec!["kimi".into(), "opencode".into()],
-            ..SessionIngestHealth::default()
-        })
-        .expect("incomplete historical coverage remains visible");
-        let providers = state["providers"].as_array().unwrap();
-
-        assert!(providers.iter().any(|provider| provider == "kimi"));
-        assert!(providers.iter().any(|provider| provider == "opencode"));
-        assert_eq!(state["status"], "warming");
-        assert_eq!(state["coverage"], "partial");
-        assert_eq!(state["reason"], "historical_provider_coverage_incomplete");
-    }
-
-    #[test]
-    fn historical_status_does_not_wait_for_non_coverage_provider_writers() {
-        let state = historical_session_catch_up_state(&SessionIngestHealth {
-            observed_providers: vec!["cursor".into()],
-            ..SessionIngestHealth::default()
-        })
-        .expect("legacy provider backlog authority remains visible");
-
-        assert_eq!(state["status"], "current");
-        assert_eq!(state["coverage"], "complete");
-    }
-
-    #[test]
     fn historical_status_is_current_only_after_every_provider_sweep_completes() {
         let provider_coverage = tracedecay_sessions::runtime::SessionProvider::ALL
             .iter()

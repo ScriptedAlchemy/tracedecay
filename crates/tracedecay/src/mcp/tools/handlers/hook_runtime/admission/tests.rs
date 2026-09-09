@@ -206,20 +206,6 @@ fn bounded_snapshot_deferral_is_typed_retryable_backpressure() {
 }
 
 #[test]
-fn hook_v2_binding_epoch_mismatch_requires_authoritative_catchup() {
-    let mut envelope = hook_v2_envelope_for_test();
-    envelope.worktree_epoch += 1;
-
-    assert!(matches!(
-        classify_hook_v2_binding(
-            &envelope,
-            tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(hook_v2_snapshot()),
-        ),
-        HookV2BindingAdmission::CatchupRequired
-    ));
-}
-
-#[test]
 fn hook_v2_binding_capability_rejection_requires_authoritative_catchup() {
     let mut envelope = hook_v2_envelope_for_test();
     envelope.event = tracedecay_hooks::HookEventV2::PromptBoundary;

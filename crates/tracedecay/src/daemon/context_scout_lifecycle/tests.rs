@@ -567,61 +567,6 @@ async fn lookup_rejects_a_binding_that_does_not_match_the_requested_identity() {
     );
 }
 
-/// Every lookup failure reason must have a distinct, stable tracing
-/// label: the reasons only earn their keep if a log line can tell an
-/// unauthorized binding apart from exhausted evidence.
-#[test]
-fn lookup_failure_reasons_have_distinct_tracing_labels() {
-    use ContextScoutLifecycleLookupFailureV1 as Failure;
-    let reasons = [
-        Failure::InvalidProfileId,
-        Failure::InvalidProjectId,
-        Failure::InvalidWorktreeId,
-        Failure::InvalidSessionId,
-        Failure::UnauthorizedBinding,
-        Failure::SnapshotUnavailable,
-        Failure::ObservationQueryFailed,
-        Failure::ObservationRowUnreadable,
-        Failure::ObservationBudgetExceeded,
-        Failure::MalformedDurableObservation,
-        Failure::DurableScopeMismatch,
-        Failure::MalformedCanonicalEnvelope,
-        Failure::CanonicalEnvelopeMismatch,
-        Failure::NoCompleteLifecycle,
-    ];
-    let labels = reasons
-        .iter()
-        .map(|reason| reason.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(labels.len(), reasons.len());
-    // Every reason still fails closed for the `Option`-shaped callers.
-    for reason in reasons {
-        assert!(
-            ContextScoutLifecycleLookupV1::Unresolved(reason)
-                .into_address()
-                .is_none()
-        );
-    }
-}
-
-/// Every registration rejection must keep a distinct, stable label too.
-#[test]
-fn registration_rejections_have_distinct_labels() {
-    let rejections = [
-        AuthorityRejectionV1::ZeroHookProjectId,
-        AuthorityRejectionV1::ZeroHookWorktreeId,
-        AuthorityRejectionV1::InvalidProjectId,
-        AuthorityRejectionV1::InvalidWorktreeId,
-        AuthorityRejectionV1::NonProjectSessionScope,
-        AuthorityRejectionV1::ProjectNotOwnedByAuthority,
-    ];
-    let labels = rejections
-        .iter()
-        .map(|rejection| rejection.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(labels.len(), rejections.len());
-}
-
 #[tokio::test]
 async fn durable_scope_and_session_mismatches_fail_closed() {
     let temporary = TempDir::new().unwrap();

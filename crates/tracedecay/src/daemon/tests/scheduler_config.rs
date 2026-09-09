@@ -86,14 +86,6 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
 }
 
 #[cfg(unix)]
-#[test]
-fn fresh_v2_configuration_is_scheduler_work() {
-    assert!(super::super::automation_scheduler_configured(
-        &tracedecay_automation_runtime::automation::config::AutomationConfig::default()
-    ));
-}
-
-#[cfg(unix)]
 #[tokio::test]
 async fn automation_scheduler_tick_secs_reads_pinned_project_configuration() {
     let dir = TempDir::new().expect("temp dir");

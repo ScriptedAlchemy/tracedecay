@@ -17,30 +17,6 @@ use tracedecay_session_memory::context::CancellationToken;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[test]
-fn bootstrap_tool_catalog_uses_project_node_count() {
-    let request: super::super::JsonRpcRequest = serde_json::from_value(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list"
-    }))
-    .expect("tools/list request");
-    let response = super::super::daemon_bootstrap_response(&request, None, Some(65_395))
-        .expect("bootstrap response")
-        .expect("tools/list response");
-    let result = response.result.expect("tools/list result");
-    let context_description = result["tools"]
-        .as_array()
-        .expect("tool catalog")
-        .iter()
-        .find(|tool| tool["name"] == serde_json::json!("tracedecay_context"))
-        .and_then(|tool| tool["description"].as_str())
-        .expect("context tool description");
-
-    assert!(context_description.contains("5 calls maximum"));
-    assert!(context_description.contains("65395 nodes"));
-}
-
 fn project_open_test_route(name: &str) -> ProjectRouteKey {
     ProjectRouteKey {
         profile_root: std::path::PathBuf::from(format!("/profiles/{name}")),

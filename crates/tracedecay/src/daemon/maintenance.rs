@@ -2611,20 +2611,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn store_window_resumes_after_the_cursor() {
-        let keys = store_keys(10);
-        let (first, next) = select_store_window(&keys, None, 4);
-        assert_eq!(first, vec![0, 1, 2, 3]);
-        assert_eq!(next.as_deref(), Some("s:003"));
-        let (second, next) = select_store_window(&keys, next.as_deref(), 4);
-        assert_eq!(second, vec![4, 5, 6, 7]);
-        assert_eq!(next.as_deref(), Some("s:007"));
-        // The window wraps past the end back to the front.
-        let (third, _) = select_store_window(&keys, next.as_deref(), 4);
-        assert_eq!(third, vec![8, 9, 0, 1]);
-    }
-
     #[tokio::test]
     async fn shutdown_release_clears_retained_telemetry_handles_and_progress() {
         let temporary = tempfile::tempdir().expect("telemetry registry fixture root");

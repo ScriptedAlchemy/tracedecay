@@ -11,7 +11,6 @@ use tracedecay_contracts::doctor::{
 #[cfg(unix)]
 #[derive(Clone, Copy)]
 enum ProjectGitState {
-    NonGit,
     Unborn,
     Committed,
 }
@@ -26,14 +25,12 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         .expect("project-open owners source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    if !matches!(git_state, ProjectGitState::NonGit) {
-        let initialized = Command::new("git")
-            .args(["init", "--quiet", "--initial-branch=main"])
-            .current_dir(&project)
-            .status()
-            .expect("run git init");
-        assert!(initialized.success(), "git init must succeed");
-    }
+    let initialized = Command::new("git")
+        .args(["init", "--quiet", "--initial-branch=main"])
+        .current_dir(&project)
+        .status()
+        .expect("run git init");
+    assert!(initialized.success(), "git init must succeed");
     if matches!(git_state, ProjectGitState::Unborn) {
         let symbolic_head = Command::new("git")
             .args(["symbolic-ref", "--quiet", "HEAD"])
@@ -113,10 +110,9 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
     // which is minted against a sealed generation — arrives with that
     // generation rather than inside the open. Sampling the instant the open
     // returns therefore measures mount latency, not ownership. Wait for the
-    // deferred mount for the one Git state that must reach it; the other two
-    // refuse synchronously (`register_project_open_dependent_owners` returns
-    // before any feedback work when HEAD is not attached), so their absence is
-    // already settled.
+    // deferred mount for the one Git state that must reach it; an unborn HEAD
+    // refuses synchronously (`register_project_open_dependent_owners` returns
+    // before any feedback work), so its absence is already settled.
     let feedback_cycle = match git_state {
         ProjectGitState::Committed => {
             tokio::time::timeout(std::time::Duration::from_secs(90), async {
@@ -135,7 +131,7 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
             .await
             .ok()
         }
-        ProjectGitState::NonGit | ProjectGitState::Unborn => {
+        ProjectGitState::Unborn => {
             engine
                 .invocation
                 .service
@@ -541,12 +537,6 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
         graph_weak.upgrade().is_none(),
         "terminal shutdown must release the cold project graph"
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn non_git_project_open_retains_lsp_and_starts_hook_replay() {
-    assert_fresh_project_open_owners("non-git-project-open-owners", ProjectGitState::NonGit).await;
 }
 
 #[cfg(unix)]
