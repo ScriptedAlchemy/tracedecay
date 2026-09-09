@@ -59,7 +59,8 @@ pub struct TraceDecay {
     >,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
-    test_runtime_guard: Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
+    test_runtime_guard:
+        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     _standalone_maintenance_scope:
         Option<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>>,
 }

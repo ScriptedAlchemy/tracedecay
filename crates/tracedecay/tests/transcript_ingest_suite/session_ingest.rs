@@ -54,8 +54,9 @@ impl IngestTestRuntime {
     /// authority that daemon startup installs; the fixture injects the same
     /// one the production worker plan uses.
     fn authority(&self) -> GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1> {
-        let background_cpu = tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
-            .expect("install fixture worker plan authority");
+        let background_cpu =
+            tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+                .expect("install fixture worker plan authority");
         GlobalDbSessionIngestAuthority::new(self.database.clone())
             .with_background_cpu(background_cpu)
     }

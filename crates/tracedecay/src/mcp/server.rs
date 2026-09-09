@@ -437,7 +437,8 @@ pub struct McpServer {
     admitted_project_scope: Option<tracedecay_contracts::ResolvedScope>,
     retained_project_server_resolver: Option<RetainedProjectServerResolver>,
     #[cfg(any(test, feature = "test-transport"))]
-    _host_admission_test_runtime: Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
+    _host_admission_test_runtime:
+        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     hook_project_routes: SharedHookProjectRouteCache,
     version_cache: std::sync::Mutex<VersionCheckState>,
     pending_notifications: std::sync::Mutex<Vec<Value>>,

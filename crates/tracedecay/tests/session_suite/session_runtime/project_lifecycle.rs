@@ -70,8 +70,9 @@ async fn register(
             project_sessions: project_sessions.clone(),
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions,
-            background_cpu: tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
-                .expect("install fixture worker plan authority"),
+            background_cpu:
+                tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+                    .expect("install fixture worker plan authority"),
             startup_import: false,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
             user_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -315,13 +316,14 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     // Re-enter the canonical host-admission owner map. This mints a fresh
     // short-lived registered lease without recovering a runtime or authority
     // from the retired client.
-    let replacement_runtime = tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-        root_a.path(),
-        root_a.path().join(project_a.as_str()),
-        project_a.clone(),
-    )
-    .await
-    .unwrap();
+    let replacement_runtime =
+        tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            root_a.path(),
+            root_a.path().join(project_a.as_str()),
+            project_a.clone(),
+        )
+        .await
+        .unwrap();
     let replacement_a = replacement_runtime
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .unwrap();
@@ -568,8 +570,9 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
-            background_cpu: tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
-                .expect("install fixture worker plan authority"),
+            background_cpu:
+                tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+                    .expect("install fixture worker plan authority"),
             startup_import: true,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
             user_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -663,8 +666,9 @@ async fn recovery_upgrades_a_journal_whose_frontiers_exceed_one_query() {
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
-            background_cpu: tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
-                .expect("install fixture worker plan authority"),
+            background_cpu:
+                tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+                    .expect("install fixture worker plan authority"),
             startup_import: false,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
             user_refresh: SessionTemporalRefreshWake::unavailable(),

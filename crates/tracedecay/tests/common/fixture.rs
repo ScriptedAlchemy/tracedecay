@@ -482,9 +482,13 @@ impl UnenrolledProject {
 impl RegisteredProject {
     /// This project's runtime, promoted to the project scope that project-graph
     /// and project-session seams require.
-    pub fn project_scoped_runtime(&self) -> tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1 {
-        tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1::new(Arc::clone(&self.registry))
-            .unwrap_or_else(|err| panic!("fixture project runtime must be project-scoped: {err}"))
+    pub fn project_scoped_runtime(
+        &self,
+    ) -> tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1 {
+        tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1::new(Arc::clone(
+            &self.registry,
+        ))
+        .unwrap_or_else(|err| panic!("fixture project runtime must be project-scoped: {err}"))
     }
 
     /// An MCP server for this project with its registry database, retained

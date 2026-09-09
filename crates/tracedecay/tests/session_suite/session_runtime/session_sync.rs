@@ -898,8 +898,9 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
-            background_cpu: tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
-                .expect("install fixture worker plan authority"),
+            background_cpu:
+                tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+                    .expect("install fixture worker plan authority"),
             startup_import: false,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
             user_refresh: SessionTemporalRefreshWake::unavailable(),
