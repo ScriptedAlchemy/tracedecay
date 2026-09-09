@@ -48,7 +48,6 @@ use tracedecay_session_memory::session::SessionRefreshServicePort;
 
 mod connection;
 mod construction;
-mod dispatch_settlement;
 mod hook_dispatch;
 mod hook_writes;
 mod ledger;
@@ -69,7 +68,6 @@ pub(crate) use project_registry::DaemonProjectRegistryReadService;
 pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
-use dispatch_settlement::RetainedDispatchAuthority;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::{
@@ -87,7 +85,7 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
-use tracedecay_mcp::server::{McpDispatchRequest, ToolCallParams};
+use tracedecay_mcp::server::{McpDispatchRequest, RetainedDispatchAuthority, ToolCallParams};
 pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 
 /// The steering instructions advertised from the `initialize` handshake of a
@@ -521,7 +519,7 @@ pub struct McpServer {
     project_server_live: Option<Arc<AtomicBool>>,
     /// The transport-visible response lifecycle for a retained project route.
     project_server_lifecycle: ProjectServerResponseLifecycle,
-    dispatch_authority: RetainedDispatchAuthority,
+    dispatch_authority: RetainedDispatchAuthority<McpServer>,
 }
 
 #[derive(Clone)]
