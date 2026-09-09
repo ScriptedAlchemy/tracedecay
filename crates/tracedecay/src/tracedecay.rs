@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use crate::config::TraceDecayConfig;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_domain::errors::Result;
+use tracedecay_graph_query::SourceReadContext;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
@@ -26,7 +27,6 @@ mod source_edit_runtime;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 pub use lifecycle::MovedStoreAdoption;
-pub(crate) use lifecycle::git_remote_url;
 
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///
@@ -113,6 +113,15 @@ impl TraceDecay {
 
     pub(crate) fn hook_store_layout(&self) -> &StoreLayout {
         &self.store_layout
+    }
+
+    pub(crate) fn source_read_context(&self) -> Option<SourceReadContext> {
+        Some(SourceReadContext::new(
+            self.project_root.clone(),
+            self.db.clone(),
+            self.read_only,
+            self.store_layout.identity.project_id.clone()?,
+        ))
     }
 
     pub(crate) fn context_scout_owner(

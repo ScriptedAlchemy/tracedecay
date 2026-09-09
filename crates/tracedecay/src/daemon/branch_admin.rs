@@ -958,14 +958,13 @@ impl StoreAdministration {
         if let Some(database) = registry.mounted_project_sessions(&project_id).await {
             return Ok(database);
         }
-        let enrollment_roots =
-            Box::pin(crate::tracedecay::TraceDecay::registered_enrollment_roots(
-                project_root,
-                store_layout,
-                &project_id,
-                profile_database.as_ref(),
-            ))
-            .await?;
+        let enrollment_roots = Box::pin(tracedecay_global_db::registered_enrollment_roots(
+            profile_database.as_ref(),
+            project_root,
+            store_layout,
+            &project_id,
+        ))
+        .await?;
         Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
     }
 
