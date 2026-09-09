@@ -18,7 +18,7 @@ use tracedecay_dashboard_api::{
     DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
 };
 use tracedecay_lcm::{LcmDescribeResponse, LcmDescribeTarget};
-use tracedecay_sessions::runtime::SessionSearchTimeRange;
+use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionSearchTimeRange};
 
 use tracedecay_session_memory::context::ResolvedSessionIdentity;
 use tracedecay_session_runtime::session_retrieval::{
@@ -104,147 +104,13 @@ impl DashboardLcmReadAdapter {
                 return not_ready(state, reason);
             }
         };
-        let aggregate = matches!(
-            request,
-            DashboardLcmReadRequestV1::Overview { .. } | DashboardLcmReadRequestV1::Timeline { .. }
-        );
-        let mut cursor = initial_cursor(&request);
-        let mut seen_cursors = BTreeSet::new();
-        let mut aggregate_results = Vec::new();
-        let mut aggregate_omitted = 0_u64;
-        let mut aggregate_pages = 0_usize;
-        // A non-aggregate session read serves one window: a Partial outcome
-        // (continuation cursor or genuine omission) keeps the page visibly
-        // partial. Aggregate reads drain to the terminal cursor, so only
-        // their accumulated omissions matter.
-        let mut window_partial = false;
-        // Aggregate reads consume the daemon-issued continuation to its
-        // terminal page. The opaque cursor binds the frozen participant/source
-        // manifest and ordering, while each execute call reauthorizes and
-        // canonically hydrates that page.
-        let temporal = loop {
-            let Some(query) = retrieval_query(&request, cursor.clone(), aggregate) else {
-                return not_ready(
-                    DashboardLcmReadStateV1::Unavailable,
-                    "lcm_dashboard_request_invalid",
-                );
-            };
-            let (page, omitted, paged_partial) = match hotpath::future!(
-                self.retrieval
-                    .retrieve_admitted_with_cancellation(&context, &cancellation, query,),
-                label = "mcp.lcm.retrieve"
-            )
+        let (page, omitted, window_partial) = match self
+            .retrieve_window(&context, &cancellation, &request)
             .await
-            {
-                SessionRetrievalServiceOutcome::Complete { page, .. } => (page, 0, false),
-                SessionRetrievalServiceOutcome::CompleteZero { temporal, .. } => (
-                    SessionRetrievalPageView {
-                        results: Vec::new(),
-                        temporal,
-                    },
-                    0,
-                    false,
-                ),
-                SessionRetrievalServiceOutcome::Partial { page, omitted, .. } => {
-                    (page, omitted, true)
-                }
-                SessionRetrievalServiceOutcome::Stale { .. } => {
-                    return not_ready(
-                        DashboardLcmReadStateV1::Stale,
-                        "lcm_temporal_projection_stale",
-                    );
-                }
-                SessionRetrievalServiceOutcome::CursorStale => {
-                    return not_ready(DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale");
-                }
-                SessionRetrievalServiceOutcome::WrongScope => return wrong_scope_not_ready(),
-                SessionRetrievalServiceOutcome::Locked => {
-                    return not_ready(DashboardLcmReadStateV1::Locked, "lcm_temporal_read_locked");
-                }
-                SessionRetrievalServiceOutcome::Redacted => {
-                    return not_ready(
-                        DashboardLcmReadStateV1::Redacted,
-                        "lcm_temporal_read_redacted",
-                    );
-                }
-                SessionRetrievalServiceOutcome::Deleted => {
-                    return not_ready(DashboardLcmReadStateV1::Absent, "lcm_session_absent");
-                }
-                SessionRetrievalServiceOutcome::Denied => {
-                    return not_ready(DashboardLcmReadStateV1::Denied, "lcm_temporal_read_denied");
-                }
-                SessionRetrievalServiceOutcome::ResetRequired { .. } => {
-                    return not_ready(
-                        DashboardLcmReadStateV1::Unavailable,
-                        "lcm_temporal_reset_required",
-                    );
-                }
-                SessionRetrievalServiceOutcome::Unavailable(_) => {
-                    return not_ready(
-                        DashboardLcmReadStateV1::Unavailable,
-                        "lcm_temporal_authority_unavailable",
-                    );
-                }
-                SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
-                    let (state, reason) = cursor_manifest_not_ready(kind);
-                    return not_ready(state, reason);
-                }
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
-                    return not_ready(
-                        DashboardLcmReadStateV1::BudgetExhausted,
-                        session_budget_reason(stage),
-                    );
-                }
-                SessionRetrievalServiceOutcome::TimedOut => {
-                    return not_ready(
-                        DashboardLcmReadStateV1::TimedOut,
-                        "lcm_temporal_read_timed_out",
-                    );
-                }
-                SessionRetrievalServiceOutcome::Cancelled => {
-                    return not_ready(
-                        DashboardLcmReadStateV1::Cancelled,
-                        "lcm_temporal_read_cancelled",
-                    );
-                }
-            };
-            aggregate_pages = aggregate_pages.saturating_add(1);
-            aggregate_omitted = aggregate_omitted.saturating_add(omitted);
-            if !aggregate {
-                window_partial |= paged_partial;
-            }
-            let next_cursor = page.temporal.cursor.clone();
-            aggregate_results.extend(page.results);
-            let temporal = page.temporal;
-            if !aggregate || next_cursor.is_none() {
-                break temporal;
-            }
-            if aggregate_pages >= DASHBOARD_AGGREGATE_PAGE_LIMIT {
-                // The daemon cursor proves more frozen-manifest records exist,
-                // but this aggregate view is deliberately bounded. Preserve a
-                // truthful partial state instead of turning a read into
-                // unbounded background work.
-                aggregate_omitted = aggregate_omitted.saturating_add(1);
-                break temporal;
-            }
-            let Some(next_cursor) = next_cursor else {
-                break temporal;
-            };
-            if !seen_cursors.insert(next_cursor.clone()) {
-                return not_ready(
-                    DashboardLcmReadStateV1::Unavailable,
-                    "lcm_temporal_cursor_did_not_advance",
-                );
-            }
-            cursor = Some(next_cursor);
+        {
+            Ok(window) => window,
+            Err((state, reason)) => return not_ready(state, reason),
         };
-        let page = SessionRetrievalPageView {
-            results: aggregate_results,
-            temporal,
-        };
-        let omitted = aggregate_omitted;
-
-        let mut partial_description_count = 0_u64;
         // A session read's stats come from the canonical describe authority,
         // addressed by the session's measured provider — taken from the
         // hydrated page itself, never a wildcard the exact-identity describe
@@ -270,93 +136,27 @@ impl DashboardLcmReadAdapter {
             .first()
             .map(|result| result.message.provider.clone());
 
-        let mut messages = Vec::new();
-        let mut summary_requests = Vec::new();
-        for result in page.results {
-            if result.message.role == "summary" {
-                let session_id = match SessionId::new(&result.message.session_id) {
-                    Ok(session_id) => session_id,
-                    Err(_) => {
-                        return not_ready(
-                            DashboardLcmReadStateV1::Unavailable,
-                            "lcm_summary_metadata_unavailable",
-                        );
-                    }
-                };
-                summary_requests.push(SummaryHydrationRequest {
-                    provider: result.message.provider,
-                    session_id,
-                    node_id: result.message.message_id,
-                    content: result.message.text,
-                });
-            } else {
-                messages.push(DashboardLcmCanonicalMessageV1 {
-                    session_id: result.message.session_id,
-                    provider: result.message.provider,
-                    role: result.message.role,
-                    timestamp: result.message.timestamp,
-                    ordinal: result.message.ordinal,
-                    content: result.message.text,
-                    message_id: result.message.message_id,
-                    metadata_json: result.message.metadata_json,
-                    tool_names: result.message.tool_names,
-                });
-            }
-        }
-        let hydrated_summaries = stream::iter(summary_requests)
-            .map(|request| self.hydrate_summary(&context, &cancellation, request))
-            .buffered(SUMMARY_DESCRIBE_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
-        let mut summary_nodes = Vec::with_capacity(hydrated_summaries.len());
-        for result in hydrated_summaries {
-            match result {
-                Ok((summary, partial)) => {
-                    partial_description_count =
-                        partial_description_count.saturating_add(u64::from(partial));
-                    summary_nodes.push(summary);
-                }
-                Err((state, _)) => {
-                    return not_ready(state, "lcm_summary_metadata_unavailable");
-                }
-            }
-        }
-
-        let stats = if let Some(session_id) = session_request_id {
-            match session_provider {
-                Some(provider) => {
-                    let (description, partial) = match self
-                        .describe(
-                            &context,
-                            &cancellation,
-                            &provider,
-                            session_id,
-                            LcmDescribeTarget::Session,
-                            RetrievalGrainV1::Session,
-                        )
-                        .await
-                    {
-                        Ok(described) => described,
-                        Err((state, reason)) => return not_ready(state, reason),
-                    };
-                    partial_description_count =
-                        partial_description_count.saturating_add(u64::from(partial));
-                    DashboardLcmCanonicalStatsV1 {
-                        message_count: description.raw_message_count,
-                        summary_node_count: description.summary_node_count,
-                        summary_token_count: None,
-                        source_token_count: None,
-                        token_estimate_total: description.session_token_estimate,
-                    }
-                }
-                // No temporal record surfaced for the session, so there is no
-                // measured provider to describe under: the zero stats feed the
-                // typed session-absent state below.
-                None => DashboardLcmCanonicalStatsV1::default(),
-            }
-        } else {
-            DashboardLcmCanonicalStatsV1::default()
+        let (messages, summary_nodes, mut partial_description_count) = match self
+            .hydrate_messages(&context, &cancellation, page.results)
+            .await
+        {
+            Ok(hydrated) => hydrated,
+            Err((state, reason)) => return not_ready(state, reason),
         };
+
+        let (stats, partial_stats) = match self
+            .session_stats(
+                &context,
+                &cancellation,
+                session_request_id,
+                session_provider,
+            )
+            .await
+        {
+            Ok(stats) => stats,
+            Err((state, reason)) => return not_ready(state, reason),
+        };
+        partial_description_count = partial_description_count.saturating_add(partial_stats);
 
         if messages.is_empty()
             && summary_nodes.is_empty()
@@ -396,6 +196,205 @@ impl DashboardLcmReadAdapter {
         } else {
             DashboardLcmReadOutcomeV1::Ready(canonical_page)
         }
+    }
+
+    async fn session_stats(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        session_request_id: Option<SessionId>,
+        session_provider: Option<String>,
+    ) -> Result<(DashboardLcmCanonicalStatsV1, u64), (DashboardLcmReadStateV1, &'static str)> {
+        let mut partial_description_count = 0_u64;
+        let stats = if let Some(session_id) = session_request_id {
+            match session_provider {
+                Some(provider) => {
+                    let (description, partial) = match self
+                        .describe(
+                            context,
+                            cancellation,
+                            &provider,
+                            session_id,
+                            LcmDescribeTarget::Session,
+                            RetrievalGrainV1::Session,
+                        )
+                        .await
+                    {
+                        Ok(described) => described,
+                        Err((state, reason)) => return Err((state, reason)),
+                    };
+                    partial_description_count =
+                        partial_description_count.saturating_add(u64::from(partial));
+                    DashboardLcmCanonicalStatsV1 {
+                        message_count: description.raw_message_count,
+                        summary_node_count: description.summary_node_count,
+                        summary_token_count: None,
+                        source_token_count: None,
+                        token_estimate_total: description.session_token_estimate,
+                    }
+                }
+                // No temporal record surfaced for the session, so there is no
+                // measured provider to describe under: the zero stats feed the
+                // typed session-absent state below.
+                None => DashboardLcmCanonicalStatsV1::default(),
+            }
+        } else {
+            DashboardLcmCanonicalStatsV1::default()
+        };
+
+        Ok((stats, partial_description_count))
+    }
+
+    async fn hydrate_messages(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        results: Vec<SessionMessageSearchResult>,
+    ) -> Result<
+        (
+            Vec<DashboardLcmCanonicalMessageV1>,
+            Vec<DashboardLcmCanonicalSummaryV1>,
+            u64,
+        ),
+        (DashboardLcmReadStateV1, &'static str),
+    > {
+        let mut partial_description_count = 0_u64;
+        let mut messages = Vec::new();
+        let mut summary_requests = Vec::new();
+        for result in results {
+            if result.message.role == "summary" {
+                let session_id = match SessionId::new(&result.message.session_id) {
+                    Ok(session_id) => session_id,
+                    Err(_) => {
+                        return Err((
+                            DashboardLcmReadStateV1::Unavailable,
+                            "lcm_summary_metadata_unavailable",
+                        ));
+                    }
+                };
+                summary_requests.push(SummaryHydrationRequest {
+                    provider: result.message.provider,
+                    session_id,
+                    node_id: result.message.message_id,
+                    content: result.message.text,
+                });
+            } else {
+                messages.push(DashboardLcmCanonicalMessageV1 {
+                    session_id: result.message.session_id,
+                    provider: result.message.provider,
+                    role: result.message.role,
+                    timestamp: result.message.timestamp,
+                    ordinal: result.message.ordinal,
+                    content: result.message.text,
+                    message_id: result.message.message_id,
+                    metadata_json: result.message.metadata_json,
+                    tool_names: result.message.tool_names,
+                });
+            }
+        }
+        let hydrated_summaries = stream::iter(summary_requests)
+            .map(|request| self.hydrate_summary(context, cancellation, request))
+            .buffered(SUMMARY_DESCRIBE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut summary_nodes = Vec::with_capacity(hydrated_summaries.len());
+        for result in hydrated_summaries {
+            match result {
+                Ok((summary, partial)) => {
+                    partial_description_count =
+                        partial_description_count.saturating_add(u64::from(partial));
+                    summary_nodes.push(summary);
+                }
+                Err((state, _)) => {
+                    return Err((state, "lcm_summary_metadata_unavailable"));
+                }
+            }
+        }
+
+        Ok((messages, summary_nodes, partial_description_count))
+    }
+
+    async fn retrieve_window(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        request: &DashboardLcmReadRequestV1,
+    ) -> Result<(SessionRetrievalPageView, u64, bool), (DashboardLcmReadStateV1, &'static str)>
+    {
+        let aggregate = matches!(
+            request,
+            DashboardLcmReadRequestV1::Overview { .. } | DashboardLcmReadRequestV1::Timeline { .. }
+        );
+        let mut cursor = initial_cursor(request);
+        let mut seen_cursors = BTreeSet::new();
+        let mut aggregate_results = Vec::new();
+        let mut aggregate_omitted = 0_u64;
+        let mut aggregate_pages = 0_usize;
+        // A non-aggregate session read serves one window: a Partial outcome
+        // (continuation cursor or genuine omission) keeps the page visibly
+        // partial. Aggregate reads drain to the terminal cursor, so only
+        // their accumulated omissions matter.
+        let mut window_partial = false;
+        // Aggregate reads consume the daemon-issued continuation to its
+        // terminal page. The opaque cursor binds the frozen participant/source
+        // manifest and ordering, while each execute call reauthorizes and
+        // canonically hydrates that page.
+        let temporal = loop {
+            let Some(query) = retrieval_query(request, cursor.clone(), aggregate) else {
+                return Err((
+                    DashboardLcmReadStateV1::Unavailable,
+                    "lcm_dashboard_request_invalid",
+                ));
+            };
+            let (page, omitted, paged_partial) = match retrieval_page(
+                hotpath::future!(
+                    self.retrieval.retrieve_admitted_with_cancellation(
+                        context,
+                        cancellation,
+                        query,
+                    ),
+                    label = "mcp.lcm.retrieve"
+                )
+                .await,
+            ) {
+                Ok(page) => page,
+                Err(outcome) => return Err(outcome),
+            };
+            aggregate_pages = aggregate_pages.saturating_add(1);
+            aggregate_omitted = aggregate_omitted.saturating_add(omitted);
+            if !aggregate {
+                window_partial |= paged_partial;
+            }
+            let next_cursor = page.temporal.cursor.clone();
+            aggregate_results.extend(page.results);
+            let temporal = page.temporal;
+            if !aggregate || next_cursor.is_none() {
+                break temporal;
+            }
+            if aggregate_pages >= DASHBOARD_AGGREGATE_PAGE_LIMIT {
+                // The daemon cursor proves more frozen-manifest records exist,
+                // but this aggregate view is deliberately bounded. Preserve a
+                // truthful partial state instead of turning a read into
+                // unbounded background work.
+                aggregate_omitted = aggregate_omitted.saturating_add(1);
+                break temporal;
+            }
+            let Some(next_cursor) = next_cursor else {
+                break temporal;
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err((
+                    DashboardLcmReadStateV1::Unavailable,
+                    "lcm_temporal_cursor_did_not_advance",
+                ));
+            }
+            cursor = Some(next_cursor);
+        };
+        let page = SessionRetrievalPageView {
+            results: aggregate_results,
+            temporal,
+        };
+        Ok((page, aggregate_omitted, window_partial))
     }
 
     #[hotpath::measure(future = true, label = "mcp.lcm.overview")]
@@ -745,9 +744,80 @@ fn not_ready(state: DashboardLcmReadStateV1, reason: &str) -> DashboardLcmReadOu
     }
 }
 
-fn wrong_scope_not_ready() -> DashboardLcmReadOutcomeV1 {
-    let (state, reason) = wrong_scope_error();
-    not_ready(state, reason)
+fn retrieval_page(
+    outcome: SessionRetrievalServiceOutcome,
+) -> Result<(SessionRetrievalPageView, u64, bool), (DashboardLcmReadStateV1, &'static str)> {
+    Ok(match outcome {
+        SessionRetrievalServiceOutcome::Complete { page, .. } => (page, 0, false),
+        SessionRetrievalServiceOutcome::CompleteZero { temporal, .. } => (
+            SessionRetrievalPageView {
+                results: Vec::new(),
+                temporal,
+            },
+            0,
+            false,
+        ),
+        SessionRetrievalServiceOutcome::Partial { page, omitted, .. } => (page, omitted, true),
+        SessionRetrievalServiceOutcome::Stale { .. } => {
+            return Err((
+                DashboardLcmReadStateV1::Stale,
+                "lcm_temporal_projection_stale",
+            ));
+        }
+        SessionRetrievalServiceOutcome::CursorStale => {
+            return Err((DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale"));
+        }
+        SessionRetrievalServiceOutcome::WrongScope => return Err(wrong_scope_error()),
+        SessionRetrievalServiceOutcome::Locked => {
+            return Err((DashboardLcmReadStateV1::Locked, "lcm_temporal_read_locked"));
+        }
+        SessionRetrievalServiceOutcome::Redacted => {
+            return Err((
+                DashboardLcmReadStateV1::Redacted,
+                "lcm_temporal_read_redacted",
+            ));
+        }
+        SessionRetrievalServiceOutcome::Deleted => {
+            return Err((DashboardLcmReadStateV1::Absent, "lcm_session_absent"));
+        }
+        SessionRetrievalServiceOutcome::Denied => {
+            return Err((DashboardLcmReadStateV1::Denied, "lcm_temporal_read_denied"));
+        }
+        SessionRetrievalServiceOutcome::ResetRequired { .. } => {
+            return Err((
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_temporal_reset_required",
+            ));
+        }
+        SessionRetrievalServiceOutcome::Unavailable(_) => {
+            return Err((
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_temporal_authority_unavailable",
+            ));
+        }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
+            let (state, reason) = cursor_manifest_not_ready(kind);
+            return Err((state, reason));
+        }
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+            return Err((
+                DashboardLcmReadStateV1::BudgetExhausted,
+                session_budget_reason(stage),
+            ));
+        }
+        SessionRetrievalServiceOutcome::TimedOut => {
+            return Err((
+                DashboardLcmReadStateV1::TimedOut,
+                "lcm_temporal_read_timed_out",
+            ));
+        }
+        SessionRetrievalServiceOutcome::Cancelled => {
+            return Err((
+                DashboardLcmReadStateV1::Cancelled,
+                "lcm_temporal_read_cancelled",
+            ));
+        }
+    })
 }
 
 fn wrong_scope_error() -> (DashboardLcmReadStateV1, &'static str) {
@@ -772,90 +842,56 @@ fn retrieval_query(
     cursor: Option<String>,
     aggregate: bool,
 ) -> Option<SessionTemporalQuery> {
-    let (session_id, cursor, query_text, limit, retrieval_scope, roles, source, time_range) =
-        match request {
-            DashboardLcmReadRequestV1::Overview { query, .. } => (
-                SessionId::new("session.dashboard-lcm.root").ok()?,
-                cursor,
-                query.as_str(),
-                500,
-                SessionRetrievalScope::AllSessionsInAuthorizedRoot,
-                Vec::new(),
-                None,
-                SessionSearchTimeRange::default(),
-            ),
-            DashboardLcmReadRequestV1::Search {
-                query,
-                limit,
-                cursor: _,
-                role,
-                source,
-                session_id,
-                since,
-                until,
-            } => {
-                let root = session_id
-                    .as_deref()
-                    .map_or("session.dashboard-lcm.root", |session_id| session_id);
-                let session = SessionId::new(root).ok()?;
-                let scope = if session_id.is_some() {
-                    SessionRetrievalScope::Session(session.clone())
-                } else {
-                    SessionRetrievalScope::AllSessionsInAuthorizedRoot
-                };
-                (
-                    session,
-                    cursor,
-                    query.as_str(),
-                    *limit,
-                    scope,
-                    role.iter().cloned().collect(),
-                    source.clone(),
-                    SessionSearchTimeRange {
-                        start_time: *since,
-                        end_time: *until,
-                    },
-                )
-            }
-            DashboardLcmReadRequestV1::Session {
-                session_id,
-                limit,
-                cursor: _,
-            } => {
-                let session = SessionId::new(session_id).ok()?;
-                (
-                    session.clone(),
-                    cursor,
-                    "",
-                    *limit,
-                    SessionRetrievalScope::Session(session),
-                    Vec::new(),
-                    None,
-                    SessionSearchTimeRange::default(),
-                )
-            }
-            DashboardLcmReadRequestV1::Timeline { session_id, .. } => {
-                let root = session_id
-                    .as_deref()
-                    .unwrap_or("session.dashboard-lcm.root");
-                let session = SessionId::new(root).ok()?;
-                let scope = if session_id.is_some() {
-                    SessionRetrievalScope::Session(session.clone())
-                } else {
-                    SessionRetrievalScope::AllSessionsInAuthorizedRoot
-                };
-                (
-                    session,
-                    cursor,
-                    "",
-                    500,
-                    scope,
-                    Vec::new(),
-                    None,
-                    SessionSearchTimeRange::default(),
-                )
-            }
-        };
+    let requested_session = match request {
+        DashboardLcmReadRequestV1::Search { session_id, .. }
+        | DashboardLcmReadRequestV1::Timeline { session_id, .. } => session_id.as_deref(),
+        DashboardLcmReadRequestV1::Session { session_id, .. } => Some(session_id.as_str()),
+        DashboardLcmReadRequestV1::Overview { .. } => None,
+    };
+    let session_id =
+        SessionId::new(requested_session.unwrap_or("session.dashboard-lcm.root")).ok()?;
+    let retrieval_scope = if requested_session.is_some() {
+        SessionRetrievalScope::Session(session_id.clone())
+    } else {
+        SessionRetrievalScope::AllSessionsInAuthorizedRoot
+    };
+    let (query_text, limit, roles, source, time_range) = match request {
+        DashboardLcmReadRequestV1::Search {
+            query,
+            limit,
+            role,
+            source,
+            since,
+            until,
+            ..
+        } => (
+            query.as_str(),
+            *limit,
+            role.iter().cloned().collect(),
+            source.clone(),
+            SessionSearchTimeRange {
+                start_time: *since,
+                end_time: *until,
+            },
+        ),
+        DashboardLcmReadRequestV1::Overview { query, .. } => (
+            query.as_str(),
+            500,
+            Vec::new(),
+            None,
+            SessionSearchTimeRange::default(),
+        ),
+        DashboardLcmReadRequestV1::Session { limit, .. } => (
+            "",
+            *limit,
+            Vec::new(),
+            None,
+            SessionSearchTimeRange::default(),
+        ),
+        DashboardLcmReadRequestV1::Timeline { .. } => {
+            ("", 500, Vec::new(), None, SessionSearchTimeRange::default())
+        }
+    };
     let limit = usize::try_from(limit.clamp(1, ADMITTED_RETRIEVAL_PAGE_LIMIT)).ok()?;
     // The admitted application port caps each request at 100 records. Larger
     // dashboard windows advance only through its opaque cursor, preserving the
@@ -970,9 +1006,8 @@ mod tests {
 
     #[test]
     fn wrong_scope_is_unavailable_and_never_reported_as_locked() {
-        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = wrong_scope_not_ready() else {
-            panic!("wrong scope must be terminal");
-        };
+        let (state, reason) =
+            retrieval_page(SessionRetrievalServiceOutcome::WrongScope).unwrap_err();
 
         assert_eq!(state, DashboardLcmReadStateV1::Unavailable);
         assert_eq!(reason, "lcm_temporal_wrong_scope");
