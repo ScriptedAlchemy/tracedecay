@@ -13,13 +13,17 @@ const NOW = 1_700_000_000_000;
 
 function pulses(): LiveActivityPulse[] {
   return [
-    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 400_000 },
-    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 380_000 },
+    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 400_000,
+      eventId: 'fixture:heartbeat:1', observationTime: String((NOW - 400_000) * 1000) },
+    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 380_000,
+      eventId: 'fixture:heartbeat:2', observationTime: String((NOW - 380_000) * 1000) },
     {
       projectId: 'p1',
       family: 'code_index_completed',
       streamId: 'code_index',
       at: NOW - 370_000,
+      eventId: 'fixture:code_index:1',
+      observationTime: String((NOW - 370_000) * 1000),
     },
   ];
 }
