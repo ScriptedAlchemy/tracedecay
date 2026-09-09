@@ -4,6 +4,8 @@
 //! Filesystem paths, free-form object IDs, Git arguments, commit messages,
 //! remotes, and provider mutations are intentionally unrepresentable.
 
+use std::sync::Arc;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -188,6 +190,18 @@ pub trait NativeIntegrationStackResolutionPort: Send + Sync {
         request: &NativeIntegrationStackResolutionRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationPortError>;
+}
+
+impl<T: NativeIntegrationStackResolutionPort + ?Sized> NativeIntegrationStackResolutionPort
+    for Arc<T>
+{
+    fn resolve(
+        &self,
+        request: &NativeIntegrationStackResolutionRequestV1,
+        cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationPortError> {
+        self.as_ref().resolve(request, cancellation)
+    }
 }
 
 /// Exact semantic evidence revisions joined to native conflict evidence.

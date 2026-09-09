@@ -1524,6 +1524,7 @@ fn dispatch_session_workflow_tools_inner<'a>(
                     options.code_index_freshness_reader.clone(),
                     options.explorer_semantic_reader.clone(),
                     options.feedback_status_reader.clone(),
+                    options.pr_autotrack_reader.clone(),
                     options.diagnostics_lsp.clone(),
                     options.dashboard_application_invocation_executor.clone(),
                     options.dashboard_delivery_settlement_authority.clone(),

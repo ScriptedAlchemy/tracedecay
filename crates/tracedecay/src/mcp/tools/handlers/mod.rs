@@ -271,6 +271,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    pub(crate) pr_autotrack_reader:
+        Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:
@@ -349,6 +351,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_freshness_reader: None,
             explorer_semantic_reader: None,
             feedback_status_reader: None,
+            pr_autotrack_reader: None,
             diagnostics_lsp: None,
             application_invocation_executor: None,
             dashboard_application_invocation_executor: None,
