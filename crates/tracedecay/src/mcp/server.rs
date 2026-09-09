@@ -1,7 +1,7 @@
 //! MCP server that reads JSON-RPC 2.0 messages from stdin and writes
 //! responses to stdout.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -18,7 +18,6 @@ use crate::mcp::tool_analytics::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_framing::is_wire_oversized_io_error;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
@@ -138,8 +137,6 @@ impl ServerStats {
         }
     }
 }
-
-use tracedecay_mcp::transport::write_wire_oversized_rejection;
 
 /// Future returned by a [`CodeIndexHookSink`] invocation. Resolves to `true`
 /// when a mounted worktree scheduler accepted the touched paths.

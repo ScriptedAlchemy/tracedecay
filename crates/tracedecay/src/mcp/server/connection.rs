@@ -2,28 +2,9 @@
 //! policy, and daemon-owned host-admission replay driving.
 
 use super::*;
-use tracedecay_mcp::serialize_response_line;
 
-#[cfg(any(test, feature = "test-transport"))]
-mod response_delivery;
-
-const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 pub(super) const MAX_CONCURRENT_CONNECTION_READS: usize =
     crate::daemon::MAX_CONCURRENT_REQUESTS_PER_DAEMON_CLIENT;
-
-#[hotpath::measure(label = "mcp.server.connection.read", future = true)]
-async fn read_connection_line(
-    transport: &mut impl tracedecay_mcp::transport::McpTransport,
-) -> std::io::Result<Option<String>> {
-    transport.read_line().await
-}
-
-#[hotpath::measure(label = "mcp.server.connection.inflight_read", future = true)]
-async fn read_inflight_connection_line(
-    transport: &mut impl tracedecay_mcp::transport::McpTransport,
-) -> std::io::Result<Option<String>> {
-    transport.read_line().await
-}
 
 pub(in crate::mcp::server) struct McpShutdownCompletion {
     state: Arc<McpShutdownState>,
@@ -227,628 +208,128 @@ impl McpShutdownState {
     }
 }
 
-/// One buffered request line plus the identity a queued cancellation can
-/// target, extracted once at enqueue so each cancellation notification does
-/// not re-parse every pending line.
-struct QueuedRequestLine {
-    line: String,
-    request_id: Option<Value>,
-    independent_read: bool,
-    /// `Some(id)` only when the line is a `tools/call` for a
-    /// live-cancellable tool — the only lines a queued cancellation matches.
-    cancellable_request_id: Option<Value>,
-    queued_at: std::time::Instant,
-    _depth: PendingRequestGaugeGuard,
-}
-
-struct PendingRequestGaugeGuard {
-    bytes: usize,
-    #[cfg(test)]
-    observer: Option<Arc<std::sync::atomic::AtomicIsize>>,
-}
-
-impl PendingRequestGaugeGuard {
-    fn enter(bytes: usize) -> Self {
-        hotpath::gauge!("mcp.server.request.queue_depth").inc(1_u64);
-        hotpath::gauge!("mcp.server.request.queue_bytes").inc(bytes as u64);
-        Self {
-            bytes,
-            #[cfg(test)]
-            observer: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn enter_observed(bytes: usize, observer: Arc<std::sync::atomic::AtomicIsize>) -> Self {
-        let mut guard = Self::enter(bytes);
-        observer.fetch_add(1, Ordering::AcqRel);
-        guard.observer = Some(observer);
-        guard
-    }
-}
-
-impl Drop for PendingRequestGaugeGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("mcp.server.request.queue_depth").dec(1_u64);
-        hotpath::gauge!("mcp.server.request.queue_bytes").dec(self.bytes as u64);
-        #[cfg(test)]
-        if let Some(observer) = self.observer.as_ref() {
-            observer.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-}
-
-impl QueuedRequestLine {
-    fn new(line: String) -> Self {
-        let parsed = hotpath::measure_block!(
-            "mcp.server.connection.queued_decode",
-            JsonRpcRequest::decode(line.trim())
-        );
-        let request = parsed.as_ref().ok();
-        let request_id = request.and_then(|request| request.id.clone());
-        let independent_read = request.is_some_and(request_is_independent_read);
-        let cancellable_request_id = request.and_then(cancellable_queued_request_id);
-        let depth = PendingRequestGaugeGuard::enter(line.len());
-        Self {
-            line,
-            request_id,
-            independent_read,
-            cancellable_request_id,
-            queued_at: std::time::Instant::now(),
-            _depth: depth,
-        }
-    }
-
-    fn from_parsed(line: String, request: Option<&JsonRpcRequest>) -> Self {
-        let request_id = request.and_then(|request| request.id.clone());
-        let independent_read = request.is_some_and(request_is_independent_read);
-        let cancellable_request_id = request.and_then(cancellable_queued_request_id);
-        let depth = PendingRequestGaugeGuard::enter(line.len());
-        Self {
-            line,
-            request_id,
-            independent_read,
-            cancellable_request_id,
-            queued_at: std::time::Instant::now(),
-            _depth: depth,
-        }
-    }
-
-    #[cfg(test)]
-    fn new_observed(line: String, observer: Arc<std::sync::atomic::AtomicIsize>) -> Self {
-        let depth = PendingRequestGaugeGuard::enter_observed(line.len(), observer);
-        Self {
-            line,
-            request_id: None,
-            independent_read: false,
-            cancellable_request_id: None,
-            queued_at: std::time::Instant::now(),
-            _depth: depth,
-        }
-    }
-
-    fn into_line(self) -> String {
-        hotpath::gauge!("mcp.server.request.queue_wait_us")
-            .set(self.queued_at.elapsed().as_micros() as u64);
-        self.line
-    }
-}
-
-fn cancellable_queued_request_id(request: &JsonRpcRequest) -> Option<Value> {
-    let cancellable = request.method == "tools/call"
-        && request
-            .params
-            .as_ref()
-            .and_then(|params| params.get("name"))
-            .and_then(Value::as_str)
-            .is_some_and(super::requests::tool_supports_live_cancellation);
-    if !cancellable {
-        return None;
-    }
-    request.id.clone()
-}
-
-fn queued_cancellable_request_key(
-    pending_lines: &VecDeque<QueuedRequestLine>,
-    request_id: &Value,
-    connection_scope: &str,
-) -> Option<String> {
-    let expected = application_surface_request_id(request_id, connection_scope)?;
-    pending_lines
-        .iter()
-        .filter_map(|queued| queued.cancellable_request_id.as_ref())
-        .any(|id| application_surface_request_id(id, connection_scope).as_ref() == Some(&expected))
-        .then_some(expected)
-}
-
-fn current_cancellable_request_key(
-    request: &JsonRpcRequest,
-    request_id: &Value,
-    connection_scope: &str,
-) -> Option<String> {
-    let current = request
-        .id
-        .as_ref()
-        .and_then(|id| application_surface_request_id(id, connection_scope))?;
-    let cancelled = application_surface_request_id(request_id, connection_scope)?;
-    (current == cancelled).then_some(current)
-}
-
-#[hotpath::measure(label = "mcp.server.connection.classify")]
-pub(super) fn request_is_independent_read(request: &JsonRpcRequest) -> bool {
-    tracedecay_mcp::server::dispatch_is_independent_read(
-        classify_mcp_method(&request.method),
-        request
-            .params
-            .as_ref()
-            .and_then(|params| params.get("name"))
-            .and_then(Value::as_str),
-        |tool_name| {
-            crate::mcp::tools::mcp_dispatch_contract(tool_name)
-                .is_ok_and(|contract| contract.read_only())
-        },
-    )
-}
-
-struct ConcurrentReadCompletion {
-    request_key: Option<String>,
-    _request_activity: Option<tracedecay_mcp::McpRequestActivity>,
-    revocable_tool_call: Option<(Value, String)>,
-    response: Option<JsonRpcResponse>,
-    selected_response_lease: Option<crate::mcp::server::routing::SelectedProjectResponseLease>,
-    connection_scope: String,
-    connection_closed: bool,
-}
-
-enum ConnectionLoopEvent {
-    Queued(String),
-    Incoming(std::io::Result<Option<String>>),
-    Completed(Box<Option<std::result::Result<ConcurrentReadCompletion, tokio::task::JoinError>>>),
-    Shutdown,
-    PeerClosed,
-}
-
-#[hotpath::measure(label = "mcp.server.connection.read_dispatch", future = true)]
-async fn dispatch_independent_read(
+/// The single production context the portable MCP connection scheduler uses.
+///
+/// It borrows the already-constructed server authorities; it does not own a
+/// registry, route cache, or cancellation table of its own.
+struct ProductionMcpConnectionContext {
     server: Arc<McpServer>,
-    request: JsonRpcRequest,
-    timings_enabled: bool,
-    mut connection: ConnectionRouteState,
-    request_activity: Option<tracedecay_mcp::McpRequestActivity>,
-    cancellation: tracedecay_session_memory::context::CancellationToken,
-    connection_shutdown: tracedecay_session_memory::context::CancellationToken,
-) -> ConcurrentReadCompletion {
-    let connection_scope = connection.memory_request_scope().to_owned();
-    let request_key = request
-        .id
-        .as_ref()
-        .and_then(|id| application_surface_request_id(id, &connection_scope));
-    let revocable_tool_call = request.id.clone().and_then(|id| {
-        (request.method == "tools/call").then_some(())?;
-        let tool_name = request.params.as_ref()?.get("name")?.as_str()?.to_owned();
-        Some((id, tool_name))
-    });
-    let (response, connection_closed) = {
-        let handling = Box::pin(server.handle_request_for_connection(
-            &request,
-            timings_enabled,
-            &mut connection,
-            cancellation.is_cancelled(),
-        ));
-        tokio::pin!(handling);
-        let mut cancellation_waiting_for_registration = false;
-        loop {
-            let waiting_for_registration = cancellation_waiting_for_registration;
-            let wait_for_cancellation_registration = async {
-                if !waiting_for_registration {
-                    std::future::pending::<()>().await;
-                    return;
-                }
-                loop {
-                    let registered = server
-                        .dispatch_authority
-                        .cancellation_registered()
-                        .notified();
-                    tokio::pin!(registered);
-                    registered.as_mut().enable();
-                    if let Some(id) = request.id.as_ref()
-                        && server.cancel_application_surface_request(id, &connection_scope)
-                    {
-                        return;
-                    }
-                    registered.await;
-                }
-            };
-            tokio::pin!(wait_for_cancellation_registration);
-            tokio::select! {
-                biased;
-                () = connection_shutdown.cancelled() => {
-                    if let Some(id) = request.id.as_ref() {
-                        let _ = server.cancel_application_surface_request(id, &connection_scope);
-                    }
-                    break (None, true);
-                }
-                response = &mut handling => break (response, false),
-                () = &mut wait_for_cancellation_registration => {
-                    cancellation_waiting_for_registration = false;
-                }
-                () = cancellation.cancelled(), if !cancellation_waiting_for_registration => {
-                    cancellation_waiting_for_registration = request
-                        .id
-                        .as_ref()
-                        .is_some_and(|id| {
-                            !server.cancel_application_surface_request(id, &connection_scope)
-                        });
-                }
-            }
-        }
-    };
-    let selected_response_lease = connection.take_selected_response_lease();
-    ConcurrentReadCompletion {
-        request_key,
-        _request_activity: request_activity,
-        revocable_tool_call,
-        response,
-        selected_response_lease,
-        connection_scope,
-        connection_closed,
+}
+
+impl ProductionMcpConnectionContext {
+    fn new(server: Arc<McpServer>) -> Arc<Self> {
+        Arc::new(Self { server })
     }
 }
 
-struct ConnectionResponseWriter;
+impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionContext {
+    type Connection = ConnectionRouteState;
 
-impl ConnectionResponseWriter {
-    async fn write(
-        server: &McpServer,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-        completion: &mut ConcurrentReadCompletion,
-    ) -> std::io::Result<bool> {
-        let response_revoked = completion
-            .selected_response_lease
-            .as_ref()
-            .map(crate::mcp::server::routing::SelectedProjectResponseLease::revoked);
-        let notifications: Vec<Value> =
-            crate::mcp::server::requests::recover_lock(&server.pending_notifications)
-                .drain(..)
-                .collect();
-        for notification in notifications {
-            if let Ok(serialized) = hotpath::measure_block!(
-                "mcp.server.notification.serialize",
-                serde_json::to_string(&notification)
-            ) && !server
-                .write_response_line_or_revoke(
-                    transport,
-                    &format!("{serialized}\n"),
-                    response_revoked,
-                )
-                .await?
-            {
-                return Ok(false);
-            }
-        }
-        let Some(response) = completion.response.as_ref() else {
-            return Ok(true);
-        };
-        let json_line = hotpath::measure_block!(
-            "mcp.server.response.serialize",
-            serialize_response_line(response)
-        );
-        server
-            .write_response_line_or_revoke(transport, &format!("{json_line}\n"), response_revoked)
-            .await
+    fn new_connection(&self) -> Result<Self::Connection> {
+        self.server.new_connection_route_state()
     }
-}
 
-async fn wait_for_peer_close(
-    peer_close: &mut Option<
-        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    >,
-) {
-    match peer_close {
-        Some(peer_close) => peer_close.await,
-        None => std::future::pending().await,
+    fn timings_enabled(&self) -> bool {
+        self.server.timings_enabled()
+    }
+
+    fn max_concurrent_reads(&self) -> usize {
+        MAX_CONCURRENT_CONNECTION_READS
+    }
+
+    fn tool_is_read_only(&self, tool_name: &str) -> bool {
+        crate::mcp::tools::mcp_dispatch_contract(tool_name)
+            .is_ok_and(|contract| contract.read_only())
+    }
+
+    fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool {
+        super::requests::tool_supports_live_cancellation(tool_name)
+    }
+
+    fn request_admitted(&self, request: &JsonRpcRequest) -> bool {
+        request.method != "tools/call"
+            || self.server.project_server_live.is_none()
+            || !self
+                .server
+                .project_server_lifecycle
+                .response_revoked()
+                .is_cancelled()
+    }
+
+    fn dispatch<'a>(
+        &'a self,
+        request: tracedecay_mcp::server::McpDispatchRequest<'a>,
+        timings_enabled: bool,
+        connection: &'a mut Self::Connection,
+        pre_cancelled: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<JsonRpcResponse>> + Send + 'a>>
+    {
+        Box::pin(
+            self.server
+                .dispatch_envelope(request, timings_enabled, connection, pre_cancelled),
+        )
+    }
+
+    fn cancel_request(&self, id: &Value, connection_scope: &str) -> bool {
+        self.server
+            .cancel_application_surface_request(id, connection_scope)
+    }
+
+    fn cancellation_registered(&self) -> &tokio::sync::Notify {
+        self.server.dispatch_authority.cancellation_registered()
+    }
+
+    fn take_pending_notifications(&self) -> Vec<Value> {
+        super::requests::recover_lock(&self.server.pending_notifications)
+            .drain(..)
+            .collect()
+    }
+
+    fn run_in_connection_admission<T, F>(
+        &self,
+        future: F,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = T> + Send + 'static,
+    {
+        Box::pin(crate::daemon::in_connection_admission(
+            crate::daemon::current_connection_admission(),
+            future,
+        ))
+    }
+
+    fn shutdown(
+        self: Arc<Self>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move { McpServer::shutdown(&self.server).await })
     }
 }
 
 impl McpServer {
-    #[hotpath::measure(label = "mcp.server.write", future = true)]
-    async fn write_response_line_or_revoke(
-        &self,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-        output: &str,
-        response_revoked: Option<&tracedecay_session_memory::context::CancellationToken>,
-    ) -> std::io::Result<bool> {
-        hotpath::gauge!("mcp.server.response.bytes").set(output.len());
-        let write = async {
-            hotpath::future!(
-                transport.write_line(output),
-                label = "mcp.server.response.write"
-            )
-            .await?;
-            hotpath::future!(transport.flush(), label = "mcp.server.response.flush").await
-        };
-        let Some(response_revoked) = response_revoked else {
-            return write.await.map(|()| true);
-        };
-        tokio::select! {
-            biased;
-            () = response_revoked.cancelled() => Ok(false),
-            result = write => result.map(|()| true),
-        }
+    fn connection_server(
+        self: &Arc<Self>,
+    ) -> Arc<tracedecay_mcp::server::McpConnectionServer<ProductionMcpConnectionContext>> {
+        tracedecay_mcp::server::McpConnectionServer::new(ProductionMcpConnectionContext::new(
+            Arc::clone(self),
+        ))
     }
 
-    #[hotpath::measure(label = "mcp.server.request_cancellable", future = true)]
-    async fn handle_cancellable_application_request(
-        &self,
-        request: &JsonRpcRequest,
-        timings_enabled: bool,
-        connection: &mut ConnectionRouteState,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<QueuedRequestLine>,
-        pending_cancellations: &mut HashSet<String>,
-        mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-    ) -> Result<(Option<JsonRpcResponse>, bool)> {
-        let connection_scope = connection.memory_request_scope().to_owned();
-        let pre_cancelled = request
-            .id
-            .as_ref()
-            .and_then(|id| application_surface_request_id(id, &connection_scope))
-            .is_some_and(|key| pending_cancellations.remove(&key));
-        let handling = Box::pin(self.handle_request_for_connection(
-            request,
-            timings_enabled,
-            connection,
-            pre_cancelled,
-        ));
-        tokio::pin!(handling);
-        let mut current_cancellation: Option<Value> = None;
-        // One-shot clients (the CLI and the stdio proxy) shut down their write
-        // half once the request is on the wire, so end-of-input means "no more
-        // requests", not "peer is gone". Stop watching for cancellations and
-        // keep serving the in-flight response. Cancel only on actual peer loss
-        // (read/write I/O failure) or explicit shutdown/cancel paths.
-        let mut peer_close_check: Option<
-            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        > = None;
-        loop {
-            let cancellation_id = current_cancellation.clone();
-            let wait_for_current_cancellation_registration = async {
-                let Some(cancellation_id) = cancellation_id.as_ref() else {
-                    std::future::pending::<()>().await;
-                    return;
-                };
-                loop {
-                    // Register interest *before* re-probing so a registration
-                    // between the probe and the await cannot be missed.
-                    let registered = self.dispatch_authority.cancellation_registered().notified();
-                    tokio::pin!(registered);
-                    registered.as_mut().enable();
-                    if self.cancel_application_surface_request(cancellation_id, &connection_scope) {
-                        return;
-                    }
-                    registered.await;
-                }
-            };
-            tokio::pin!(wait_for_current_cancellation_registration);
-            if let Some(peer_close_check) = peer_close_check.as_mut() {
-                tokio::select! {
-                    biased;
-                    () = &mut shutdown_requested => {
-                        if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(id, &connection_scope);
-                        }
-                        return Ok((None, true));
-                    }
-                    () = &mut wait_for_current_cancellation_registration => {
-                        current_cancellation = None;
-                    }
-                    response = &mut handling => return Ok((response, false)),
-                    () = peer_close_check => {
-                        if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(id, &connection_scope);
-                        }
-                        return Ok((None, true));
-                    }
-                }
-            }
-            tokio::select! {
-                biased;
-                () = &mut shutdown_requested => {
-                    if let Some(id) = request.id.as_ref() {
-                        let _ = self.cancel_application_surface_request(id, &connection_scope);
-                    }
-                    return Ok((None, true));
-                }
-                () = &mut wait_for_current_cancellation_registration => {
-                    current_cancellation = None;
-                }
-                response = &mut handling => return Ok((response, false)),
-                incoming = read_inflight_connection_line(transport) => {
-                    let line = match incoming {
-                        Ok(Some(line)) => line,
-                        Ok(None) => {
-                            peer_close_check = Some(Box::pin(
-                                transport.peer_fully_closed_after_eof(),
-                            ));
-                            continue;
-                        }
-                        Err(error) => {
-                            if let Some(id) = request.id.as_ref() {
-                                let _ = self.cancel_application_surface_request(id, &connection_scope);
-                            }
-                            return Err(error.into());
-                        }
-                    };
-                    let parsed = hotpath::measure_block!(
-                        "mcp.server.connection.inflight_decode",
-                        JsonRpcRequest::decode(line.trim())
-                    );
-                    if let Ok(notification) = &parsed
-                        && matches!(
-                            classify_mcp_method(&notification.method),
-                            McpMethod::Cancelled
-                        )
-                    {
-                        if let Some(id) = notification
-                            .params
-                            .as_ref()
-                            .and_then(|params| params.get("requestId"))
-                            && !self.cancel_application_surface_request(id, &connection_scope)
-                        {
-                            if current_cancellable_request_key(
-                                request,
-                                id,
-                                &connection_scope,
-                            )
-                            .is_some()
-                            {
-                                current_cancellation = Some(id.clone());
-                            } else if pending_cancellations.len()
-                                    < MAX_PENDING_CANCELLABLE_REQUEST_LINES
-                                && let Some(key) = queued_cancellable_request_key(
-                                    pending_lines,
-                                    id,
-                                    &connection_scope,
-                                )
-                            {
-                                pending_cancellations.insert(key);
-                            }
-                        }
-                        continue;
-                    }
-                    if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
-                        if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(id, &connection_scope);
-                        }
-                        return Ok((None, true));
-                    }
-                    pending_lines.push_back(QueuedRequestLine::from_parsed(
-                        line,
-                        parsed.as_ref().ok(),
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Runs a non-live-cancellable request while still observing connection
-    /// teardown.  A request-side EOF is only a half-close until the transport
-    /// reports the peer's write side closed; this keeps one-shot CLI responses
-    /// intact while dropping abandoned handlers and their admission permits.
-    #[hotpath::measure(label = "mcp.server.request_non_cancellable", future = true)]
-    async fn handle_non_cancellable_application_request(
-        &self,
-        request: &JsonRpcRequest,
-        timings_enabled: bool,
-        connection: &mut ConnectionRouteState,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<QueuedRequestLine>,
-        mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-    ) -> Result<(Option<JsonRpcResponse>, bool)> {
-        let connection_scope = connection.memory_request_scope().to_owned();
-        let handling = Box::pin(self.handle_request_for_connection(
-            request,
-            timings_enabled,
-            connection,
-            false,
-        ));
-        tokio::pin!(handling);
-        let mut peer_close_check: Option<
-            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        > = None;
-        loop {
-            if let Some(peer_close_check) = peer_close_check.as_mut() {
-                tokio::select! {
-                    response = &mut handling => return Ok((response, false)),
-                    () = &mut shutdown_requested => {
-                        if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(
-                                id,
-                                &connection_scope,
-                            );
-                        }
-                        return Ok((None, true));
-                    }
-                    () = peer_close_check => {
-                        if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(
-                                id,
-                                &connection_scope,
-                            );
-                        }
-                        return Ok((None, true));
-                    }
-                }
-            }
-            tokio::select! {
-                response = &mut handling => return Ok((response, false)),
-                () = &mut shutdown_requested => {
-                    if let Some(id) = request.id.as_ref() {
-                        let _ = self.cancel_application_surface_request(
-                            id,
-                            &connection_scope,
-                        );
-                    }
-                    return Ok((None, true));
-                }
-                incoming = read_inflight_connection_line(transport) => {
-                    let line = match incoming {
-                        Ok(Some(line)) => line,
-                        Ok(None) => {
-                            peer_close_check = Some(Box::pin(
-                                transport.peer_fully_closed_after_eof(),
-                            ));
-                            continue;
-                        }
-                        Err(error) => {
-                            if let Some(id) = request.id.as_ref() {
-                                let _ = self.cancel_application_surface_request(
-                                    id,
-                                    &connection_scope,
-                                );
-                            }
-                            return Err(error.into());
-                        }
-                    };
-                    if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
-                        if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(
-                                id,
-                                &connection_scope,
-                            );
-                        }
-                        return Ok((None, true));
-                    }
-                    pending_lines.push_back(QueuedRequestLine::new(line));
-                }
-            }
-        }
-    }
-
-    /// Runs the server, reading JSON-RPC requests from stdin and writing
-    /// responses to stdout. Runs until stdin is closed or a shutdown signal
-    /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     #[hotpath::skip]
     pub async fn run(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
     ) -> Result<()> {
-        self.run_with_shutdown_policy(transport, true, true, None, None)
-            .await
+        self.connection_server().run(transport).await
     }
 
-    /// Runs one client connection without shutting down the server when that
-    /// connection closes. Production daemon connections go through
-    /// [`Self::run_daemon_connection_with_timings`]; this is the in-process
-    /// test-transport harness entry for the same connection loop.
     #[cfg(any(test, feature = "test-transport"))]
     #[hotpath::skip]
     pub async fn run_connection(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
     ) -> Result<()> {
-        self.run_with_shutdown_policy(transport, false, false, None, None)
-            .await
+        self.connection_server().run_connection(transport).await
     }
 
     #[hotpath::skip]
@@ -858,17 +339,13 @@ impl McpServer {
         timings_enabled: bool,
         lifecycle: &dyn tracedecay_mcp::McpConnectionLifecyclePort,
     ) -> Result<()> {
-        self.run_with_shutdown_policy(
-            transport,
-            false,
-            false,
-            Some(timings_enabled),
-            Some(lifecycle),
-        )
-        .await
+        self.connection_server()
+            .run_daemon_connection_with_timings(transport, timings_enabled, lifecycle)
+            .await
     }
 
-    #[hotpath::measure(label = "mcp.server.connection", future = true)]
+    #[cfg(any(test, feature = "test-transport"))]
+    #[hotpath::skip]
     pub(crate) async fn run_with_shutdown_policy(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
@@ -877,412 +354,27 @@ impl McpServer {
         timings_override: Option<bool>,
         request_lifecycle: Option<&dyn tracedecay_mcp::McpConnectionLifecyclePort>,
     ) -> Result<()> {
-        Box::pin(self.run_connection_loop(
-            transport,
-            shutdown_on_exit,
-            listen_for_process_signals,
-            timings_override,
-            request_lifecycle,
-        ))
-        .await
+        self.connection_server()
+            .run_with_shutdown_policy(
+                transport,
+                shutdown_on_exit,
+                listen_for_process_signals,
+                timings_override,
+                request_lifecycle,
+            )
+            .await
     }
 
-    #[hotpath::measure(label = "mcp.server.connection.loop", future = true)]
-    async fn run_connection_loop(
-        self: &Arc<Self>,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-        shutdown_on_exit: bool,
-        listen_for_process_signals: bool,
-        timings_override: Option<bool>,
-        request_lifecycle: Option<&dyn tracedecay_mcp::McpConnectionLifecyclePort>,
-    ) -> Result<()> {
-        let mut connection_route = self.new_connection_route_state()?;
-        let mut pending_lines: VecDeque<QueuedRequestLine> = VecDeque::new();
-        let mut pending_cancellations = HashSet::new();
-        let mut active_reads: tokio::task::JoinSet<ConcurrentReadCompletion> =
-            tokio::task::JoinSet::new();
-        let mut active_cancellations: HashMap<
-            String,
-            tracedecay_session_memory::context::CancellationToken,
-        > = HashMap::new();
-        let connection_shutdown = tracedecay_session_memory::context::CancellationToken::new();
-        let mut input_closed = false;
-        let mut peer_close_check: Option<
-            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        > = None;
-        let timings_enabled = timings_override.unwrap_or_else(|| self.timings_enabled());
-
-        // Install the process listeners once. This same fused future is polled
-        // by idle reads, active read batches, and effect barriers, so shutdown
-        // cannot land in an iteration gap.
-        let external_shutdown_requested = async {
-            if listen_for_process_signals {
-                #[cfg(unix)]
-                {
-                    #[allow(clippy::expect_used)]
-                    let mut sigterm =
-                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                            .expect("failed to register SIGTERM handler");
-                    tokio::select! {
-                        _ = tokio::signal::ctrl_c() => {}
-                        _ = sigterm.recv() => {}
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = tokio::signal::ctrl_c().await;
-                }
-            } else if let Some(lifecycle) = request_lifecycle {
-                lifecycle.wait_for_draining().await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
-        tokio::pin!(external_shutdown_requested);
-
-        'connection: loop {
-            if input_closed && pending_lines.is_empty() && active_reads.is_empty() {
-                break;
-            }
-
-            let queued_ready = pending_lines.front().is_some_and(|queued| {
-                if active_reads.is_empty() {
-                    return true;
-                }
-                if !queued.independent_read || active_reads.len() >= MAX_CONCURRENT_CONNECTION_READS
-                {
-                    return false;
-                }
-                queued
-                    .request_id
-                    .as_ref()
-                    .and_then(|id| {
-                        application_surface_request_id(id, connection_route.memory_request_scope())
-                    })
-                    .is_none_or(|key| !active_cancellations.contains_key(&key))
-            });
-
-            let line_from_queue = queued_ready;
-            let event = if queued_ready {
-                let Some(queued) = pending_lines.pop_front() else {
-                    continue;
-                };
-                ConnectionLoopEvent::Queued(queued.into_line())
-            } else if active_reads.is_empty() {
-                let incoming = read_connection_line(transport);
-                tokio::pin!(incoming);
-                tokio::select! {
-                    biased;
-                    () = &mut external_shutdown_requested => ConnectionLoopEvent::Shutdown,
-                    () = wait_for_peer_close(&mut peer_close_check), if input_closed =>
-                        ConnectionLoopEvent::PeerClosed,
-                    result = &mut incoming, if !input_closed =>
-                        ConnectionLoopEvent::Incoming(result),
-                }
-            } else {
-                let can_read_more =
-                    !input_closed && pending_lines.len() < MAX_PENDING_CANCELLABLE_REQUEST_LINES;
-                let incoming = read_connection_line(transport);
-                tokio::pin!(incoming);
-                tokio::select! {
-                    biased;
-                    () = &mut external_shutdown_requested => ConnectionLoopEvent::Shutdown,
-                    () = wait_for_peer_close(&mut peer_close_check), if input_closed =>
-                        ConnectionLoopEvent::PeerClosed,
-                    result = active_reads.join_next() => {
-                        ConnectionLoopEvent::Completed(Box::new(result))
-                    },
-                    result = &mut incoming, if can_read_more =>
-                        ConnectionLoopEvent::Incoming(result),
-                }
-            };
-
-            let line = match event {
-                ConnectionLoopEvent::Queued(line) => Some(line),
-                ConnectionLoopEvent::Incoming(Ok(Some(line))) => Some(line),
-                ConnectionLoopEvent::Incoming(Ok(None)) => {
-                    input_closed = true;
-                    peer_close_check = Some(Box::pin(transport.peer_fully_closed_after_eof()));
-                    None
-                }
-                ConnectionLoopEvent::Incoming(Err(error)) => {
-                    connection_shutdown.cancel();
-                    while active_reads.join_next().await.is_some() {}
-                    if is_wire_oversized_io_error(&error) {
-                        let _ = write_wire_oversized_rejection(transport, &error).await;
-                        break;
-                    }
-                    self.shutdown_if(shutdown_on_exit).await;
-                    return Err(error.into());
-                }
-                ConnectionLoopEvent::Completed(completed) => {
-                    let Some(completed) = *completed else {
-                        continue;
-                    };
-                    let mut completion = completed.map_err(|error| TraceDecayError::Config {
-                        message: format!("MCP concurrent read task failed: {error}"),
-                    })?;
-                    if let Some(request_key) = completion.request_key.as_ref() {
-                        active_cancellations.remove(request_key);
-                    }
-                    if completion.connection_closed {
-                        connection_shutdown.cancel();
-                        while active_reads.join_next().await.is_some() {}
-                        break;
-                    }
-                    match ConnectionResponseWriter::write(self, transport, &mut completion).await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            connection_shutdown.cancel();
-                            while active_reads.join_next().await.is_some() {}
-                            break;
-                        }
-                        Err(error) => {
-                            tracing::error!(error = %error, "failed to write MCP response");
-                            if let Some((id, _)) = &completion.revocable_tool_call {
-                                let _ = self.cancel_application_surface_request(
-                                    id,
-                                    &completion.connection_scope,
-                                );
-                            }
-                            connection_shutdown.cancel();
-                            while active_reads.join_next().await.is_some() {}
-                            self.shutdown_if(shutdown_on_exit).await;
-                            return Err(error.into());
-                        }
-                    }
-                    drop(completion);
-                    if request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting()) {
-                        connection_shutdown.cancel();
-                        while active_reads.join_next().await.is_some() {}
-                        break;
-                    }
-                    None
-                }
-                ConnectionLoopEvent::Shutdown | ConnectionLoopEvent::PeerClosed => {
-                    connection_shutdown.cancel();
-                    while active_reads.join_next().await.is_some() {}
-                    break;
-                }
-            };
-
-            let Some(line) = line else {
-                continue;
-            };
-
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
-
-            let parsed = hotpath::measure_block!(
-                "mcp.server.connection.decode",
-                JsonRpcRequest::decode(&line)
-            );
-            if let Ok(notification) = &parsed
-                && matches!(
-                    classify_mcp_method(&notification.method),
-                    McpMethod::Cancelled
-                )
-                && let Some(id) = notification
-                    .params
-                    .as_ref()
-                    .and_then(|params| params.get("requestId"))
-            {
-                let connection_scope = connection_route.memory_request_scope();
-                if !self.cancel_application_surface_request(id, connection_scope)
-                    && let Some(key) = application_surface_request_id(id, connection_scope)
-                {
-                    if let Some(cancellation) = active_cancellations.get(&key) {
-                        cancellation.cancel();
-                    } else if pending_cancellations.len() < MAX_PENDING_CANCELLABLE_REQUEST_LINES
-                        && queued_cancellable_request_key(&pending_lines, id, connection_scope)
-                            .is_some()
-                    {
-                        pending_cancellations.insert(key);
-                    }
-                }
-                continue;
-            }
-
-            if let Ok(request) = &parsed
-                && request_is_independent_read(request)
-            {
-                let request_key = request.id.as_ref().and_then(|id| {
-                    application_surface_request_id(id, connection_route.memory_request_scope())
-                });
-                let duplicate_in_flight = request_key
-                    .as_ref()
-                    .is_some_and(|key| active_cancellations.contains_key(key));
-                if !duplicate_in_flight
-                    && active_reads.len() < MAX_CONCURRENT_CONNECTION_READS
-                    && (line_from_queue || pending_lines.is_empty())
-                {
-                    let request_activity = request_lifecycle
-                        .and_then(tracedecay_mcp::McpConnectionLifecyclePort::try_enter);
-                    if request_lifecycle.is_some() && request_activity.is_none() {
-                        let mut completion = ConcurrentReadCompletion {
-                            request_key,
-                            _request_activity: request_activity,
-                            revocable_tool_call: None,
-                            response: request.id.clone().map(|id| {
-                                JsonRpcResponse::error(
-                                    id,
-                                    ErrorCode::InternalError,
-                                    "TraceDecay daemon is draining for upgrade; retry the request"
-                                        .to_string(),
-                                )
-                            }),
-                            selected_response_lease: None,
-                            connection_scope: connection_route.memory_request_scope().to_owned(),
-                            connection_closed: false,
-                        };
-                        ConnectionResponseWriter::write(self, transport, &mut completion).await?;
-                        break;
-                    }
-                    let cancellation = tracedecay_session_memory::context::CancellationToken::new();
-                    if let Some(request_key) = request_key.as_ref() {
-                        if pending_cancellations.remove(request_key) {
-                            cancellation.cancel();
-                        }
-                        active_cancellations.insert(request_key.clone(), cancellation.clone());
-                    }
-                    let admission = crate::daemon::current_connection_admission();
-                    active_reads.spawn(crate::daemon::in_connection_admission(
-                        admission,
-                        dispatch_independent_read(
-                            Arc::clone(self),
-                            request.clone(),
-                            timings_enabled,
-                            connection_route.fork_for_connection_owned_read(),
-                            request_activity,
-                            cancellation,
-                            connection_shutdown.clone(),
-                        ),
-                    ));
-                    continue;
-                }
-            }
-
-            if !active_reads.is_empty() {
-                if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
-                    connection_shutdown.cancel();
-                    while active_reads.join_next().await.is_some() {}
-                    break;
-                }
-                pending_lines.push_back(QueuedRequestLine::from_parsed(line, parsed.as_ref().ok()));
-                continue;
-            }
-
-            let revocable_tool_call = parsed.as_ref().ok().and_then(|request| {
-                (request.method == "tools/call").then_some(())?;
-                let id = request.id.clone()?;
-                let tool_name = request.params.as_ref()?.get("name")?.as_str()?.to_owned();
-                Some((id, tool_name))
-            });
-            let request_activity =
-                request_lifecycle.and_then(tracedecay_mcp::McpConnectionLifecyclePort::try_enter);
-            let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
-            let mut peer_closed = false;
-
-            let response = if rejecting_for_drain {
-                parsed.as_ref().ok().and_then(|request| {
-                    request.id.clone().map(|id| {
-                        JsonRpcResponse::error(
-                            id,
-                            ErrorCode::InternalError,
-                            "TraceDecay daemon is draining for upgrade; retry the request"
-                                .to_string(),
-                        )
-                    })
-                })
-            } else {
-                match parsed {
-                    Ok(request) => {
-                        let cancellable_tool_call = request.method == "tools/call"
-                            && request
-                                .params
-                                .as_ref()
-                                .and_then(|params| params.get("name"))
-                                .and_then(Value::as_str)
-                                .is_some_and(super::requests::tool_supports_live_cancellation);
-                        if cancellable_tool_call {
-                            let (response, closed) = self
-                                .handle_cancellable_application_request(
-                                    &request,
-                                    timings_enabled,
-                                    &mut connection_route,
-                                    transport,
-                                    &mut pending_lines,
-                                    &mut pending_cancellations,
-                                    external_shutdown_requested.as_mut(),
-                                )
-                                .await?;
-                            peer_closed = closed;
-                            response
-                        } else {
-                            let (response, closed) = self
-                                .handle_non_cancellable_application_request(
-                                    &request,
-                                    timings_enabled,
-                                    &mut connection_route,
-                                    transport,
-                                    &mut pending_lines,
-                                    external_shutdown_requested.as_mut(),
-                                )
-                                .await?;
-                            peer_closed = closed;
-                            response
-                        }
-                    }
-                    Err(error) => Some(error.into_response()),
-                }
-            };
-
-            let selected_response_lease = connection_route.take_selected_response_lease();
-            if peer_closed {
-                drop(request_activity);
-                break;
-            }
-            let mut completion = ConcurrentReadCompletion {
-                request_key: None,
-                _request_activity: request_activity,
-                revocable_tool_call,
-                response,
-                selected_response_lease,
-                connection_scope: connection_route.memory_request_scope().to_owned(),
-                connection_closed: false,
-            };
-            match ConnectionResponseWriter::write(self, transport, &mut completion).await {
-                Ok(true) => {}
-                Ok(false) => break 'connection,
-                Err(error) => {
-                    tracing::error!(error = %error, "failed to write MCP response");
-                    if let Some((id, _)) = &completion.revocable_tool_call {
-                        let _ = self
-                            .cancel_application_surface_request(id, &completion.connection_scope);
-                    }
-                    self.shutdown_if(shutdown_on_exit).await;
-                    return Err(error.into());
-                }
-            }
-            drop(completion);
-            if rejecting_for_drain
-                || request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting())
-            {
-                break;
-            }
-        }
-
-        self.shutdown_if(shutdown_on_exit).await;
-        Ok(())
-    }
-
+    #[cfg(any(test, feature = "test-transport"))]
     #[hotpath::skip]
-    pub(crate) async fn shutdown_if(self: &Arc<Self>, enabled: bool) {
-        if enabled {
-            self.shutdown().await;
-        }
+    pub async fn handle_and_write(
+        self: &Arc<Self>,
+        line: &str,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
+    ) -> Result<()> {
+        self.connection_server()
+            .handle_and_write(line, transport)
+            .await
     }
 
     /// Persists the tokens-saved counter, flushes pending tokens to the
@@ -2267,84 +1359,6 @@ mod cancellable_queue_tests {
 
         drop(sender);
         fixture.harness.shutdown().await;
-    }
-
-    #[test]
-    fn queued_request_cancellation_is_type_preserving() {
-        let pending: VecDeque<QueuedRequestLine> = [
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "tools/call",
-                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
-            })
-            .to_string(),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": "tracedecay_git_status", "arguments": {}},
-            })
-            .to_string(),
-        ]
-        .into_iter()
-        .map(QueuedRequestLine::new)
-        .collect();
-
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")
-                .is_some()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(1), "connection").is_none()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
-        );
-    }
-
-    #[test]
-    fn queued_line_with_foreign_protocol_version_carries_no_request_metadata() {
-        let tools_call = |version: serde_json::Value| {
-            serde_json::json!({
-                "jsonrpc": version,
-                "id": "1",
-                "method": "tools/call",
-                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
-            })
-            .to_string()
-        };
-        let accepted = QueuedRequestLine::new(tools_call(serde_json::json!("2.0")));
-        assert_eq!(accepted.request_id, Some(serde_json::json!("1")));
-        assert!(accepted.independent_read);
-        assert!(accepted.cancellable_request_id.is_some());
-
-        let rejected = QueuedRequestLine::new(tools_call(serde_json::json!("1.0")));
-        assert_eq!(rejected.request_id, None);
-        assert!(!rejected.independent_read);
-        assert!(rejected.cancellable_request_id.is_none());
-    }
-
-    #[test]
-    fn queued_request_depth_is_released_on_dequeue_and_connection_drop() {
-        let queued = Arc::new(std::sync::atomic::AtomicIsize::new(0));
-        let mut pending = VecDeque::new();
-        pending.push_back(QueuedRequestLine::new_observed(
-            "first".to_owned(),
-            Arc::clone(&queued),
-        ));
-        pending.push_back(QueuedRequestLine::new_observed(
-            "second".to_owned(),
-            Arc::clone(&queued),
-        ));
-        assert_eq!(queued.load(Ordering::Acquire), 2);
-
-        let first = pending.pop_front().expect("first queued line").into_line();
-        assert_eq!(first, "first");
-        assert_eq!(queued.load(Ordering::Acquire), 1);
-
-        drop(pending);
-        assert_eq!(queued.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]

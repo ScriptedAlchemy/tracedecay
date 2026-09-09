@@ -1,11 +1,15 @@
 //! Transport-owned MCP request protocol and dispatch envelope.
 
+mod connection;
 mod dispatch;
 mod protocol;
 mod settlement;
 
 pub use crate::lifecycle::{
     McpBackgroundTaskOwner, ProjectServerResponseLifecycle, StartupCatchUpMachineV1,
+};
+pub use connection::{
+    McpConnectionContext, McpConnectionServer, McpConnectionState, McpResponseLease,
 };
 pub use dispatch::{
     McpDispatchParams, McpDispatchRequest, ToolCallParams, dispatch_is_independent_read,
