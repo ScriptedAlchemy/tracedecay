@@ -9,16 +9,18 @@ on:
 permissions:
   contents: read
 
-# One run per pull request (or per pushed ref). A newer push to a
-# feature-branch pull request supersedes the run in flight: its verdict is for
-# a head nobody can merge any more, and letting it finish only holds runners
-# the current head is waiting for. Pull requests into `master` (the integration
-# delivery and release PRs) keep every run to completion: their heads move
-# often as child work lands, and a verdict for a slightly older tip is still
-# the evidence those merges are judged by. `push` runs are never cancelled.
+# One run per pull request (or per pushed ref). A newer push to a pull
+# request supersedes the run in flight: its verdict is for a head nobody can
+# merge any more, and letting it finish only holds runners the current head is
+# waiting for. Keeping master-bound runs to completion did not buy a verdict
+# per tip either: GitHub holds one pending run per group, so while a 100-min
+# run finished, every intermediate push was queued and then cancelled by the
+# next (runs 34311300344, 34312118984, 34313237349 never scheduled a job) and
+# only the head at the moment the old run ended got a verdict, ~100 min late.
+# `push` runs are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref != 'master' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
