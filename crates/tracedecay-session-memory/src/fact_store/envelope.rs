@@ -305,6 +305,7 @@ mod write_control_tests {
         let path = temp.path().join(format!("{label}.db"));
         let authority = DatabaseAuthority::acquire_test(&path, "write-control fixture")
             .expect("database authority");
+        tracedecay_global_db::register_test_schema_installer();
         let (db, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await

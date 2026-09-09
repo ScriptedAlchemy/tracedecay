@@ -53,6 +53,7 @@ mod ledger;
 mod lifecycle;
 mod project_open_access;
 mod requests;
+pub use requests::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 mod rmcp;
 mod routing;
 mod session_refresh;

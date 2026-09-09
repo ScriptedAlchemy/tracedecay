@@ -17,7 +17,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
 use super::AutomationSchedulerHandle;
-use super::DaemonEngine;
+use super::engine::DaemonEngine;
 #[cfg(unix)]
 use super::explicit_git_state;
 #[cfg(unix)]

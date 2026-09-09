@@ -15,6 +15,11 @@ use tracedecay_mcp::{
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+/// Prefix of the out-of-band token-accounting block appended after a tool's
+/// payload. `tracedecay tool` routes blocks carrying it to stderr so a JSON
+/// payload on stdout stays a single document for scripts and hosts.
+pub const TOKEN_ACCOUNTING_FOOTER_PREFIX: &str = "tracedecay_metrics:";
+
 mod tool_dispatch;
 
 struct PreparedToolCall {
@@ -1127,7 +1132,7 @@ impl McpServer {
                 .and_then(|c| c.as_array_mut())
         {
             content.push(json!({"type": "text", "text": format!(
-                "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
+                "\n{TOKEN_ACCOUNTING_FOOTER_PREFIX} before={raw_file_tokens} after={response_tokens}"
             )}));
         }
 
