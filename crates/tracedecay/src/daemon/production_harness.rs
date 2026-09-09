@@ -980,7 +980,7 @@ impl ProductionProjectCompositionHarnessV1 {
     pub async fn shutdown(mut self) {
         if let Some(resources) = self.resources.take() {
             hotpath::future!(
-                shutdown_production_project_harness(resources),
+                Box::pin(shutdown_production_project_harness(resources)),
                 label = "daemon.harness.shutdown"
             )
             .await;
