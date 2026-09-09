@@ -422,7 +422,7 @@ pub struct McpServer {
     /// use it as the default path filter. `None` when cwd == project root.
     scope_prefix: Option<String>,
     /// Retains the single shutdown coordinator independently of its waiters.
-    shutdown: connection::McpShutdownCompletion,
+    shutdown: tracedecay_daemon_service::ShutdownCoordinatorV1,
     /// When true, every `tools/call` response gains a `_meta.duration_us`
     /// field measuring the handler's pure execution time. Toggled by
     /// `tracedecay serve --timings`. Off by default to keep responses clean.
@@ -1166,7 +1166,7 @@ impl McpServer {
             }),
             pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
-            shutdown: connection::McpShutdownCompletion::default(),
+            shutdown: tracedecay_daemon_service::ShutdownCoordinatorV1::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
             last_staleness_check_at: AtomicI64::new(0),
             worktree_mismatch,

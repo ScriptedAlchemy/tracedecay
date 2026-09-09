@@ -53,6 +53,7 @@ pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLI
 pub mod invocation;
 pub mod project_runtime;
 pub mod request_cancellation;
+mod shutdown_coordination;
 
 mod multi_root;
 
@@ -98,6 +99,7 @@ pub use project_runtime::{
     StoreObservabilityRegistryV1,
 };
 pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
+pub use shutdown_coordination::{ShutdownCoordinatorV1, ShutdownStatus};
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
     DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
