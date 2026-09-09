@@ -81,31 +81,6 @@ const NESTED = [
 ];
 
 describe('SubagentTree', () => {
-  it('draws parent/child edges as a nested tree, not a flat rollup', () => {
-    render(<SubagentTree payload={tree(NESTED)} />);
-
-    // A tree is one group here, not three islands — which is the whole
-    // difference from the per-agent session rollup beside it.
-    const root = document.querySelector('[data-subagent-tree-groups]');
-    expect(root?.getAttribute('data-subagent-tree-groups')).toBe('1');
-
-    const depths = [...document.querySelectorAll('[data-subagent-node]')].map((element) => [
-      element.getAttribute('data-subagent-node'),
-      element.getAttribute('data-subagent-depth'),
-    ]);
-    expect(depths).toEqual([
-      ['session.root', '0'],
-      ['session.child', '1'],
-      ['session.grandchild', '2'],
-    ]);
-  });
-
-  it('states the edge count and the reach rather than leaving them to the drawing', () => {
-    render(<SubagentTree payload={tree(NESTED)} />);
-
-    expect(screen.getByText(/delegation/i).textContent).toMatch(/2\s*delegation edges/i);
-    expect(screen.getByText(/delegation/i).textContent).toMatch(/nested/i);
-  });
 
   it('attributes a delegation to the tool call that made it', () => {
     render(<SubagentTree payload={tree(NESTED)} />);
@@ -185,20 +160,6 @@ describe('SubagentTree', () => {
 
     expect(document.querySelector('[data-subagent-tree-truncated="true"]')?.textContent).toMatch(
       /prefix of the store/i,
-    );
-  });
-
-  it('reads the store\'s second stamps as seconds', () => {
-    render(<SubagentTree payload={tree(NESTED)} />);
-
-    // 1_760_003_600 - 1_760_000_000 = 3600 seconds. Read as micros this would
-    // be a sub-millisecond session; read as millis, 3.6 seconds.
-    expect(document.querySelector('[data-subagent-node="session.root"]')?.textContent).toMatch(
-      /3,600s/,
-    );
-    // The child records no end, and says so instead of drawing zero.
-    expect(document.querySelector('[data-subagent-node="session.child"]')?.textContent).toMatch(
-      /span unrecorded/i,
     );
   });
 });

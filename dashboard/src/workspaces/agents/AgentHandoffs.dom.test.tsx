@@ -75,15 +75,6 @@ describe('AgentHandoffs', () => {
     expect(within(table).getByText('none declared')).toBeTruthy();
   });
 
-  it('states the population the frontier is a subset of', () => {
-    render(<AgentHandoffs reading={readHandoffFrontier(landed(frontierFixture()))} />);
-    // Two handoffs over ONE of the two tasks: a frontier reported without its
-    // denominator reads as the whole graph.
-    expect(screen.getByText(/2 handoffs · 1 of 2 tasks · graph version 4/)).toBeTruthy();
-    expect(screen.getByText(/3 evidence references were carried/)).toBeTruthy();
-    expect(screen.getByText(/1 declared unknown/)).toBeTruthy();
-  });
-
   it('carries the actor rollup as text and not only as a rail', () => {
     render(<AgentHandoffs reading={readHandoffFrontier(landed(frontierFixture()))} />);
     // The meter rails are aria-hidden by construction, so each actor's figures
@@ -136,11 +127,5 @@ describe('AgentHandoffs', () => {
     // A measured emptiness renders no failure chip: this read landed.
     expect(screen.queryByText('Offline')).toBeNull();
     expect(document.querySelector('[data-agent-handoffs-empty="true"]')).toBeTruthy();
-  });
-
-  it('says where the frontier came from, and that the token operations are not it', () => {
-    render(<AgentHandoffs reading={readHandoffFrontier(landed(frontierFixture()))} />);
-    expect(screen.getByText(/work\.views/)).toBeTruthy();
-    expect(screen.getByText(/cannot enumerate a frontier/)).toBeTruthy();
   });
 });

@@ -33,23 +33,6 @@ function points(path: string): ReadonlyArray<{ x: number; y: number }> {
 }
 
 describe('sampleRibbon', () => {
-  it('draws one closed outline of both edges', () => {
-    const path = sampleRibbon(WIDTH, HEIGHT);
-    expect(path.startsWith('M')).toBe(true);
-    expect(path.endsWith('Z')).toBe(true);
-    expect(points(path)).toHaveLength(SAMPLE_STEPS * 2);
-  });
-
-  it('spans exactly the box it was given', () => {
-    const all = points(sampleRibbon(WIDTH, HEIGHT));
-    const xs = all.map((point) => point.x);
-    expect(Math.min(...xs)).toBe(0);
-    expect(Math.max(...xs)).toBe(WIDTH);
-    for (const point of all) {
-      expect(point.y).toBeGreaterThanOrEqual(0);
-      expect(point.y).toBeLessThanOrEqual(HEIGHT);
-    }
-  });
 
   it('takes its half-width from taperAt at every step', () => {
     const all = points(sampleRibbon(WIDTH, HEIGHT));

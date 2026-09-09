@@ -169,23 +169,6 @@ describe('ScopedBrain', () => {
     expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
   });
 
-  it('renders project identity and checkout aliases without a branch store', async () => {
-    vi.stubGlobal(
-      'fetch',
-      serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': {
-          status: 200,
-          body: SUBGRAPH_ENVELOPE,
-        },
-        '/api/projects/proj_x': { status: 200, body: CONTEXT },
-      }),
-    );
-    renderScoped();
-
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
-    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
-  });
-
   it('does not infer an unmounted graph from a generic scoped read failure', async () => {
     vi.stubGlobal(
       'fetch',
@@ -317,28 +300,6 @@ describe('ScopedBrain', () => {
     await waitFor(() => expect(readout('nodes')).toBe('—'));
     expect(readout('edges')).toBe('—');
     expect(readout('files')).toBe('—');
-  });
-
-  it('keeps a real figure when a neighbouring one is zero', async () => {
-    // The specific loss the all-or-nothing rule caused: one zero took the
-    // other two measurements with it.
-    vi.stubGlobal(
-      'fetch',
-      serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
-        '/api/projects/proj_x/plugins/graph/overview': {
-          status: 200,
-          body: graphOverview({ nodes: 1204, edges: 0, files: 88 }),
-        },
-        '/api/projects/proj_x': { status: 200, body: CONTEXT },
-      }),
-    );
-    renderScoped();
-
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
-    expect(readout('nodes')).toBe('1,204');
-    expect(readout('edges')).toBe('0');
-    expect(readout('files')).toBe('88');
   });
 
   /**

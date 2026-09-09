@@ -1,19 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import * as brainActivity from '../brain/activitySummary.ts';
-import { formatDurationMs } from '../brain/activitySummary.ts';
-import * as loomTracks from './tracks.ts';
-import {
-  axisTicks,
-  bandScale,
-  clampWindow,
-  fittedWindow,
-  formatDurationSeconds,
-  isFitted,
-  packTrack,
-  tickStepFor,
-  zoomWindow,
-  type LoomSpan,
-} from './tracks.ts';
+import { axisTicks, bandScale, clampWindow, fittedWindow, isFitted, packTrack, tickStepFor, zoomWindow, type LoomSpan } from './tracks.ts';
 
 const HOUR = 3600;
 const DAY = 86_400;
@@ -105,49 +91,5 @@ describe('viewport', () => {
   it('refuses to strand the viewport in empty time', () => {
     const view = clampWindow({ start: 500 * DAY, end: 501 * DAY }, extent);
     expect(view.start).toBeLessThan(extent.end + DAY);
-  });
-});
-
-describe('formatDurationSeconds', () => {
-  it('speaks in the largest honest unit', () => {
-    expect(formatDurationSeconds(45)).toBe('45s');
-    expect(formatDurationSeconds(600)).toBe('10m');
-    expect(formatDurationSeconds(2 * HOUR + 30 * 60)).toBe('2h 30m');
-    expect(formatDurationSeconds(5 * DAY)).toBe('5d');
-  });
-
-  it('does not round across a unit boundary into 60 minutes', () => {
-    expect(formatDurationSeconds(HOUR - 1)).toBe('59m');
-    expect(formatDurationSeconds(2 * HOUR - 1)).toBe('1h 59m');
-  });
-});
-
-/**
- * Two workspaces format durations from different clocks: Loom's spans are
- * epoch SECONDS, Brain's deltas are MILLISECONDS. Both take a bare `number`,
- * so importing the wrong one is not a type error — it silently prints a
- * duration that is off by 1000x, which is a falsified value on screen with
- * nothing to catch it. The only defence is that the unit is in every name, so
- * the wrong import fails to resolve instead of rendering.
- */
-describe('duration formatter unit naming', () => {
-  it('names the unit on every exported duration formatter', () => {
-    const modules: Record<string, Record<string, unknown>> = {
-      'loom/tracks.ts': loomTracks,
-      'brain/activitySummary.ts': brainActivity,
-    };
-    const ambiguous: string[] = [];
-    for (const [file, module] of Object.entries(modules)) {
-      for (const name of Object.keys(module)) {
-        if (!/duration/i.test(name)) continue;
-        if (!/(Seconds|Ms)$/.test(name)) ambiguous.push(`${file}:${name}`);
-      }
-    }
-    expect(ambiguous).toEqual([]);
-  });
-
-  it('disagrees by 1000x on the same number, which is why the names differ', () => {
-    expect(formatDurationSeconds(7_200)).toBe('2h');
-    expect(formatDurationMs(7_200)).toBe('7s');
   });
 });

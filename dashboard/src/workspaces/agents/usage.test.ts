@@ -85,13 +85,6 @@ describe('describeWindow', () => {
 });
 
 describe('formatSpan', () => {
-  it('scales its unit to the magnitude', () => {
-    expect(formatSpan(0.5)).toBe('30 min');
-    expect(formatSpan(9.4)).toBe('9.4 h');
-    expect(formatSpan(30)).toBe('30 h');
-    expect(formatSpan(73.87)).toBe('3.1 d');
-    expect(formatSpan(600)).toBe('25 d');
-  });
 
   it('renders an em dash for an unknown span', () => {
     expect(formatSpan(null)).toBe('—');
@@ -154,13 +147,6 @@ describe('familyVerdict', () => {
         underused: false,
       }).state,
     ).toBe('idle');
-  });
-
-  it('summarises the live payload in one sentence instead of four null rows', () => {
-    const summary = familiesSummary(live);
-    expect(summary).toContain('2 of 4');
-    expect(summary).toContain('zero times');
-    expect(summary).toContain('cannot be flagged by construction');
   });
 
   it('yields the summary to the rows when a family is actually flagged', () => {

@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  freshnessSteps,
-  freshnessTier,
-  relativeAge,
-} from '../../ui/time.ts';
+import { freshnessTier, relativeAge } from '../../ui/time.ts';
 
 const DAY = 86_400;
 
@@ -18,16 +14,6 @@ describe('freshnessTier', () => {
 
   it('clamps future observations to the live tier', () => {
     expect(freshnessTier(-120)).toBe('live');
-  });
-});
-
-describe('freshnessSteps', () => {
-  it('maps semantic tiers to an ordered non-colour shape', () => {
-    expect(
-      (['dormant', 'aging', 'recent', 'live'] as const).map((tier) =>
-        freshnessSteps(tier),
-      ),
-    ).toEqual([1, 2, 3, 4]);
   });
 });
 

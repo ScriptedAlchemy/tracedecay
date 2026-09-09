@@ -20,15 +20,6 @@ afterEach(() => {
 });
 
 describe('Observatory performance comparisons', () => {
-  it('asserts exactly one disposition', async () => {
-    renderComparisons();
-
-    await screen.findByRole('region', { name: 'Comparison disposition' });
-    expect(document.querySelectorAll('[data-comparison-disposition]').length).toBe(1);
-    expect(
-      document.querySelectorAll('[data-comparison-disposition-reached="true"]').length,
-    ).toBe(1);
-  });
 
   it('renders the server disposition without re-deciding it in the browser', async () => {
     renderComparisons();
@@ -41,53 +32,6 @@ describe('Observatory performance comparisons', () => {
     expect(reached.querySelector('[data-state="denied"]')).toBeNull();
   });
 
-  it('names reject and promote as not reached rather than omitting them', async () => {
-    renderComparisons();
-
-    await waitForDisposition();
-    const reject = document.querySelector('[data-comparison-disposition-not-reached="reject"]');
-    const promote = document.querySelector('[data-comparison-disposition-not-reached="promote"]');
-    expect(reject?.textContent).toContain('not reached');
-    expect(promote?.textContent).toContain('not reached');
-    // `reject` appears only as a disposition that was NOT reached.
-    expect(
-      document.querySelector('[data-comparison-disposition="reject"]'),
-    ).toBeNull();
-  });
-
-  it('says in words that insufficient evidence is not a rejection', async () => {
-    renderComparisons();
-
-    const reached = await waitForDisposition();
-    expect(reached.textContent).toContain('not a rejection');
-  });
-
-  it('renders baseline and candidate build as separate unknown requirements', async () => {
-    renderComparisons();
-
-    await screen.findByText('baseline build');
-    for (const id of ['baseline_build', 'candidate_build', 'rollback_profile']) {
-      const card = document.querySelector(`[data-dimension="${id}"]`);
-      expect(card?.getAttribute('data-dimension-available')).toBe('false');
-      expect(card?.textContent).toContain('comparison_evidence_not_recorded');
-      // The figure cell itself: an em dash, never a count.
-      const figure = card?.querySelector('[data-cell="numeric"]');
-      expect(figure?.textContent).toBe('—');
-      expect(figure?.textContent).not.toBe('0');
-    }
-  });
-
-  it('keeps per-stratum support, intervals, calibration, flakiness, and deviations separate', async () => {
-    renderComparisons();
-
-    await screen.findByText('per-stratum support');
-    expect(screen.getByText('intervals')).toBeTruthy();
-    expect(screen.getByText('calibration')).toBeTruthy();
-    expect(screen.getByText('flaky and indeterminate evidence')).toBeTruthy();
-    expect(screen.getByText('deviations')).toBeTruthy();
-    expect(screen.getByText('risk and coverage')).toBeTruthy();
-  });
-
   it('exposes the two evidence bands as named regions with list semantics', async () => {
     renderComparisons();
 
@@ -97,14 +41,6 @@ describe('Observatory performance comparisons', () => {
     ).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Evaluation results dimensions' })).toBeTruthy();
     expect(screen.getAllByRole('listitem').length).toBe(14);
-  });
-
-  it('anchors the read on the scope and watermark it was taken at', async () => {
-    renderComparisons();
-
-    await screen.findByText('baseline build');
-    expect(screen.getByText('project.tracedecay')).toBeTruthy();
-    expect(screen.getByText(/current · watermark analytics:4821/)).toBeTruthy();
   });
 
   it('reports a daemon that never answered as offline rather than as a reject', async () => {

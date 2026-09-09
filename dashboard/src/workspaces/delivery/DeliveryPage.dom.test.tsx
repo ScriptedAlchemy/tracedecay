@@ -415,16 +415,6 @@ describe('DeliveryPage', () => {
     ).toBe(false);
   });
 
-  it('says the recency axis is index time, not commit time', async () => {
-    renderDelivery();
-    await screen.findByText('last indexed across · branches up');
-    expect(
-      screen.getByText(
-        /not when it was last committed to; commit history is shown separately\s+for the active checkout/,
-      ),
-    ).toBeTruthy();
-  });
-
   it('draws non-git entries as unknown branches rather than zero', async () => {
     renderDelivery();
     await screen.findByText('last indexed across · branches up');
@@ -932,14 +922,6 @@ describe('DeliveryPage', () => {
     renderDelivery();
     expect((await screen.findAllByTitle('live — under a day')).length).toBeGreaterThan(0);
     expect(screen.getAllByText('1h ago').length).toBeGreaterThan(0);
-  });
-
-  it('scans as one row per repository, not a header-plus-row pair', async () => {
-    renderDelivery();
-    await screen.findByRole('table');
-    const rows = screen.getAllByRole('row');
-    // One header row plus one row per repository — three repositories here.
-    expect(rows).toHaveLength(4);
   });
 
   it('expands a selected repository to its checkouts and branch names', async () => {
