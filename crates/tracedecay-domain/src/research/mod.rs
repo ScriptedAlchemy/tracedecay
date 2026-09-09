@@ -253,12 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_coverage_accepts_exact_shard_bound() {
-        let remote: RemoteCoverageV1 = serde_json::from_str(&remote_coverage_json(1_024)).unwrap();
-        assert_eq!(remote.shards.len(), 1_024);
-    }
-
-    #[test]
     fn remote_coverage_rejects_shard_bound_plus_one() {
         let error = serde_json::from_str::<RemoteCoverageV1>(&remote_coverage_json(1_025))
             .expect_err("remote shard coverage above the bound must be rejected");

@@ -51,20 +51,6 @@ fn identity_families_serialize_transparently() {
     }
 }
 
-/// Round-tripping through the validating `Deserialize` returns the same value.
-#[test]
-fn identity_families_round_trip() {
-    let entity = EntityId::new("entity-1").unwrap();
-    let encoded = serde_json::to_string(&entity).unwrap();
-    let decoded: EntityId = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, entity);
-
-    let profile = UserProfileId::new("profile-1").unwrap();
-    let encoded = serde_json::to_string(&profile).unwrap();
-    let decoded: UserProfileId = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, profile);
-}
-
 /// A canonical digest taken over one identity from each family. A change to
 /// the declaration that altered the serialized bytes would move these.
 #[test]

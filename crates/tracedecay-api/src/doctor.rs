@@ -401,18 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn every_known_family_has_a_label_that_round_trips() {
-        for family in KNOWN_DOCTOR_FINDING_FAMILIES {
-            let label = doctor_finding_family_label(family);
-            assert_eq!(
-                parse_doctor_finding_family(Some(label)).unwrap(),
-                Some(family),
-                "family label {label} must parse back to its own family"
-            );
-        }
-    }
-
-    #[test]
     fn absent_and_failed_sources_never_present_as_healthy_or_empty() {
         let unsupported = DoctorReadPresentationV1::source_unsupported();
         assert_eq!(

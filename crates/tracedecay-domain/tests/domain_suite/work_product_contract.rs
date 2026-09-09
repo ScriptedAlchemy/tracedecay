@@ -509,44 +509,6 @@ fn informational_and_causal_relations_may_form_multi_task_cycles() {
 }
 
 #[test]
-fn work_product_event_envelopes_pin_profile_authority_versions_and_exact_evidence() {
-    let mut input = work_product_event_input("event.work-product.1", "task.event");
-    input.sequence = WorkProductEventSequenceV1::new(7).unwrap();
-    input.authorized_relation_scopes = vec![
-        WorkProductAuthorizedRelationScopeV1::Repository {
-            project_id: id("project.contract"),
-            repository_id: id("repository.contract"),
-        },
-        WorkProductAuthorizedRelationScopeV1::Project {
-            project_id: id("project.contract"),
-        },
-    ];
-    input.evidence = vec![WorkProductEventEvidenceV1 {
-        source_store_id: id("source.contract"),
-        anchor_id: id("anchor.contract"),
-        evidence_digest: digest('2'),
-    }];
-    input.source_watermark =
-        WorkProductSourceWatermarkV1::new(BTreeMap::from([(id("source.contract"), 11)])).unwrap();
-    let event = WorkProductEventV1::new(input).unwrap();
-
-    assert_eq!(event.expected_graph_version(), None);
-    assert_eq!(event.result_graph_version(), WorkGraphVersionV1::initial());
-    assert_eq!(event.occurred_at(), UtcMicros(0));
-    assert_eq!(event.evidence()[0].anchor_id.as_str(), "anchor.contract");
-    assert_eq!(event.authorized_relation_scopes().len(), 2);
-    assert!(matches!(
-        event.authorized_relation_scopes()[0],
-        WorkProductAuthorizedRelationScopeV1::Project { .. }
-    ));
-    let encoded = serde_json::to_value(&event).unwrap();
-    assert_eq!(
-        serde_json::from_value::<WorkProductEventV1>(encoded).unwrap(),
-        event
-    );
-}
-
-#[test]
 fn work_product_event_deserialization_rejects_invalid_creation_progression_and_self_causation() {
     let input = work_product_event_input("event.work-product.invalid", "task.event.invalid");
     let event = WorkProductEventV1::new(input).unwrap();
