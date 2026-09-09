@@ -46,14 +46,14 @@ import {
  * provider-qualified rows. The reasoning, in full, is in `weave.ts`:
  *
  *   - Threads are real. Every mark is one session at its real start time, as
- *     thick as its real message count, in its host's lane.
+ *     thick as its real message count, grouped by recorded parent identity.
  *   - Extent is honest per thread. A recorded end wins, then a last-message
  *     observation; otherwise the thread stays visibly open.
  *   - Commit, edited-file and branch/worktree relations come directly from
  *     their durable authorities and retain provider and coverage.
  *
  * Selecting a thread isolates it and pulls its chain — prompt, turns, tools —
- * from the LCM session endpoint into the rail, then appends the selected
+ * from the LCM session endpoint into the main field, then appends the selected
  * session's persisted edits, commit attributions and branch/worktree spans.
  */
 export function LoomPage() {
@@ -140,6 +140,10 @@ function TemporalBody({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
 }) {
+  const [params, setParams] = useSearchParams();
+  const rawWindow = params.get('loomOverviewWindow')?.split(',').map(Number);
+  const overviewWindow = rawWindow?.length === 2 && rawWindow.every(Number.isFinite) && rawWindow[1]! > rawWindow[0]!
+    ? { start: rawWindow[0]!, end: rawWindow[1]! } : null;
   const data = envelope.payload;
   const rows = data.sessions ?? [];
 
@@ -269,7 +273,7 @@ function TemporalBody({
         role="region"
         aria-label="Loom content"
         tabIndex={0}
-        className={cn("flex min-h-0 flex-1 flex-col gap-1 overflow-auto px-3 py-1 [scrollbar-gutter:stable]", !selected && "xl:flex-row")}
+        className={cn("flex min-h-0 flex-1 flex-col gap-1 overflow-auto px-3 py-1 [scrollbar-gutter:stable]")}
       >
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           {selectedId && !selected ? <StateChip kind="unavailable" detail="Selected session is outside this loaded page; choose a retained session." /> : null}
@@ -284,6 +288,13 @@ function TemporalBody({
               <WeaveCanvas
                 weave={weave}
                 hierarchy={hierarchy}
+                initialWindow={overviewWindow}
+                onWindowChange={(window) => {
+                  const next = new URLSearchParams(params);
+                  if (window) next.set('loomOverviewWindow', `${window.start},${window.end}`);
+                  else next.delete('loomOverviewWindow');
+                  setParams(next, { replace: true });
+                }}
                 selectedId={selectedId}
                 onSelect={onSelect}
                 ariaLabel={weaveDescription(weave)}
@@ -299,12 +310,12 @@ function TemporalBody({
           )}
         </div>
 
-        <aside className={cn("flex w-full shrink-0 flex-col gap-3", selected ? "order-first" : "xl:w-[22rem]")}>
-          <details open={selected ? undefined : true}>
-            {selected && <summary className="min-h-6 cursor-pointer text-3xs leading-6 text-text-muted">
+        <aside className={cn("flex w-full shrink-0 flex-col gap-3", "order-first")}>
+          <details>
+            {<summary className="min-h-6 cursor-pointer text-3xs leading-6 text-text-muted">
               Source coverage · {envelope.freshness.state} · {data.source_statuses.map((source) => `${source.label}: ${source.state}`).join(' · ')}
             </summary>}
-            <div className={cn("flex gap-3", selected ? "flex-wrap [&>*]:min-w-64 [&>*]:flex-1" : "flex-col")}>
+            <div className={cn("flex gap-3", "flex-wrap [&>*]:min-w-64 [&>*]:flex-1")}>
           <Panel legend="Causal crossings">
             <div className="flex flex-col gap-2">
               <p className="text-2xs leading-relaxed text-text-muted">
@@ -443,7 +454,7 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
   const busiest = weave.hosts.reduce((max, host) => Math.max(max, host.count), 0);
   return (
     <div className="flex flex-col gap-1.5">
-      <Legend>time left to right · host lanes · thickness = messages</Legend>
+      <Legend>time left to right · session lanes · thickness = messages</Legend>
       <div className="flex flex-wrap border-y border-edge-subtle bg-surface-1">
         {weave.hosts.map((host) => (
           <div
@@ -466,24 +477,24 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
         className="flex flex-wrap gap-x-4 gap-y-1 text-3xs text-text-muted"
       >
         <span className="flex items-center gap-1.5">
-          <span aria-hidden className="h-0.5 w-3 bg-[var(--ev-measured)]" />
+          <span aria-hidden className="h-0.5 w-3 bg-text-secondary" />
           measured session end
         </span>
         <span className="flex items-center gap-1.5">
-          <span aria-hidden className="h-0.5 w-3 bg-[var(--ev-associated)]" />
+          <span aria-hidden className="h-0.5 w-3 border-t border-dashed border-text-secondary" />
           last-message observation
         </span>
         <span className="flex items-center gap-1.5">
           <span
             aria-hidden
-            className="h-0.5 w-3 border-t border-dashed border-[var(--ev-unknown)]"
+            className="h-0.5 w-3 border-t border-dashed border-text-muted"
           />
           extent unknown
         </span>
       </div>
       <p className="text-2xs leading-relaxed text-text-muted">
         Each thread is one session: horizontal position = when it started (exact,
-        on the printed axis), lane = the host that ran it, thickness = its message
+        on the printed axis), each lane = one session in recorded parent order, thickness = its message
         count on a log scale. A thread drawn solid to its right endpoint has a served
         end time; a thread ending in a short dashed stub does not —{' '}
         <span className="text-text-secondary">
@@ -497,8 +508,8 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
         {weave.undated > 0
           ? `${weave.undated} ${weave.undated === 1 ? 'row' : 'rows'} carried no usable start time and ${weave.undated === 1 ? 'is' : 'are'} not on the field at all. `
           : ''}
-        Sub-lane offset inside a host is packing so threads do not overlap; it
-        encodes nothing.
+        Lane spacing is presentation only. Curves express recorded parent identity,
+        not the time of a spawn, handoff or rejoin.
       </p>
     </div>
   );
@@ -554,9 +565,9 @@ function ThreadTable({
                     type="button"
                     onClick={() => onSelect(selectedId === thread.id ? null : thread.id)}
                     aria-pressed={selectedId === thread.id}
-                    // The only keyboard and touch path to selecting a thread —
-                    // the weave canvas beside it is the picture, this is the
-                    // control — so the row carries the touch minimum on its own
+                    // The table complements canvas picking with exact text and
+                    // a touch target that remains usable at narrow widths.
+                    // The row carries the touch minimum on its own
                     // box, in BOTH axes. At 320 the session column is the one
                     // the five-column table squeezes (38px), and the width half
                     // of the minimum is what stops it: the column holds 44 and
@@ -606,7 +617,7 @@ function weaveDescription(weave: ReturnType<typeof composeWeave>): string {
   const hosts = weave.hosts
     .map((host) => `${host.count} on ${host.label}`)
     .join(', ');
-  return `Weave: ${weave.threads.length} sessions as horizontal threads, time running left to right, one lane group per host (${hosts || 'none'}). ${weave.openEndedCount} have no recorded extent and are drawn open. Provider-qualified causal rows are served and listed in the selected workspace, but are not geometrically drawn on this weave. The thread table below is the accessible equivalent.`;
+  return `Weave: ${weave.threads.length} sessions as horizontal threads, time running left to right, one lane per session with recorded parent grouping; providers ${hosts || 'none'}. ${weave.openEndedCount} have no recorded extent and are drawn open. Only recorded parent identities are drawn between sessions; timed spawn and rejoin remain unavailable. Other provider-qualified causal rows are listed in the selected workspace. The thread table below is the accessible equivalent.`;
 }
 
 /** Composed empty state: the frame stays, so an empty weave reads as an
