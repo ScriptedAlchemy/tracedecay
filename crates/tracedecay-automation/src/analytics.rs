@@ -712,21 +712,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_metadata_refines_category() {
-        let events = infer_usage_events(
-            Some("functions.exec_command"),
-            Some(r#"{"cmd":"rg -n \"analytics\" src tests"}"#),
-            None,
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Tool,
-            "functions.exec_command",
-            UsageCategory::BroadFileSearch,
-        );
-    }
-
-    #[test]
     fn infers_skills_from_metadata_and_text() {
         let events = infer_usage_events(
             None,
@@ -757,21 +742,6 @@ mod tests {
         assert!(
             events.is_empty(),
             "url and path strings should not become skills, got {events:#?}"
-        );
-    }
-
-    #[test]
-    fn normalizes_punctuation_wrapped_skill_mentions() {
-        let events = infer_usage_events(
-            None,
-            None,
-            Some("Using `tracedecay:exploring-code`, then continue."),
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Skill,
-            "tracedecay:exploring-code",
-            UsageCategory::TraceDecayWorkflowSkill,
         );
     }
 

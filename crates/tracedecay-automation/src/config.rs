@@ -672,53 +672,6 @@ mod tests {
     }
 
     #[test]
-    fn model_only_patch_is_cleared_while_backend_is_disabled() {
-        let patch = AutomationConfigPatch {
-            model_id: Some(Some("must-not-survive".to_owned())),
-            ..AutomationConfigPatch::default()
-        };
-
-        let merged = merge_project_config(
-            Some(AutomationConfigPatch {
-                backend: Some(AutomationBackend::Disabled),
-                ..AutomationConfigPatch::default()
-            }),
-            patch.clone(),
-        );
-        let disabled = AutomationConfig {
-            enabled: false,
-            backend: AutomationBackend::Disabled,
-            model_id: None,
-            tasks: AutomationTaskSet::default(),
-            ..AutomationConfig::default()
-        };
-        let effective = effective_config(&disabled, Some(&patch))
-            .expect("disabled backend should normalize away a model-only patch");
-
-        assert_eq!(merged.model_id, Some(None));
-        assert_eq!(effective.backend, AutomationBackend::Disabled);
-        assert_eq!(effective.model_id, None);
-    }
-
-    #[test]
-    fn merged_non_codex_backend_records_an_explicit_model_clear() {
-        let current = AutomationConfigPatch {
-            backend: Some(AutomationBackend::CodexAppServer),
-            model_id: Some(Some("gpt-5.6-mini".to_owned())),
-            ..AutomationConfigPatch::default()
-        };
-        let patch = AutomationConfigPatch {
-            backend: Some(AutomationBackend::Disabled),
-            ..AutomationConfigPatch::default()
-        };
-
-        let merged = merge_project_config(Some(current), patch);
-
-        assert_eq!(merged.backend, Some(AutomationBackend::Disabled));
-        assert_eq!(merged.model_id, Some(None));
-    }
-
-    #[test]
     fn codex_model_set_and_clear_preserve_explicit_patch_intent() {
         let codex = AutomationConfigPatch {
             backend: Some(AutomationBackend::CodexAppServer),

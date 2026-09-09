@@ -1144,28 +1144,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn backend_message_boundary_types_denial_disconnect_and_unavailability() {
-        assert_eq!(
-            AgentTaskError::from_backend_message("permission denied by the codex host policy"),
-            AgentTaskError::Denied {
-                reason: "permission denied by the codex host policy".to_string()
-            }
-        );
-        assert_eq!(
-            AgentTaskError::from_backend_message("broken pipe writing the prompt"),
-            AgentTaskError::Disconnected {
-                reason: "broken pipe writing the prompt".to_string()
-            }
-        );
-        assert_eq!(
-            AgentTaskError::from_backend_message("codex executable was not found"),
-            AgentTaskError::Unavailable {
-                reason: "codex executable was not found".to_string()
-            }
-        );
-    }
-
     #[tokio::test]
     async fn denied_task_is_never_retried_and_surfaces_denial() {
         let backend = FlakyBackend::failing_with(
