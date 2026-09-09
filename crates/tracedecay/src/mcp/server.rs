@@ -341,7 +341,7 @@ pub struct McpServer {
     profile_root: Option<PathBuf>,
     profile_identity: Option<Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
     profile_retained_authority:
-        Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
+        Option<tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1>,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Registered project session store. Startup recovery, ingestion,
     /// retrieval, and host admission all borrow this one lease and never
@@ -1038,7 +1038,7 @@ impl McpServer {
             .zip(profile_session_db.as_ref())
             .and_then(|(profile, registered)| {
                 let serving =
-                    crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
+                    tracedecay_session_runtime::retained::profile_session_retrieval_serving_identity(
                         profile,
                         &registered.binding().shard_id,
                         registered.db_path(),
@@ -1100,7 +1100,7 @@ impl McpServer {
             .zip(profile_session_retrieval_root.as_ref())
         {
             Some((identity, root)) => {
-                match crate::daemon::retained_owner::profile_retained_connection_authority(
+                match tracedecay_session_runtime::retained::profile_retained_connection_authority(
                     identity.as_ref(),
                     root.identity(),
                 ) {

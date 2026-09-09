@@ -261,12 +261,9 @@ mod tests {
             let profile_root = temp.path().join("profile");
             let identity =
                 profile_identity::load_or_create(&profile_root).expect("profile identity");
-            let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-                &profile_root,
-                29,
-                label,
-            )
-            .expect("daemon database scope");
+            let database_scope =
+                tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 29, label)
+                    .expect("daemon database scope");
             let registry = Arc::new(
                 DaemonSessionRuntimeRegistryV1::open(identity)
                     .await
@@ -285,10 +282,7 @@ mod tests {
                 .project_memory(project_id.clone(), [project_root.clone()])
                 .await
                 .expect("mounted project memory");
-            let profile_database = registry
-                .profile_database()
-                .await
-                .expect("profile database");
+            let profile_database = registry.profile_database().await.expect("profile database");
             Self {
                 registry,
                 profile_database,

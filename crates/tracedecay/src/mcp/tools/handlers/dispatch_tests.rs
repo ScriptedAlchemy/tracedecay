@@ -1727,7 +1727,7 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
             .expect("profile root identity"),
     );
     let profile_retained_authority =
-        crate::daemon::retained_owner::profile_retained_connection_authority(
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
             &profile_identity,
             &session_identity,
         )
@@ -1804,7 +1804,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
             .expect("profile root identity"),
     );
     let profile_retained_authority =
-        crate::daemon::retained_owner::profile_retained_connection_authority(
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
             &profile_identity,
             &session_identity,
         )
@@ -1860,7 +1860,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
                         .with_profile_retained_authority(Some(profile_retained_authority))
                         .with_profile_session_refresh(mounted.then_some(
                             refresh
-                                as &dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1,
+                                as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
                         )),
                     ..Default::default()
                 },

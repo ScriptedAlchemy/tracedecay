@@ -12,9 +12,11 @@ use tracedecay_contracts::retained_surfaces::{
 use tracedecay_contracts::{RetainedSurfaceExecutionErrorV1, RetainedSurfacePortsV1};
 use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProjectId};
-use tracedecay_session_runtime::retained::map_execution_error;
+use tracedecay_session_runtime::retained::{
+    ProjectRetainedSessionAuthoritiesV1, RetainedSessionRefreshPortV1, map_execution_error,
+};
 use tracedecay_store_runtime::retained_memory::{
-    RetainedMemoryTargetAuthorityV1, RetainedMemoryTargetV1,
+    MemoryTargetAccessV1, RetainedMemoryTargetAuthorityV1, RetainedMemoryTargetV1,
 };
 
 use crate::tracedecay::TraceDecay;
@@ -25,14 +27,6 @@ mod memory_target_journeys;
 mod profile_refresh_journeys;
 #[cfg(test)]
 mod session_retained_effect_tests;
-
-pub(crate) use tracedecay_session_runtime::retained::{
-    ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,
-    ProjectRetainedSessionAuthoritiesV1, RetainedSessionRefreshPortV1,
-    execute_profile_retained_application, profile_retained_connection_authority,
-    profile_session_retrieval_serving_identity,
-};
-pub(crate) use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
 
 /// Exact authorities used by independently mounted project retained families.
 /// A missing session or LCM authority cannot prevent memory from registering.
@@ -148,9 +142,11 @@ pub(crate) fn retained_surface_ports(
     Arc::new(ports)
 }
 
-/// Root-selected automation runtime. The curator still consumes `TraceDecay`
-/// inside `dashboard_automation` (not this lane); this assembler only passes
-/// the already-selected lock and invocation service upward.
+/// Single `RetainedAutomationExecutionPortV1` impl at the composition root.
+/// The curator still requires the selected `TraceDecay` lock inside
+/// `dashboard_automation`; this type forwards that already-selected runtime
+/// and the invocation service. It is not a compatibility rename of
+/// `DirectRetainedAutomationPortV1`.
 struct AssembledRetainedAutomation {
     cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
     invocation_service: DaemonInvocationService,
