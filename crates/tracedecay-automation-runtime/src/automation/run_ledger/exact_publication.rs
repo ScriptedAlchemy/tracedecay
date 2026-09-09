@@ -54,11 +54,13 @@ pub(super) fn acquire_run_ledger_lock(path: &Path) -> std::io::Result<std::fs::F
 }
 
 fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
+    let lock_path =
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(lock_path);
     if let Some(parent) = lock_path.parent() {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
     tracedecay_runtime_core::storage::reject_symlink_components(
-        lock_path,
+        &lock_path,
         "automation run ledger lock",
     )?;
     let parent = lock_path.parent().ok_or_else(|| {
@@ -99,12 +101,16 @@ pub(super) fn open_run_ledger_nofollow(
     append: bool,
     create: bool,
 ) -> std::io::Result<Option<std::fs::File>> {
+    // cap-std ambient opens walk each component. On macOS `/var` is a
+    // firmlink to `/private/var`; opening the unresolved tempfile spelling
+    // can ENOENT under concurrent create. Resolve the existing prefix first.
+    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
     if let Some(parent) = path.parent()
         && create
     {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation run ledger")?;
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation run ledger")?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
