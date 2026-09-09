@@ -39,6 +39,7 @@ mod agent_cmd;
 mod analytics_cmd;
 mod automation_cli;
 mod cli;
+mod cloud;
 mod commands;
 mod cost_cmd;
 mod display;
@@ -617,6 +618,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // dashboard bundle; the composition library reads both through this
     // set-once registration.
     tracedecay::register_product_runtime(crate::product_runtime::provider())?;
+    crate::cloud::admit_sync_probes();
     // Every process-global runtime port the extracted crates invert back into
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
@@ -1843,7 +1845,11 @@ async fn dispatch_configuration_command(
 async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Doctor => {
-            hotpath::future!(tracedecay::doctor::run_doctor(), label = "cli.doctor.run").await?;
+            hotpath::future!(
+                tracedecay::doctor::run_doctor(crate::cloud::doctor_network_probes()),
+                label = "cli.doctor.run"
+            )
+            .await?;
         }
         Commands::Cost {
             range,

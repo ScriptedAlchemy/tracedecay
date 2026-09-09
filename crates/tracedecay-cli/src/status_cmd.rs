@@ -105,10 +105,10 @@ impl OnlineRefreshPlan {
         OnlineRefresh {
             worldwide_total: self
                 .worldwide_total
-                .then(tracedecay::cloud::fetch_worldwide_total)
+                .then(crate::cloud::fetch_worldwide_total)
                 .flatten(),
             country_flags: if self.country_flags {
-                tracedecay::cloud::fetch_country_flags()
+                crate::cloud::fetch_country_flags()
             } else {
                 Vec::new()
             },

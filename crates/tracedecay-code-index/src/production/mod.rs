@@ -8,7 +8,7 @@ use std::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_code_extraction::incremental::ParseError;
+use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
@@ -1857,12 +1857,20 @@ where
             let cancellation = ExtractionControlBridge { control };
             let extraction = match parse_for_indexing(
                 retained_parses,
-                config,
-                snapshot,
-                repository_parse_identity,
+                ParseDocumentIdentity::Repository {
+                    project_id: config.project_id.clone(),
+                    repository_id: snapshot.repository.clone(),
+                    worktree_id: snapshot.worktree.clone(),
+                    reference: snapshot.reference.clone(),
+                    commit: snapshot.source_revision.clone(),
+                    tree: repository_parse_identity.tree.clone(),
+                    dirty: repository_parse_identity.dirty,
+                    logical_path: file.logical_path.clone(),
+                },
                 file,
                 captured,
                 parser,
+                control,
             ) {
                 Ok((parse_artifacts, parsed_len)) => {
                     Self::checkpoint(control)?;
@@ -1881,16 +1889,16 @@ where
                             error => CodeIndexProductionErrorV1::Extraction(error),
                         })?
                 }
-                // One file exceeding the bounded parse budget is evidence about
-                // that file, never about the generation: record it as a typed
-                // unsupported document with a reason and keep building, instead
-                // of failing the whole reconcile cycle and leaving the served
-                // generation permanently stale.
-                Err(CodeIndexProductionErrorV1::RetainedParse(ParseError::TimedOut { .. })) => {
+                // A parse quantum is scheduling state, never evidence that the
+                // source is unsupported. Only the enclosing operation can stop
+                // admitted continuation, and it must not publish partial identity.
+                Err(
+                    error @ CodeIndexProductionErrorV1::RetainedParse(ParseError::TimedOut {
+                        ..
+                    }),
+                ) => {
                     Self::checkpoint(control)?;
-                    extractor
-                        .extract_parse_timed_out(&receipt_bound, descriptor)
-                        .map_err(CodeIndexProductionErrorV1::Extraction)?
+                    return Err(error);
                 }
                 Err(error) => return Err(error),
             };

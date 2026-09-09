@@ -1877,6 +1877,7 @@ fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
         RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
         RetrievalFailure::IncompatibleProjection { .. } => OmissionReason::Unsupported,
         RetrievalFailure::StaleSource => OmissionReason::Stale,
+        RetrievalFailure::CandidateSourcesPruned { .. } => OmissionReason::Budget,
         RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
             OmissionReason::Failed
         }
@@ -2012,7 +2013,9 @@ where
             let evidence =
                 terminal_lane_evidence(finished_at, prepared.generation().clone(), omission);
             match reason {
-                RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
+                RetrievalFailure::InvalidRequest { .. }
+                | RetrievalFailure::Internal { .. }
+                | RetrievalFailure::CandidateSourcesPruned { .. } => {
                     RetrievalPortOutcome::Failed(evidence)
                 }
                 RetrievalFailure::AuthorityUnavailable { .. }

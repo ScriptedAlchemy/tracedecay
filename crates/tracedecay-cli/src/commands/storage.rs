@@ -2,7 +2,9 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tracedecay::profile_registry_maintenance::{remove_store_directory, verify_store_path_absent};
+use tracedecay_global_db::profile_registry_maintenance::{
+    ProfileRegistryMaintenanceRuntime, remove_store_directory, verify_store_path_absent,
+};
 
 use crate::global;
 
@@ -176,6 +178,45 @@ impl ProfileOfflineAuthority {
             Self::QuiescedDaemon(guard) => guard.finish(),
         }
     }
+}
+
+/// Opens an existing exact-final profile registry without creating one, then
+/// admits the lease into [`ProfileRegistryMaintenanceRuntime`].
+pub(crate) async fn try_admit_profile_registry(
+    profile_root: &Path,
+) -> tracedecay_domain::errors::Result<Option<ProfileRegistryMaintenanceRuntime>> {
+    if !profile_root.try_exists().map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Database {
+            operation: "inspect existing profile root".to_string(),
+            message: error.to_string(),
+        }
+    })? {
+        return Ok(None);
+    }
+    let profile_root = profile_root.canonicalize().map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Database {
+            operation: "resolve existing profile registry".to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    if !profile_root
+        .join("global.db")
+        .try_exists()
+        .map_err(
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
+                operation: "inspect existing profile registry".to_string(),
+                message: error.to_string(),
+            },
+        )?
+    {
+        return Ok(None);
+    }
+    let identity = tracedecay_daemon_identity::profile_identity::load_existing(&profile_root)?;
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity).await?;
+    let profile_database = registry.profile_database().await?;
+    Ok(Some(
+        ProfileRegistryMaintenanceRuntime::from_admitted_lease(profile_database),
+    ))
 }
 
 /// Takes the whole profile offline for a destructive maintenance command,
@@ -428,8 +469,7 @@ async fn wipe_under_profile_offline(
         let registry = if all {
             None
         } else {
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::try_open_existing(profile_root)
-            .await?
+            try_admit_profile_registry(profile_root).await?
         };
 
         // A complete wipe is deliberately schema-independent: the databases may
@@ -632,17 +672,16 @@ fn handle_list_inner(
             } else {
                 0
             };
-            let project_key =
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(path);
+            let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(path);
             let token_row = token_rows.iter().find(|row| {
-            row.get("project")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| {
-                    tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(
-                        Path::new(value),
-                    ) == project_key
-                })
-        });
+                row.get("project")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| {
+                        tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(Path::new(
+                            value,
+                        )) == project_key
+                    })
+            });
             // `None` is a total this run could not read, which is not the same
             // answer as a project that has saved nothing.
             let tokens = token_row
@@ -762,9 +801,7 @@ fn append_orphan_manifest_rows(
     };
     let registered: std::collections::HashSet<String> = project_paths
         .iter()
-        .map(|path| {
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(path)
-        })
+        .map(|path| tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(path))
         .collect();
     let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
         profile_root,
@@ -776,7 +813,7 @@ fn append_orphan_manifest_rows(
         {
             continue;
         }
-        let key = tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(
+        let key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(
             &plan.project.project_root,
         );
         if registered.contains(&key) {

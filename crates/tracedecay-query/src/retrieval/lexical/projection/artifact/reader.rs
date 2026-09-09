@@ -57,7 +57,7 @@ use super::super::{
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
     MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
-    field_admitted, lexical_checkpoint,
+    candidate_admission_outcome, field_admitted, lexical_checkpoint,
 };
 
 #[derive(Clone)]
@@ -573,7 +573,7 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
             return Ok(RetrieverOutcome::Stale(self.receipt.freshness().clone()));
         }
         let connection = self.lock_connection().map_err(map_query_artifact_error)?;
-        let batch = ArtifactQueryV1::new(
+        let outcome = ArtifactQueryV1::new(
             &connection,
             &self.metadata,
             &self.receipt,
@@ -581,7 +581,6 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
             &self.fuzzy_vocabulary,
         )?
         .lexical_batch(request)?;
-        let outcome = RetrieverOutcome::Complete(batch);
         crate::hotpath_metrics::record_lane(
             "query.lane.lexical.candidates",
             "query.lane.lexical.examined",
@@ -1507,7 +1506,7 @@ impl<'a> ArtifactQueryV1<'a> {
     fn lexical_batch(
         &self,
         request: &LexicalLaneRequest<'_>,
-    ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
+    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         let control = request.control;
         let fuzzy = self.fuzzy_expansions(request)?;
         let prepared = PreparedLexicalQueryV1::new(request);
@@ -1550,7 +1549,9 @@ impl<'a> ArtifactQueryV1<'a> {
                 Ok(())
             },
         )?;
-        let documents = self.lexical_documents(request, &fuzzy, &stats, &phrase_queries)?;
+        let mut pruned = Vec::new();
+        let documents =
+            self.lexical_documents(request, &fuzzy, &stats, &phrase_queries, &mut pruned)?;
         // The scan holds one transient row and retains complete rows only for
         // the cap-bounded winners. That avoids a second winner hydration pass
         // while preserving the same strict materialization ceiling.
@@ -1625,13 +1626,16 @@ impl<'a> ArtifactQueryV1<'a> {
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
-        Ok(capped_batch(
-            self.document_count,
-            eligible,
-            excluded,
-            truncated,
-            candidates,
-            evidence_by_occurrence,
+        Ok(candidate_admission_outcome(
+            capped_batch(
+                self.document_count,
+                eligible,
+                excluded,
+                truncated,
+                candidates,
+                evidence_by_occurrence,
+            ),
+            pruned,
         ))
     }
 
@@ -1764,6 +1768,7 @@ impl<'a> ArtifactQueryV1<'a> {
         fuzzy: &FuzzyExpansionsV1,
         stats: &LexicalStatsCacheV1,
         phrase_queries: &BTreeMap<String, DocumentQueryV1>,
+        pruned: &mut Vec<(String, u64)>,
     ) -> Result<DocumentQueryV1, RetrievalPortError> {
         let mut whole_terms = Vec::new();
         for term in &request.whole_terms {
@@ -1786,14 +1791,20 @@ impl<'a> ArtifactQueryV1<'a> {
                     let frequency = stats.whole_term_documents(&term);
                     sources.push((
                         frequency,
-                        DocumentQueryV1::term_except(term, subtoken_field.clone()),
+                        (
+                            term.clone(),
+                            DocumentQueryV1::term_except(term, subtoken_field.clone()),
+                        ),
                     ));
                 }
                 for subtoken in subtokens {
                     let frequency = stats.document_frequency(LexicalFieldV1::Subtoken, &subtoken);
                     sources.push((
                         frequency,
-                        DocumentQueryV1::term(subtoken_field.clone(), subtoken),
+                        (
+                            subtoken.clone(),
+                            DocumentQueryV1::term(subtoken_field.clone(), subtoken),
+                        ),
                     ));
                 }
             }
@@ -1808,7 +1819,10 @@ impl<'a> ArtifactQueryV1<'a> {
                     {
                         sources.push((
                             stats.whole_term_documents(&term),
-                            DocumentQueryV1::term_except_id(term_id, subtoken_field),
+                            (
+                                term,
+                                DocumentQueryV1::term_except_id(term_id, subtoken_field),
+                            ),
                         ));
                     }
                 }
@@ -1818,14 +1832,20 @@ impl<'a> ArtifactQueryV1<'a> {
                     {
                         sources.push((
                             stats.document_frequency(LexicalFieldV1::Subtoken, &subtoken),
-                            DocumentQueryV1::term_id(subtoken_field, term_id),
+                            (subtoken, DocumentQueryV1::term_id(subtoken_field, term_id)),
                         ));
                     }
                 }
             }
         }
         let mut admitted = phrase_queries.values().cloned().collect::<Vec<_>>();
-        admitted.extend(admit_candidate_sources(sources));
+        admitted.extend(
+            admit_candidate_sources(sources, |frequency, (term, _)| {
+                pruned.push((term.clone(), frequency as u64));
+            })
+            .into_iter()
+            .map(|(_, source)| source),
+        );
         union_document_queries(admitted)
     }
 

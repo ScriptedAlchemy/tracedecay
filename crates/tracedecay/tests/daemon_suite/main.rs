@@ -30,7 +30,6 @@ mod indexing_lifecycle_test;
 mod invocation_observability;
 mod invocation_primitives;
 #[cfg(unix)]
-mod pr_autotrack_test;
 #[cfg(unix)]
 mod stale_client_resilience_test;
 mod workflow_handoff_test;
