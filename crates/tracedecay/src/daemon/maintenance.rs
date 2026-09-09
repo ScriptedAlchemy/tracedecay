@@ -2184,8 +2184,8 @@ mod tests {
 
     use super::{
         CadenceInstant, MAINTENANCE_FUTURES_ACTIVE, MAINTENANCE_STORE_PAGE_LIMIT,
-        MaintenanceCadence, MaintenanceContinuation, MaintenanceCoordinator, MaintenanceTickOutcome,
-        RetentionOperatorLogLaneV1, SemanticVectorRetentionCensusOutcome,
+        MaintenanceCadence, MaintenanceContinuation, MaintenanceCoordinator,
+        MaintenanceTickOutcome, RetentionOperatorLogLaneV1, SemanticVectorRetentionCensusOutcome,
         SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry, TableGrowthObservation,
         compare_table_growth, cursor_after_attempted_units, retention_failure_is_by_design,
         run_maintenance_loop, run_resident_memory_sampler_loop, select_store_window,
