@@ -184,8 +184,8 @@ contract change instead.
 ## Running Specific Tests
 
 ```bash
-# All extractor tests for a specific language
-cargo nextest run -p tracedecay-code-extraction --test rust
+# All extractor tests for a specific language (a module of the `main` test binary)
+cargo nextest run -p tracedecay-code-extraction --test main -E 'test(/^rust::/)'
 
 # A single test by name
 cargo nextest run test_find_stale_files

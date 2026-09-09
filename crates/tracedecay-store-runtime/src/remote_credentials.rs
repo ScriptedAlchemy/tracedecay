@@ -57,12 +57,6 @@ pub enum DaemonRemoteCredentialRegistryErrorV1 {
     ResetRequired,
 }
 
-/// Shared provider of the canonical Remote Brain operational read. The
-/// composition root builds exactly one from the mounted session runtime
-/// registry; MCP, dashboard, and Doctor surfaces all read through it.
-pub type RemoteOperationalStatusProviderV1 =
-    Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>;
-
 const REMOTE_LISTENER_STOPPED: u8 = 0;
 const REMOTE_LISTENER_SERVING: u8 = 1;
 const REMOTE_LISTENER_DEGRADED: u8 = 2;

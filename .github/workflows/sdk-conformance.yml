@@ -109,7 +109,8 @@ jobs:
       - run: >-
           cargo nextest run
           --manifest-path crates/tracedecay-sdk/Cargo.toml
-          --test production_daemon
+          --test sdk_suite
+          -E 'test(/^production_daemon::/)'
           --run-ignored all
           --no-tests=fail
       - run: npm ci

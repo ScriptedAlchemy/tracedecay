@@ -1,3 +1,5 @@
+// Its own test binary, not a graph_db_suite module: this contract is not gated
+// on `test-helpers` and must keep compiling in a default-feature build.
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},

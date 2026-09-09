@@ -5,7 +5,7 @@ use tracedecay_rusqlite_runtime::{
 };
 use tracedecay_store::AdmissionConfigV1;
 
-use crate::runtime_test_support::{
+use super::runtime_test_support::{
     CountExecutor, Probe, TestDatabase, maintenance_binding, read_request, reader_locator,
 };
 

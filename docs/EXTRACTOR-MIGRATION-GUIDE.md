@@ -45,7 +45,7 @@ For each future extractor migration:
 
 1. Compare the local helper body against `crates/tracedecay-code-extraction/src/traversal.rs`, not just the helper name.
 2. Add or identify tests that cover each shared helper path used by the extractor. At minimum, cover direct-child lookup and nested descendant lookup when both are used.
-3. Run the focused extractor test module (its `crates/tracedecay-code-extraction/tests/<lang>.rs` module) before and after migration. If behavior changes, either revert the migration or document and test the intended behavior change.
+3. Run the focused extractor test module (its `crates/tracedecay-code-extraction/tests/main/<lang>.rs` module of the `main` test binary) before and after migration. If behavior changes, either revert the migration or document and test the intended behavior change.
 4. Run the shared traversal unit tests and `cargo check --lib` with the same feature profile used by the extractor tests.
 5. Leave language-specific traversal helpers local until their semantics are proven identical.
 
@@ -53,8 +53,8 @@ Validation commands used for the C/C++ pilot:
 
 ```sh
 cargo nextest run -p tracedecay-code-extraction --lib --no-default-features extraction::traversal::tests
-cargo nextest run -p tracedecay-code-extraction --no-default-features --test c
-cargo nextest run -p tracedecay-code-extraction --no-default-features --test cpp
+cargo nextest run -p tracedecay-code-extraction --no-default-features --test main -E 'test(/^c::/)'
+cargo nextest run -p tracedecay-code-extraction --no-default-features --test main -E 'test(/^cpp::/)'
 cargo check -p tracedecay-code-extraction --lib --no-default-features
 ```
 

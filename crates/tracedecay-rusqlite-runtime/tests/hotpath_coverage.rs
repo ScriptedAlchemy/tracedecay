@@ -1,3 +1,5 @@
+// Its own test binary, not a rusqlite_suite module: it sets HOTPATH_* process
+// environment variables in-process.
 //! Coverage for this crate's existing `#[hotpath::measure]` hot paths in
 //! both feature modes.
 //!

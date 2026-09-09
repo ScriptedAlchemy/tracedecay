@@ -1,0 +1,162 @@
+{
+  "partitions": [
+    {
+      "name": "root-lib",
+      "timeout_minutes": 110,
+      "packages": ["tracedecay", "tracedecay-cli", "tracedecay-search-eval"],
+      "targets": ["lib"],
+      "features": ["tracedecay/test-helpers"]
+    },
+    {
+      "name": "root-sessions",
+      "timeout_minutes": 80,
+      "packages": ["tracedecay", "tracedecay-cli", "tracedecay-search-eval"],
+      "targets": [
+        "test:session_suite",
+        "test:transcript_ingest_suite",
+        "test:storage_suite",
+        "test:storage_runtime_rusqlite_suite"
+      ],
+      "executables": ["bins", "example:tracedecay-host-cli-fixture"],
+      "features": ["tracedecay/test-helpers"]
+    },
+    {
+      "name": "root-journeys",
+      "timeout_minutes": 75,
+      "packages": ["tracedecay", "tracedecay-cli", "tracedecay-search-eval"],
+      "targets": [
+        "test:runtime_acceptance_suite",
+        "test:memory_suite",
+        "test:automation_runner_test",
+        "test:daemon_suite",
+        "test:graph_suite",
+        "test:agent_suite",
+        "test:hermes_suite",
+        "test:hooks_lsp_suite",
+        "test:product_surface_suite",
+        "test:search_quality_suite",
+        "test:cursor_observation_identity_fallback",
+        "bins",
+        "test:core_cli_suite",
+        "test:work_route_exposure_conformance"
+      ],
+      "executables": ["example:tracedecay-host-cli-fixture"],
+      "features": ["tracedecay/test-helpers"]
+    },
+    {
+      "name": "root-dashboard-api",
+      "timeout_minutes": 70,
+      "packages": ["tracedecay"],
+      "targets": ["test:dashboard_api_test"],
+      "features": ["tracedecay/test-transport"]
+    },
+    {
+      "name": "runtime",
+      "timeout_minutes": 65,
+      "packages": [
+        "tracedecay-application",
+        "tracedecay-automation-runtime",
+        "tracedecay-code-index-runtime",
+        "tracedecay-configuration",
+        "tracedecay-daemon-service",
+        "tracedecay-dashboard-api",
+        "tracedecay-global-db",
+        "tracedecay-graph-query",
+        "tracedecay-host-admission",
+        "tracedecay-maintenance",
+        "tracedecay-mcp",
+        "tracedecay-session-memory",
+        "tracedecay-session-runtime",
+        "tracedecay-source-edit",
+        "tracedecay-store-runtime"
+      ],
+      "features": [
+        "tracedecay-application/test-helpers",
+        "tracedecay-automation-runtime/test-helpers",
+        "tracedecay-automation-runtime/test-transport",
+        "tracedecay-code-index-runtime/test-helpers",
+        "tracedecay-code-index-runtime/test-transport",
+        "tracedecay-daemon-service/test-helpers",
+        "tracedecay-dashboard-api/test-transport",
+        "tracedecay-global-db/test-helpers",
+        "tracedecay-graph-query/test-helpers",
+        "tracedecay-host-admission/test-helpers",
+        "tracedecay-maintenance/test-helpers",
+        "tracedecay-mcp/test-transport",
+        "tracedecay-session-runtime/test-helpers",
+        "tracedecay-store-runtime/test-helpers"
+      ]
+    },
+    {
+      "name": "core-storage",
+      "timeout_minutes": 50,
+      "packages": [
+        "tracedecay-code-index",
+        "tracedecay-code-index-retention",
+        "tracedecay-graph-db",
+        "tracedecay-lcm",
+        "tracedecay-lsp",
+        "tracedecay-query",
+        "tracedecay-runtime-core",
+        "tracedecay-semantic",
+        "tracedecay-session-temporal-store",
+        "tracedecay-sessions"
+      ],
+      "features": [
+        "tracedecay-code-index/test-helpers",
+        "tracedecay-code-index/eval-helpers",
+        "tracedecay-graph-db/test-helpers",
+        "tracedecay-graph-db/eval-helpers",
+        "tracedecay-lcm/test-helpers",
+        "tracedecay-query/test-helpers",
+        "tracedecay-runtime-core/test-helpers",
+        "tracedecay-runtime-core/test-transport",
+        "tracedecay-semantic/test-helpers",
+        "tracedecay-session-temporal-store/test-helpers",
+        "tracedecay-sessions/test-helpers"
+      ]
+    },
+    {
+      "name": "core-contracts",
+      "timeout_minutes": 55,
+      "packages": [
+        "tracedecay-agent-hosts",
+        "tracedecay-api",
+        "tracedecay-automation",
+        "tracedecay-capture",
+        "tracedecay-code-extraction",
+        "tracedecay-contracts",
+        "tracedecay-daemon-control",
+        "tracedecay-daemon-identity",
+        "tracedecay-daemon-protocol",
+        "tracedecay-domain",
+        "tracedecay-framing",
+        "tracedecay-hooks",
+        "tracedecay-host-integration",
+        "tracedecay-policy",
+        "tracedecay-privacy",
+        "tracedecay-private-fs",
+        "tracedecay-rusqlite-runtime",
+        "tracedecay-sdk",
+        "tracedecay-semantic-contracts",
+        "tracedecay-store",
+        "tracedecay-temporal-query",
+        "tracedecay-tool-catalog"
+      ],
+      "features": [
+        "tracedecay-code-extraction/test-helpers",
+        "tracedecay-daemon-protocol/test-helpers",
+        "tracedecay-framing/test-helpers",
+        "tracedecay-rusqlite-runtime/test-transport",
+        "tracedecay-temporal-query/test-helpers"
+      ]
+    }
+  ],
+  "not_run": {
+    "tracedecay::mcp_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay::transport_acceptance_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay-cli::host_journeys_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay-cli::work_loop_journey": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay-global-db::schema_convergence_hotpath": "requires hotpath-alloc, which no test lane enables; the hotpath workflows own it"
+  }
+}
