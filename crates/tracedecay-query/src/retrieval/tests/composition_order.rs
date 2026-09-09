@@ -425,6 +425,21 @@ fn saturated_scores_preserve_retriever_strength_before_identity_ties() {
     weaker.contributions = vec![contribution(u64::MAX)];
     weaker.contributions[0].score_domain = id("score.unrelated");
     let domain_order = compare_fused(&stronger, &weaker);
+    assert_eq!(
+        domain_order,
+        calibration
+            .score_domain
+            .cmp(&weaker.contributions[0].score_domain)
+    );
     weaker.contributions[0].raw_score = FixedPointScore(0);
     assert_eq!(compare_fused(&stronger, &weaker), domain_order);
+
+    // At identical primary utility, different lane mixes use the recorded
+    // retriever tag order, not a magnitude comparison across score scales.
+    weaker.contributions[0].retriever = RetrieverKind::Semantic;
+    weaker.contributions[0].score_domain = id("score.semantic");
+    assert_eq!(
+        compare_fused(&stronger, &weaker),
+        RetrieverKind::Lexical.cmp(&RetrieverKind::Semantic)
+    );
 }

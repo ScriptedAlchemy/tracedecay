@@ -110,7 +110,11 @@ pub(super) fn ordered_occurrence_ids(candidate: &FusedCandidate) -> Vec<SourceOc
 }
 
 /// Preserve measured score differences when calibration rounds or saturates.
-/// Domain tags prevent comparing numbers from unrelated score scales.
+/// Compare unique entries lexicographically: retriever and score-domain tags
+/// ascending, then raw score descending within matching tags. Different lane
+/// or domain mixes therefore use tag order before evidence identity, never
+/// compare unrelated numeric scales. A common-domains-only comparison would
+/// not define a transitive total order across candidates with different lanes.
 pub(super) fn ordered_domain_scores(
     candidate: &FusedCandidate,
 ) -> Vec<(RetrieverKind, &ScoreDomainId, Reverse<FixedPointScore>)> {
