@@ -1,4 +1,4 @@
-import { render, within } from '@testing-library/react';
+import { fireEvent, render, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SignalPanel } from './SignalPanel.tsx';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
@@ -40,6 +40,21 @@ afterEach(() => {
 });
 
 describe('SignalPanel connection honesty', () => {
+  it('opens exact admitted identity and reports when that event leaves the retained window', () => {
+    const event = { ...pulses()[0]!, projectId: null, observationTime: '1700000000000001' };
+    const view = render(<SignalPanel pulses={[event]} sseState="live" lastEventAt={NOW} />);
+    fireEvent.click(view.getByText(/Inspect admitted events/));
+    fireEvent.click(view.getByRole('button', { name: `heartbeat · ${event.eventId}` }));
+    const evidence = within(view.getByRole('region', { name: 'Admitted event evidence' }));
+    expect(evidence.getByText(event.eventId)).toBeTruthy();
+    expect(evidence.getByText('1700000000000001')).toBeTruthy();
+    expect(evidence.getByText('unavailable: event is unscoped')).toBeTruthy();
+    expect(evidence.getByText(/carries no session\/message identity/)).toBeTruthy();
+    view.rerender(<SignalPanel pulses={[]} sseState="live" lastEventAt={NOW} />);
+    expect(view.queryByRole('region', { name: 'Admitted event evidence' })).toBeNull();
+    expect(view.getByText(/no longer retained/)).toBeTruthy();
+  });
+
   it('says in words that a dead stream is not an idle one', () => {
     const { container, getByText } = renderPanel('offline', NOW - 370_000);
     expect(getByText(/frozen, not idle/i)).toBeTruthy();
