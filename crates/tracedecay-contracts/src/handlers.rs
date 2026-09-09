@@ -111,8 +111,8 @@ pub trait CanonicalApplicationDispatcher<Request> {
     fn invoke(&self, operation: &ApplicationOperation, request: Request) -> Self::Output;
 }
 
-/// A resolved application handler bound to the one dispatcher retained by
-/// root composition.
+/// A resolved application handler bound to the one canonical dispatcher
+/// retained by `tracedecay-daemon-service`.
 pub struct BoundApplicationHandler<'a, Dispatcher> {
     descriptor: &'a ApplicationHandlerDescriptor,
     dispatcher: &'a Dispatcher,
@@ -150,7 +150,8 @@ impl<'a, Dispatcher> BoundApplicationHandler<'a, Dispatcher> {
 }
 
 /// Proof that one concrete application use case owns a request/result schema
-/// pair and can be bound to root composition's canonical dispatcher.
+/// pair and can be bound to the canonical dispatcher that
+/// `tracedecay-daemon-service` binds and the composition root mounts.
 ///
 /// Canonical public operations also retain their typed surface identity and
 /// execution service here so MCP, HTTP, SDK, and dispatch projections do not
