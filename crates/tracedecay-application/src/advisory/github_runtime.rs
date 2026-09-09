@@ -50,7 +50,8 @@ pub use anchors::{
     github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
 };
 pub use credential_lifecycle::{
-    GitHubReadOnlyCredentialLifecycleV1, GitHubSecretReadErrorV1, GitHubSecretReadPortV1,
+    GitHubReadOnlyCredentialLifecycleV1, GitHubReadOnlyCredentialPermissionVerifierV1,
+    GitHubSecretReadErrorV1, GitHubSecretReadPortV1,
 };
 pub use decoder::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,

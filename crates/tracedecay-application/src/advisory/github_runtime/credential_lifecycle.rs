@@ -60,6 +60,14 @@ pub enum GitHubSecretReadErrorV1 {
     Unavailable,
 }
 
+pub trait GitHubReadOnlyCredentialPermissionVerifierV1: Send + Sync {
+    fn verify(
+        &self,
+        secret: &str,
+        repository_owner: &str,
+    ) -> GitHubReadOnlyCredentialAuthorityOutcomeV1;
+}
+
 #[derive(Clone)]
 struct GitHubProviderPermissionVerifierV1 {
     agent: ureq::Agent,
@@ -176,6 +184,16 @@ impl GitHubProviderPermissionVerifierV1 {
     }
 }
 
+impl GitHubReadOnlyCredentialPermissionVerifierV1 for GitHubProviderPermissionVerifierV1 {
+    fn verify(
+        &self,
+        secret: &str,
+        repository_owner: &str,
+    ) -> GitHubReadOnlyCredentialAuthorityOutcomeV1 {
+        self.verify(secret, repository_owner)
+    }
+}
+
 #[derive(Deserialize)]
 struct GitHubInstallationsEnvelopeV1 {
     installations: Vec<GitHubInstallationV1>,
@@ -200,7 +218,7 @@ struct OsKeyringGitHubReadOnlyCredentialAuthorityV1 {
     keyring_service: String,
     keyring_account: String,
     secrets: Arc<dyn GitHubSecretReadPortV1>,
-    verifier: GitHubProviderPermissionVerifierV1,
+    verifier: Arc<dyn GitHubReadOnlyCredentialPermissionVerifierV1>,
 }
 
 impl GitHubReadOnlyCredentialAuthorityV1 for OsKeyringGitHubReadOnlyCredentialAuthorityV1 {
@@ -237,13 +255,31 @@ enum ProfileRepositoryCredentialRegistrationV1 {
     },
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct GitHubReadOnlyCredentialLifecycleV1 {
     registrations: Arc<Mutex<Vec<ProfileRepositoryCredentialRegistrationV1>>>,
     mounts: Arc<Mutex<BTreeSet<ProfileRepositoryCredentialKeyV1>>>,
+    verifier: Arc<dyn GitHubReadOnlyCredentialPermissionVerifierV1>,
+}
+
+impl Default for GitHubReadOnlyCredentialLifecycleV1 {
+    fn default() -> Self {
+        Self::with_permission_verifier(Arc::new(GitHubProviderPermissionVerifierV1::production()))
+    }
 }
 
 impl GitHubReadOnlyCredentialLifecycleV1 {
+    #[must_use]
+    pub fn with_permission_verifier(
+        verifier: Arc<dyn GitHubReadOnlyCredentialPermissionVerifierV1>,
+    ) -> Self {
+        Self {
+            registrations: Arc::default(),
+            mounts: Arc::default(),
+            verifier,
+        }
+    }
+
     pub fn mount(
         &self,
         profile_id: &UserProfileId,
@@ -278,7 +314,7 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
             profile_id,
             profile_root,
             secrets,
-            GitHubProviderPermissionVerifierV1::production(),
+            Arc::clone(&self.verifier),
         );
     }
 
@@ -288,7 +324,7 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
         profile_id: &UserProfileId,
         profile_root: &Path,
         secrets: Arc<dyn GitHubSecretReadPortV1>,
-        verifier: GitHubProviderPermissionVerifierV1,
+        verifier: Arc<dyn GitHubReadOnlyCredentialPermissionVerifierV1>,
     ) {
         let configured = load_configured_repositories(profile_root);
         let mut repositories = BTreeMap::new();
@@ -341,7 +377,7 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
                             keyring_service,
                             keyring_account,
                             secrets: Arc::clone(&secrets),
-                            verifier: verifier.clone(),
+                            verifier: Arc::clone(&verifier),
                         });
                     if register_profile_github_read_only_credential_authority_v1(
                         key.0.clone(),
@@ -571,7 +607,9 @@ keyring_account = "read"
             &profile_id,
             &profile_root,
             secrets,
-            GitHubProviderPermissionVerifierV1::local(format!("http://{address}")),
+            Arc::new(GitHubProviderPermissionVerifierV1::local(format!(
+                "http://{address}"
+            ))),
         );
         assert_eq!(
             mount_profile_github_read_only_credential_authority_v1(

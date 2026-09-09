@@ -16,8 +16,7 @@ use super::orphan_stores::{
     OrphanStoreFinding, StoreDisposition, UnregisteredStoreFinding, UnverifiableReason,
 };
 
-const MAX_SYNCHRONOUS_SESSION_RETENTION_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SYNCHRONOUS_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
 const DOCTOR_TEXT_LIMIT: usize = 512;
 
@@ -30,7 +29,7 @@ fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
             match std::fs::metadata(PathBuf::from(path)) {
                 Ok(metadata) => total
                     .checked_add(metadata.len())
-                    .filter(|size| *size <= MAX_SYNCHRONOUS_SESSION_RETENTION_BYTES),
+                    .filter(|size| *size <= MAX_SYNCHRONOUS_SCAN_BYTES),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(total),
                 Err(_) => None,
             }
@@ -249,7 +248,7 @@ fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
                 return false;
             };
             observed_bytes = observed_bytes.saturating_add(metadata.len());
-            if observed_bytes > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES {
+            if observed_bytes > MAX_SYNCHRONOUS_SCAN_BYTES {
                 return false;
             }
         }
@@ -370,7 +369,7 @@ mod tests {
 
         std::fs::File::create(temporary.path().join("sessions.db-wal"))
             .expect("WAL fixture")
-            .set_len(MAX_SYNCHRONOUS_SESSION_RETENTION_BYTES + 1)
+            .set_len(MAX_SYNCHRONOUS_SCAN_BYTES + 1)
             .expect("oversized WAL fixture");
         assert!(!permits_synchronous_session_retention_backlog(&database));
     }
@@ -451,7 +450,7 @@ mod tests {
         std::fs::create_dir(&large).expect("large root");
         std::fs::File::create(large.join("payload"))
             .expect("large payload")
-            .set_len(MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES + 1)
+            .set_len(MAX_SYNCHRONOUS_SCAN_BYTES + 1)
             .expect("oversized payload");
         assert!(!permits_synchronous_exhaustive_scan(&large));
     }

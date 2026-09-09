@@ -1347,11 +1347,11 @@ async fn run_registered_store_retention(
                 ],
             );
         }
-        Err(_) => super::log_daemon_event(
+        Err(error) => super::log_daemon_event(
             "retention_degraded",
             &[
                 ("pass", "observability_analytics".to_owned()),
-                ("failure", "retention_pass_failed".to_owned()),
+                ("failure", error.diagnostic().to_owned()),
             ],
         ),
         Ok(_) => {}

@@ -6,12 +6,26 @@ use tracedecay_global_db::observation::retention::{
 use tracedecay_global_db::{ObservabilityRetentionReceiptV1, RegisteredGlobalDb};
 use tracedecay_lcm::{LcmRetentionConfig, LcmRetentionReport, RetentionMode as LcmRetentionMode};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisteredStoreRetentionErrorV1 {
+    Observability { diagnostic: String },
+}
+
+impl RegisteredStoreRetentionErrorV1 {
+    #[must_use]
+    pub fn diagnostic(&self) -> &str {
+        match self {
+            Self::Observability { diagnostic } => diagnostic,
+        }
+    }
+}
+
 /// Typed outcomes from every independent retention authority consulted for a
 /// registered store. Disabled policies never acquire their writer.
 pub struct RegisteredStoreRetentionReportV1 {
     pub session_lcm: Option<tracedecay_domain::errors::Result<LcmRetentionReport>>,
     pub observations: Option<tracedecay_domain::errors::Result<ObservationRetentionReport>>,
-    pub observability: Result<ObservabilityRetentionReceiptV1, String>,
+    pub observability: Result<ObservabilityRetentionReceiptV1, RegisteredStoreRetentionErrorV1>,
 }
 
 impl RegisteredStoreRetentionReportV1 {
@@ -56,7 +70,10 @@ pub async fn run_registered_store_retention(
     } else {
         None
     };
-    let observability = database.prune_observability_events(now).await;
+    let observability = database
+        .prune_observability_events(now)
+        .await
+        .map_err(|diagnostic| RegisteredStoreRetentionErrorV1::Observability { diagnostic });
     RegisteredStoreRetentionReportV1 {
         session_lcm,
         observations,
@@ -129,5 +146,30 @@ mod tests {
             rows.is_empty(),
             "registered maintenance must invoke analytics retention"
         );
+    }
+
+    #[tokio::test]
+    async fn observability_retention_failure_preserves_typed_owner_diagnostic() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "maintenance-registered-observability-retention-error",
+        )
+        .await;
+        let mut session_lcm = LcmRetentionConfig::default();
+        session_lcm.enabled = false;
+        let mut observations = ObservationRetentionConfig::default();
+        observations.enabled = false;
+
+        let report =
+            run_registered_store_retention(&harness.registered, &session_lcm, &observations, -1)
+                .await;
+
+        assert_eq!(
+            report.observability,
+            Err(RegisteredStoreRetentionErrorV1::Observability {
+                diagnostic: "invalid observability retention time".to_owned(),
+            })
+        );
+        assert!(!report.succeeded());
     }
 }

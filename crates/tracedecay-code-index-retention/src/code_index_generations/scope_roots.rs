@@ -162,7 +162,12 @@ pub fn code_index_scope_store_root(data_root: &Path) -> PathBuf {
     data_root.join("code-index-v1")
 }
 
-/// The per-project scope root containing immutable code-index generations.
+/// The exact per-project code-index store root this cadence sweeps.
+///
+/// This must stay the scoped root the scheduler publishes into and Doctor
+/// reports on. A cadence pointed at any other directory would find no sealed
+/// generations and silently reclaim nothing, which is the failure this pass
+/// exists to end.
 #[must_use]
 pub fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
     super::scoped_code_index_store_root(&code_index_scope_store_root(data_root), project_root)
@@ -224,14 +229,21 @@ pub fn git_worktree_scope_root_inventory(
     Ok((roots, receipt))
 }
 
-/// Read-only projection of the exact roots from the bounded Git inventory.
+/// Apply never uses this projection by itself: scope collection combines it
+/// with durable project enrollment, mounted leases, configuration roots,
+/// vector dependencies, and the exact source binding in one proof receipt.
+///
+/// Every failure is an `Err`, never a smaller set: a truncated live set is
+/// indistinguishable from stranding and would authorize deletion.
 pub fn resolve_live_code_index_roots(
     project_root: &Path,
 ) -> Result<BTreeSet<PathBuf>, &'static str> {
     git_worktree_scope_root_inventory(project_root).map(|(roots, _)| roots)
 }
 
-/// Records both the literal root and its symlink-resolved form.
+/// Record both the literal path and its symlink-resolved form. The scope hash
+/// is taken over the canonical root string recorded at publication time, and a
+/// live root spelled differently must never be mistaken for a dead one.
 pub fn insert_live_root_variants(roots: &mut BTreeSet<PathBuf>, root: &Path) {
     roots.insert(root.to_path_buf());
     if let Ok(resolved) = std::fs::canonicalize(root) {

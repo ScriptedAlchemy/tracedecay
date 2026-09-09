@@ -134,13 +134,7 @@ fn compaction_is_scheduled(
         .map_err(|_| ())?
         .as_micros();
     let observed_at = i64::try_from(observed_at).map_err(|_| ())?;
-    let sample = StoreSizeSampleV1 {
-        store: StoreKeyV1::new("store.db").map_err(|_| ())?,
-        page_size_bytes: u32::try_from(page_size).map_err(|_| ())?,
-        page_count,
-        freelist_pages: freelist,
-        observed_at: UtcMicros(observed_at),
-    };
+    let sample = store_size_sample_at(page_size, page_count, freelist, UtcMicros(observed_at))?;
     let policy = CompactionTriggerPolicyV1 {
         free_page_ratio_threshold: FreePageRatioV1::new(config.free_page_ratio_threshold)
             .map_err(|_| ())?,
@@ -150,6 +144,21 @@ fn compaction_is_scheduled(
         .decide(&sample)
         .map(|decision| decision.is_scheduled())
         .map_err(|_| ())
+}
+
+fn store_size_sample_at(
+    page_size: u64,
+    page_count: u64,
+    freelist: u64,
+    observed_at: UtcMicros,
+) -> Result<StoreSizeSampleV1, ()> {
+    Ok(StoreSizeSampleV1 {
+        store: StoreKeyV1::new("store.db").map_err(|_| ())?,
+        page_size_bytes: u32::try_from(page_size).map_err(|_| ())?,
+        page_count,
+        freelist_pages: freelist,
+        observed_at,
+    })
 }
 
 #[cfg(test)]
@@ -178,5 +187,14 @@ mod tests {
             compaction_is_scheduled(4_096, 100, 50, &config(0.0, 0)),
             Err(())
         );
+    }
+
+    #[test]
+    fn compaction_sample_preserves_true_unix_microseconds() {
+        let observed_at = UtcMicros(1_700_000_000_123_456);
+        let sample =
+            store_size_sample_at(4_096, 100, 50, observed_at).expect("valid compaction sample");
+
+        assert_eq!(sample.observed_at, observed_at);
     }
 }
