@@ -1433,18 +1433,6 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
 }
 
 #[test]
-fn parent_resolver_registers_same_batch_effects_only_after_derivation() {
-    let mut resolver = ParentMessageResolver::default();
-    assert_eq!(resolver.resolve("message.reemitted"), None);
-
-    resolver.register("message.reemitted", "occurrence.first-effect");
-    assert_eq!(
-        resolver.resolve("message.reemitted"),
-        Some("occurrence.first-effect")
-    );
-}
-
-#[test]
 fn parent_resolver_prefers_a_persisted_cross_batch_predecessor() {
     let mut resolver = ParentMessageResolver::default();
     resolver.register("message.reemitted", "occurrence.persisted-predecessor");

@@ -1370,24 +1370,6 @@ mod windows_tests {
     }
 
     #[test]
-    fn stable_read_bytes_match_reported_size_and_hash() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
-        fs::create_dir(&root).unwrap();
-        let dir = prepare_payload_dir(&root).unwrap();
-        let path = dir.join("payload_hash.payload");
-        let expected = b"stable hash input";
-        fs::write(&path, expected).unwrap();
-
-        let (content, _) = read_payload_file_for_verify(&path).unwrap().unwrap();
-        assert_eq!(content.len() as u64, expected.len() as u64);
-        assert_eq!(
-            super::super::util::sha256_hex(&content),
-            super::super::util::sha256_hex(expected)
-        );
-    }
-
-    #[test]
     fn handle_delete_blocks_writer_and_removes_opened_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");

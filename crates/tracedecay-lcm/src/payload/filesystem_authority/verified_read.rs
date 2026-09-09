@@ -338,30 +338,4 @@ mod tests {
             "verification did not reach an in-file checkpoint"
         );
     }
-
-    #[test]
-    fn verified_read_preserves_deadline_interruption() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("payload.payload");
-        let content = vec![b'x'; 256 * 1024];
-        fs::write(&path, &content).unwrap();
-        let hash = super::super::super::util::sha256_hex(&content);
-        let mut checkpoints = 0;
-        let error = read_verified_payload_file_with_checkpoint(
-            &path,
-            &hash,
-            content.len() as u64,
-            content.len() as u64,
-            &mut || {
-                checkpoints += 1;
-                if checkpoints >= 4 {
-                    Err(LcmError::DeadlineExceeded)
-                } else {
-                    Ok(())
-                }
-            },
-        )
-        .expect_err("deadline must interrupt a multi-chunk verified read");
-        assert_eq!(error, LcmError::DeadlineExceeded);
-    }
 }

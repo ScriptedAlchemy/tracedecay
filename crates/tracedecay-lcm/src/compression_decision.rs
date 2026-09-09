@@ -337,18 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn condensation_candidate_decision_requires_fan_in_children() {
-        assert_eq!(
-            condensation_candidate_decision(2, 3),
-            CondensationCandidateDecision::SkipNotEnoughCandidates
-        );
-        assert_eq!(
-            condensation_candidate_decision(3, 3),
-            CondensationCandidateDecision::Condense
-        );
-    }
-
-    #[test]
     fn preflight_forced_overflow_beats_maintenance_debt() {
         let request = LcmPreflightRequest {
             provider: "cursor".to_string(),

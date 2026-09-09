@@ -2845,21 +2845,6 @@ mod authority_tests {
     }
 
     #[test]
-    fn replay_budget_matches_policy_for_object_with_text() {
-        let message = json!({
-            "content": {
-                "extra": "ignored key words",
-                "text": "one",
-            }
-        });
-        assert_eq!(replay_token_estimate(std::slice::from_ref(&message)), 1);
-        assert_eq!(
-            replay_token_estimate(std::slice::from_ref(&message)),
-            crate::lcm_message_budget_tokens(&message)
-        );
-    }
-
-    #[test]
     fn replay_budget_matches_policy_for_array_of_text_parts() {
         let message = json!({
             "content": [

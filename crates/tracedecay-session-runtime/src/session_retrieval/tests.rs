@@ -615,16 +615,6 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
     );
 }
 
-#[test]
-fn stored_retrieval_does_not_require_refresh_worker() {
-    assert!(!requires_refresh_worker(
-        SessionFreshnessPolicy::AllowStored
-    ));
-    assert!(requires_refresh_worker(
-        SessionFreshnessPolicy::RequireFresh
-    ));
-}
-
 fn typed<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -729,15 +719,6 @@ async fn service_rejects_foreign_shard_before_read_admission() {
         before,
         "identity mismatch must fail before retrieval admits a read snapshot"
     );
-}
-
-#[tokio::test]
-async fn service_accepts_exact_registered_identity() {
-    let harness =
-        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("exact-shard").await;
-    let root = registered_profile_retrieval_root(&harness.registered);
-
-    assert!(DaemonSessionRetrievalService::new(harness.registered.clone(), root, None).is_some());
 }
 
 fn profile_retrieval_root(

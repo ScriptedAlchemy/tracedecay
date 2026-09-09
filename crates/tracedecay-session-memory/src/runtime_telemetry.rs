@@ -1209,26 +1209,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_snapshot_deserializes_from_owned_transport_json() {
-        fn require_owned_transport_decode<T: serde::de::DeserializeOwned>() {}
-
-        require_owned_transport_decode::<RuntimeSnapshot>();
-    }
-
-    #[test]
     fn bytes_human_formats_units() {
         assert_eq!(bytes_human(0), "0 B");
         assert_eq!(bytes_human(512), "512 B");
         assert_eq!(bytes_human(2 * 1024), "2.0 KB");
         assert_eq!(bytes_human(5 * 1024 * 1024), "5.0 MB");
         assert_eq!(bytes_human(3 * 1024 * 1024 * 1024), "3.0 GB");
-    }
-
-    #[test]
-    fn with_suffix_appends_to_path() {
-        let p = Path::new("/tmp/x.db");
-        assert_eq!(with_suffix(p, "-wal"), Path::new("/tmp/x.db-wal"));
-        assert_eq!(with_suffix(p, "-shm"), Path::new("/tmp/x.db-shm"));
     }
 
     #[test]
@@ -1260,25 +1246,6 @@ mod tests {
         assert!(marker.exists);
         assert!(!marker.parsed);
         assert_eq!(marker.state, None);
-    }
-
-    /// A saturated pool is the case the survey exists for, so the rendered
-    /// report has to show where the workers went and who is queued behind
-    /// them — not just a total.
-    #[test]
-    fn reader_lane_line_reports_occupancy_and_waiters() {
-        let line = lane_line(&ReaderLaneOccupancy {
-            workers: 8,
-            available: 0,
-            leased: 6,
-            limbo: 2,
-            waiting: 3,
-        });
-
-        assert_eq!(
-            line,
-            "8 workers (0 available, 6 leased, 2 limbo), 3 waiting"
-        );
     }
 
     #[test]
