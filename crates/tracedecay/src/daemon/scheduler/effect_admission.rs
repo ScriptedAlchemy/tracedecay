@@ -100,6 +100,10 @@ async fn fixed_task_schedule_decision(
 }
 
 #[hotpath::measure(label = "daemon.scheduler.automation_effect", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Admission binds the engine, retained memory, cancellation and pinned configuration before creating an effect."
+)]
 pub(super) async fn scheduler_automation_effect(
     engine: &DaemonEngine,
     memory: &crate::tracedecay::TraceDecay,
@@ -246,6 +250,10 @@ pub(super) fn synchronize_scheduler_effect_control(run_control: &AutomationRunCo
     run_control.read_control().interrupted();
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Settlement keeps the effect and runner guard alive together while recording the exact project and task outcome."
+)]
 pub(super) async fn abandon_reused_scheduler_skip(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,

@@ -231,6 +231,10 @@ pub(super) fn invalid_multi_root_invocation_response(
 }
 
 #[cfg(any(not(unix), test))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Portable transport composes separately owned lifecycle, route admission and HTTP owners; the extra argument is a test probe."
+)]
 pub(super) async fn execute_portable_daemon_invocation(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,

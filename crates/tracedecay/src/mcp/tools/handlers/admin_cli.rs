@@ -97,6 +97,10 @@ struct AdminCliContext<'a> {
 }
 
 impl<'a> AdminCliContext<'a> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Binds independently admitted project, profile, session, and request authorities at the CLI composition boundary"
+    )]
     fn with_project(
         cg: &'a TraceDecay,
         global_db: &'a RegisteredGlobalDbLeaseV1,
@@ -219,6 +223,10 @@ impl<'a> AdminCliContext<'a> {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CLI dispatch carries independently admitted store and sync authorities plus protocol request identity and controls"
+)]
 pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
