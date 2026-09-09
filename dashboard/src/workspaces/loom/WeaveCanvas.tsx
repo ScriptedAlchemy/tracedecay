@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router';
 import { axisTicks, clampWindow, fittedWindow, formatMoment, zoomWindow, type LoomWindow } from './tracks.ts';
 import type { Weave } from './weave.ts';
 import type { LoomPlaybackFrame } from './playback.ts';
+import type { AnalyticsSubagentTreePayloadV1 } from '../../contracts/generated.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 
 // Packing scale for the bounded session overview. This is presentation geometry,
@@ -14,8 +15,9 @@ const LEFT = 100;
 const RIGHT = 28;
 const SPAN = WIDTH - LEFT - RIGHT;
 
-export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel }: {
+export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy }: {
   weave: Weave;
+  hierarchy?: AnalyticsSubagentTreePayloadV1;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   ariaLabel: string;
@@ -55,6 +57,21 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel }: {
         </g>)}
         {weave.hosts.map((host, index) => <text key={host.id} x={12} y={y(lane(index, 0)) + 4} fill="var(--raw-graph-text)" fontSize={11}>{host.label}</text>)}
         <g clipPath={`url(#${clipId})`}>
+          {view && hierarchy?.available && !hierarchy.error && hierarchy.nodes.filter((node) => node.link === 'linked').map((node) => {
+            const child = weave.threads.find((thread) => thread.host === node.provider && thread.sessionId === node.session_id);
+            const parent = weave.threads.find((thread) => thread.host === node.provider && thread.sessionId === node.parent_session_id);
+            if (!child || !parent) return null;
+            const px = x(parent.start), cx = x(child.start);
+            const py = y(lane(parent.column, parent.lane)), cy = y(lane(child.column, child.lane));
+            const path = `M ${px} ${py} C ${(px + cx) / 2} ${py}, ${(px + cx) / 2} ${cy}, ${cx} ${cy}`;
+            const label = `Recorded parent ${parent.label} of ${child.label}`;
+            return <g key={child.id} role="button" tabIndex={0} aria-label={label} data-parent-session={parent.sessionId} data-child-session={child.sessionId} className="cursor-pointer" onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id); } }}>
+              <title>{label}. Session-bound placement; spawn time unavailable. Parent tool use: {node.parent_tool_use_id ?? 'unrecorded'}.</title>
+              <path d={path} fill="none" stroke="var(--ev-associated)" strokeWidth={1.5} />
+              <path d={path} fill="none" stroke="transparent" strokeWidth={18} />
+            </g>;
+          })}
+
           {view && weave.threads.filter((thread) => thread.start <= view.end && (thread.end ?? thread.start) >= view.start).map((thread) => {
             const start = x(thread.start);
             const end = thread.end == null ? start + 18 : Math.max(start + 4, x(thread.end));

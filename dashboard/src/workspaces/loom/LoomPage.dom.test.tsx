@@ -394,6 +394,49 @@ beforeEach(() => {
 });
 
 describe('LoomPage', () => {
+  it('projects only admitted same-provider parent relations and keeps replay scoped to the selected page', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[1]!.provider = 'cursor';
+    const node = (sessionId: string, parent: string | null, provider = 'cursor', link = 'linked') => ({
+      session_id: sessionId, parent_session_id: parent, provider, link,
+      parent_tool_use_id: 'tool-parent-7', agent: null, title: null,
+      started_at: NOW - 20_000, ended_at: null, depth: parent ? 1 : 0,
+      descendants: parent ? 0 : 1, is_subagent: parent != null,
+    });
+    const hierarchy = {
+      available: true, source: 'sessions', error: null, sessions_read: 5,
+      root_count: 1, edge_count: 2, max_depth: 1, missing_parent_count: 1,
+      cycle_count: 1, truncated: true,
+      nodes: [node('sess-open', null, 'cursor', 'root'), node('sess-closed', 'sess-open'),
+        node('sess-hollow', 'sess-open', 'codex'),
+        node('outside-loaded-page', 'sess-open', 'cursor', 'missing_parent'),
+        node('cycle', 'cycle', 'cursor', 'cycle')],
+    };
+    const { container } = renderLoom({ ...HAPPY,
+      '/api/loom/temporal': { status: 200, body: temporal },
+      '/api/plugins/analytics/subagent-tree': { status: 200, body: readyEnvelope(hierarchy) },
+      '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) },
+    });
+    const parent = await screen.findByRole('button', { name: 'Recorded parent Deliver Git primitive runtime of Verify QUERY scheduler' });
+    expect(container.querySelectorAll('[data-parent-session]')).toHaveLength(1);
+    expect(screen.getByText(/Session hierarchy: partial/).textContent).toContain('1 missing parents · 1 cycles');
+    expect(parent.textContent).toContain('spawn time unavailable');
+    // The hierarchy's unrelated bounds do not reposition the temporal session.
+    const threads = [...container.querySelectorAll('[data-thread]')];
+    const lineFor = (id: string) => threads.find((thread) => thread.getAttribute('data-thread') === JSON.stringify(['cursor', id]))!.querySelector('line')!;
+    const parentLine = lineFor('sess-open');
+    const childLine = lineFor('sess-closed');
+    const path = parent.querySelector('path')!.getAttribute('d')!;
+    expect(path.startsWith(`M ${parentLine.getAttribute('x1')} ${parentLine.getAttribute('y1')} C`)).toBe(true);
+    expect(path.endsWith(`${childLine.getAttribute('x1')} ${childLine.getAttribute('y1')}`)).toBe(true);
+    fireEvent.keyDown(parent, { key: 'Enter' });
+    await screen.findByRole('button', { name: 'Select stored event m0' });
+    expect(container.querySelector('[data-parent-session]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Select stored event m0' }));
+    expect(screen.queryByRole('button', { name: 'Select stored event m2' })).toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
+  });
+
   it('does not present unfed Delivery outcomes as a Loom relation', async () => {
     renderLoom();
 
