@@ -607,10 +607,10 @@ impl Default for StoreAdministration {
 
 impl StoreAdministration {
     #[cfg(unix)]
-    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+    async fn spawn_manual_branch_publication<Publication, Task>(
         &self,
         publication: Publication,
-    ) -> Result<BranchAddOutcome>
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<BranchAddOutcome>>>
     where
         Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
         Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
@@ -660,13 +660,44 @@ impl StoreAdministration {
                 let _ = result_sender.send(publication(cancellation).await);
             });
         }
-        result_receiver.await.map_err(|error| {
-            TraceDecayError::project_route(
-                "branch_tracking_failed",
-                true,
-                format!("manual branch publication owner stopped before completion: {error}"),
-            )
-        })?
+        Ok(result_receiver)
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        self.spawn_manual_branch_publication(publication)
+            .await?
+            .await
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before completion: {error}"),
+                )
+            })?
+    }
+
+    /// Admit exact branch publication to the daemon-owned task set. The
+    /// caller returns while activation and indexing continue under shutdown
+    /// ownership.
+    #[cfg(unix)]
+    pub(super) async fn admit_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        let _completion = self.spawn_manual_branch_publication(publication).await?;
+        Ok(BranchAddOutcome::Deferred)
     }
 
     #[cfg(unix)]
