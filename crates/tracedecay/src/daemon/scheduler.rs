@@ -278,6 +278,12 @@ pub(super) struct AutomationSchedulerHandle {
     termination: Arc<MaintenanceTaskTermination>,
 }
 
+impl AutomationSchedulerHandle {
+    pub(super) fn request_stop(&self) {
+        self.stop_requested.request();
+    }
+}
+
 #[cfg(test)]
 impl AutomationSchedulerHandle {
     pub(super) fn for_test(task: JoinHandle<()>) -> Self {
@@ -952,6 +958,19 @@ impl DaemonEngine {
             );
         }
         Some(AutomationSchedulerRetirement { termination })
+    }
+
+    /// Request every automation loop to stop without awaiting the scheduler
+    /// map. Prepare-time cancel must be synchronous; `try_lock` skips a
+    /// contended map and the join still retires those owners.
+    pub(super) fn cancel_automation_schedulers(&self) {
+        let Ok(schedulers) = self.store_administration.automation_schedulers().try_lock() else {
+            return;
+        };
+        for handle in schedulers.values() {
+            handle.request_stop();
+            handle.wake.notify_one();
+        }
     }
 
     #[hotpath::skip]

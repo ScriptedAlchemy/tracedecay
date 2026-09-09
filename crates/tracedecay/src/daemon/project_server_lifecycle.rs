@@ -16,6 +16,10 @@ pub(super) async fn cancel_retained_session_history(store_administration: &Store
         .session_temporal_refresh_schedulers()
         .cancel_historical_ingest()
         .await;
+    let servers = store_administration.project_servers().lock().await;
+    for server in servers.values() {
+        server.refuse_background_work();
+    }
 }
 
 /// One bounded, idempotent project-server teardown. Servers whose shutdown

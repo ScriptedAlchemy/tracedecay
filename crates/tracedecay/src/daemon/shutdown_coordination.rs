@@ -285,10 +285,25 @@ async fn join_shutdown_phase(
     for (ordinal, name, cancellation_error, join) in owners {
         let handle = joins.spawn(async move {
             let _draining = DrainingGauge::arm("daemon.shutdown.owners_draining");
+            let started = std::time::Instant::now();
             let join_status = match tokio::time::timeout_at(deadline, join(deadline)).await {
                 Ok(status) => status,
                 Err(_) => ShutdownStatus::TimedOut,
             };
+            let status_label = match &join_status {
+                ShutdownStatus::Clean => "clean",
+                ShutdownStatus::Failed(_) => "failed",
+                ShutdownStatus::TimedOut => "timed_out",
+            };
+            super::log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "owner_joined".to_string()),
+                    ("owner", name.to_string()),
+                    ("status", status_label.to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
             let status = match (cancellation_error, join_status) {
                 (None, status) => status,
                 (Some(error), ShutdownStatus::Clean) => ShutdownStatus::Failed(error),
