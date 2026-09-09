@@ -252,10 +252,12 @@ mod tests {
     };
 
     // Growth tripwire only, not an MCP client or protocol limit. The complete
-    // final-V2 profile measures 573,502 bytes after the typed Work and workflow
-    // schemas ship. This reviewed 640 KiB ceiling leaves about 14% headroom;
-    // raising it requires another serialized tools/list measurement and a
-    // stated reason for the additional payload.
+    // final-V2 profile measures 626,799 bytes with every application, Work,
+    // and workflow tool projecting its canonical request schema through
+    // `tracedecay_mcp::mcp_input_schema` (the CAS-gated configuration writes
+    // bound their value unions). This reviewed 640 KiB ceiling leaves about 4%
+    // headroom; raising it requires another serialized tools/list measurement
+    // and a stated reason for the additional payload.
     const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 640 * 1024;
 
     fn current_bindings_on(surface: BindingSurface) -> Vec<SurfaceBindingV1> {
