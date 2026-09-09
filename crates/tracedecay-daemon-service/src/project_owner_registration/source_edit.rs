@@ -309,10 +309,10 @@ impl ProjectSourceEditOwnerV1 {
             request_id,
             &operation,
             observed_at,
-            deadline.clone(),
+            deadline,
             cancellation.context(),
         )?;
-        let effect_control = SourceEditEffectControlV1::new(deadline, cancellation);
+        let effect_control = SourceEditEffectControlV1::for_request(&context, cancellation);
         let current = self
             .authorization
             .current_authority(&context, &operation, observed_at)
@@ -391,7 +391,6 @@ impl ProjectSourceEditOwnerV1 {
     ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
         self.mutation.authorize_mutation("rollback")?;
         let observed_at = now_micros();
-        let effect_control = SourceEditEffectControlV1::new(deadline.clone(), cancellation.clone());
         let operation = tracedecay_contracts::source_edit_rollback_operation()
             .map_err(source_edit_contract_error)?;
         let access = self
@@ -407,6 +406,7 @@ impl ProjectSourceEditOwnerV1 {
             deadline,
             cancellation.context(),
         )?;
+        let effect_control = SourceEditEffectControlV1::for_request(&context, cancellation);
         let current = self
             .authorization
             .current_authority(&context, &operation, observed_at)
@@ -450,7 +450,6 @@ impl ProjectSourceEditOwnerV1 {
     ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
         self.mutation.authorize_mutation("reconciliation")?;
         let observed_at = now_micros();
-        let effect_control = SourceEditEffectControlV1::new(deadline.clone(), cancellation.clone());
         let operation = tracedecay_contracts::source_edit_reconciliation_operation()
             .map_err(source_edit_contract_error)?;
         let access = self
@@ -466,6 +465,7 @@ impl ProjectSourceEditOwnerV1 {
             deadline,
             cancellation.context(),
         )?;
+        let effect_control = SourceEditEffectControlV1::for_request(&context, cancellation);
         let current = self
             .authorization
             .current_authority(&context, &operation, observed_at)

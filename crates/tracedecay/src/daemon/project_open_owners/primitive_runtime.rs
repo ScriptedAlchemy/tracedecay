@@ -10,7 +10,9 @@ use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 
 use crate::daemon::DaemonInvocationState;
 use crate::mcp::McpServer;
-use tracedecay_daemon_service::daemon_operation_event_authority;
+use tracedecay_daemon_service::{
+    DaemonPrimitiveRuntimeRegistrationError, daemon_operation_event_authority,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_runtime::session_retrieval::DaemonSessionLookupPrimitiveV1;
 
@@ -65,7 +67,56 @@ pub(super) async fn open_and_register_project_primitive_runtime(
             ),
         )
         .await
-        .map_err(|error| TraceDecayError::Config {
+        .map_err(primitive_runtime_registration_error)
+}
+
+fn primitive_runtime_registration_error(
+    error: DaemonPrimitiveRuntimeRegistrationError,
+) -> TraceDecayError {
+    match error {
+        error @ DaemonPrimitiveRuntimeRegistrationError::Open(_) => {
+            TraceDecayError::Io(std::io::Error::other(error))
+        }
+        error => TraceDecayError::Config {
             message: format!("project-open primitive runtime registration failed: {error}"),
-        })
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use tracedecay_contracts::ApplicationContractError;
+    use tracedecay_daemon_service::DaemonPrimitiveRuntimeRegistrationError;
+
+    use super::primitive_runtime_registration_error;
+
+    #[test]
+    fn primitive_open_failure_preserves_field_specific_contract_cause() {
+        let error = primitive_runtime_registration_error(
+            DaemonPrimitiveRuntimeRegistrationError::Open(ApplicationContractError::Inconsistent {
+                field: "application primitive session cursor key",
+            }),
+        );
+        let io = error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("typed root error source");
+        let registration = io
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<DaemonPrimitiveRuntimeRegistrationError>())
+            .expect("typed primitive registration cause");
+        let contract = registration
+            .source()
+            .and_then(|source| source.downcast_ref::<ApplicationContractError>())
+            .expect("typed application contract cause");
+
+        assert!(matches!(
+            contract,
+            ApplicationContractError::Inconsistent {
+                field: "application primitive session cursor key"
+            }
+        ));
+    }
 }
