@@ -187,7 +187,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
-        Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
+        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
 }
 
 pub(crate) struct McpServerWriters {

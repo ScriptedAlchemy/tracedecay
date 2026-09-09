@@ -8,8 +8,20 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use tracedecay_daemon_service::ShutdownStatus;
 use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShutdownStatus {
+    Clean,
+    Failed(String),
+    TimedOut,
+}
+
+impl ShutdownStatus {
+    pub fn is_clean(&self) -> bool {
+        matches!(self, Self::Clean)
+    }
+}
 
 pub type ShutdownTaskStatus = ShutdownStatus;
 

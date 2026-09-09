@@ -76,6 +76,10 @@ impl ProductionProjectCompositionRuntime {
         }
     }
 
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Portable runtimes return None; Unix production builds compile only the available reconciler arm"
+    )]
     pub(super) fn automation_scheduler_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,

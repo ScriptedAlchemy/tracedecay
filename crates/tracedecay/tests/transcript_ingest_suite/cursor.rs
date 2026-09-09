@@ -2,7 +2,7 @@ use std::hash::BuildHasher;
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
 use tracedecay_sessions::admission::HostAdmissionScope;

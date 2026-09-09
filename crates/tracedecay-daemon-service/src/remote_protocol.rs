@@ -41,7 +41,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{EnrollmentCredentialRecordV1, UtcMicros};
 use tracedecay_tool_catalog::SchemaId;
 
-use tracedecay_daemon_service::DaemonInvocationService;
+use crate::DaemonInvocationService;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_store_runtime::remote_credentials::{
     presented_spool_keyring, remote_authority_unavailable_response,
@@ -52,20 +52,7 @@ use tracedecay_store_runtime::{
 
 mod observability;
 
-#[cfg(test)]
-pub(super) fn remote_query_result_observation(
-    operation_ref: &str,
-    expected_shards: usize,
-    result: &tracedecay_contracts::remote::query::RemoteQueryResultV1,
-    terminal_succeeded: tracedecay_domain::ObservedTernaryV1,
-) -> tracedecay_domain::RemoteCoverageObservedV1 {
-    observability::remote_query_result_observation(
-        operation_ref,
-        expected_shards,
-        result,
-        terminal_succeeded,
-    )
-}
+pub use observability::remote_query_result_observation;
 
 use tracedecay_store_runtime::{DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1};
 
@@ -350,7 +337,7 @@ macro_rules! impl_daemon_remote_recovery_protocol {
 }
 
 #[hotpath::measure(label = "daemon.remote.router_build")]
-pub(crate) fn build_daemon_remote_protocol_router(
+pub fn build_daemon_remote_protocol_router(
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
     invocation: DaemonInvocationService,

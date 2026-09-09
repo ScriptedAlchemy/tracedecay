@@ -57,6 +57,16 @@ where
     }
 }
 
+impl CodeGraphSourceAuthorityPort for SourceReadContext {
+    fn bind<'a>(
+        &'a self,
+        _request: CodeGraphSourceBindRequest<'a>,
+    ) -> CodeGraphSourceBindFuture<'a> {
+        let source = self.clone();
+        Box::pin(async move { Ok(source) })
+    }
+}
+
 /// Exact source authority frozen at admitted open.
 ///
 /// Construction is crate-private: nothing outside this crate can build or

@@ -147,7 +147,7 @@ async fn open_selected_project_read_only<'a>(
         return denied();
     }
     let roots = tracedecay_runtime_core::storage::enrolled_project_roots(
-        TraceDecay::registry_context_candidate_roots(&context),
+        tracedecay_global_db::registry_context_candidate_roots(&context),
         selected_project_id,
     )
     .map_err(map_target_infrastructure_error)?;
@@ -224,7 +224,7 @@ mod tests {
         tempfile::TempDir,
         TraceDecay,
         TraceDecay,
-        Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
+        Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         // Register the same canonical paths that retained-target lookup uses.
