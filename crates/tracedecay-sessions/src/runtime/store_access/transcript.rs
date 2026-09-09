@@ -9,7 +9,7 @@ use super::super::git_correlation::{
     CommitSessionRecord, SpanObservation, enqueue_git_evidence_publication,
 };
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
-use super::super::shared::path_identity_key;
+use super::super::shared::{durable_project_path_key, path_identity_key};
 use super::codex_goal_reconciliation::find_preceding_codex_goal_response;
 use super::types::{TranscriptBatch, TranscriptPersistenceError};
 
@@ -311,7 +311,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 session.provider.clone(),
                 session.session_id.clone(),
                 session.project_key.clone(),
-                path_identity_key(&session.project_path),
+                durable_project_path_key(&session.project_path),
                 session.title.clone(),
                 session.started_at,
                 session.ended_at,
