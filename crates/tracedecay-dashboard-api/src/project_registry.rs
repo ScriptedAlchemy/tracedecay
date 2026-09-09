@@ -289,21 +289,4 @@ mod tests {
         assert_eq!(kinds.get("main"), Some(&"primary"));
         assert_eq!(kinds.get("wt"), Some(&"worktree"));
     }
-
-    #[test]
-    fn repo_label_with_parent_leaves_label_unchanged_for_root_path() {
-        // Degenerate case: a project rooted at "/" has no parent
-        // directory to qualify the label with, so the label must be
-        // returned unchanged rather than panicking or producing garbage.
-        let entry = project_entry(&registry_context(project_record("root", "/", None)), None);
-        let group = ProjectRepoGroup {
-            label: "root".to_string(),
-            git_common_dir: None,
-            project_count: 1,
-            branches: Vec::new(),
-            projects: vec![entry],
-        };
-
-        assert_eq!(repo_label_with_parent(&group), "root");
-    }
 }

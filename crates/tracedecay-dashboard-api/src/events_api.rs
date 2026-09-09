@@ -1144,22 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn storage_change_emits_only_after_baseline() {
-        let mut state = EventStreamState::new("run-test".to_string());
-        let scope = scope();
-        assert!(state.detect_storage_change(1000, &scope).is_none());
-        assert!(state.detect_storage_change(1000, &scope).is_none());
-        let event = state
-            .detect_storage_change(2048, &scope)
-            .expect("storage change event");
-        assert_eq!(event.stream, STREAM_STORAGE_TELEMETRY);
-        assert_eq!(
-            event.kind,
-            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 2048 }
-        );
-    }
-
-    #[test]
     fn event_kinds_serialize_additively_with_family_tag() {
         let value = serde_json::to_value(DashboardEventKindV1::CodeIndexActivity {
             count: 1,

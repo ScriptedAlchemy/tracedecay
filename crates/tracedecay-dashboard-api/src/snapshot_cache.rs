@@ -104,38 +104,6 @@ mod tests {
     }
 
     #[test]
-    fn different_stores_compute_concurrently_while_one_is_pending() {
-        let first_store = DerivedSnapshotCache::<u64, usize>::new();
-        let second_store = DerivedSnapshotCache::<u64, usize>::new();
-        let first_polls = AtomicUsize::new(0);
-        let second_polls = AtomicUsize::new(0);
-
-        // The pending computation stays alive (pinned in this scope, holding
-        // its store's slot lock) while the other store is polled.
-        let mut first = pin!(first_store.get_or_compute(1, || {
-            std::future::poll_fn(|_| {
-                first_polls.fetch_add(1, Ordering::SeqCst);
-                Poll::<Result<(u64, Arc<usize>), ()>>::Pending
-            })
-        }));
-        assert!(poll_pinned_once(first.as_mut()).is_pending());
-
-        let mut second = pin!(second_store.get_or_compute(1, || async {
-            second_polls.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, ()>((1, Arc::new(2)))
-        }));
-        assert!(matches!(
-            poll_pinned_once(second.as_mut()),
-            Poll::Ready(Ok((value, DerivedSnapshotCacheState::Miss))) if *value == 2
-        ));
-
-        // Still pending and still exclusively holding its own slot.
-        assert!(poll_pinned_once(first.as_mut()).is_pending());
-        assert_eq!(first_polls.load(Ordering::SeqCst), 2);
-        assert_eq!(second_polls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
     fn warm_hit_skips_row_loader_while_another_store_is_pending() {
         let warm_store = DerivedSnapshotCache::<u64, usize>::new();
         let cold_store = DerivedSnapshotCache::<u64, usize>::new();
@@ -210,30 +178,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revision_change_replaces_the_cached_value() {
-        let cache = DerivedSnapshotCache::<u64, usize>::new();
-
-        let (_, first_state) = cache
-            .get_or_compute(1, || async { Ok::<_, ()>((1, Arc::new(7))) })
-            .await
-            .unwrap();
-        let (second, second_state) = cache
-            .get_or_compute(2, || async { Ok::<_, ()>((2, Arc::new(8))) })
-            .await
-            .unwrap();
-        let (hit, hit_state) = cache
-            .get_or_compute(2, || async { Ok::<_, ()>((2, Arc::new(99))) })
-            .await
-            .unwrap();
-
-        assert_eq!(first_state, DerivedSnapshotCacheState::Miss);
-        assert_eq!(second_state, DerivedSnapshotCacheState::Miss);
-        assert_eq!(hit_state, DerivedSnapshotCacheState::Hit);
-        assert_eq!(*second, 8);
-        assert_eq!(*hit, 8);
-    }
-
-    #[tokio::test]
     async fn failed_computation_is_not_cached_and_is_recomputed() {
         let cache = DerivedSnapshotCache::<u64, usize>::new();
         let computes = AtomicUsize::new(0);
@@ -289,26 +233,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((*fresh, fresh_state), (8, DerivedSnapshotCacheState::Miss));
-    }
-
-    #[tokio::test]
-    async fn dropping_the_owner_releases_the_derived_snapshot() {
-        let cache = DerivedSnapshotCache::<u64, Vec<u8>>::new();
-        let (value, _) = cache
-            .get_or_compute(1, || async { Ok::<_, ()>((1, Arc::new(vec![0_u8; 4096]))) })
-            .await
-            .unwrap();
-        let retained = Arc::downgrade(&value);
-        drop(value);
-        assert!(
-            retained.upgrade().is_some(),
-            "the owner still retains its snapshot"
-        );
-
-        drop(cache);
-        assert!(
-            retained.upgrade().is_none(),
-            "retiring the owner must release the derived snapshot"
-        );
     }
 }

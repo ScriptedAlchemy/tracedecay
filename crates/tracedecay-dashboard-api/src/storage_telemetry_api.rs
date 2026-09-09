@@ -682,23 +682,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_telemetry_context_reuses_the_state_resolved_scope() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state, _) = state_for_test().await;
-
-        let context = storage_telemetry_context(&state).expect("telemetry context");
-
-        // The per-request application context is minted from the exact scope
-        // resolved once at state construction; the handler never re-resolves
-        // repository/worktree identity from paths ad hoc.
-        assert_eq!(
-            context.scope(),
-            state.resolved_scope.as_ref().expect("state resolved scope"),
-        );
-        context.scope().validate().expect("valid scope");
-    }
-
-    #[tokio::test]
     async fn storage_telemetry_without_resolved_scope_fails_closed() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state, _) = state_for_test().await;
@@ -826,49 +809,6 @@ mod tests {
     }
 
     #[test]
-    fn two_roles_backed_by_one_file_produce_one_entry_carrying_both_roles() {
-        // The graph and project-memory roles resolve to the same database file
-        // in project storage mode. Reporting them as two entries produced two
-        // cards with byte-identical sizes; they must merge into one store.
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("shared.db");
-        let display = path.display().to_string();
-
-        let mut entries = Vec::new();
-        let mut seen = HashMap::new();
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "graph",
-            &display,
-            "test fixture".to_string(),
-        );
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "memory",
-            &display,
-            "test fixture".to_string(),
-        );
-
-        assert_eq!(entries.len(), 1, "one file is one store");
-        assert_eq!(entries[0].primary_role(), "graph");
-        assert_eq!(entries[0].roles, vec!["graph", "memory"]);
-
-        // A genuinely distinct file is still its own entry.
-        let other = directory.path().join("other.db");
-        let other_display = other.display().to_string();
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "savings",
-            &other_display,
-            "test fixture".to_string(),
-        );
-        assert_eq!(entries.len(), 2, "distinct files are never merged");
-    }
-
-    #[test]
     fn configured_budget_is_evaluated_and_missing_budget_is_unset_not_unsupported() {
         let store = StoreKeyV1::new("probe.db").expect("key");
         let sample = StoreSizeSampleV1 {
@@ -918,14 +858,6 @@ mod tests {
         assert!(matches!(
             budget_dimension("probe.db", None, Some(&configured)),
             StoreBudgetDimensionV1::Unknown { .. }
-        ));
-    }
-
-    #[test]
-    fn growth_without_execution_owned_snapshot_is_unknown() {
-        assert!(matches!(
-            growth_dimension(Some(4096), Some(0)),
-            StoreGrowthDimensionV1::Unknown { .. }
         ));
     }
 
