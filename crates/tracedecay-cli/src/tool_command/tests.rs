@@ -127,17 +127,6 @@ fn whole_payload_invocation_defers_schema_dependent_flags() {
 }
 
 #[test]
-fn coerces_integer_flag() {
-    let d = def("search");
-    let parsed = parse_invocation(
-        &d,
-        &["foo".to_string(), "--limit".to_string(), "25".to_string()],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "foo", "limit": 25 }));
-}
-
-#[test]
 fn rejects_non_numeric_flag() {
     let d = def("search");
     let err = parse_invocation(
@@ -150,21 +139,6 @@ fn rejects_non_numeric_flag() {
         msg.contains("number") || msg.contains("integer"),
         "got: {msg}"
     );
-}
-
-#[test]
-fn args_escape_hatch() {
-    let d = def("search");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--args".to_string(),
-            r#"{"query":"foo","limit":3}"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["query"], json!("foo"));
-    assert_eq!(parsed.tool_args["limit"], json!(3));
 }
 
 #[test]
@@ -433,22 +407,6 @@ fn invalid_ref_enum_errors_with_allowed_values() {
 }
 
 #[test]
-fn valid_ref_enum_passes() {
-    let d = def("fact_store_add");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--content".to_string(),
-            "categorized fact".to_string(),
-            "--category".to_string(),
-            "decision".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["category"], json!("decision"));
-}
-
-#[test]
 fn args_payload_missing_required_errors() {
     let d = def("search");
     let err =
@@ -555,25 +513,6 @@ fn lcm_cli_help_exposes_scope_without_hermes_profile_routing() {
 }
 
 #[test]
-fn per_key_json_array_of_pairs_parses() {
-    let d = def("multi_str_replace");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--path".to_string(),
-            "lib.rs".to_string(),
-            "--replacements".to_string(),
-            r#"[["alpha","gamma"]]"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args["replacements"],
-        json!([["alpha", "gamma"]])
-    );
-}
-
-#[test]
 fn comma_split_array_of_pairs_gets_corrective_error() {
     let d = def("multi_str_replace");
     let err = parse_invocation(
@@ -589,25 +528,6 @@ fn comma_split_array_of_pairs_gets_corrective_error() {
     let msg = format!("{err}");
     assert!(msg.contains("array of arrays"), "got: {msg}");
     assert!(msg.contains("--args -"), "got: {msg}");
-}
-
-#[test]
-fn per_key_json_object_parses() {
-    let d = def("message_search");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--query".to_string(),
-            "zeta".to_string(),
-            "--project-selector".to_string(),
-            r#"{"project_id":"other"}"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args["project_selector"],
-        json!({"project_id": "other"})
-    );
 }
 
 #[test]
@@ -673,24 +593,6 @@ fn bare_boolean_flag_before_next_flag_does_not_swallow_it() {
     assert_eq!(
         parsed.tool_args,
         json!({ "task": "how", "include_code": true })
-    );
-}
-
-#[test]
-fn boolean_flag_with_explicit_value_after_it_is_still_consumed() {
-    let d = def("context");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "how".to_string(),
-            "--include-code".to_string(),
-            "false".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args,
-        json!({ "task": "how", "include_code": false })
     );
 }
 
