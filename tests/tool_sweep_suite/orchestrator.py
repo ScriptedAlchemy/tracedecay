@@ -116,7 +116,7 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     return {
         "discovered": len(rows),
         "completed": sum(1 for row in rows if row.get("verdict") != "CANCELLED"),
-        "failed": sum(1 for row in rows if row.get("verdict") == "FAIL"),
+        "failed": sum(1 for row in rows if row.get("verdict") not in {"PASS", "CANCELLED"}),
         "cancelled": sum(1 for row in rows if row.get("verdict") == "CANCELLED"),
     }
 
@@ -146,7 +146,7 @@ def _write_junit(
         cases.append(
             f'<testcase name="fatal:aggregate" time="0.000"><error message="{code}: {note}" type="{code}" /></testcase>'
         )
-    failures = sum(1 for row in rows if row["verdict"] == "FAIL")
+    failures = sum(1 for row in rows if row["verdict"] not in {"PASS", "CANCELLED"})
     skipped = sum(1 for row in rows if row["verdict"] == "CANCELLED")
     (out / "junit.xml").write_text(
         f'<testsuite name="mcp-catalog-sweep" tests="{len(rows)}" failures="{failures}" skipped="{skipped}">'
@@ -351,7 +351,7 @@ def merge_phase_reports(
             return
         verdict = row.get("verdict")
         code = row.get("problem_code")
-        if verdict not in {"PASS", "FAIL", "CANCELLED"}:
+        if verdict not in {"PASS", "FAIL", "UNPROVEN", "CANCELLED"}:
             errors.append(f"{source} emitted invalid verdict for {kind}:{name}")
             return
         if verdict != "PASS" and not isinstance(code, str):
