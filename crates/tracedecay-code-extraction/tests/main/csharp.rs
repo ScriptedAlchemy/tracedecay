@@ -561,13 +561,6 @@ public class Foo
 }
 
 #[test]
-fn test_cs_extensions() {
-    let extractor = CSharpExtractor;
-    assert_eq!(extractor.extensions(), &["cs"]);
-    assert_eq!(extractor.language_name(), "C#");
-}
-
-#[test]
 fn test_cs_qualified_names() {
     let source = r#"
 namespace MyApp

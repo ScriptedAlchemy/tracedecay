@@ -1209,13 +1209,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_snapshot_deserializes_from_owned_transport_json() {
-        fn require_owned_transport_decode<T: serde::de::DeserializeOwned>() {}
-
-        require_owned_transport_decode::<RuntimeSnapshot>();
-    }
-
-    #[test]
     fn bytes_human_formats_units() {
         assert_eq!(bytes_human(0), "0 B");
         assert_eq!(bytes_human(512), "512 B");

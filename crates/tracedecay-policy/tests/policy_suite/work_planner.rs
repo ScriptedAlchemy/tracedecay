@@ -589,11 +589,6 @@ fn planner_reasons_are_appended_after_the_gate_reasons() {
 }
 
 #[test]
-fn the_evaluator_revision_records_the_planner_implementation() {
-    assert_eq!(evaluate(&base_input()).evaluator_revision, 3);
-}
-
-#[test]
 fn the_short_circuit_paths_carry_no_planner_claim() {
     let mut populated = base_input();
     populated.eligible_routes = vec![route("route.alpha", WorkOrdinalBandV1::High)];

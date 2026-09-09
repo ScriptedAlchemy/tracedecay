@@ -36,6 +36,7 @@ impl Fixture {
         let path = directory.path().join(format!("{label}.db"));
         let authority = DatabaseAuthority::acquire_test(&path, "destructive curation authority")
             .expect("acquire destructive curation authority");
+        tracedecay_global_db::register_test_schema_installer();
         let (database, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await

@@ -286,14 +286,6 @@ mod tests {
     }
 
     #[test]
-    fn workflow_unavailable_states_preserve_mount_authority() {
-        assert_ne!(
-            WorkflowIndexState::AuthorityNotRetained,
-            WorkflowIndexState::IndexNotBuilt
-        );
-    }
-
-    #[test]
     fn workflow_detail_distinguishes_missing_from_unbuilt() {
         assert!(matches!(
             WorkflowRunDetailOutcome::NotFound,

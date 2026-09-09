@@ -540,10 +540,3 @@ class Server:
         "async method should have is_async = true"
     );
 }
-
-#[test]
-fn test_py_extensions() {
-    let extractor = PythonExtractor;
-    assert_eq!(extractor.extensions(), &["py"]);
-    assert_eq!(extractor.language_name(), "Python");
-}

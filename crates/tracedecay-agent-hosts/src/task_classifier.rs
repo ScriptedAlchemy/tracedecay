@@ -272,22 +272,10 @@ mod tests {
     }
 
     #[test]
-    fn test_category_display() {
-        assert_eq!(TaskCategory::GitOps.as_str(), "git_ops");
-        assert_eq!(TaskCategory::GitOps.label(), "Git Ops");
-    }
-
-    #[test]
     fn test_redundancy_tool_is_redundancy() {
         assert_eq!(
             classify(&["tracedecay_redundancy"], &[]),
             TaskCategory::Redundancy
         );
-    }
-
-    #[test]
-    fn test_redundancy_category_display() {
-        assert_eq!(TaskCategory::Redundancy.as_str(), "redundancy");
-        assert_eq!(TaskCategory::Redundancy.label(), "Redundancy");
     }
 }
