@@ -2,18 +2,20 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use tracedecay_contracts::{WorkProductSelectionScopeV1, WorkTaskSessionRequestV1};
+use tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1;
+use tracedecay_application::work::work_evidence_retrieval::tests::{
+    CountingReauthorization, StaticFederatedAuthority, context, federated_authority, id,
+    verified_version,
+};
+use tracedecay_contracts::{
+    WorkEvidenceHydrationErrorV1, WorkProductSelectionScopeV1, WorkTaskSessionPortV1,
+    WorkTaskSessionRequestV1,
+};
 use tracedecay_domain::{
     AttemptId, ObservationSourceIdentityV1, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
     RunId, SessionId, TaskId, TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorktreeId,
 };
 use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
-
-use super::tests::{
-    CountingReauthorization, StaticFederatedAuthority, context, federated_authority, id,
-    verified_version,
-};
-use super::*;
 
 #[tokio::test]
 async fn continuation_resumes_the_same_provider_session_without_repeating_evidence() {
@@ -102,11 +104,12 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
             database, root, None,
         )
         .expect("mounted project retrieval service");
-    let adapter = DaemonWorkEvidenceRetrievalV1::new(Arc::new(retrieval)).with_federated_authority(
-        Arc::new(StaticFederatedAuthority(Arc::new(federated_authority(
-            id::<PrivacyDomainId>("privacy.work-task-session-continuation"),
-        )))),
-    );
+    let adapter = WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(retrieval))
+        .with_federated_authority(Arc::new(StaticFederatedAuthority(Arc::new(
+            federated_authority(id::<PrivacyDomainId>(
+                "privacy.work-task-session-continuation",
+            )),
+        ))));
     let source = ObservationSourceIdentityV1::for_provider(id::<ProviderId>("codex"), session_id)
         .expect("provider-qualified session");
     let mut request = WorkTaskSessionRequestV1 {

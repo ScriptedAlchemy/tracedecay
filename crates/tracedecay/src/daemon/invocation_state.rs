@@ -17,6 +17,9 @@ use tracedecay_runtime_core::resident_memory::{
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use tracedecay_application::work::{
+    WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
+};
 use tracedecay_daemon_service::{
     DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar, DaemonInvocationOutcome,
@@ -45,8 +48,7 @@ pub(crate) struct DaemonInvocationState {
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
-    work_federated_query_authority:
-        Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1>,
+    work_federated_query_authority: Arc<dyn WorkFederatedQueryAuthorityPortV1>,
     semantic_projection_scheduler:
         tracedecay_application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
@@ -432,7 +434,7 @@ impl DaemonInvocationState {
 
     pub(super) fn work_federated_query_authority(
         &self,
-    ) -> Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1> {
+    ) -> Arc<dyn WorkFederatedQueryAuthorityPortV1> {
         Arc::clone(&self.work_federated_query_authority)
     }
 
@@ -1168,13 +1170,11 @@ struct DaemonWorkFederatedQueryAuthorityV1 {
     provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
 }
 
-impl crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1
-    for DaemonWorkFederatedQueryAuthorityV1
-{
+impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {
     fn authority_for<'a>(
         &'a self,
         scope: &'a tracedecay_contracts::ResolvedScope,
-    ) -> crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityFutureV1<'a> {
+    ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
         Box::pin(async move {
             let mounted = self.schedulers.query_authority_for_scope(scope).await?;
             self.provider

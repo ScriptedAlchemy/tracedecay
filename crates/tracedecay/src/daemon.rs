@@ -404,7 +404,8 @@ pub(crate) mod store_runtime_tests;
 
 mod store_writer_gate;
 mod wire_io;
-pub(crate) mod work_evidence_retrieval;
+#[cfg(test)]
+mod work_evidence_retrieval_tests;
 use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
