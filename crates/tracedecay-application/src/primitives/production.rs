@@ -746,20 +746,12 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
     }
 }
 
-pub struct TraceDecayRedundancyAuthorityV1 {
-    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
-}
-
-impl TraceDecayRedundancyAuthorityV1 {
-    pub fn new(code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
-        Self { code_graph }
-    }
-}
+pub struct TraceDecayRedundancyAuthorityV1;
 
 impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
     fn redundancy<'a>(
         &'a self,
-        context: &'a PrimitivePortContextV1<'a>,
+        _context: &'a PrimitivePortContextV1<'a>,
         request: &'a RedundancyRequestV1,
     ) -> PrimitiveFutureV1<'a, RedundancyResultV1> {
         Box::pin(hotpath::future!(
@@ -769,7 +761,6 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
                         "compatibility cursor unsupported".to_owned(),
                     ));
                 }
-                let _ = (&self.code_graph, request, context.scope_prefix);
                 PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
                     "the verified graph generation does not publish redundancy fingerprints"
                         .to_owned(),
@@ -2819,9 +2810,7 @@ pub async fn open_production_primitive_runtime(
             Arc::clone(&source_runtime),
             Arc::clone(&code_graph),
         )),
-        Arc::new(TraceDecayRedundancyAuthorityV1::new(Arc::clone(
-            &code_graph,
-        ))),
+        Arc::new(TraceDecayRedundancyAuthorityV1),
         temporal,
         Arc::new(TraceDecaySourceLinesPortV1::new(Arc::clone(
             &source_runtime,

@@ -125,7 +125,7 @@ pub fn spawn_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>(
     grant: PrivacyRemediationGrantV1,
     memory: Memory,
     lcm: Lcm,
-    now: impl Fn() -> UtcMicros + Send + 'static,
+    now: impl Fn() -> UtcMicros + Send + Sync + 'static,
 ) -> bool
 where
     Memory:
@@ -148,7 +148,7 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
     grant: PrivacyRemediationGrantV1,
     memory: Memory,
     lcm: Lcm,
-    now: impl Fn() -> UtcMicros + Send + 'static,
+    now: impl Fn() -> UtcMicros + Send + Sync + 'static,
 ) where
     Memory: Future<Output = Result<PrivacyMemoryRemediationOutcomeV1, MemoryError>>,
     Lcm: Future<Output = Result<PrivacyLcmRemediationOutcomeV1, LcmError>>,

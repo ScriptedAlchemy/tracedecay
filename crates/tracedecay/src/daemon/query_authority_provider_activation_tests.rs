@@ -1196,6 +1196,10 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
 /// Install one committed semantic route through the exact production path:
 /// reserve the epoch fence, prepare the query authority, bind the semantic
 /// authority to the committed activation, and install both as one pair.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture independently varies scope, privacy, cursor keys and committed state to exercise authority rejection."
+)]
 async fn install_committed_semantic_route(
     registry: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     provider: &DaemonQueryAuthorityProviderV1,
