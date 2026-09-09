@@ -24,5 +24,7 @@ mod hermes;
 mod kiro;
 mod provider_contract;
 mod restart_atomicity;
+mod session_ingest;
 mod source_identity;
 mod vibe;
+mod workflow_ingest;

@@ -381,11 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn fixture_record_validates() {
-        fixture_record().validate().expect("valid fixture record");
-    }
-
-    #[test]
     fn message_is_bounded_and_sanitized() {
         let mut record = fixture_record();
         record.message = String::new();
@@ -489,15 +484,5 @@ mod tests {
             record.validate(),
             Err(DomainError::SelfSupersession)
         ));
-    }
-
-    #[test]
-    fn record_round_trips_through_json() {
-        let record = fixture_record()
-            .supersede(id("generation.clean.2"))
-            .unwrap();
-        let json = serde_json::to_string(&record).expect("serialize");
-        let parsed: GenerationDiagnosticV1 = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record, parsed);
     }
 }

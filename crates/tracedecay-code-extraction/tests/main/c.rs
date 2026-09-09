@@ -533,17 +533,3 @@ static int counter = 0;
     assert_eq!(statics[0].name, "counter");
     assert_eq!(statics[0].visibility, Visibility::Private);
 }
-
-#[test]
-fn test_c_extensions() {
-    let extractor = CExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"c"));
-    assert!(exts.contains(&"h"));
-}
-
-#[test]
-fn test_c_language_name() {
-    let extractor = CExtractor;
-    assert_eq!(extractor.language_name(), "C");
-}

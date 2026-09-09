@@ -38,13 +38,13 @@ async fn register(
     root: &tempfile::TempDir,
     project_id: ProjectId,
 ) -> (
-    crate::host_admission::HostAdmissionTestRuntimeV1,
+    tracedecay::host_admission::HostAdmissionTestRuntimeV1,
     tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     UserProfileId,
 ) {
     let project_root = root.path().join(project_id.as_str());
     std::fs::create_dir_all(&project_root).unwrap();
-    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         root.path(),
         &project_root,
         project_id.clone(),
@@ -70,7 +70,7 @@ async fn register(
             project_sessions: project_sessions.clone(),
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions,
-            background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
+            background_cpu: tracedecay::host_admission::ensure_process_background_cpu_authority()
                 .expect("install fixture worker plan authority"),
             startup_import: false,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -315,7 +315,7 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     // Re-enter the canonical host-admission owner map. This mints a fresh
     // short-lived registered lease without recovering a runtime or authority
     // from the retired client.
-    let replacement_runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let replacement_runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         root_a.path(),
         root_a.path().join(project_a.as_str()),
         project_a.clone(),
@@ -409,7 +409,7 @@ async fn registration_recovery_fences_concurrent_execute() {
     let project_id = ProjectId::new("project.session-sync.registration-race").unwrap();
     let project_root = root.path().join(project_id.as_str());
     std::fs::create_dir_all(&project_root).unwrap();
-    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         root.path(),
         &project_root,
         project_id.clone(),
@@ -458,8 +458,9 @@ async fn registration_recovery_fences_concurrent_execute() {
                 project_sessions,
                 user_sessions: profile_sessions.clone(),
                 registry: profile_sessions,
-                background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
-                    .expect("install fixture worker plan authority"),
+                background_cpu:
+                    tracedecay::host_admission::ensure_process_background_cpu_authority()
+                        .expect("install fixture worker plan authority"),
                 startup_import: false,
                 project_refresh: SessionTemporalRefreshWake::unavailable(),
                 user_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -499,7 +500,7 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
     let project_id = ProjectId::new("project.session-sync.terminal-alias").unwrap();
     let project_root = root.path().join(project_id.as_str());
     std::fs::create_dir_all(&project_root).unwrap();
-    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         root.path(),
         &project_root,
         project_id.clone(),
@@ -567,7 +568,7 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
-            background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
+            background_cpu: tracedecay::host_admission::ensure_process_background_cpu_authority()
                 .expect("install fixture worker plan authority"),
             startup_import: true,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -607,7 +608,7 @@ async fn recovery_upgrades_a_journal_whose_frontiers_exceed_one_query() {
     let project_id = ProjectId::new("project.session-sync.large-frontier").unwrap();
     let project_root = root.path().join(project_id.as_str());
     std::fs::create_dir_all(&project_root).unwrap();
-    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         root.path(),
         &project_root,
         project_id.clone(),
@@ -662,7 +663,7 @@ async fn recovery_upgrades_a_journal_whose_frontiers_exceed_one_query() {
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
-            background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
+            background_cpu: tracedecay::host_admission::ensure_process_background_cpu_authority()
                 .expect("install fixture worker plan authority"),
             startup_import: false,
             project_refresh: SessionTemporalRefreshWake::unavailable(),

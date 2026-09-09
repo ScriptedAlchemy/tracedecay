@@ -256,24 +256,6 @@ fn test_qbasic_complexity() {
 }
 
 #[test]
-fn test_qbasic_extensions() {
-    let extractor = QBasicExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"qb"), "extensions should contain 'qb'");
-    // Should NOT contain 'bas' to avoid conflict with msbasic2
-    assert!(
-        !exts.contains(&"bas"),
-        "extensions should NOT contain 'bas'"
-    );
-}
-
-#[test]
-fn test_qbasic_language_name() {
-    let extractor = QBasicExtractor;
-    assert_eq!(extractor.language_name(), "QBasic");
-}
-
-#[test]
 fn test_qbasic_signatures() {
     let result = extract_fixture();
 

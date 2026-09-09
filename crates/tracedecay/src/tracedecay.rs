@@ -16,6 +16,7 @@ use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
+mod automation_context;
 #[cfg(test)]
 mod concrete_runtime_tests;
 mod diagnostics;
@@ -23,8 +24,8 @@ mod edits;
 pub(crate) mod facts;
 mod lifecycle;
 mod move_symbol;
-mod project_runtime_port;
 pub(crate) mod queries;
+mod source_edit_runtime;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 pub use lifecycle::MovedStoreAdoption;
