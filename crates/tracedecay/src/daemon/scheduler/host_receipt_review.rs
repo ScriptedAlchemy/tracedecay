@@ -199,11 +199,12 @@ async fn run_one_host_receipt_review(
         &combined_options,
     ))
     .await?;
+    let automation_context = cg.automation_project_context()?;
     let mut first_error = None;
     let outcome = Box::pin(super::combined_effect::run_combined_scheduler_effect(
         admission,
         engine,
-        cg,
+        &automation_context,
         &project_id,
         project_path,
         config,

@@ -338,6 +338,7 @@ fn run_automation_scheduler_tick_inner<'a>(
             );
             return Ok(());
         }
+        let automation_context = cg.automation_project_context()?;
         if let Ok(profile_database) = engine
             .store_administration
             .registered_profile_database()
@@ -457,7 +458,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                         let mut options = memory_curator_options;
                         options.run_id = Some(run_id);
                         let retained_run = run_memory_curator_with_backend_for_retained_settlement(
-                            cg,
+                            &automation_context,
                             config,
                             &configuration.configuration_revision_id,
                             &backend,
@@ -520,7 +521,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     combined_handled = super::combined_effect::run_combined_scheduler_effect(
                         admission,
                         engine,
-                        cg,
+                        &automation_context,
                         &project_id,
                         project_path,
                         config,
@@ -600,7 +601,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     )) => {
                         let retained_run =
                             run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                                cg,
+                                &automation_context,
                                 config,
                                 &effect_run_control,
                                 &configuration.configuration_revision_id,
@@ -681,7 +682,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                         options.run_id = Some(run_id);
                         let retained_run =
                             run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-                                cg,
+                                &automation_context,
                                 config,
                                 &configuration.configuration_revision_id,
                                 &backend,

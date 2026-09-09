@@ -13,6 +13,7 @@ use tracedecay_automation_runtime::automation::runner::{
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
 };
+use tracedecay_automation_runtime::ports::project_runtime::AutomationProjectContext;
 
 use super::scheduler_automation_effect;
 use crate::daemon::DaemonEngine;
@@ -360,7 +361,7 @@ where
 pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
     engine: &DaemonEngine,
-    memory: &TraceDecay,
+    automation_context: &AutomationProjectContext,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
@@ -373,7 +374,7 @@ pub(super) async fn run_combined_scheduler_effect(
     run_combined_scheduler_effect_inner(
         admission,
         engine,
-        memory,
+        automation_context,
         project_id,
         project_path,
         config,
@@ -394,7 +395,7 @@ pub(super) async fn run_combined_scheduler_effect(
 fn run_combined_scheduler_effect_inner<'a>(
     admission: CombinedEffectAdmission,
     engine: &'a DaemonEngine,
-    memory: &'a TraceDecay,
+    automation_context: &'a AutomationProjectContext,
     project_id: &'a tracedecay_domain::ProjectId,
     project_path: &'a Path,
     config: &'a tracedecay_automation_runtime::automation::config::AutomationConfig,
@@ -456,7 +457,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 skill_options.trigger = options.trigger;
                 let replay_completed = reflector.is_completed();
                 let retained = run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-                    memory,
+                    automation_context,
                     config,
                     configuration_revision_id,
                     backend,
@@ -494,7 +495,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 let replay_completed = skill.is_completed();
                 let retained =
                     run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                        memory,
+                        automation_context,
                         config,
                         &reflector_control,
                         configuration_revision_id,
@@ -528,7 +529,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                     *reflector,
                     *skill,
                     engine,
-                    memory,
+                    automation_context,
                     project_id,
                     project_path,
                     config,
@@ -566,7 +567,7 @@ fn run_execute_pair<'a>(
     reflector: AutomationEffectAuthority,
     skill: AutomationEffectAuthority,
     engine: &'a DaemonEngine,
-    memory: &'a TraceDecay,
+    automation_context: &'a AutomationProjectContext,
     project_id: &'a tracedecay_domain::ProjectId,
     project_path: &'a Path,
     config: &'a tracedecay_automation_runtime::automation::config::AutomationConfig,
@@ -578,7 +579,7 @@ fn run_execute_pair<'a>(
 ) -> Pin<Box<dyn Future<Output = CombinedEffectOutcome> + Send + 'a>> {
     Box::pin(async move {
         let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-            memory,
+            automation_context,
             config,
             configuration_revision_id,
             backend,
@@ -1551,10 +1552,14 @@ mod tests {
         let options = CombinedReviewAutomationOptions::default();
         assert_eq!(options.trigger, AutomationTrigger::Scheduler);
         assert_eq!(options.skill_writer.trigger, AutomationTrigger::ManualCli);
+        let automation_context = fixture
+            .memory
+            .automation_project_context()
+            .expect("compose project automation context");
 
         let prior_skill_run_id = "combined-partial-replay-prior-skill";
         let prior_skill = run_skill_writer_with_backend_and_retrieval(
-            fixture.memory.as_ref(),
+            &automation_context,
             &config,
             &fixture.configuration_revision_id,
             &backend,
@@ -1603,7 +1608,7 @@ mod tests {
         reflector_options.run_id = Some(combined_run_id.to_owned());
         let reflector_run =
             run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                fixture.memory.as_ref(),
+                &automation_context,
                 &config,
                 &parent_control,
                 &fixture.configuration_revision_id,
@@ -1671,7 +1676,7 @@ mod tests {
         let mut effect = Box::pin(run_combined_scheduler_effect(
             admission,
             &fixture.engine,
-            fixture.memory.as_ref(),
+            &automation_context,
             &fixture.project_id,
             &fixture.project_root,
             &config,
