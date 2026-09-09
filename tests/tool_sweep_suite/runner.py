@@ -683,9 +683,9 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(
 #   daemon-internal project servers, so the hermetic stdio server has no
 #   executor and the typed daemon_unavailable denial is the complete
 #   hermetic contract (45-attempt/90s mount probe evidence).
-# An entry is falsifiable in both directions: a different problem stays FAIL,
-# and a hermetic success FAILs with expected_denial_superseded until the entry
-# is removed.
+# An exact denial is UNPROVEN functionality rather than successful coverage. A
+# different problem stays FAIL, and a hermetic success FAILs with
+# expected_denial_superseded until the entry is removed.
 EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_context_scout_budget": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_context_scout_capability": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
@@ -1062,8 +1062,8 @@ def _expected_denial_row(row: dict[str, Any], name: str, response: dict[str, Any
     if row["verdict"] == "FAIL" and problem == expected:
         row.update(
             {
-                "verdict": "PASS",
-                "note": f"expected hermetic typed denial confirmed: {problem[0]}",
+                "verdict": "UNPROVEN",
+                "note": f"expected hermetic typed denial confirmed; success path unproven: {problem[0]}",
                 "problem_code": problem[1],
                 "expected_denial": True,
             }
@@ -1156,9 +1156,9 @@ def _unavailable_tool_row(client: McpClient, policy: ToolPolicy) -> dict[str, An
     if row["verdict"] == "FAIL" and problem_kind == "unavailable" and isinstance(code, str) and code:
         row.update(
             {
-                "verdict": "PASS",
+                "verdict": "UNPROVEN",
                 "note": (
-                    "declared unavailable state confirmed: "
+                    "declared unavailable state confirmed; success path unproven: "
                     f"{policy.availability_reason or 'unspecified'}"
                 ),
                 "problem_code": code,

@@ -94,8 +94,8 @@ class WholeRunDeadlineTests(unittest.TestCase):
         orchestrator = load_orchestrator()
         report = {
             "entries": [{
-                "kind": "tool", "name": "tracedecay_read", "verdict": "FAIL",
-                "note": "typed failure", "problem_code": "store.offline",
+                "kind": "tool", "name": "tracedecay_read", "verdict": "UNPROVEN",
+                "note": "success path unproven", "problem_code": "store.offline",
                 "elapsed_ms": 0, "deadline_ms": 1,
             }],
             "fatal": "discovery failed",
@@ -105,9 +105,18 @@ class WholeRunDeadlineTests(unittest.TestCase):
             out = Path(raw)
             orchestrator.write_final_report(out, report)
             junit = (out / "junit.xml").read_text()
+        merged = orchestrator.merge_phase_reports(
+            {"tools": [{"name": "tracedecay_read"}], "resources": [], "prompts": []},
+            {"entries": report["entries"]},
+            {},
+            False,
+        )
 
         self.assertIn("store.offline", junit)
         self.assertIn("tool_sweep.discovery_failed", junit)
+        self.assertIn('failures="1"', junit)
+        self.assertNotIn("fatal", merged)
+        self.assertEqual(merged["summary"]["failed"], 1)
 
 
 if __name__ == "__main__":
