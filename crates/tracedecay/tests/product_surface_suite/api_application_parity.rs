@@ -29,7 +29,7 @@ use tracedecay_domain::{
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
-use tracedecay_mcp::get_tool_definitions;
+use tracedecay_mcp::{get_tool_definitions, mcp_input_schema};
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, OperationId, ProfileId, SchemaId,
     SurfaceOperationName,
@@ -418,19 +418,21 @@ fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
         let operation_id =
             OperationId::new(format!("operation.application.{}", operation.as_str()))
                 .expect("operation ID");
-        let canonical = mcp_registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-            .expect("MCP executable")
-            .request_schema()
-            .body();
+        let canonical = mcp_input_schema(
+            mcp_registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .expect("MCP executable")
+                .request_schema()
+                .body(),
+        );
         let mut projected = definition.input_schema.clone();
         projected["properties"]
             .as_object_mut()
             .expect("request properties")
             .remove("format");
         assert_eq!(
-            &projected, canonical,
+            projected, canonical,
             "{tool_name} must advertise its canonical continuation request"
         );
     }
