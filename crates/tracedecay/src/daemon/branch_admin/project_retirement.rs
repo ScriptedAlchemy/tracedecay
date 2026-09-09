@@ -495,13 +495,13 @@ mod tests {
         project_id: &str,
     ) -> (
         crate::tracedecay::TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(profile_root).expect("isolated profile root");
         std::fs::create_dir_all(project_root).expect("isolated project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
             .expect("typed project identity");
-        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
             profile_root,
             project_root,
             project_id,
@@ -522,13 +522,13 @@ mod tests {
     }
 
     async fn isolated_sibling_graph(
-        runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
+        runtime: &crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
         profile_root: &std::path::Path,
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
         crate::tracedecay::TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(project_root).expect("isolated sibling project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
