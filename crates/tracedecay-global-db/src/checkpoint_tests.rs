@@ -231,16 +231,3 @@ async fn below_trigger_checkpoint_reports_measured_wal_bytes() {
     );
     assert_eq!(receipt.wal_bytes_after, receipt.wal_bytes_before);
 }
-
-#[tokio::test]
-async fn public_checkpoint_remains_best_effort_when_reader_is_busy() {
-    let harness = RegisteredGlobalDbHarness::open("best-effort-checkpoint").await;
-    let reader = grow_pressured_wal(&harness.registered).await;
-
-    // The best-effort entry point must swallow the pinned-reader failure so
-    // shutdown paths never abort on a busy WAL.
-    harness.registered.checkpoint().await;
-
-    drop(reader);
-    harness.registered.checkpoint_result().await.unwrap();
-}

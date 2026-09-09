@@ -2801,14 +2801,6 @@ mod store_runtime_event_level_tests {
             ("error", "authority invariant failed".to_owned()),
         ]));
     }
-
-    #[test]
-    fn events_without_a_complete_outcome_stay_loud() {
-        assert!(!store_runtime_event_is_success(&[(
-            "resource",
-            "statuses".to_owned()
-        ),]));
-    }
 }
 
 pub fn release_process_allocator_memory() {

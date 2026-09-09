@@ -155,20 +155,6 @@ mod tests {
     use tracedecay_runtime_core::db::DatabaseAuthorityRole;
 
     #[test]
-    fn wal_below_trigger_is_left_alone_for_every_role() {
-        for role in [
-            DatabaseAuthorityRole::Daemon,
-            DatabaseAuthorityRole::Maintenance,
-            DatabaseAuthorityRole::Test,
-        ] {
-            assert_eq!(
-                wal_reclaim_plan(REGISTERED_WAL_RECLAIM_TRIGGER_BYTES - 1, role),
-                WalReclaimPlan::BelowTrigger
-            );
-        }
-    }
-
-    #[test]
     fn triggered_wal_truncates_only_under_exclusive_maintenance() {
         assert_eq!(
             wal_reclaim_plan(

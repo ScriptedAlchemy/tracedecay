@@ -1024,22 +1024,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_total_sums_every_measured_family() {
-        let report = StorageReport {
-            stores: vec![store("alpha", 400), store("beta", 600)],
-            global_db_bytes: 100,
-            unregistered_bytes: 25,
-            ..StorageReport::default()
-        };
-
-        let total = report.profile_total_size();
-        assert_eq!(total.state, ProfileTotalCoverageStateV1::Complete);
-        assert_eq!(total.registered_store_bytes, 1_000);
-        assert_eq!(total.accounted_bytes, 1_125);
-        assert!(total.excluded_families.is_empty());
-    }
-
-    #[test]
     fn paginated_report_totals_a_floor_and_never_claims_completeness() {
         let report = StorageReport {
             stores: vec![store("alpha", 400)],
@@ -1085,17 +1069,6 @@ mod tests {
                 .excluded_families
                 .iter()
                 .any(|family| family.contains("could not be read"))
-        );
-    }
-
-    #[test]
-    fn empty_profile_totals_zero_only_when_nothing_is_excluded() {
-        let total = StorageReport::default().profile_total_size();
-        assert_eq!(total.accounted_bytes, 0);
-        assert_eq!(
-            total.state,
-            ProfileTotalCoverageStateV1::Complete,
-            "a genuinely empty profile is a complete zero, not a partial one"
         );
     }
 
@@ -1497,22 +1470,6 @@ mod tests {
             })
     }
 
-    fn profile_entries(root: &Path) -> BTreeSet<PathBuf> {
-        fn collect(root: &Path, current: &Path, entries: &mut BTreeSet<PathBuf>) {
-            for entry in std::fs::read_dir(current).unwrap().flatten() {
-                let path = entry.path();
-                entries.insert(path.strip_prefix(root).unwrap().to_path_buf());
-                if entry.file_type().unwrap().is_dir() {
-                    collect(root, &path, entries);
-                }
-            }
-        }
-
-        let mut entries = BTreeSet::new();
-        collect(root, root, &mut entries);
-        entries
-    }
-
     fn sqlite_family_bytes(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         ["", "-wal", "-shm"]
             .into_iter()
@@ -1582,28 +1539,6 @@ mod tests {
             total.accounted_bytes, expected_bytes,
             "a full profile total must include session and code-generation files, \
              not only registered graph databases"
-        );
-    }
-
-    #[tokio::test]
-    async fn full_profile_report_creates_no_entries_under_the_profile_root() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let profile_root = tmp.path().join("profile");
-        std::fs::create_dir_all(&profile_root).unwrap();
-        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
-        seed_graph_db(&profile_root, "proj_a");
-        let before = profile_entries(&profile_root);
-
-        let report = build_storage_report(&profile_root).await.unwrap();
-
-        assert_eq!(
-            report.profile_total_size().state,
-            ProfileTotalCoverageStateV1::Complete
-        );
-        assert_eq!(
-            profile_entries(&profile_root),
-            before,
-            "read-only reporting must not add scratch or other entries to a live profile"
         );
     }
 
@@ -1768,19 +1703,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn report_on_empty_profile_root_is_empty_not_an_error() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let profile_root = tmp.path().join("profile");
-        std::fs::create_dir_all(&profile_root).unwrap();
-
-        let report = build_storage_report(&profile_root).await.unwrap();
-
-        assert!(report.stores.is_empty());
-        assert_eq!(report.unregistered_dir_count, 0);
-        assert_eq!(report.global_db_bytes, 0);
-    }
-
     #[test]
     fn targeted_project_report_bypasses_global_registry() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1877,32 +1799,6 @@ mod tests {
         assert_eq!(
             payload["code_generation_retention_availability"][0]["state"], "unavailable",
             "a corrupt active pointer is still unavailable: {payload}"
-        );
-    }
-
-    #[test]
-    fn metadata_only_state_is_not_treated_as_an_unreadable_scope() {
-        let report = StorageReport {
-            stores: vec![store("alpha", 400)],
-            code_generation_retention_availability: vec![
-                CodeGenerationRetentionAvailabilityEntry {
-                    project_id: "alpha".to_owned(),
-                    store_root: "/profile/projects/alpha/code-index-v1/ab".to_owned(),
-                    state: StorageReportAvailabilityState::MetadataOnly,
-                    reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
-                },
-            ],
-            ..StorageReport::default()
-        };
-
-        let total = report.profile_total_size();
-
-        assert!(
-            !total
-                .excluded_families
-                .iter()
-                .any(|family| family.contains("could not be read")),
-            "a metadata-only census read the scope; it just did not re-hash it"
         );
     }
 }

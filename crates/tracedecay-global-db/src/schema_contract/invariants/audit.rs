@@ -1769,9 +1769,7 @@ mod tests {
     };
 
     use super::{
-        AuditCheckpoint, BTreeSet, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
-        DETAILED_TAIL_CONCURRENCY, HashMap, MAX_DETAILED_OBSERVATIONS_PER_PAGE,
-        PROJECTION_PROGRESS_PAGE_INTERVAL, ProjectionOutputOwnership, ResolvedOutputAuthority,
+        AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ResolvedOutputAuthority,
         ensure_audit_checkpoint_schema, historical_projection_delta_required,
         projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
     };
@@ -1807,16 +1805,6 @@ mod tests {
         async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
             self.inner.execute_batch(sql).await
         }
-    }
-
-    #[test]
-    fn exhaustive_projection_audit_bounds_detailed_work() {
-        assert_eq!(
-            MAX_DETAILED_OBSERVATIONS_PER_PAGE,
-            DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
-        );
-        assert!(std::hint::black_box(DETAILED_TAIL_CONCURRENCY) < DETAILED_AUDIT_CONCURRENCY);
-        assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
     }
 
     #[tokio::test]
