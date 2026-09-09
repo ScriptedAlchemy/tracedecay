@@ -351,7 +351,7 @@ impl TraceDecay {
             let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
         }
 
-        let mut ts = Self {
+        let ts = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -365,8 +365,6 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -381,20 +379,19 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            ts.context_scout_owner =
-                tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
-                    ts.db.clone(),
-                    project_id,
-                    tracedecay_domain::UtcMicros(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(1, |duration| {
-                                duration.as_micros().min(i64::MAX as u128) as i64
-                            }),
-                    ),
-                    None,
-                )
-                .await;
+            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                ts.db.clone(),
+                project_id,
+                tracedecay_domain::UtcMicros(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(1, |duration| {
+                            duration.as_micros().min(i64::MAX as u128) as i64
+                        }),
+                ),
+                None,
+            )
+            .await;
         }
         ts.register_project_store_in_global_registry().await?;
         Ok(ts)
@@ -589,7 +586,7 @@ impl TraceDecay {
         .into_parts();
         let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        let mut ts = Self {
+        let ts = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -603,8 +600,6 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -617,20 +612,19 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            ts.context_scout_owner =
-                tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
-                    ts.db.clone(),
-                    project_id,
-                    tracedecay_domain::UtcMicros(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(1, |duration| {
-                                duration.as_micros().min(i64::MAX as u128) as i64
-                            }),
-                    ),
-                    None,
-                )
-                .await;
+            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                ts.db.clone(),
+                project_id,
+                tracedecay_domain::UtcMicros(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(1, |duration| {
+                            duration.as_micros().min(i64::MAX as u128) as i64
+                        }),
+                ),
+                None,
+            )
+            .await;
         }
 
         ts.register_project_store_in_global_registry().await?;
@@ -813,8 +807,6 @@ impl TraceDecay {
             fallback_warning,
             read_only: true,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -848,20 +840,20 @@ mod tests {
         let opened = TraceDecay::init_with_options(&project, options)
             .await
             .expect("initialize project graph");
-        let project_id = tracedecay_agent_hosts::hooks::hook_project_id_for_layout(
-            opened.hook_store_layout(),
-        )
-        .expect("initialized project has hook identity");
+        let project_id =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(opened.hook_store_layout())
+                .expect("initialized project has hook identity");
         let owner = opened
             .context_scout_owner()
-            .cloned()
             .expect("Context Scout owner starts with the project");
         let registered =
             tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
                 project_id,
             );
         assert!(
-            registered.iter().any(|candidate| Arc::ptr_eq(candidate, &owner)),
+            registered
+                .iter()
+                .any(|candidate| Arc::ptr_eq(candidate, &owner)),
             "startup must publish the owner into the process-global registry"
         );
 
@@ -927,7 +919,7 @@ mod tests {
             .context_scout_owner()
             .expect("Context Scout owner must remain resolvable after branch reopen");
         assert!(
-            Arc::ptr_eq(&owner, after),
+            Arc::ptr_eq(&owner, &after),
             "Context Scout owner is keyed by project identity, not by the TraceDecay instance"
         );
         assert_eq!(
