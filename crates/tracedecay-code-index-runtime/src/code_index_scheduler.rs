@@ -9021,6 +9021,7 @@ mod tests;
 
 mod activation;
 pub mod branch_generations;
+pub mod branch_publication;
 mod cadence;
 mod classification;
 mod freshness_witness;

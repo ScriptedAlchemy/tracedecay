@@ -1953,16 +1953,18 @@ fn project_dashboard_freshness_reader(
 fn project_dashboard_pr_autotrack_reader()
 -> tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader {
     Arc::new(|store_root| {
-        crate::daemon::pr_autotrack::managed_summary(&store_root)
-            .into_iter()
-            .map(
-                |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
-                    branch: entry.branch,
-                    pr: entry.pr,
-                    head_branch: entry.head_branch,
-                },
-            )
-            .collect()
+        tracedecay_application::pr_tracking::managed_summary(&store_root).map(|entries| {
+            entries
+                .into_iter()
+                .map(
+                    |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                        branch: entry.branch,
+                        pr: entry.pr,
+                        head_branch: entry.head_branch,
+                    },
+                )
+                .collect()
+        })
     })
 }
 
