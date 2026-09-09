@@ -105,6 +105,19 @@ impl ManualBranchArtifactsV1 {
         }
     }
 
+    /// Each head is staged independently so interruption cannot destroy the
+    /// artifacts still named by the previously published branch provenance.
+    pub(crate) fn for_head(data_root: &Path, branch: &str, head: &str) -> Self {
+        let mut artifacts = Self::for_branch(data_root, branch);
+        let generation = sha256_hex(head.as_bytes());
+        artifacts
+            .worktree
+            .set_file_name(format!("{}-{generation}", artifacts.branch_digest));
+        artifacts.tracking_ref = format!("{}-{generation}", artifacts.tracking_ref);
+        artifacts.label = format!("{}-{generation}", artifacts.label);
+        artifacts
+    }
+
     /// Lifecycle locks live beside `branch-worktrees`, never inside it. The
     /// lease is taken before the branch identity is resolved, so a typed
     /// pre-mutation refusal (missing ref, unavailable Git authority) must not
@@ -458,22 +471,26 @@ async fn activate_manual_branch_with_administration(
             "manual branch lifecycle lease changed before activation",
         ));
     }
-    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
+    let artifacts = ManualBranchArtifactsV1::for_head(data_root, branch, &head_sha);
     let worktree = artifacts.worktree.clone();
     if worktree.try_exists().map_err(|error| {
         ManualBranchActivationError::git_unavailable(format!(
             "cannot inspect manual worktree '{}': {error}",
             worktree.display()
         ))
-    })? && schedulers.is_worktree_mounted(&worktree).await
-        && manual_branch_artifacts_match_off_runtime(
-            repo_root,
-            &artifacts,
-            &head_sha,
-            administration.command_control.clone(),
-        )
-        .await?
+    })? && manual_branch_artifacts_match_off_runtime(
+        repo_root,
+        &artifacts,
+        &head_sha,
+        administration.command_control.clone(),
+    )
+    .await?
     {
+        if !schedulers.is_worktree_mounted(&worktree).await {
+            activate_linked_worktree(schedulers, graph, &worktree)
+                .await
+                .map_err(ManualBranchActivationError::activation_failed)?;
+        }
         return Ok(ManualBranchActivation {
             branch: branch.to_string(),
             head_sha,
@@ -490,36 +507,10 @@ async fn activate_manual_branch_with_administration(
             worktree.display()
         ))
     })? {
-        let replacement_head = manual_branch_owned_head_off_runtime(
-            repo_root,
-            &artifacts,
-            administration.command_control.clone(),
-        )
-        .await?
-        .ok_or_else(|| {
-            ManualBranchActivationError::activation_failed(format!(
-                "existing manual worktree '{}' does not prove ownership for branch '{branch}'",
-                worktree.display()
-            ))
-        })?;
-        retire_worktree_mount(Some(schedulers), &worktree)
-            .await
-            .map_err(ManualBranchActivationError::activation_failed)?;
-        if !cleanup_owned_worktree_off_runtime(
-            repo_root,
-            &worktree,
-            &tracking_ref,
-            &label,
-            &replacement_head,
-            administration.command_control.clone(),
-        )
-        .await?
-        {
-            return Err(ManualBranchActivationError::activation_failed(format!(
-                "existing manual worktree '{}' changed before replacement",
-                worktree.display()
-            )));
-        }
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "existing manual worktree '{}' does not match requested branch generation",
+            worktree.display()
+        )));
     }
     let repo = repo_root.to_path_buf();
     let wt = worktree.clone();
@@ -694,7 +685,8 @@ pub(crate) async fn cleanup_manual_branch_activation(
             "manual branch lifecycle lease does not match failed activation",
         ));
     }
-    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, &activation.branch);
+    let artifacts =
+        ManualBranchArtifactsV1::for_head(data_root, &activation.branch, &activation.head_sha);
     if artifacts.worktree != activation.worktree {
         return Err(ManualBranchActivationError::activation_failed(format!(
             "failed activation worktree '{}' does not match exact branch identity",
@@ -748,7 +740,7 @@ pub(crate) async fn cleanup_manual_branch_retirement(
             "stored branch provenance does not own manual artifacts for '{branch}'"
         )));
     }
-    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
+    let artifacts = ManualBranchArtifactsV1::for_head(data_root, branch, &source.source_oid);
     let expected_worktree = artifacts
         .worktree
         .canonicalize()
@@ -807,7 +799,8 @@ pub(crate) fn manual_branch_source_owns_artifacts(
     let canonical_data_root = data_root
         .canonicalize()
         .unwrap_or_else(|_| data_root.to_path_buf());
-    let artifacts = ManualBranchArtifactsV1::for_branch(&canonical_data_root, branch);
+    let artifacts =
+        ManualBranchArtifactsV1::for_head(&canonical_data_root, branch, &source.source_oid);
     let worktree = artifacts
         .worktree
         .canonicalize()
@@ -916,24 +909,6 @@ async fn manual_branch_artifacts_match_off_runtime(
     .map_err(|error| {
         ManualBranchActivationError::activation_failed(format!(
             "manual branch exactness inspection task did not complete: {error}"
-        ))
-    })?
-}
-
-async fn manual_branch_owned_head_off_runtime(
-    repo_root: &Path,
-    artifacts: &ManualBranchArtifactsV1,
-    command_control: PrCommandControl,
-) -> std::result::Result<Option<String>, ManualBranchActivationError> {
-    let repo_root = repo_root.to_path_buf();
-    let artifacts = artifacts.clone();
-    tokio::task::spawn_blocking(move || {
-        manual_branch_owned_head(&repo_root, &artifacts, &command_control)
-    })
-    .await
-    .map_err(|error| {
-        ManualBranchActivationError::activation_failed(format!(
-            "manual branch ownership inspection task did not complete: {error}"
         ))
     })?
 }
@@ -1218,29 +1193,6 @@ fn manual_branch_artifacts_match(
             expected_head,
             command_control,
         )?)
-}
-
-fn manual_branch_owned_head(
-    repo_root: &Path,
-    artifacts: &ManualBranchArtifactsV1,
-    command_control: &PrCommandControl,
-) -> std::result::Result<Option<String>, ManualBranchActivationError> {
-    let branch_ref = format!("refs/heads/{}", artifacts.label);
-    let ExactRefReadV1::Present(head) =
-        read_exact_ref(repo_root, &artifacts.tracking_ref, command_control)?
-    else {
-        return Ok(None);
-    };
-    if manual_branch_artifacts_match(repo_root, artifacts, &head, command_control)? {
-        return Ok(Some(head));
-    }
-    if !checked_path_exists(&artifacts.worktree)?
-        && exact_ref_ownership(repo_root, &branch_ref, &head, command_control)?
-            == ManualBranchArtifactOwnershipV1::Exact
-    {
-        return Ok(Some(head));
-    }
-    Ok(None)
 }
 
 fn worktree_matches_branch_head(

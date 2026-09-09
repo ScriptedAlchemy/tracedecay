@@ -558,7 +558,12 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
     );
     assert!(git_ref_exists(
         repo.path(),
-        "refs/tracedecay/branch/feature-manual"
+        &ManualBranchArtifactsV1::for_head(
+            &graph.store_layout().data_root,
+            "feature-manual",
+            &activation.head_sha
+        )
+        .tracking_ref
     ));
     schedulers.shutdown().await;
 }
@@ -654,7 +659,8 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
         default_pr_command_control(),
     )
     .expect("resolve linked-worktree head");
-    let artifacts = ManualBranchArtifactsV1::for_branch(&data_root, "feature-retained-refusal");
+    let artifacts =
+        ManualBranchArtifactsV1::for_head(&data_root, "feature-retained-refusal", &head);
     prepare_manual_branch_worktree(
         repo.path(),
         &linked,
@@ -754,22 +760,23 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
     );
     assert_ne!(slashed.worktree, underscored.worktree);
     assert_ne!(
-        ManualBranchArtifactsV1::for_branch(&data_root, "feature/a").worktree,
-        ManualBranchArtifactsV1::for_branch(&data_root, "feature_a").worktree
+        ManualBranchArtifactsV1::for_head(&data_root, "feature/a", &slashed.head_sha).worktree,
+        ManualBranchArtifactsV1::for_head(&data_root, "feature_a", &underscored.head_sha).worktree
     );
     assert!(git_ref_exists(
         repo.path(),
-        "refs/tracedecay/branch/feature/a"
+        &ManualBranchArtifactsV1::for_head(&data_root, "feature/a", &slashed.head_sha).tracking_ref
     ));
     assert!(git_ref_exists(
         repo.path(),
-        "refs/tracedecay/branch/feature_a"
+        &ManualBranchArtifactsV1::for_head(&data_root, "feature_a", &underscored.head_sha)
+            .tracking_ref
     ));
     schedulers.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advances() {
+async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
@@ -784,6 +791,25 @@ async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advanc
         activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
             .await
             .expect("initial activation");
+
+    let publication = crate::daemon::branch_add::branch_publication_context(&graph).unwrap();
+    publication
+        .track_exact_worktree_branch(
+            &schedulers,
+            repo.path(),
+            &initial.worktree,
+            "feature/advance",
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
+        .await
+        .expect("publish initial branch generation");
+    let original_source =
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&graph.store_layout().data_root)
+            .unwrap()
+            .branches["feature/advance"]
+            .graph_source
+            .clone()
+            .unwrap();
 
     git(repo.path(), &["checkout", "-q", "feature/advance"]);
     std::fs::write(
@@ -800,10 +826,104 @@ async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advanc
         .unwrap();
     git(repo.path(), &["checkout", "-q", "main"]);
 
-    let replay =
-        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
-            .await
-            .expect("advanced branch activation");
+    let staged_graph = Arc::clone(&graph);
+    let staged_schedulers = schedulers.clone();
+    let staged_repo = repo.path().to_path_buf();
+    let (staged_sender, staged_receiver) = tokio::sync::oneshot::channel();
+    let owner = tokio::spawn(async move {
+        let lifecycle = try_acquire_manual_branch_lifecycle(
+            &staged_graph.store_layout().data_root,
+            "feature/advance",
+        )
+        .unwrap();
+        let staged = activate_manual_branch_head_with_lifecycle(
+            &staged_repo,
+            &staged_graph,
+            Some(&staged_schedulers),
+            "feature/advance",
+            &lifecycle,
+            default_pr_command_control(),
+        )
+        .await
+        .expect("stage advanced head");
+        staged_sender.send(staged).unwrap();
+        std::future::pending::<()>().await;
+        drop(lifecycle);
+    });
+    let replay = staged_receiver.await.unwrap();
+    // A hard owner abort after staging, before metadata publication, must leave
+    // the previously published worktree and its exact Git identity usable.
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    assert_ne!(initial.worktree, replay.worktree);
+    assert!(schedulers.is_worktree_mounted(&initial.worktree).await);
+    assert_eq!(
+        git_output(&initial.worktree, &["rev-parse", "HEAD"]).trim(),
+        initial.head_sha
+    );
+    assert_eq!(
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&graph.store_layout().data_root)
+            .unwrap()
+            .branches["feature/advance"]
+            .graph_source
+            .as_ref(),
+        Some(&original_source)
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let metadata_lock =
+        tracedecay_runtime_core::branch::try_acquire_branch_add_lock(&data_root).unwrap();
+    let deferred = crate::daemon::branch_add::activate_and_track_manual_branch_owned(
+        repo.path().to_path_buf(),
+        Arc::clone(&graph),
+        schedulers.clone(),
+        "feature/advance".to_owned(),
+        data_root.clone(),
+        try_acquire_manual_branch_lifecycle(&data_root, "feature/advance").unwrap(),
+        tracedecay_runtime_core::cancellation::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        deferred,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Deferred
+    );
+    assert!(initial.worktree.exists());
+    assert!(schedulers.is_worktree_mounted(&initial.worktree).await);
+    assert_eq!(
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root)
+            .unwrap()
+            .branches["feature/advance"]
+            .graph_source
+            .as_ref(),
+        Some(&original_source)
+    );
+    drop(metadata_lock);
+    crate::daemon::branch_add::activate_and_track_manual_branch_owned(
+        repo.path().to_path_buf(),
+        Arc::clone(&graph),
+        schedulers.clone(),
+        "feature/advance".to_owned(),
+        data_root.clone(),
+        try_acquire_manual_branch_lifecycle(&data_root, "feature/advance").unwrap(),
+        tracedecay_runtime_core::cancellation::CancellationToken::new(),
+    )
+    .await
+    .expect("publish staged generation after lock releases");
+    assert!(
+        !initial.worktree.exists(),
+        "retire prior worktree only after publication commits"
+    );
+    assert!(!schedulers.is_worktree_mounted(&initial.worktree).await);
+    assert_eq!(
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root)
+            .unwrap()
+            .branches["feature/advance"]
+            .graph_source
+            .as_ref()
+            .unwrap()
+            .source_oid,
+        replay.head_sha
+    );
     let mounted_head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(&replay.worktree)
@@ -818,7 +938,7 @@ async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advanc
     assert_eq!(
         String::from_utf8_lossy(&advanced_head.stdout).trim(),
         String::from_utf8_lossy(&mounted_head.stdout).trim(),
-        "a mounted stale worktree must be replaced with the newly resolved branch head"
+        "the new candidate must carry the newly resolved branch head"
     );
     schedulers.shutdown().await;
 }
@@ -848,10 +968,18 @@ async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_muta
         &error,
         ManualBranchActivationError::LifecycleContended { .. }
     ));
-    assert!(!git_ref_exists(
-        repo.path(),
-        "refs/tracedecay/branch/feature/contended"
-    ));
+    assert!(
+        git_output(
+            repo.path(),
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/tracedecay/branch"
+            ]
+        )
+        .trim()
+        .is_empty()
+    );
     drop(lifecycle);
     schedulers.shutdown().await;
 }
@@ -899,7 +1027,12 @@ async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_track
     assert!(
         !git_ref_exists(
             repo.path(),
-            "refs/tracedecay/branch/feature/failure-cleanup"
+            &ManualBranchArtifactsV1::for_head(
+                &data_root,
+                "feature/failure-cleanup",
+                &activation.head_sha
+            )
+            .tracking_ref
         ),
         "the exact tracking ref must not leak after sealing failure"
     );
@@ -932,10 +1065,18 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
     ));
     assert_eq!(error.reason_code(), "code_index_scheduler_unavailable");
     assert!(!data_root.join("branch-worktrees").exists());
-    assert!(!git_ref_exists(
-        repo.path(),
-        "refs/tracedecay/branch/feature-denied"
-    ));
+    assert!(
+        git_output(
+            repo.path(),
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/tracedecay/branch"
+            ]
+        )
+        .trim()
+        .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -971,10 +1112,18 @@ async fn manual_branch_missing_ref_is_typed_failure() {
         "a permanently missing branch identity must not become retryable"
     );
     assert!(!data_root.join("branch-worktrees").exists());
-    assert!(!git_ref_exists(
-        repo.path(),
-        "refs/tracedecay/branch/definitely-missing-branch"
-    ));
+    assert!(
+        git_output(
+            repo.path(),
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/tracedecay/branch"
+            ]
+        )
+        .trim()
+        .is_empty()
+    );
     schedulers.shutdown().await;
 }
 
@@ -984,9 +1133,9 @@ fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
     let branch = "feature/exact-cleanup";
     init_manual_branch_repo(repo.path(), branch);
     let data = tempfile::tempdir().unwrap();
-    let artifacts = ManualBranchArtifactsV1::for_branch(data.path(), branch);
     let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
         .expect("feature branch head");
+    let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
 
     prepare_manual_branch_worktree(
         repo.path(),
@@ -1075,9 +1224,9 @@ fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() 
     let branch = "feature/retry-after-git-failure";
     init_manual_branch_repo(repo.path(), branch);
     let data = tempfile::tempdir().unwrap();
-    let artifacts = ManualBranchArtifactsV1::for_branch(data.path(), branch);
     let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
         .expect("feature branch head");
+    let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
     let branch_ref = format!("refs/heads/{}", artifacts.label);
 
     prepare_manual_branch_worktree(
@@ -1167,7 +1316,7 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
     let activation = activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), branch)
         .await
         .expect("initial activation creates exact artifacts");
-    let artifacts = ManualBranchArtifactsV1::for_branch(&data_root, branch);
+    let artifacts = ManualBranchArtifactsV1::for_head(&data_root, branch, &activation.head_sha);
     // Ask Git for the loose-ref path rather than assuming the ref stayed loose
     // after activation: a loose entry is what Git's exact-ref reader opens
     // first, and it takes precedence over any packed entry, so the FIFO stalls
