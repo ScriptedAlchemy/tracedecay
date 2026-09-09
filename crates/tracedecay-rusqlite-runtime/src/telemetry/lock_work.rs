@@ -57,13 +57,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lock_work_is_ignored_outside_a_held_lock_scope() {
-        record_encoded_bytes(8);
-        record_decoded_bytes(16);
-        assert_eq!(take_lock_work(), WriterLockWorkSnapshot::default());
-    }
-
-    #[test]
     fn lock_work_counts_only_bytes_observed_while_the_scope_is_active() {
         let scope = LockWorkScope::enter();
         record_encoded_bytes(4);

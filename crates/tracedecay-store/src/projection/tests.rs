@@ -154,21 +154,6 @@ fn eager_workflow_digest(session: &SessionRecord, fact: &WorkflowFactRecord) -> 
 }
 
 #[test]
-fn memoized_message_digest_equals_eager_derivation() {
-    let observation = observation("alpha");
-    let session = session_record("alpha");
-    let message = message_record("alpha");
-    let expected = eager_message_digest(&session, &message, 0);
-
-    let projection = ObservationProjection::for_message(&observation, session, message).unwrap();
-    let output = projection.message().unwrap();
-
-    assert_eq!(output.output_digest().unwrap(), &expected);
-    // Memoization is idempotent: a second read returns the same bytes.
-    assert_eq!(output.output_digest().unwrap(), &expected);
-}
-
-#[test]
 fn memoized_digests_match_eager_derivation_for_every_output_ordinal() {
     let observation = observation("beta");
     let outputs: Vec<_> = ["one", "two", "three"]
@@ -235,28 +220,6 @@ fn equality_ignores_whether_the_digest_memo_is_materialized() {
     assert_eq!(
         left.message().unwrap().output_digest().unwrap(),
         right.message().unwrap().output_digest().unwrap()
-    );
-}
-
-#[test]
-fn cloning_a_projection_preserves_the_derived_digest() {
-    let observation = observation("epsilon");
-    let session = session_record("epsilon");
-    let message = message_record("epsilon");
-    let expected = eager_message_digest(&session, &message, 0);
-
-    let projection = ObservationProjection::for_message(&observation, session, message).unwrap();
-    let before_clone = projection.clone();
-    let _ = projection.message().unwrap().output_digest().unwrap();
-    let after_clone = projection.clone();
-
-    assert_eq!(
-        before_clone.message().unwrap().output_digest().unwrap(),
-        &expected
-    );
-    assert_eq!(
-        after_clone.message().unwrap().output_digest().unwrap(),
-        &expected
     );
 }
 

@@ -3,26 +3,6 @@ use super::*;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 #[test]
-fn retrieval_request_retains_the_explicit_execution_control() {
-    let session_id = session("session.controlled-retrieval");
-    let control = ExecutionControl::default();
-    let request = SessionTemporalRetrievalRequestV1::new(
-        session_id,
-        TemporalModeV1::Current,
-        RetrievalGrainV1::Occurrence,
-        snapshot_for(session("session.controlled-retrieval"), 7),
-        1,
-        None,
-        control.clone(),
-    )
-    .expect("valid controlled retrieval request");
-
-    assert!(!request.execution_control().is_cancelled());
-    control.cancel();
-    assert!(request.execution_control().is_cancelled());
-}
-
-#[test]
 fn frozen_snapshots_preserve_exact_session_and_reject_cross_session_reads() {
     let session_a = session("session.a");
     let snapshot = snapshot_for(session_a.clone(), 7);

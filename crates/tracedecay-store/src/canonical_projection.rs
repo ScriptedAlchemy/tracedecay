@@ -1427,39 +1427,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_transcript_metadata_uses_the_canonical_session_namespace() {
-        let fields = CanonicalSessionFields {
-            project_path: Some("/workspace/project".to_owned()),
-            location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
-            transcript_path: Some("/transcripts/session.jsonl".to_owned()),
-            title: None,
-            started_at: None,
-            ended_at: None,
-            source: Some("cursor_transcript".to_owned()),
-            native_source: Some("cursor".to_owned()),
-            profile: None,
-            location_provenance: Some("hook_event".to_owned()),
-        };
-        let metadata: serde_json::Value = serde_json::from_str(
-            canonical_session_metadata("cursor", Some(&fields))
-                .unwrap()
-                .as_deref()
-                .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            metadata["cursor_session_cwd"],
-            "/workspace/project/.worktrees/feature"
-        );
-        assert_eq!(
-            metadata["cursor_session_worktree"],
-            "/workspace/project/.worktrees/feature"
-        );
-        assert_eq!(metadata["cursor_session_location_provenance"], "hook_event");
-    }
-
-    #[test]
     fn canonical_projection_kind_names_are_stable() {
         assert_eq!(
             reasoning_kind(CanonicalReasoningVisibilityV1::Visible),

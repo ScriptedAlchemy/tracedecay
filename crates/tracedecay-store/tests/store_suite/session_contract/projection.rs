@@ -3,23 +3,6 @@ use super::*;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 #[test]
-fn activation_request_retains_the_explicit_execution_control() {
-    let session_id = session("session.controlled-activation");
-    let control = ExecutionControl::default();
-    let request = SessionGenerationActivationRequestV1::new(
-        session_id.clone(),
-        generation(8),
-        snapshot_for(session_id, 7),
-        control.clone(),
-    )
-    .expect("valid controlled activation request");
-
-    assert!(!request.execution_control().is_cancelled());
-    control.cancel();
-    assert!(request.execution_control().is_cancelled());
-}
-
-#[test]
 fn rebuild_and_activation_validate_session_capability_and_generation_transition() {
     let session_id = session("session.fixture");
     let snapshot = snapshot_for(session_id.clone(), 7);

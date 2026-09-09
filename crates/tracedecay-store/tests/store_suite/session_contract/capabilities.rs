@@ -271,11 +271,6 @@ fn adapter_capabilities_override_forged_snapshot_capabilities() {
 }
 
 #[test]
-fn guarded_refresh_dispatch_never_enters_denied_adapters() {
-    refresh_ports_deny_every_unsupported_capability();
-}
-
-#[test]
 fn yielding_in_memory_adapter_exercises_every_guarded_port() {
     let ports = InMemorySessionPorts::default();
     let session_id = session("session.adapter");

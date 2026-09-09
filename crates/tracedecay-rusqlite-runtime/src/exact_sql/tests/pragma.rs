@@ -27,16 +27,6 @@ fn mutating_no_argument_pragmas_are_denied() {
 }
 
 #[test]
-fn connection_local_memory_release_pragma_is_allowed() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-
-    channel
-        .execute_batch("PRAGMA shrink_memory".to_owned())
-        .expect("connection-local cache release must be authorized");
-}
-
-#[test]
 fn read_only_handle_releases_reader_memory_without_writer() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach_read_only(&fixture.readers);

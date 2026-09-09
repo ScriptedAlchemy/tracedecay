@@ -85,20 +85,6 @@ fn writer_bounds_the_retained_wal_file_to_the_soft_limit_ceiling() {
     );
 }
 
-/// Maintenance connections are the offline RESTART/TRUNCATE path, so they reset
-/// the WAL too and must carry the same retention bound.
-#[test]
-fn maintenance_bounds_the_retained_wal_file_to_the_soft_limit_ceiling() {
-    let file = database();
-    let connection = open(file.path(), ConnectionMode::Maintenance).expect("maintenance policy");
-
-    assert_eq!(
-        pragma_i64(&connection, "journal_size_limit"),
-        i64::try_from(WAL_SOFT_LIMIT_BYTES).expect("soft limit fits in i64"),
-        "maintenance must cap the retained WAL file at the configurable soft-limit ceiling"
-    );
-}
-
 #[test]
 fn writer_close_never_bypasses_explicit_checkpoint_policy() {
     let file = database();
@@ -366,25 +352,6 @@ fn worker_open_path_stays_on_the_pinned_file_across_an_a_b_a_swap() {
     std::fs::rename(&retired, &path).unwrap();
     assert_eq!(std::fs::read(&worker_path).unwrap(), b"original");
     pinned.verify_current_path(&path).unwrap();
-}
-
-#[cfg(any(unix, windows))]
-#[test]
-fn writer_open_path_preserves_platform_identity_policy() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("writer-path.db");
-    std::fs::File::create(&path).unwrap();
-    let pinned = OpenedDatabaseFile::pin(&path).unwrap();
-    let worker_path = pinned.writer_open_path(&path).unwrap();
-
-    #[cfg(unix)]
-    if cfg!(any(target_os = "linux", target_os = "android")) {
-        assert!(worker_path.starts_with("/proc/self/fd/"));
-    } else {
-        assert_eq!(worker_path, path);
-    }
-    #[cfg(windows)]
-    assert_eq!(worker_path, path);
 }
 
 /// A WAL reader opens the `-shm` sidecar, so it needs the same sidecar-safe

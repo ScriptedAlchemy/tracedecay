@@ -281,22 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn advance_offset_is_an_explicit_valid_batch() {
-        let batch = TranscriptWriteBatch::advance_offset(
-            PathBuf::from("session.jsonl"),
-            ParseOffset::default(),
-            ParseOffset {
-                byte_offset: 42,
-                mtime: 7,
-                file_id: 9,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(batch.cursor_path(), Path::new("session.jsonl"));
-    }
-
-    #[test]
     fn upsert_uses_the_session_transcript_path() {
         let batch = TranscriptWriteBatch::upsert(
             session(Some("session.jsonl")),

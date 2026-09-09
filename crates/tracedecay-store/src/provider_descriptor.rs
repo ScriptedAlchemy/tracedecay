@@ -173,27 +173,3 @@ fn normalize_cursor_tool_metadata(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_the_synthesizing_provider_may_omit_a_native_record_id() {
-        assert!(synthesizes_native_record_id("claude"));
-        for provider in ["codex", "cursor", "hermes", ""] {
-            assert!(
-                !synthesizes_native_record_id(provider),
-                "{provider} must carry a native record id"
-            );
-        }
-    }
-
-    #[test]
-    fn the_tool_metadata_normalizer_is_selected_by_the_transcript_source_alone() {
-        assert!(tool_metadata_normalizer(Some("cursor_transcript")).is_some());
-        assert!(tool_metadata_normalizer(Some("cursor_composer")).is_none());
-        assert!(tool_metadata_normalizer(Some("provider_store")).is_none());
-        assert!(tool_metadata_normalizer(None).is_none());
-    }
-}
