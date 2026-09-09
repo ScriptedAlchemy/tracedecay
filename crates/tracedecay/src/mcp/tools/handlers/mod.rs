@@ -190,6 +190,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
+use tracedecay_runtime_core::storage::registered_project_id;
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -235,9 +236,25 @@ pub async fn handle_tool_call(
         args,
         server_stats,
         scope_prefix,
-        ToolCallRegistryOptions::default(),
+        ToolCallRegistryOptions::default().admit_opened_project(cg)?,
     ))
     .await
+}
+
+/// Fixture `handle_tool_call` derives the checkout the opened project already
+/// holds so integration tests get an [`McpToolBinding::Admitted`] snapshot.
+/// Production dispatch carries `admitted_project_scope` from project-open;
+/// without it the binding is unprojected.
+fn opened_project_scope(cg: &TraceDecay) -> Result<tracedecay_contracts::ResolvedScope> {
+    let project_id = registered_project_id(cg.store_layout())?;
+    tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "admitted_project_scope_unresolved",
+                false,
+                error.to_string(),
+            )
+        })
 }
 
 /// Evidence for the `code_graph_freshness` response trailer when a
@@ -409,10 +426,22 @@ impl Default for ToolCallRegistryOptions<'_> {
 
 impl<'a> ToolCallRegistryOptions<'a> {
     pub fn with_session_authorities(session_authorities: SessionAuthorities<'a>) -> Self {
+        // Canonical session-store field is `registered_project_session_db`.
+        // The helper is the one place that copies the lease out of the
+        // authorities bag so dispatch never `.or()`s the two fields.
         Self {
+            registered_project_session_db: session_authorities.project.cloned(),
             session_authorities,
             ..Self::default()
         }
+    }
+
+    /// Marks this call as admitted for the opened project's checkout.
+    /// Fixture `handle_tool_call` uses this; production carries the scope
+    /// from project-open publication.
+    pub fn admit_opened_project(mut self, cg: &TraceDecay) -> Result<Self> {
+        self.admitted_project_scope = Some(opened_project_scope(cg)?);
+        Ok(self)
     }
 }
 
