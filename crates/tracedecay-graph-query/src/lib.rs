@@ -58,12 +58,7 @@ pub struct SourceReadContext {
 }
 
 impl SourceReadContext {
-    pub fn new(
-        project_root: PathBuf,
-        db: Database,
-        read_only: bool,
-        project_id: String,
-    ) -> Self {
+    pub fn new(project_root: PathBuf, db: Database, read_only: bool, project_id: String) -> Self {
         Self {
             project_root,
             db,
