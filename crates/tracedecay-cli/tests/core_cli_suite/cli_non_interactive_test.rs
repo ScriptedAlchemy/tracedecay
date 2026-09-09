@@ -1619,6 +1619,35 @@ async fn projects_list_json_reads_global_registry() {
 }
 
 #[tokio::test]
+async fn projects_list_from_initialized_cwd_stays_projectless_and_marks_active() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
+    write_profile_sharded_fixture(home.path(), project.path());
+    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["projects", "list", "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "projects list should use the projectless registry route\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["projects"][0]["project_id"], "proj_cli");
+    assert_eq!(payload["projects"][0]["is_active"], true);
+}
+
+#[tokio::test]
 async fn projects_search_text_matches_registered_alias() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
