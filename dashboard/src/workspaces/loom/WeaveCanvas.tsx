@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { axisTicks, clampWindow, fittedWindow, formatMoment, zoomWindow, type LoomWindow } from './tracks.ts';
@@ -105,13 +106,15 @@ export function eventPositions(frames: readonly LoomPlaybackFrame[]) {
       x: frame.timestamp != null && start != null && end != null
         ? end === start ? .5 : (frame.timestamp - start) / (end - start)
         : frames.length <= 1 ? .5 : index / (frames.length - 1),
-      y: frame.timestamp == null ? 225 : 115,
+      y: frame.timestamp == null ? 350 : 200,
       frame,
     })),
   };
 }
 
-export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspect }: {
+export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspect, toolbar, scrubber }: {
+  toolbar: ReactNode;
+  scrubber: ReactNode;
   frames: readonly LoomPlaybackFrame[];
   visible: readonly LoomPlaybackFrame[];
   activeId: string | null;
@@ -144,9 +147,17 @@ export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspe
   });
   const points = revealed.filter((point) => point.x >= window.start && point.x <= window.end);
   const hasUndated = revealed.some((point) => point.frame.timestamp == null);
-  const laneY = hasUndated ? [115, 225] : [115];
+  const laneY = hasUndated ? [200, 350] : [200];
   const active = revealed.find((point) => point.id === activeId);
   const x = (position: number) => left + (position - window.start) / (window.end - window.start) * spanPx;
+  // Partition hit regions at neighboring time positions. A dense page must
+  // not let a later SVG rectangle steal clicks from an earlier event.
+  const ordered = [...points].sort((a, b) => a.x - b.x);
+  const markSpacing = new Map(ordered.map((point, index) => {
+    const before = ordered[index - 1], after = ordered[index + 1];
+    const gap = Math.min(before ? x(point.x) - x(before.x) : 44, after ? x(after.x) - x(point.x) : 44);
+    return [point.id, Math.max(.5, Math.min(22, gap / 2))];
+  }));
   const move = (start: number, end: number) => {
     // One URL update also suspends tail-follow; separate updates could race and
     // lose either the cursor or the viewport under React Router batching.
@@ -162,21 +173,24 @@ export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspe
     return `M ${projectX(previous.x)} ${previous.y * scaleY} C ${mid} ${previous.y * scaleY}, ${mid} ${point.y * scaleY}, ${projectX(point.x)} ${point.y * scaleY}`;
   };
   return <section ref={host} aria-label="Loaded execution field" className="min-w-0">
-    <div className="flex flex-wrap gap-2 border border-edge-subtle p-2 text-xs" role="toolbar" aria-label="Execution viewport">
-      <button className="td-hit" aria-label="Zoom into execution" disabled={span < .02} onClick={() => move(window.start + span / 4, window.end - span / 4)}>+ Zoom</button>
-      <button className="td-hit" aria-label="Fit loaded execution" onClick={() => move(0, 1)}>Fit</button>
-      <button className="td-hit" aria-label="Pan execution earlier" disabled={window.start === 0} onClick={() => { const start = Math.max(0, window.start - span / 4); move(start, start + span); }}>← Older</button>
-      <button className="td-hit" aria-label="Pan execution later" disabled={window.end === 1} onClick={() => { const end = Math.min(1, window.end + span / 4); move(end - span, end); }}>Later →</button>
+    <div className="flex min-h-10 flex-wrap items-center gap-3 border border-edge-subtle px-1 text-xs">
+      {toolbar}
+      <div className="flex items-center gap-2" role="toolbar" aria-label="Execution viewport">
+      <button className="min-h-8 min-w-8" aria-label="Zoom into execution" disabled={span < .02} onClick={() => move(window.start + span / 4, window.end - span / 4)}>+ Zoom</button>
+      <button className="min-h-8 min-w-8" aria-label="Fit loaded execution" onClick={() => move(0, 1)}>Fit</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan execution earlier" disabled={window.start === 0} onClick={() => { const start = Math.max(0, window.start - span / 4); move(start, start + span); }}>← Older</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan execution later" disabled={window.end === 1} onClick={() => { const end = Math.min(1, window.end + span / 4); move(end - span, end); }}>Later →</button>
+      </div>
     </div>
     {width < 480 && <p className="text-xs text-text-muted">{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)} → {geometry.end == null ? 'loaded source order' : `${formatMoment(geometry.end)} · loaded end`}</p>}
     <div className="td-optic">
-      <svg role="group" aria-label="Revealed execution events" width="100%" viewBox={`0 0 ${width} ${hasUndated ? 295 : 235}`}>
-        <defs><clipPath id={clipId}><rect x={left - 12} y={40} width={spanPx + 24} height={240} /></clipPath></defs>
+      <svg role="group" aria-label="Revealed execution events" width="100%" viewBox={`0 0 ${width} 460`}>
+        <defs><clipPath id={clipId}><rect x={left - 12} y={40} width={spanPx + 24} height={400} /></clipPath></defs>
         <text visibility={width < 480 ? "hidden" : "visible"} x={left} y={24} fill="var(--raw-graph-text)" fontSize={12}>{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)}</text>
         <text visibility={width < 480 ? "hidden" : "visible"} x={width - RIGHT} y={24} textAnchor="end" fill="var(--raw-graph-text)" fontSize={12}>{geometry.end == null ? 'Loaded source order' : `${formatMoment(geometry.end)} · LOADED END`}</text>
-        <text x={12} y={85} fill="var(--raw-graph-text)" fontSize={11}>Recorded time</text>
-        {hasUndated && <text x={12} y={195} fill="var(--raw-graph-text)" fontSize={11}>Undated</text>}
-        {hasUndated && <text x={12} y={210} fill="var(--raw-graph-text)" fontSize={10}>source order</text>}
+        <text x={12} y={170} fill="var(--raw-graph-text)" fontSize={11}>Recorded time</text>
+        {hasUndated && <text x={12} y={320} fill="var(--raw-graph-text)" fontSize={11}>Undated</text>}
+        {hasUndated && <text x={12} y={335} fill="var(--raw-graph-text)" fontSize={10}>source order</text>}
         {laneY.map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y} y2={y} stroke="var(--raw-graph-edge)" strokeDasharray="2 5" />)}
         <g clipPath={`url(#${clipId})`}>
           {sequences.map(({ previous, point }) => {
@@ -186,27 +200,32 @@ export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspe
               <path d={path} fill="none" stroke="#58daec" strokeWidth={1} opacity={.6} />
             </g>;
           })}
-          {active && <line x1={x(active.x)} x2={x(active.x)} y1={42} y2={270} stroke="var(--raw-graph-text)" strokeWidth={1} opacity={.55} />}
-          {points.map((point) => <g key={point.id} data-event={point.id} role="button" tabIndex={0} aria-label={`Select stored event ${point.id}`} aria-pressed={point.id === activeId} onClick={() => onSelect(point.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(point.id); } }} className="cursor-pointer outline-none [&:focus>rect]:stroke-white">
-            <rect x={x(point.x) - 22} y={point.y - 22} width={44} height={70} fill="transparent" />
+          {active && <line x1={x(active.x)} x2={x(active.x)} y1={42} y2={430} stroke="var(--raw-graph-text)" strokeWidth={1} opacity={.55} />}
+          {points.map((point) => {
+            const halfHit = markSpacing.get(point.id) ?? 22;
+            const radius = Math.min(6, Math.max(1.5, halfHit * .6));
+            return <g key={point.id} data-event={point.id} role="button" tabIndex={0} aria-label={`Select stored event ${point.id}`} aria-pressed={point.id === activeId} onClick={() => onSelect(point.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(point.id); } }} className="cursor-pointer outline-none [&:focus>rect]:stroke-white">
+            <rect x={x(point.x) - halfHit} y={point.y - 22} width={halfHit * 2} height={70} fill="transparent" />
             <title>{point.frame.role} · {point.frame.tool ?? 'message'} · {point.id}</title>
-            <circle cx={x(point.x)} cy={point.y} r={point.id === activeId ? 19 : 12} fill="#35d6ee" opacity={.08} />
-            <circle cx={x(point.x)} cy={point.y} r={point.id === activeId ? 10 : 6} fill="var(--raw-graph-bg)" stroke="#58daec" strokeWidth={point.id === activeId ? 2 : 1} />
-            <circle cx={x(point.x)} cy={point.y} r={2} fill="#c1f8ff" />
-            <text x={x(point.x)} y={point.y + 35} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{points.length <= 12 || point.id === activeId ? point.frame.tool ?? point.frame.role : ''}</text>
-          </g>)}
+            <circle pointerEvents="none" cx={x(point.x)} cy={point.y} r={point.id === activeId ? 19 : radius * 2} fill="#35d6ee" opacity={.08} />
+            <circle pointerEvents="none" cx={x(point.x)} cy={point.y} r={point.id === activeId ? 10 : radius} fill="var(--raw-graph-bg)" stroke="#58daec" strokeWidth={point.id === activeId ? 2 : 1} />
+            <circle pointerEvents="none" cx={x(point.x)} cy={point.y} r={Math.min(2, radius / 2)} fill="#c1f8ff" />
+            <text pointerEvents="none" x={x(point.x)} y={point.y + 35} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{points.length <= 12 || point.id === activeId ? point.frame.tool ?? point.frame.role : ''}</text>
+          </g>;
+          })}
         </g>
       </svg>
       <svg role="group" aria-label="Execution minimap" width="100%" viewBox={`0 0 ${width} 64`}>
-        {laneY.map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y / 5} y2={y / 5} stroke="var(--raw-graph-edge)" />)}
-        {sequences.map(({ previous, point }) => <path key={`${previous.id}:${point.id}`} d={orderPath(previous, point, (position) => left + position * spanPx, .2)} fill="none" stroke="#58daec" opacity={.5} />)}
-        {revealed.map((point) => <circle key={point.id} data-minimap-event={point.id} cx={left + point.x * spanPx} cy={point.y / 5} r={point.id === activeId ? 4 : 2} fill="#58daec" />)}
+        {laneY.map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y / 8} y2={y / 8} stroke="var(--raw-graph-edge)" />)}
+        {sequences.map(({ previous, point }) => <path key={`${previous.id}:${point.id}`} d={orderPath(previous, point, (position) => left + position * spanPx, .125)} fill="none" stroke="#58daec" opacity={.5} />)}
+        {revealed.map((point) => <circle key={point.id} data-minimap-event={point.id} cx={left + point.x * spanPx} cy={point.y / 8} r={point.id === activeId ? 4 : 2} fill="#58daec" />)}
         <rect x={left + window.start * spanPx} y={8} width={span * spanPx} height={48} fill="none" stroke="var(--raw-graph-text)" />
       </svg>
     </div>
     <label className="flex flex-wrap items-center gap-2 text-xs text-text-muted">Minimap position
       <input type="range" aria-label="Minimap viewport" min={0} max={1 - span} step={.001} value={window.start} disabled={span === 1} onChange={(event) => move(Number(event.currentTarget.value), Number(event.currentTarget.value) + span)} />
     </label>
-    <p className="text-3xs text-text-muted">Each dot is a stored message. Placement measures time, or explicitly undated source order; thin connections show canonical message order, not causal attribution. Proximity is not a causal edge. Exact source selection remains available in the sequence below.</p>
+    {scrubber}
+    <details><summary className="text-3xs text-text-muted">Recorded message order · causality unavailable</summary><p className="text-3xs text-text-muted">Each dot is a stored message. Placement measures time, or explicitly undated source order; thin connections show canonical message order, not causal attribution. Proximity is not a causal edge. Exact source selection remains available in the sequence below.</p></details>
   </section>;
 }

@@ -269,7 +269,7 @@ function TemporalBody({
         role="region"
         aria-label="Loom content"
         tabIndex={0}
-        className={cn("flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable]", !selected && "xl:flex-row")}
+        className={cn("flex min-h-0 flex-1 flex-col gap-1 overflow-auto px-3 py-1 [scrollbar-gutter:stable]", !selected && "xl:flex-row")}
       >
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           {selectedId && !selected ? <StateChip kind="unavailable" detail="Selected session is outside this loaded page; choose a retained session." /> : null}
@@ -301,7 +301,7 @@ function TemporalBody({
 
         <aside className={cn("flex w-full shrink-0 flex-col gap-3", selected ? "order-first" : "xl:w-[22rem]")}>
           <details open={selected ? undefined : true}>
-            {selected && <summary className="td-hit flex flex-wrap items-center gap-2 text-xs text-text-muted">
+            {selected && <summary className="min-h-6 cursor-pointer text-3xs leading-6 text-text-muted">
               Source coverage · {envelope.freshness.state} · {data.source_statuses.map((source) => `${source.label}: ${source.state}`).join(' · ')}
             </summary>}
             <div className={cn("flex gap-3", selected ? "flex-wrap [&>*]:min-w-64 [&>*]:flex-1" : "flex-col")}>
