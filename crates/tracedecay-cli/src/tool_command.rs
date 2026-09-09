@@ -169,8 +169,11 @@ fn run_inner(
             let requested_name = name.as_deref().map(canonical_tool_name);
             hotpath::val!("cli.tool.name").set(&requested_name.as_deref().unwrap_or("list"));
         }
-        if let Some(canonical) = name.as_deref().map(canonical_tool_name)
-            && let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&canonical)
+        let requested_operation = name
+            .as_deref()
+            .map(canonical_tool_name)
+            .and_then(|canonical| cli_application_operation(&canonical));
+        if let Some(operation) = requested_operation
             && let Some(parsed) = parse_whole_payload_invocation(&args)?
         {
             let ParsedInvocation {
@@ -184,8 +187,9 @@ fn run_inner(
             let deadline = Instant::now()
                 .checked_add(tool_command_deadline()?)
                 .ok_or_else(tool_deadline_range_error)?;
+            let tool_name = operation.mcp_tool_name();
             let (request, requested_format) =
-                cli_surface_invocation(&canonical, tool_args, raw_json).map_err(|error| {
+                cli_surface_invocation(tool_name, tool_args, raw_json).map_err(|error| {
                     TraceDecayError::Config {
                         message: error.to_string(),
                     }
@@ -193,7 +197,7 @@ fn run_inner(
             return dispatch_cli_application_surface(
                 operation,
                 request,
-                DaemonToolDispatch::project_scoped(explicit_project, &canonical).project_path,
+                DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path,
                 requested_format,
                 deadline,
             )
@@ -213,10 +217,17 @@ fn run_inner(
         };
 
         let canonical = canonical_tool_name(&raw_name);
-        let internal_def = internal_daemon_tool_definition(&canonical);
+        // An application operation advertises one MCP definition under its
+        // transport spelling; a canonical-identity request selects that same
+        // definition instead of a second, unadvertised one.
+        let advertised_name: &str = match requested_operation {
+            Some(operation) => operation.mcp_tool_name(),
+            None => canonical.as_str(),
+        };
+        let internal_def = internal_daemon_tool_definition(advertised_name);
         let Some(def) = defs
             .iter()
-            .find(|definition| definition.name == canonical)
+            .find(|definition| definition.name == advertised_name)
             .or(internal_def.as_ref())
         else {
             let suggestion = nearest_tool_name(&canonical, &defs)
@@ -285,6 +296,18 @@ fn run_inner(
         )
         .await
     })
+}
+
+/// Resolves a canonicalised `tracedecay tool` name to its application operation.
+///
+/// The CLI answers to both spellings the catalog gives an operation: its CLI
+/// binding name, which is the MCP tool spelling, and its canonical identity,
+/// which every other surface and every rendered envelope reports. They differ
+/// only for `diagnostics` / `diagnostics_read`, so neither spelling needs a
+/// name table of its own.
+fn cli_application_operation(canonical: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_tool_name(canonical)
+        .or_else(|| ApplicationSurfaceOperation::from_catalog_name(short_tool_name(canonical)))
 }
 
 /// Dispatch one catalogued application-surface operation on behalf of a
