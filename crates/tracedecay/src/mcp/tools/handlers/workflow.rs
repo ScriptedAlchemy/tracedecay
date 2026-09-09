@@ -609,17 +609,10 @@ where
     }
 
     let (selected_targets, test_names, truncated) =
-        select_test_targets(test_targets, run_args.max_tests);
-    for test_name in &test_names {
-        if let Err(message) = validate_test_identity(test_name) {
-            return Ok(error_result(
-                &args,
-                "invalid_test_identity",
-                "test_identity",
-                &message,
-            ));
-        }
-    }
+        match select_test_targets(test_targets, run_args.max_tests, &args) {
+            Ok(selected) => selected,
+            Err(result) => return Ok(result),
+        };
     let started_at = now_micros();
     let (emitter, effective_deadline) = begin_test_run(
         cg,
@@ -1180,7 +1173,8 @@ fn is_callable(node: &GraphTestSymbol) -> bool {
 fn select_test_targets(
     test_targets: HashMap<String, TestTarget>,
     max_tests: usize,
-) -> (Vec<TestTarget>, Vec<String>, bool) {
+    args: &Value,
+) -> std::result::Result<(Vec<TestTarget>, Vec<String>, bool), ToolResult> {
     let mut selected_targets: Vec<TestTarget> = test_targets.into_values().collect();
     selected_targets.sort_by(|a, b| {
         a.qualified_name
@@ -1198,7 +1192,17 @@ fn select_test_targets(
     test_names.sort();
     test_names.dedup();
 
-    (selected_targets, test_names, truncated)
+    for test_name in &test_names {
+        if let Err(message) = validate_test_identity(test_name) {
+            return Err(error_result(
+                args,
+                "invalid_test_identity",
+                "test_identity",
+                &message,
+            ));
+        }
+    }
+    Ok((selected_targets, test_names, truncated))
 }
 
 fn missing_requested_test<'a>(
