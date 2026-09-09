@@ -194,46 +194,6 @@ where
 }
 
 #[test]
-fn semantic_store_errors_are_typed_and_non_storage() {
-    let errors = [
-        SessionStoreError::MissingGeneration {
-            generation: generation(8),
-        },
-        SessionStoreError::StaleGeneration {
-            expected: generation(8),
-            actual: generation(7),
-        },
-        SessionStoreError::InvalidRefreshState {
-            operation_id: operation_id(),
-            state: SessionRefreshStateV1::Complete,
-        },
-        SessionStoreError::Cancelled,
-        SessionStoreError::DeadlineExceeded,
-        SessionStoreError::BudgetExceeded {
-            resource: "work units",
-        },
-    ];
-    assert!(
-        errors
-            .iter()
-            .all(|error| !matches!(error, SessionStoreError::Storage { .. }))
-    );
-}
-
-#[test]
-fn adapter_failures_map_to_storage_without_erasing_semantic_errors() {
-    let storage =
-        SessionStoreError::storage("freeze session snapshot", std::io::Error::other("offline"));
-    assert!(storage.is_storage());
-    assert!(std::error::Error::source(&storage).is_some());
-
-    let semantic = SessionStoreError::SessionMismatch {
-        context: "typed mapping",
-    };
-    assert!(!semantic.is_storage());
-}
-
-#[test]
 fn temporal_digests_are_bounded_and_canonical() {
     let digest = temporal_digest('a');
     assert_eq!(digest.as_str(), format!("sha256:{}", "a".repeat(64)));

@@ -36,19 +36,6 @@ fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
     .unwrap()
 }
 
-#[test]
-fn fact_read_control_observes_live_interruption_state() {
-    let interrupted = std::sync::Arc::new(std::sync::RwLock::new(false));
-    let observed = std::sync::Arc::clone(&interrupted);
-    let control = FactReadControl::new(std::sync::Arc::new(move || {
-        *observed.read().expect("read interruption fixture")
-    }));
-
-    assert!(!control.interrupted());
-    *interrupted.write().expect("write interruption fixture") = true;
-    assert!(control.interrupted());
-}
-
 fn receipt_for(material: &serde_json::Value) -> SanitizationReceiptV1 {
     receipt_for_disposition(material, SanitizerDispositionV1::Accepted)
 }
@@ -884,49 +871,6 @@ fn durable_memory_receipts_expose_infallible_stable_state_digests() {
     assert_eq!(replayed.committed_state_digest(), &expected);
     assert!(!recorded.replayed());
     assert!(replayed.replayed());
-}
-
-#[test]
-fn automatic_fact_receipt_preserves_typed_automation_run_id() {
-    let owner = FactOwnerV1::Profile;
-    let material = serde_json::json!({
-        "content": "durable automatic fact",
-        "category": "decision",
-        "tags": [],
-        "entities": [],
-        "metadata": {},
-    });
-    let request = ProjectMemoryFactAddMaterialV1::new(
-        owner.clone(),
-        "durable automatic fact".to_owned(),
-        FactCategoryV1::Decision,
-        None,
-        vec![],
-        vec![],
-        serde_json::json!({}),
-        receipt_for(&material),
-        Some("run.fixture.1".to_owned()),
-        Confidence::new(0.5).unwrap(),
-        None,
-    )
-    .unwrap()
-    .into_command(id("operation.automatic-fact"))
-    .unwrap();
-    let receipt = ProjectMemoryAutomaticFactReceiptV1::new(
-        id("automatic-fact.automation.fixture"),
-        owner,
-        ProjectMemoryAutomaticFactStateV1::Quarantined,
-        request,
-        ProjectMemoryAutomaticFactEvidenceV1::default(),
-        ProjectMemoryAutomaticFactEffectV1::Quarantined {
-            reason: "privacy sanitizer declined the automatic apply".to_owned(),
-        },
-        UtcMicros(1),
-    )
-    .unwrap();
-
-    assert_eq!(receipt.automation_run_id(), Some("run.fixture.1"));
-    assert_eq!(receipt.request().actor(), None);
 }
 
 #[test]

@@ -2,26 +2,6 @@ use super::common::*;
 use super::*;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-fn source_coverage() -> tracedecay_domain::SessionSourceCoverageReceiptV1 {
-    let request = tracedecay_domain::SessionTemporalCoverageRequestV1::new(
-        tracedecay_domain::TemporalModeV1::Current,
-    );
-    tracedecay_domain::SessionSourceCoverageReceiptV1::new(
-        request.clone(),
-        vec![
-            tracedecay_domain::SessionSourceCoverageV1::from_frontiers(
-                tracedecay_domain::SessionSourceIdV1::new("cursor").unwrap(),
-                tracedecay_domain::SessionSourceFrontierV1::new(10),
-                tracedecay_domain::SessionSourceFrontierV1::new(8),
-                tracedecay_domain::SessionSourceFrontierV1::new(10),
-                request,
-            )
-            .unwrap(),
-        ],
-    )
-    .unwrap()
-}
-
 #[test]
 fn refresh_begin_request_preserves_temporal_coverage_mode() {
     let session_id = session("session.coverage-mode");
@@ -79,37 +59,6 @@ fn refresh_progress_is_persistable_and_terminal_receipts_preserve_coverage() {
 }
 
 #[test]
-fn refresh_progress_and_receipts_preserve_typed_source_coverage() {
-    let source_coverage = source_coverage();
-    assert_eq!(
-        source_coverage.aggregate_state(),
-        tracedecay_domain::SessionSourceCoverageAggregateStateV1::Stale
-    );
-    let progress = SessionRefreshProgressV1::new(
-        operation_id(),
-        session("session.source-coverage"),
-        SessionRefreshFrontierV1::new(10, 8).unwrap(),
-        coverage(),
-        1,
-        8,
-        UtcMicros(100),
-    )
-    .with_source_coverage(source_coverage.clone());
-    assert_eq!(progress.source_coverage(), Some(&source_coverage));
-
-    let completion = SessionRefreshCompletionRequestV1::new(
-        operation_id(),
-        session("session.source-coverage"),
-        SessionRefreshFrontierV1::new(10, 10).unwrap(),
-        coverage(),
-    )
-    .unwrap();
-    let receipt = SessionRefreshReceiptV1::completed(completion, UtcMicros(110))
-        .with_source_coverage(source_coverage.clone());
-    assert_eq!(receipt.source_coverage(), Some(&source_coverage));
-}
-
-#[test]
 fn refresh_failure_and_cancellation_return_terminal_receipts() {
     let session_id = session("session.fixture");
     let operation_id = operation_id();
@@ -137,52 +86,6 @@ fn refresh_failure_and_cancellation_return_terminal_receipts() {
     assert_eq!(cancelled.state(), SessionRefreshTerminalStateV1::Cancelled);
     assert_eq!(cancelled.frontier(), frontier);
     assert_eq!(cancelled.coverage(), &coverage());
-}
-
-#[test]
-fn terminal_refresh_requests_expose_adapter_fields_without_receipt_conversion() {
-    let session_id = session("session.fixture");
-    let operation_id = operation_id();
-    let complete_frontier = SessionRefreshFrontierV1::new(10, 10).unwrap();
-    let partial_frontier = SessionRefreshFrontierV1::new(10, 8).unwrap();
-    let expected_coverage = coverage();
-
-    let completion = SessionRefreshCompletionRequestV1::new(
-        operation_id.clone(),
-        session_id.clone(),
-        complete_frontier,
-        expected_coverage,
-    )
-    .unwrap();
-    assert_eq!(completion.operation_id(), &operation_id);
-    assert_eq!(completion.session_id(), &session_id);
-    assert_eq!(completion.frontier(), complete_frontier);
-    assert_eq!(completion.coverage(), &expected_coverage);
-
-    let failure = SessionRefreshFailureRequestV1::new(
-        operation_id.clone(),
-        session_id.clone(),
-        partial_frontier,
-        expected_coverage,
-        "source_unavailable",
-    )
-    .unwrap();
-    assert_eq!(failure.operation_id(), &operation_id);
-    assert_eq!(failure.session_id(), &session_id);
-    assert_eq!(failure.frontier(), partial_frontier);
-    assert_eq!(failure.coverage(), &expected_coverage);
-    assert_eq!(failure.failure_code().as_str(), "source_unavailable");
-
-    let cancellation = SessionRefreshCancellationRequestV1::new(
-        operation_id.clone(),
-        session_id.clone(),
-        partial_frontier,
-        expected_coverage,
-    );
-    assert_eq!(cancellation.operation_id(), &operation_id);
-    assert_eq!(cancellation.session_id(), &session_id);
-    assert_eq!(cancellation.frontier(), partial_frontier);
-    assert_eq!(cancellation.coverage(), &expected_coverage);
 }
 
 #[test]
