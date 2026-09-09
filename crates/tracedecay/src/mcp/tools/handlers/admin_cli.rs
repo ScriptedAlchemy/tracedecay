@@ -862,10 +862,10 @@ mod tests {
         project_id: &str,
     ) -> (
         TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(root).unwrap();
-        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
             profile,
             root,
             ProjectId::new(project_id).unwrap(),

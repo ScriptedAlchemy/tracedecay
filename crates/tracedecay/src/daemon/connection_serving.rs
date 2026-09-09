@@ -17,6 +17,7 @@ use tracedecay_session_memory::context::CancellationToken;
 /// routing, selected-project response, delivery-settlement, and RMCP adapter
 /// path as the daemon without adding a shipped benchmark API.
 #[cfg(feature = "rmcp-benchmark")]
+#[path = "../../benches/rmcp/benchmark.rs"]
 pub mod rmcp_benchmark;
 
 impl BrokerSelectedResponseLease for crate::mcp::server::SelectedProjectResponseLease {

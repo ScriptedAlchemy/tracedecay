@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 #[tokio::test]
 async fn evicted_project_owner_releases_temporal_scheduler() {
