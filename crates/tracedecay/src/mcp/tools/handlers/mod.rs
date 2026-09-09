@@ -149,7 +149,6 @@ use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
     tool_dispatches_registered_project_reader,
 };
-use crate::application_surface::resolve_catalog_tool_binding;
 use crate::tracedecay::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
@@ -164,6 +163,7 @@ use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_contracts::ProjectRegistryReadPort;
+use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;

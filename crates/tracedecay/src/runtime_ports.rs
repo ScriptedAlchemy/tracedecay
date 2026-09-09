@@ -44,9 +44,11 @@ pub(crate) fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
 > {
-    crate::catalog_composition::build_application_catalog_snapshot().map_err(|error| {
-        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
-    })
+    tracedecay_contracts::catalog_composition::build_application_catalog_snapshot().map_err(
+        |error| {
+            tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

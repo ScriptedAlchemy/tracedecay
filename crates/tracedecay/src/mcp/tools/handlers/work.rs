@@ -56,7 +56,7 @@ pub(super) async fn handle_work(
         ));
     };
     let response = hotpath::future!(
-        crate::application_surface::invoke_work_operation(
+        tracedecay_daemon_service::application_surface::invoke_work_operation(
             executor,
             WorkHttpRequest {
                 operation,
@@ -317,7 +317,7 @@ mod tests {
                 CancellationSignal::active(format!("cancellation.work-mcp-parity-{index}"))
                     .expect("valid cancellation signal");
             let http = response_json(
-                crate::application_surface::invoke_work_operation(
+                tracedecay_daemon_service::application_surface::invoke_work_operation(
                     &executor,
                     WorkHttpRequest {
                         operation,

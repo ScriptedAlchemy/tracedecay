@@ -99,6 +99,7 @@ hotpath = [
     "tracedecay-code-index/hotpath",
     "tracedecay-code-index-runtime/hotpath",
     "tracedecay-contracts/hotpath",
+    "tracedecay-daemon-service/hotpath",
     "tracedecay-dashboard-api/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
@@ -363,7 +364,6 @@ clap = { version = "4.6", features = ["derive"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_path_to_error = "0.1"
 base64 = "0.22"
 toml = "1"
 ureq = { version = "3", features = ["json"] }

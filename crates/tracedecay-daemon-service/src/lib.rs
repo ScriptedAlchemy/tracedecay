@@ -5,6 +5,12 @@
 //! usecases, application, agent-hosts, and code-index-runtime, and below the
 //! composition root. OS lifecycle management (install/start/stop/probe) lives
 //! in `tracedecay-daemon-control`.
+//!
+//! [`application_surface`] is the transport adaptation shared by HTTP, MCP,
+//! and the CLI: it resolves catalog bindings, normalizes request controls, and
+//! projects canonical application envelopes. Route descriptors and encoding
+//! stay in `tracedecay-api`; the composition root only injects the
+//! authenticated executor into the routers assembled here.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -50,6 +56,7 @@
 /// crate remains the cycle-free owner shared with code-index runtime.
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
 
+pub mod application_surface;
 pub mod invocation;
 pub mod project_runtime;
 pub mod request_cancellation;

@@ -11,13 +11,13 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-use crate::application_surface::{
-    ApplicationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
-};
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_daemon_service::application_surface::{
+    ApplicationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
+};
 use tracedecay_runtime_core::text::format_token_count;
 
 // Consumed by the unix-only daemon git-watch maintenance path; on other

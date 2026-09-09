@@ -1,16 +1,19 @@
-//! Root-owned assembly of the application capability catalog.
+//! Assembly of the application capability catalog from its own descriptors.
 //!
 //! Composition validates metadata against the closed application handler
-//! descriptors and binds them to one caller-supplied canonical dispatcher.
+//! descriptors and binds them to one caller-supplied canonical dispatcher. It
+//! lives beside `application_catalog_contributions` and
+//! `application_handler_descriptors` so the descriptor-derived catalog has one
+//! owner every transport can reach.
 
-use thiserror::Error;
-use tracedecay_contracts::handlers::BoundApplicationHandler;
-use tracedecay_contracts::{
+use crate::handlers::BoundApplicationHandler;
+use crate::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID, ApplicationContractError,
     ApplicationHandlerDescriptors, application_catalog_contributions,
     application_handler_descriptors,
 };
+use thiserror::Error;
 use tracedecay_tool_catalog::{
     BindingSurface, CatalogContributionV1, CatalogSnapshotBuilderV1, CatalogSnapshotV1,
     CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
@@ -239,22 +242,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::mcp::tools::{
-        default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
-    };
-    use tracedecay_contracts::handlers::CanonicalApplicationDispatcher;
-    use tracedecay_contracts::{
-        ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
-    };
-    use tracedecay_mcp::{ToolRegistryMode, project_catalog_discovery_scope};
+    use crate::handlers::CanonicalApplicationDispatcher;
+    use crate::{ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic};
     use tracedecay_tool_catalog::{BindingStatus, CapabilityId, SurfaceOperationName};
-
-    // Growth tripwire only, not an MCP client or protocol limit. The complete
-    // final-V2 profile measures 573,502 bytes after the typed Work and workflow
-    // schemas ship. This reviewed 640 KiB ceiling leaves about 14% headroom;
-    // raising it requires another serialized tools/list measurement and a
-    // stated reason for the additional payload.
-    const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 640 * 1024;
 
     fn dashboard_operations() -> Vec<String> {
         application_catalog_contributions()
@@ -426,68 +416,5 @@ mod tests {
                 "{operation} must resolve to an eager-visible capability"
             );
         }
-    }
-
-    #[test]
-    fn default_profile_capacity_tracks_composed_runtime() {
-        let snapshot = build_application_catalog_snapshot().expect("application catalog");
-        let contributions = application_catalog_contributions().expect("application contributions");
-        let default_profile_id =
-            ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("default profile id");
-        let default_profile = snapshot
-            .profile(&default_profile_id)
-            .expect("default application profile");
-        let default_binding_count = contributions
-            .iter()
-            .flat_map(CatalogContributionV1::bindings)
-            .filter(|binding| {
-                default_profile.includes_capability(binding.capability_id())
-                    && default_profile.enables_surface(binding.surface())
-            })
-            .count();
-        assert_eq!(
-            default_profile.budget().maximum_bindings(),
-            DEFAULT_PROFILE_MAXIMUM_BINDINGS
-        );
-        assert!(default_binding_count > 0);
-        assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
-
-        let definitions = get_catalog_filtered_tool_definitions_with_budget(
-            0,
-            tracedecay_mcp::explore_call_budget(0),
-            &default_profile_id,
-            &default_catalog_discovery_authority().expect("default discovery authority"),
-            &project_catalog_discovery_scope(),
-            ToolRegistryMode::DeterministicMaximal,
-        )
-        .expect("default-profile MCP definitions");
-        let measured_bytes = serde_json::to_vec(&serde_json::json!({ "tools": &definitions }))
-            .expect("serialize default-profile tools/list response")
-            .len();
-        let mut contributors = definitions
-            .iter()
-            .map(|definition| {
-                (
-                    definition.name.as_str(),
-                    serde_json::to_vec(definition)
-                        .expect("serialize tool definition")
-                        .len(),
-                )
-            })
-            .collect::<Vec<_>>();
-        contributors.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
-        let largest_contributors = contributors
-            .iter()
-            .take(10)
-            .map(|(name, bytes)| format!("{name}={bytes}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        assert!(
-            measured_bytes <= DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES,
-            "default-profile MCP tools/list payload measured {measured_bytes} bytes, exceeding \
-             the {DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES}-byte regression ceiling; \
-             largest serialized tool definitions: {largest_contributors}"
-        );
     }
 }

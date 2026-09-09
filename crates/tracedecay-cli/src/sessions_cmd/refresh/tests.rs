@@ -4,7 +4,6 @@ use std::sync::Mutex;
 
 use clap::Parser;
 use serde_json::{Value, json};
-use tracedecay::application_surface::retained::decode_request;
 use tracedecay_contracts::retained_surfaces::{
     RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     SessionRefreshActionRequestV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
@@ -17,6 +16,7 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, RetainedSurfaceExecutionContextV1, RetrievalEvidence, TemporalState,
     retained_receipts, retained_surface_application_operation,
 };
+use tracedecay_daemon_service::application_surface::retained::decode_request;
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };

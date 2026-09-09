@@ -585,7 +585,8 @@ fn application_capability_for_tool(
     super::dispatch::McpDispatchMetadataError,
 > {
     let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
-    let catalog = crate::application_surface::application_surface_catalog_ref()?;
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_catalog_ref()?;
     Ok(catalog.capabilities().find(|capability| {
         capability.binding_ids().iter().any(|binding_id| {
             catalog.binding(binding_id).is_some_and(|binding| {

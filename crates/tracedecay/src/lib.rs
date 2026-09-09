@@ -42,11 +42,9 @@
 // across the tree churns far more than the lint is worth here.
 #![allow(clippy::large_futures)]
 
-pub mod application_surface;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
 pub mod bench;
-pub mod catalog_composition;
 pub mod cloud;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod host_admission;

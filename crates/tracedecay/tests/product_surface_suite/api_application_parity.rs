@@ -4,11 +4,6 @@ use axum::body::Body;
 use axum::extract::Extension;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
-use tracedecay::application_surface::{
-    ApplicationSurfaceRequest, FeedbackSurfaceRequest, GitApplySurfaceRequest,
-    GitPreviewSurfaceRequest, GitReadSurfaceRequest, parse_application_surface_request,
-    resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
-};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
@@ -21,6 +16,11 @@ use tracedecay_contracts::{
 };
 use tracedecay_daemon_protocol::{
     BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
+};
+use tracedecay_daemon_service::application_surface::{
+    ApplicationSurfaceRequest, FeedbackSurfaceRequest, GitApplySurfaceRequest,
+    GitPreviewSurfaceRequest, GitReadSurfaceRequest, parse_application_surface_request,
+    resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
@@ -112,8 +112,8 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
             cancellation: CancellationSignal::active("cancel.feedback-http-parity")
                 .expect("cancellation"),
         }));
-    let catalog =
-        tracedecay::application_surface::application_surface_catalog().expect("catalog snapshot");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
+        .expect("catalog snapshot");
     let resolver = CatalogBindingResolver::new(&catalog);
 
     for (route, operation) in [
@@ -227,7 +227,7 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
 fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
     let fixture = parity_fixture();
     let unpinned = unpinned_operations(&fixture);
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
 
@@ -367,7 +367,7 @@ fn the_parity_golden_accounts_for_every_catalog_operation() {
 #[test]
 fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
     let fixture = parity_fixture();
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
     let definitions = get_tool_definitions().expect("tool definitions");
@@ -438,7 +438,7 @@ fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
 
 #[test]
 fn extended_primitive_reads_bind_cli_mcp_and_http() {
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
     for operation in [
@@ -548,8 +548,10 @@ fn mcp_primitive_definitions_use_application_contracts() {
             expected_required.iter().copied().collect::<BTreeSet<_>>(),
             "{tool_name} required properties"
         );
-        tracedecay::application_surface::parse_application_surface_request(operation, request)
-            .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
+        tracedecay_daemon_service::application_surface::parse_application_surface_request(
+            operation, request,
+        )
+        .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
     }
 }
 
@@ -575,7 +577,7 @@ fn handle_gated_feedback_tools_are_advertised_over_mcp() {
 
 #[test]
 fn handle_gated_feedback_capabilities_follow_catalog_availability() {
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     for capability_id in [
         "capability.application.feedback.affected-tests",

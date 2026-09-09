@@ -361,13 +361,13 @@ impl DaemonHttpApplicationRegistry {
             .clone();
         match remote {
             Some(remote) => Ok((
-                crate::application_surface::with_hotpath_server_layer(
+                tracedecay_daemon_service::application_surface::with_hotpath_server_layer(
                     local.merge(Router::new().nest("/remote", remote.router)),
                 ),
                 Some(remote.credentials),
             )),
             None => Ok((
-                crate::application_surface::with_hotpath_server_layer(local),
+                tracedecay_daemon_service::application_surface::with_hotpath_server_layer(local),
                 None,
             )),
         }
@@ -809,11 +809,12 @@ impl DaemonHttpApplicationService {
                 Some(RemoteBrainTlsServer {
                     listener,
                     endpoint,
-                    router: crate::application_surface::with_hotpath_server_layer(
-                        Router::new()
-                            .nest("/remote", router)
-                            .layer(middleware::from_fn(force_remote_connection_close)),
-                    ),
+                    router:
+                        tracedecay_daemon_service::application_surface::with_hotpath_server_layer(
+                            Router::new()
+                                .nest("/remote", router)
+                                .layer(middleware::from_fn(force_remote_connection_close)),
+                        ),
                     admission,
                     credentials,
                     #[cfg(test)]

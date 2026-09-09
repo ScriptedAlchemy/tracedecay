@@ -5866,7 +5866,6 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "serde_path_to_error",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
@@ -6164,6 +6163,7 @@ dependencies = [
  "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
+ "tracedecay-daemon-service",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6405,6 +6405,7 @@ dependencies = [
 name = "tracedecay-daemon-service"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -6412,10 +6413,13 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-stream",
+ "tower",
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",

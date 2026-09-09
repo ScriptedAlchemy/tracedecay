@@ -162,8 +162,9 @@ impl ProjectOpenSourceEditAuthorizationV1 {
         {
             return Err(concealed_source_edit_problem());
         }
-        let catalog = crate::catalog_composition::build_application_catalog_snapshot()
-            .map_err(|_| concealed_source_edit_problem())?;
+        let catalog =
+            tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
+                .map_err(|_| concealed_source_edit_problem())?;
         let manifest = catalog
             .capability(operation.capability_id())
             .ok_or_else(concealed_source_edit_problem)?;
