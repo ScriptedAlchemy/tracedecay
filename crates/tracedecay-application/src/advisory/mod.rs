@@ -102,8 +102,7 @@ pub use host_delivery::{
     register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
 };
 pub use production::{
-    AdvisoryProductionAuthoritiesV1, AdvisoryProductionHookDeliveryPortV1,
-    AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionAuthoritiesV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
     AdvisoryProductionProviderAuthoritiesV1, AdvisoryProductionStartupRegistrationV1,
     open_advisory_production_authorities,
 };

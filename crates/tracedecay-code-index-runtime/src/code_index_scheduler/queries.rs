@@ -1074,32 +1074,28 @@ impl GenerationRecordIndexV1 {
     }
 }
 
-struct LatestCompleteNativeRecordReadPortV1<'a> {
-    latest: &'a LatestCompleteCodeIndexV1,
-}
-
-impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
+impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
     fn generation(&self) -> &CodeGenerationId {
-        &self.latest.generation.manifest().generation_id
+        &self.generation.manifest().generation_id
     }
 
     fn occurrence(
         &self,
         binding: &CodeCandidateBindingV1,
     ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        if &binding.occurrence.generation != self.generation() {
+        if &binding.occurrence.generation != NativeRecordReadPortV1::generation(self) {
             return Err(QueryExecutionContractErrorV1::GenerationMismatch);
         }
-        let index = self.latest.record_index();
+        let index = self.record_index();
         let file = index
             .file_position(&binding.occurrence.file)
-            .map(|position| &self.latest.generation.snapshot().files[position])
+            .map(|position| &self.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let chunk = match binding.occurrence.chunk.as_ref() {
             Some(chunk_id) => Some(
                 index
                     .chunk_position(chunk_id)
-                    .map(|position| &self.latest.generation.chunks().chunks()[position])
+                    .map(|position| &self.generation.chunks().chunks()[position])
                     .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?,
             ),
             None => None,
@@ -1123,14 +1119,14 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         &self,
         chunk_id: &CodeSearchChunkId,
     ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        let index = self.latest.record_index();
+        let index = self.record_index();
         let chunk = index
             .chunk_position(chunk_id)
-            .map(|position| &self.latest.generation.chunks().chunks()[position])
+            .map(|position| &self.generation.chunks().chunks()[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let file = index
             .file_position(&chunk.anchor.file_occurrence_id)
-            .map(|position| &self.latest.generation.snapshot().files[position])
+            .map(|position| &self.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         Ok(NativeCodeOccurrenceV1 {
             file: chunk.anchor.file_occurrence_id.clone(),
@@ -1146,18 +1142,18 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
     ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
-        let index = self.latest.record_index();
+        let index = self.record_index();
         let lineage = index
             .symbol_position(symbol)
-            .map(|position| &self.latest.generation.symbols().symbols[position])
+            .map(|position| &self.generation.symbols().symbols[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let source = index
             .file_position(file)
-            .map(|position| &self.latest.generation.snapshot().files[position])
+            .map(|position| &self.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let chunk = index
             .chunk_position_for_file_symbol(file, symbol)
-            .map(|position| &self.latest.generation.chunks().chunks()[position]);
+            .map(|position| &self.generation.chunks().chunks()[position]);
         let signature = chunk
             .and_then(|chunk| {
                 chunk
@@ -1295,8 +1291,7 @@ fn symbol_record(
     symbol: &SymbolOccurrenceId,
     file: &tracedecay_domain::FileOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
-    let records = LatestCompleteNativeRecordReadPortV1 { latest };
-    records
+    latest
         .symbol(symbol, file)
         .ok()
         .map(application_symbol_record)
@@ -2332,9 +2327,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(graph_serving) = latest.production_graph_serving() else {
                 return unavailable(finished_at);
             };
-            let records = LatestCompleteNativeRecordReadPortV1 { latest };
             let Ok(native_context) =
-                AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
+                AdmittedGenerationContextV1::admit(served_generation.clone(), latest)
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };

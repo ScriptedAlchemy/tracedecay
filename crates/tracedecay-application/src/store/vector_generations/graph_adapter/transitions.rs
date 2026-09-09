@@ -1147,4 +1147,4 @@ impl GraphVectorGenerationStoreStateV1 {
 
 #[cfg(test)]
 #[path = "transitions/tests.rs"]
-mod tests;
+pub(super) mod tests;
