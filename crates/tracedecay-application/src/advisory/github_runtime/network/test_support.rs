@@ -4,12 +4,11 @@ use std::net::TcpStream;
 pub(super) fn read_http_request_with_headers(
     stream: &mut TcpStream,
 ) -> (String, serde_json::Value) {
-    // macOS `accept()` on a nonblocking listener yields a nonblocking client
-    // socket; Linux does not. Block on the client's write instead of treating
-    // WouldBlock as a hang-up.
+    // macOS `accept` inherits `O_NONBLOCK` from a non-blocking listener, so
+    // the first `read` returns `WouldBlock` instead of the request bytes.
     stream
         .set_nonblocking(false)
-        .expect("fixture client stream must become blocking before the request read");
+        .expect("accepted GraphQL fixture stream must be blocking");
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     let header_end = loop {

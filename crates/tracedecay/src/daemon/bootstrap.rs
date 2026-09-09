@@ -302,9 +302,16 @@ async fn run_foreground_loopback(
                     session_refresh.shutdown().await;
                 },
             ),
-            shutdown_coordination::ShutdownOwner::new("host_admission_replay", || {}, async move {
-                replay_join.shutdown_host_admission_replay().await;
-            }),
+            shutdown_coordination::ShutdownOwner::new(
+                "host_admission_replay",
+                {
+                    let replay_cancel = store_administration.clone();
+                    move || replay_cancel.cancel_host_admission_replay()
+                },
+                async move {
+                    replay_join.shutdown_host_admission_replay().await;
+                },
+            ),
         ],
         // Client setup and in-flight requests may create schedulers, project
         // servers, or provider executions. Sweep the invocation registry only

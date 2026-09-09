@@ -283,9 +283,9 @@ fn git_command() -> std::process::Command {
     if let Ok(path) = std::env::join_paths(paths) {
         command.env("PATH", path);
     }
-    // Parallel libtests and CI runners can inherit GIT_DIR / GIT_WORK_TREE.
-    // `git -C` is not used here; those overrides would retarget every fixture
-    // command at a foreign repo and make `worktree add` fail closed.
+    // Inherited GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR would resolve every
+    // fixture `git` spawn against the caller's checkout (or a sibling test's
+    // repo) instead of `current_dir`.
     command.env_remove("GIT_DIR");
     command.env_remove("GIT_WORK_TREE");
     command.env_remove("GIT_COMMON_DIR");
@@ -363,6 +363,10 @@ mod tests {
             ],
         );
         let worktree = tmp.path().join("wt");
+        // git worktree add creates `.git/worktrees/<name>/locked`. Under load
+        // the parent can be missing for the lock open (ENOENT). Create the
+        // directory first so add only has to create the named slot.
+        fs::create_dir_all(main.join(".git/worktrees")).unwrap();
         run_git(
             &main,
             &["worktree", "add", "--detach", worktree.to_str().unwrap()],

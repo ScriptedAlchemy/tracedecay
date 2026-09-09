@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::path::Path;
 
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -75,7 +77,6 @@ async fn wait_for_exact_interactive_graph_ready(
 /// `<root>/linked` whose checkout differs from the primary's: the primary
 /// owns `README.md` and `primary.rs`, the linked worktree owns `linked.rs`,
 /// so a listing that leaks across routes is observable.
-#[cfg(unix)]
 fn create_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
     let primary = root.join("primary");
     let linked = root.join("linked");
@@ -109,7 +110,6 @@ fn create_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
     (primary, linked)
 }
 
-#[cfg(unix)]
 fn files_listing_text(response: &tracedecay_mcp::JsonRpcResponse) -> &str {
     assert!(
         response.error.is_none(),
@@ -124,7 +124,6 @@ fn files_listing_text(response: &tracedecay_mcp::JsonRpcResponse) -> &str {
         .unwrap_or_else(|| panic!("files response must contain text: {response:?}"))
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bindings() {
     let home = TempDir::new().expect("isolated home");
@@ -497,7 +496,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 /// automatic indexing, seats its own generation, serves its own census (never
 /// the primary's), reopens through the retained canonical runtime, and shuts
 /// down within the same bound — all concurrently with the primary route.
-#[cfg(unix)]
 #[tokio::test]
 async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary() {
     let home = TempDir::new().expect("isolated home");

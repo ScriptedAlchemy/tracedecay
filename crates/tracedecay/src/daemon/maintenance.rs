@@ -1226,6 +1226,26 @@ impl Drop for MaintenancePhaseInstrumentation {
     }
 }
 
+async fn join_abandoned_maintenance_task(task: Option<JoinHandle<()>>, owner: &'static str) {
+    let Some(task) = task else {
+        return;
+    };
+    task.abort();
+    match tokio::time::timeout(super::DAEMON_TASK_ABORT_DEADLINE, task).await {
+        Ok(Ok(()) | Err(_)) => {}
+        Err(_) => {
+            super::log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "maintenance_task_abandoned".to_string()),
+                    ("owner", owner.to_string()),
+                    ("reason", "join_exceeded_abort_deadline".to_string()),
+                ],
+            );
+        }
+    }
+}
+
 async fn run_maintenance_loop<F, Fut>(
     cancellation: &tracedecay_session_memory::context::CancellationToken,
     wake: &Notify,
@@ -1503,12 +1523,17 @@ impl MaintenanceCoordinator {
     #[hotpath::skip]
     pub(super) async fn shutdown(&self) {
         self.cancel();
-        if let Some(task) = self.task.lock().await.take() {
-            let _ = task.await;
-        }
-        if let Some(sampler) = self.resident_memory_sampler.lock().await.take() {
-            let _ = sampler.await;
-        }
+        // Cancel stops the next pass; an in-flight tick only notices between
+        // stores. Abort the tasks so shutdown does not wait for retention or
+        // RSS sampling to finish — those are abandonable maintenance, not
+        // durability. The abort deadline is the join backstop if a tick is
+        // stuck in blocking work.
+        join_abandoned_maintenance_task(self.task.lock().await.take(), "retention_tick").await;
+        join_abandoned_maintenance_task(
+            self.resident_memory_sampler.lock().await.take(),
+            "resident_memory_sampler",
+        )
+        .await;
     }
 
     /// Sample measured RSS every [`RESIDENT_MEMORY_SAMPLE_INTERVAL_V1`] until
@@ -2182,12 +2207,13 @@ mod tests {
     use super::{
         CadenceInstant, ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE,
         MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence, MaintenanceContinuation,
-        MaintenanceStoreOutcomeV1, MaintenanceTickOutcome, RetentionOperatorLogLaneV1,
-        SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
-        StoreTelemetrySamplingRegistry, TableGrowthObservation, checkpoint_path,
-        classify_cold_store_state, compare_table_growth, cursor_after_attempted_units, load_cursor,
-        next_cold_store_cursor, persist_cursor, retention_failure_is_by_design,
-        run_maintenance_loop, run_resident_memory_sampler_loop, select_store_window,
+        MaintenanceCoordinator, MaintenanceStoreOutcomeV1, MaintenanceTickOutcome,
+        RetentionOperatorLogLaneV1, SemanticVectorRetentionCensusOutcome,
+        SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry, TableGrowthObservation,
+        checkpoint_path, classify_cold_store_state, compare_table_growth,
+        cursor_after_attempted_units, load_cursor, next_cold_store_cursor, persist_cursor,
+        retention_failure_is_by_design, run_maintenance_loop, run_resident_memory_sampler_loop,
+        select_store_window,
     };
 
     #[test]
@@ -3315,5 +3341,22 @@ mod tests {
             "cancellation must not wait for a blocked pressure reclaimer"
         );
         sampler_result.expect("sampler joins after cancellation");
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_an_in_flight_tick_instead_of_waiting_for_it() {
+        let coordinator = MaintenanceCoordinator::default();
+        let started = Arc::new(Notify::new());
+        let task_started = Arc::clone(&started);
+        let handle = tokio::spawn(async move {
+            task_started.notify_one();
+            std::future::pending::<()>().await;
+        });
+        *coordinator.task.lock().await = Some(handle);
+        started.notified().await;
+
+        tokio::time::timeout(Duration::from_millis(500), coordinator.shutdown())
+            .await
+            .expect("maintenance shutdown must abort an in-flight tick");
     }
 }

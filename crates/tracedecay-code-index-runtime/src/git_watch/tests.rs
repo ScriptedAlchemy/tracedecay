@@ -792,18 +792,38 @@ async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
     );
     assert_eq!(watcher.spawn().await, GitWatcherStart::ShuttingDown);
     let drained_before = state.drained_plans.load(Ordering::Acquire);
+    // FSEvents can mark dirty during watch install, before shutdown joins the
+    // task. The debounce never drains after join, so requiring `is_clean()`
+    // fails on macOS even when the post-shutdown commit is ignored. Snapshot
+    // the set and require it unchanged — `last_event` moves if a detached
+    // watcher still classifies metadata.
+    let dirty_before_commit = {
+        let dirty = state.dirty.lock().await;
+        (
+            dirty.is_clean(),
+            dirty.last_event,
+            dirty.affected_roots.clone(),
+            dirty.reconcile_metadata,
+        )
+    };
     git(
         repo.path(),
         &["commit", "--allow-empty", "-m", "after shutdown"],
     );
-    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         state.drained_plans.load(Ordering::Acquire),
         drained_before,
         "shutdown must join the repository task instead of detaching its notify watcher"
     );
-    assert!(
-        state.dirty.lock().await.is_clean(),
+    let dirty_after_commit = state.dirty.lock().await;
+    assert_eq!(
+        (
+            dirty_after_commit.is_clean(),
+            dirty_after_commit.last_event,
+            dirty_after_commit.affected_roots.clone(),
+            dirty_after_commit.reconcile_metadata,
+        ),
+        dirty_before_commit,
         "metadata events after shutdown must not reach detached watcher state"
     );
 }
