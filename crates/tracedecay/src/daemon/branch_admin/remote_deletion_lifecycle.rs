@@ -759,7 +759,7 @@ impl StoreAdministration {
                 },
             ));
         }
-        crate::daemon::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
+        crate::daemon::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
         self.project_routes
             .forget_project(identity.profile_id(), project_id)
             .map_err(|error| {

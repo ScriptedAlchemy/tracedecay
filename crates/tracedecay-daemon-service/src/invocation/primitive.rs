@@ -4,6 +4,9 @@ use super::*;
 use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
 };
+use tracedecay_application::primitives::{
+    ProductionPrimitiveOpenRequestV1, open_production_primitive_runtime,
+};
 use tracedecay_contracts::CallableCodeSurfaceRequest;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
@@ -927,12 +930,14 @@ const fn context_scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1)
 
 #[derive(Debug, Error)]
 pub enum DaemonPrimitiveRuntimeRegistrationError {
-    #[error("a application primitive runtime is already mounted for this project")]
+    #[error("an application primitive runtime is already mounted for this project")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
     #[error("a concurrent primitive runtime build failed: {detail}")]
     ConcurrentBuildFailed { detail: String },
+    #[error("the application primitive runtime could not be opened")]
+    Open(#[from] ApplicationContractError),
 }
 
 /// Central project-open registration for the owned primitive facade.
@@ -973,5 +978,18 @@ impl DaemonPrimitiveRuntimeRegistrar {
                 }
             })?;
         Ok(dispatch)
+    }
+
+    #[hotpath::skip]
+    pub async fn open_and_register(
+        &self,
+        project_root: PathBuf,
+        request: ProductionPrimitiveOpenRequestV1,
+    ) -> Result<(), DaemonPrimitiveRuntimeRegistrationError> {
+        let runtime = open_production_primitive_runtime(request).await?;
+        match self.register(project_root, runtime).await {
+            Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }

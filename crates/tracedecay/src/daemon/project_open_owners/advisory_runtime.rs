@@ -1454,6 +1454,10 @@ async fn register_project_delivery_read_authority(
             gated_project_delivery_read_handle_v1(feedback_scope, gate)
         }
     };
+    let source_access =
+        super::project_open_source_access_authority().map_err(|error| TraceDecayError::Config {
+            message: format!("project-open delivery source access is invalid: {error}"),
+        })?;
     invocation
         .advisory_runtime_registrar()
         .publish_delivery_read(
@@ -1463,7 +1467,7 @@ async fn register_project_delivery_read_authority(
                 state.scope.clone(),
                 Arc::clone(state.graph.configuration_runtime()),
                 handle,
-                Arc::new(super::DaemonOwnedProjectSourceAccess),
+                Arc::new(source_access),
             ),
         )
         .await
