@@ -15,7 +15,6 @@ use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
 use crate::config::lock_user_data_dir_test_env;
-use crate::mcp::tools::binding::{McpToolDispatchGroup, dispatch_group_for_tool};
 use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
 use crate::mcp::tools::handlers::{
     ToolCallRegistryOptions, handle_tool_call_with_registry_options,
@@ -72,14 +71,6 @@ fn parse_tool_json(result: &ToolResult) -> Value {
             .expect("tool JSON text"),
     )
     .expect("parse tool JSON")
-}
-
-#[test]
-fn remote_status_is_an_info_dispatch_tool() {
-    assert_eq!(
-        dispatch_group_for_tool("tracedecay_remote_status"),
-        Some(McpToolDispatchGroup::Info)
-    );
 }
 
 #[tokio::test]

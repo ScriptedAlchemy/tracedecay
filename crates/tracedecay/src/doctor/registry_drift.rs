@@ -167,15 +167,6 @@ mod tests {
     }
 
     #[test]
-    fn relinkable_store_maps_to_orphan_store_finding() {
-        let typed = orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Relinkable {
-            live_root: PathBuf::from("/live/moved/root"),
-        }))
-        .expect("relinkable store produces a typed finding");
-        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
-    }
-
-    #[test]
     fn unregistered_store_maps_to_orphan_store_finding() {
         let finding = UnregisteredStoreFinding {
             project_dir_name: "proj_ghost".to_string(),

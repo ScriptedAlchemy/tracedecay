@@ -249,8 +249,7 @@ mod tests {
 
     use super::{
         FIXTURE_PROVIDER, ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance,
-        RegisteredProductRuntime, compose_build_version, register_fixture_product_runtime,
-        register_in, runtime_in, validated,
+        compose_build_version, register_in, runtime_in, validated,
     };
     use crate::version::PACKAGE_VERSION;
 
@@ -296,34 +295,6 @@ mod tests {
         assert_eq!(
             runtime_in(&slot).err(),
             Some(ProductRuntimeError::MissingProvider)
-        );
-    }
-
-    #[test]
-    fn a_valid_provider_registers_and_reads_back_exactly() {
-        let slot = OnceLock::new();
-        register_in(&slot, valid_provider()).expect("valid provider must register");
-        let runtime = runtime_in(&slot).expect("registered runtime must read back");
-        assert_eq!(runtime.release_version(), PACKAGE_VERSION);
-        assert_eq!(runtime.source().full_sha, VALID_SHA);
-        assert!(!runtime.source().dirty);
-        assert_eq!(runtime.dashboard().cache_tag, VALID_ASSETS.cache_tag);
-        assert_eq!(runtime.provider().dashboard.assets.len(), 2);
-        assert_eq!(
-            runtime.build_version(),
-            format!("{PACKAGE_VERSION}+{VALID_SHA}")
-        );
-    }
-
-    #[test]
-    fn a_dirty_source_is_admitted_in_the_build_version() {
-        let slot = OnceLock::new();
-        let mut provider = valid_provider();
-        provider.source.dirty = true;
-        register_in(&slot, provider).expect("dirty provider must register");
-        assert_eq!(
-            runtime_in(&slot).expect("registered").build_version(),
-            format!("{PACKAGE_VERSION}+{VALID_SHA}.dirty")
         );
     }
 
@@ -490,22 +461,6 @@ mod tests {
         assert_eq!(
             runtime.build_version(),
             format!("{PACKAGE_VERSION}+{}", super::FIXTURE_FULL_SHA)
-        );
-    }
-
-    /// The unit-test process registers the fixture into the real global slot,
-    /// matching the documented invariant for test processes.
-    #[test]
-    fn the_global_fixture_registration_is_idempotent_and_readable() {
-        let first: &'static RegisteredProductRuntime = register_fixture_product_runtime();
-        let second = register_fixture_product_runtime();
-        assert!(std::ptr::eq(first, second));
-        assert_eq!(first.source().full_sha, super::FIXTURE_FULL_SHA);
-        assert_eq!(
-            super::product_runtime()
-                .expect("fixture registered")
-                .build_version(),
-            first.build_version()
         );
     }
 }

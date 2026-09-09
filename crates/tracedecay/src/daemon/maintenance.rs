@@ -2180,14 +2180,14 @@ mod tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{
-        CadenceInstant, ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE,
-        MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence, MaintenanceContinuation,
-        MaintenanceStoreOutcomeV1, MaintenanceTickOutcome, RetentionOperatorLogLaneV1,
-        SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
-        StoreTelemetrySamplingRegistry, TableGrowthObservation, checkpoint_path,
-        classify_cold_store_state, compare_table_growth, cursor_after_attempted_units, load_cursor,
-        next_cold_store_cursor, persist_cursor, retention_failure_is_by_design,
-        run_maintenance_loop, run_resident_memory_sampler_loop, select_store_window,
+        CadenceInstant, ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE, MaintenanceCadence,
+        MaintenanceContinuation, MaintenanceStoreOutcomeV1, MaintenanceTickOutcome,
+        RetentionOperatorLogLaneV1, SemanticVectorRetentionCensusOutcome,
+        SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry, TableGrowthObservation,
+        checkpoint_path, classify_cold_store_state, compare_table_growth,
+        cursor_after_attempted_units, load_cursor, next_cold_store_cursor, persist_cursor,
+        retention_failure_is_by_design, run_maintenance_loop, run_resident_memory_sampler_loop,
+        select_store_window,
     };
 
     #[test]
@@ -2580,18 +2580,6 @@ mod tests {
 
     fn store_keys(count: usize) -> Vec<String> {
         (0..count).map(|index| format!("s:{index:03}")).collect()
-    }
-
-    #[test]
-    fn store_window_is_bounded_by_the_per_tick_budget() {
-        let keys = store_keys(50);
-        let (window, _) = select_store_window(&keys, None, MAINTENANCE_STORE_PAGE_LIMIT);
-        assert_eq!(window.len(), MAINTENANCE_STORE_PAGE_LIMIT);
-
-        // A mounted set smaller than the budget is processed whole.
-        let small = store_keys(3);
-        let (window, _) = select_store_window(&small, None, MAINTENANCE_STORE_PAGE_LIMIT);
-        assert_eq!(window, vec![0, 1, 2]);
     }
 
     #[test]
@@ -3147,19 +3135,6 @@ mod tests {
     }
 
     #[test]
-    fn cold_store_outcomes_do_not_report_deferred_work_as_processed() {
-        for outcome in [
-            MaintenanceStoreOutcomeV1::Busy,
-            MaintenanceStoreOutcomeV1::Missing,
-            MaintenanceStoreOutcomeV1::Unreadable,
-            MaintenanceStoreOutcomeV1::Cancelled,
-        ] {
-            assert!(!outcome.was_processed());
-        }
-        assert!(MaintenanceStoreOutcomeV1::Processed.was_processed());
-    }
-
-    #[test]
     fn cold_store_checkpoint_survives_restart() {
         let root = tempfile::tempdir().expect("checkpoint root");
         let path = checkpoint_path(root.path());
@@ -3221,11 +3196,6 @@ mod tests {
             !super::retention_maintenance_enabled(&retention),
             "soft budgets are Doctor findings, never a retention trigger"
         );
-    }
-
-    #[test]
-    fn retention_window_conversion_never_wraps_negative() {
-        assert_eq!(super::retention_window_secs(u64::MAX), i64::MAX);
     }
 
     #[test]

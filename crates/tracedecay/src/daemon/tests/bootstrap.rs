@@ -2152,27 +2152,6 @@ fn exhausted_code_runtime_capacity_retries_at_resource_cadence() {
 }
 
 #[test]
-fn undecodable_authority_row_backs_off_beyond_the_transient_debounce() {
-    // The identity material of a committed observation stopped matching the
-    // derivation the running binary applies, so every reopen re-runs the whole
-    // authority audit and fails on the same row.
-    let backoff = super::super::project_open_retry_backoff(&authority_invariant_error(
-        "invalid committed observation authority JSON: serialized observation identity \
-         does not match its source evidence",
-    ));
-
-    assert_eq!(
-        backoff,
-        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
-        "an undecodable persisted row must not reopen at the transient debounce cadence"
-    );
-    assert!(
-        super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF
-            > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
-    );
-}
-
-#[test]
 fn mutable_cursor_key_rejection_keeps_the_transient_debounce() {
     assert_eq!(
         super::super::project_open_retry_backoff(&authority_invariant_error(

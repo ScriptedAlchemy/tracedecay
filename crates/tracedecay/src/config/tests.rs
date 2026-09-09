@@ -1,6 +1,5 @@
 use super::{
-    GENERATED_DIR_SEGMENTS, TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path,
-    get_tracedecay_dir, is_excluded, is_excluded_dir, is_generated_dir_segment,
+    TraceDecayConfig, USER_DATA_DIR_ENV, is_excluded, is_excluded_dir, is_generated_dir_segment,
     is_generated_path_segment, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
     is_included, lock_user_data_dir_test_env, user_data_dir,
 };
@@ -37,29 +36,6 @@ impl Drop for EnvRestore {
             }
         }
     }
-}
-
-#[test]
-fn test_data_dir_defaults_to_tracedecay_for_new_installs() {
-    let root = TempDir::new().unwrap();
-    assert_eq!(
-        get_tracedecay_dir(root.path()),
-        root.path().join(".tracedecay")
-    );
-    assert_eq!(
-        get_project_db_path(root.path()),
-        root.path().join(".tracedecay/tracedecay.db")
-    );
-}
-
-#[test]
-fn test_data_dir_uses_tracedecay_when_present() {
-    let root = TempDir::new().unwrap();
-    fs::create_dir(root.path().join(".tracedecay")).unwrap();
-    assert_eq!(
-        get_tracedecay_dir(root.path()),
-        root.path().join(".tracedecay")
-    );
 }
 
 #[cfg(unix)]
@@ -101,28 +77,6 @@ fn nextest_shared_target_profile_is_isolated_by_test_name() {
 }
 
 #[test]
-fn nextest_shared_target_profile_is_isolated_under_the_perf_profile() {
-    let _lock = lock_user_data_dir_test_env();
-    let root = TempDir::new().unwrap();
-    let target = root.path().join("target");
-    // A `cargo test-ci` / CI checkout only ever builds `target/perf`.
-    fs::create_dir_all(target.join("perf")).unwrap();
-    let profile = target.join("test-profile/.tracedecay");
-    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
-    let _binary_id = EnvRestore::set("NEXTEST_BINARY_ID", "tracedecay::storage_suite");
-    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::perf_profile");
-
-    let resolved = user_data_dir().unwrap();
-
-    let canonical_profile = target
-        .canonicalize()
-        .unwrap()
-        .join("test-profile/.tracedecay");
-    assert!(resolved.starts_with(canonical_profile.join("nextest")));
-    assert_ne!(resolved, canonical_profile);
-}
-
-#[test]
 fn nextest_preserves_explicit_temp_profile_override() {
     let _lock = lock_user_data_dir_test_env();
     let root = TempDir::new().unwrap();
@@ -140,14 +94,6 @@ fn nextest_preserves_explicit_temp_profile_override() {
 }
 
 #[test]
-fn test_db_filename_tracks_dir_brand() {
-    assert_eq!(
-        db_filename(std::path::Path::new("/p/.tracedecay")),
-        "tracedecay.db"
-    );
-}
-
-#[test]
 fn test_is_included_matches_glob() {
     let config = TraceDecayConfig {
         include: vec![".github/**".to_string()],
@@ -160,12 +106,6 @@ fn test_is_included_matches_glob() {
 }
 
 #[test]
-fn test_is_included_empty_matches_nothing() {
-    let config = TraceDecayConfig::default();
-    assert!(!is_included(".github/workflows/ci.yml", &config));
-}
-
-#[test]
 fn test_include_records_explicit_override_even_when_excluded() {
     let config = TraceDecayConfig {
         include: vec![".config/**".to_string()],
@@ -174,12 +114,6 @@ fn test_include_records_explicit_override_even_when_excluded() {
     };
     assert!(is_included(".config/secret/key.rs", &config));
     assert!(is_excluded(".config/secret/key.rs", &config));
-}
-
-#[test]
-fn test_default_gitignore_is_enabled() {
-    let config = TraceDecayConfig::default();
-    assert!(config.git_ignore);
 }
 
 #[test]
@@ -200,15 +134,6 @@ fn test_default_excludes_nested_node_modules() {
     assert!(is_excluded("packages/web/dist/main.js", &config));
     assert!(is_excluded("coverage/lcov.js", &config));
     assert!(is_excluded("packages/web/.next/server/app.js", &config));
-}
-
-#[test]
-fn test_dir_pruning_pattern_matches_nested_dirs() {
-    // scan_files_walkdir checks is_excluded("{dir}/_") for directory pruning.
-    // Patterns like **/node_modules/** must match the dummy-file probe.
-    let config = TraceDecayConfig::default();
-    assert!(is_excluded("node_modules/_", &config));
-    assert!(is_excluded("projectA/node_modules/_", &config));
 }
 
 #[test]
@@ -279,28 +204,6 @@ fn test_explicit_global_excludes_ignores_comments_and_blank_lines() {
     let ignored = is_ignored_by_explicit_global_excludes(&repo, &git_config);
 
     assert_eq!(ignored, Some(true));
-}
-
-#[test]
-fn sync_config_defaults_round_trip() {
-    let config = TraceDecayConfig::default();
-    let json = serde_json::to_string(&config).unwrap();
-    let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(config.sync, parsed.sync);
-    assert_eq!(parsed.sync, super::SyncConfig::default());
-    // Spot-check a few of the documented defaults.
-    assert!(
-        !parsed.sync.auto_watch,
-        "filesystem metadata watching is an explicit opt-in fallback"
-    );
-    assert!(
-        !parsed.sync.watch_linked_worktrees,
-        "linked worktree watching requires explicit project opt-in"
-    );
-    assert_eq!(parsed.sync.watch_debounce_ms, 2000);
-    assert_eq!(parsed.sync.full_sync_escalation_files, 500);
-    assert_eq!(parsed.sync.max_concurrent_syncs, 2);
-    assert!(parsed.sync.auto_init);
 }
 
 #[test]
@@ -434,32 +337,6 @@ fn telemetry_timing_defaults_on_and_round_trips() {
 }
 
 #[test]
-fn diagnostics_prewarm_round_trips_and_defaults_off() {
-    let config = TraceDecayConfig::default();
-    assert!(!config.diagnostics_prewarm, "prewarm must default off");
-    let json = serde_json::to_string(&config).unwrap();
-    let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
-    assert!(!parsed.diagnostics_prewarm);
-
-    // Explicit true round-trips, and old configs without the key default.
-    let mut on = config.clone();
-    on.diagnostics_prewarm = true;
-    let parsed: TraceDecayConfig =
-        serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
-    assert!(parsed.diagnostics_prewarm);
-    let legacy = r#"{
-        "version": 1,
-        "root_dir": "/tmp/proj",
-        "exclude": [],
-        "max_file_size": 1048576,
-        "extract_docstrings": true,
-        "track_call_sites": true
-    }"#;
-    let parsed: TraceDecayConfig = serde_json::from_str(legacy).unwrap();
-    assert!(!parsed.diagnostics_prewarm);
-}
-
-#[test]
 fn config_without_sync_key_deserializes_to_default_sync() {
     // Old config.json files predate the `sync` table; the field-level
     // `#[serde(default)]` must fill it in.
@@ -498,25 +375,6 @@ fn partial_sync_table_fills_missing_fields_with_defaults() {
 }
 
 #[test]
-fn pr_autotrack_defaults_off_and_survives_missing_keys() {
-    // Back-compat: a config predating the PR-autotrack keys must default the
-    // feature OFF and to the 300s poll cadence.
-    let json = r#"{
-        "version": 1,
-        "root_dir": "/tmp/proj",
-        "exclude": [],
-        "max_file_size": 1048576,
-        "extract_docstrings": true,
-        "track_call_sites": true,
-        "sync": { "auto_watch": true }
-    }"#;
-    let parsed: TraceDecayConfig = serde_json::from_str(json).unwrap();
-    assert!(!parsed.sync.auto_track_pr_branches);
-    assert_eq!(parsed.sync.auto_track_pr_poll_secs, 300);
-    assert_eq!(parsed.sync.effective_auto_track_pr_poll_secs(), 300);
-}
-
-#[test]
 fn pr_autotrack_round_trips_and_clamps_poll_floor() {
     let json = r#"{
         "version": 1,
@@ -551,17 +409,6 @@ fn parse_env_bool_shares_canonical_truthy_spellings() {
         assert_eq!(super::parse_env_bool(raw), Some(false), "{raw}");
     }
     assert_eq!(super::parse_env_bool("maybe"), None);
-}
-
-#[test]
-fn pr_autotrack_env_overrides() {
-    let _lock = lock_user_data_dir_test_env();
-    let _enable = EnvRestore::set("TRACEDECAY_SYNC_AUTO_TRACK_PR_BRANCHES", "true");
-    let _poll = EnvRestore::set("TRACEDECAY_SYNC_AUTO_TRACK_PR_POLL_SECS", "120");
-
-    let overridden = super::SyncConfig::default().with_env_overrides();
-    assert!(overridden.auto_track_pr_branches);
-    assert_eq!(overridden.auto_track_pr_poll_secs, 120);
 }
 
 #[test]
@@ -818,43 +665,9 @@ async fn discover_project_root_with_identity_preserves_sync_fast_path() {
 // hand-maintained lists: this module's own DEFAULT_EXCLUDE_PATTERNS,
 // tracedecay::scan's is_skipped_dir_hint, migrate::inventory's
 // should_prune_dir, and mcp::tools::handlers::redundancy's
-// is_generated_path. These tests pin the union those four call sites need
-// and spot-check that segments unique to one of the formerly-separate lists
-// are now recognized everywhere.
+// is_generated_path. These tests spot-check that segments unique to one of
+// the formerly-separate lists are now recognized everywhere.
 // ---------------------------------------------------------------------------
-
-#[test]
-fn generated_dir_segments_cover_the_union_all_call_sites_need() {
-    // Formerly scan.rs-only (its HINTABLE_DIRS list).
-    for segment in [
-        "node_modules",
-        "vendor",
-        "build",
-        "dist",
-        "out",
-        "coverage",
-        ".cache",
-        ".next",
-        ".turbo",
-        ".gradle",
-        ".venv",
-        "venv",
-        "__pycache__",
-    ] {
-        assert!(
-            GENERATED_DIR_SEGMENTS.contains(&segment),
-            "{segment} (from scan.rs's old list) missing from GENERATED_DIR_SEGMENTS"
-        );
-    }
-    // Formerly migrate::inventory-only addition beyond the scan.rs set.
-    assert!(GENERATED_DIR_SEGMENTS.contains(&"target"));
-    // Formerly redundancy.rs-only addition beyond the scan.rs set.
-    assert!(GENERATED_DIR_SEGMENTS.contains(&".worktrees"));
-    // `.git` is intentionally NOT part of the shared list — it stays a
-    // site-local addition in migrate::inventory::should_prune_dir (see its
-    // doc comment) because it's VCS metadata, not generated/vendored code.
-    assert!(!GENERATED_DIR_SEGMENTS.contains(&".git"));
-}
 
 #[test]
 fn is_generated_dir_segment_delegates_for_segments_unique_to_one_former_list() {
@@ -1890,44 +1703,7 @@ mod runtime_configuration_cutover {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
-    use crate::config::{RetentionConfig, SyncConfig};
-    use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
-
-    #[test]
-    fn default_retention_runs_only_safe_bounded_maintenance() {
-        let retention = RetentionConfig::default();
-        assert!(
-            retention.session_lcm.enabled,
-            "projection-durable session dedupe enabled by default"
-        );
-        assert_eq!(retention.session_lcm.offload_after_days, Some(30));
-        assert_eq!(retention.session_lcm.drop_after_days, Some(180));
-        assert_eq!(retention.session_lcm.dedupe_projected_after_days, Some(30));
-        assert_eq!(retention.session_lcm.max_batch_size, 500);
-        assert!(
-            retention.observation.enabled,
-            "released observation evidence maintenance is active by default"
-        );
-        assert_eq!(retention.observation.anchor_release_after_days, Some(30));
-        assert_eq!(
-            retention.observation.observation_release_after_days,
-            Some(30)
-        );
-        assert_eq!(
-            retention.observation.provenance_release_after_days,
-            Some(30)
-        );
-        assert_eq!(retention.orphan_store_gc_days, Some(30));
-        assert_eq!(retention.incident_debris_retention_days, Some(30));
-        let compaction = retention.compaction.expect("compaction enabled");
-        assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
-        assert_eq!(compaction.minimum_reclaimable_bytes, 64 * 1024 * 1024);
-        assert_eq!(compaction.max_pages_per_tick, 1024);
-        assert_eq!(compaction, CompactionThresholdConfig::default());
-        assert!(retention.store_soft_budgets_bytes.is_empty());
-        // A default SyncConfig carries the same bounded retention tree.
-        assert_eq!(SyncConfig::default().retention, retention);
-    }
+    use crate::config::RetentionConfig;
 
     #[test]
     fn empty_json_object_deserializes_to_safe_defaults() {

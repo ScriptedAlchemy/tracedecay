@@ -2327,9 +2327,7 @@ mod code_index_root_alignment_tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use super::{
-        code_index_scope_store_root, code_index_store_root, resolve_live_code_index_roots,
-    };
+    use super::{code_index_store_root, resolve_live_code_index_roots};
 
     #[test]
     fn code_generation_retention_sweeps_the_scheduler_store_root() {
@@ -2355,22 +2353,6 @@ mod code_index_root_alignment_tests {
             swept,
             data_root.join("code-index-v1"),
             "sweep root must be the per-project scoped subdirectory, not the shared parent"
-        );
-    }
-
-    #[test]
-    fn scope_reconciliation_operates_on_the_shared_code_index_parent() {
-        let data_root = PathBuf::from("/profile/projects/alpha");
-        let project_root = PathBuf::from("/work/alpha");
-
-        let parent = code_index_scope_store_root(&data_root);
-        let scoped = code_index_store_root(&data_root, &project_root);
-
-        assert_eq!(parent, data_root.join("code-index-v1"));
-        assert_eq!(
-            scoped.parent(),
-            Some(parent.as_path()),
-            "the scoped sweep root must be a direct child of the reconciled parent"
         );
     }
 

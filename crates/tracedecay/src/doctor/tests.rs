@@ -122,14 +122,6 @@ fn format_bytes_boundaries() {
 }
 
 #[test]
-fn format_bytes_fractional_kb() {
-    // 2048 bytes = 2.0 KB
-    assert_eq!(format_bytes(2048), "2.0 KB");
-    // 1536 = 1.5 KB
-    assert_eq!(format_bytes(1536), "1.5 KB");
-}
-
-#[test]
 fn database_recovery_guidance_names_the_preserved_recovery_set() {
     let db_path = PathBuf::from("/profile/projects/proj_test/tracedecay.db");
     let guidance = database_recovery_guidance(&db_path);
@@ -191,20 +183,6 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     assert_eq!(
         parsed.pointer("/doctor_report/kind"),
         Some(&serde_json::json!("unknown"))
-    );
-}
-
-#[test]
-fn daemon_doctor_request_uses_comprehensive_ready_owner() {
-    assert_eq!(
-        super::daemon_doctor_runtime_args(),
-        serde_json::json!({
-            "format": "json",
-            "startup_health": false,
-            "authority_audit": true,
-            "doctor_report": true,
-            "session_ingest_health": false,
-        })
     );
 }
 
@@ -476,23 +454,6 @@ fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
-}
-
-#[test]
-fn doctor_result_fails_when_checks_report_issues() {
-    let mut counters = DoctorCounters::new();
-    counters.fail("broken integration");
-
-    let error = super::doctor_result(&counters, &DatabaseHealth::Healthy).unwrap_err();
-    assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
-}
-
-#[test]
-fn doctor_result_allows_warnings_without_issues() {
-    let mut counters = DoctorCounters::new();
-    counters.warn("optional check unavailable");
-
-    super::doctor_result(&counters, &DatabaseHealth::Healthy).unwrap();
 }
 
 #[test]

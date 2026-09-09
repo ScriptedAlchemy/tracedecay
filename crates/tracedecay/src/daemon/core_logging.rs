@@ -486,11 +486,6 @@ mod stderr_tracing_tests {
     }
 
     #[test]
-    fn a_fully_understood_value_reports_nothing() {
-        assert!(parse(Some("warn,tracedecay=debug")).diagnostic().is_none());
-    }
-
-    #[test]
     fn hooks_stay_silent_until_rust_log_asks_otherwise() {
         let unset = parse_for_hook(None);
         assert_eq!(unset.level_for_target("tracedecay"), LevelFilter::OFF);

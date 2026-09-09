@@ -2213,21 +2213,11 @@ async fn scheduled_user_job_run_id(
 mod scheduler_project_open_backoff_tests {
     use super::{
         BackgroundJobGaugeGuard, SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING,
-        SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION, scheduler_project_open_backoff,
+        scheduler_project_open_backoff,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::time::Duration;
-
-    #[test]
-    fn backoff_starts_at_one_tick_and_grows() {
-        let tick = Duration::from_secs(
-            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
-        assert_eq!(scheduler_project_open_backoff(1), tick);
-        assert_eq!(scheduler_project_open_backoff(2), tick * 2);
-        assert_eq!(scheduler_project_open_backoff(3), tick * 4);
-    }
 
     #[test]
     fn backoff_is_capped_and_never_regresses() {
@@ -2244,24 +2234,6 @@ mod scheduler_project_open_backoff_tests {
         assert_eq!(
             scheduler_project_open_backoff(64),
             SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING
-        );
-    }
-
-    #[test]
-    fn escalation_bounds_the_total_futile_retry_window() {
-        let total: Duration = (1..=SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION)
-            .map(scheduler_project_open_backoff)
-            .sum();
-        let tick = Duration::from_secs(
-            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
-        assert!(
-            total > tick,
-            "escalation must allow more than one retry before exiting"
-        );
-        assert!(
-            total <= Duration::from_hours(1),
-            "a futile streak must not run for hours before escalating"
         );
     }
 

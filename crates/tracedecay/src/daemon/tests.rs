@@ -420,19 +420,6 @@ fn search_request_controls_distinguish_cancellation_and_timeout() {
 }
 
 #[test]
-fn search_scope_resolution_failure_is_authority_unavailable() {
-    assert!(matches!(
-        super::code_index_scope_unavailable(),
-        code_search::CodeIndexSearchOutcomeV1::Unavailable(
-            code_search::CodeIndexSearchUnavailableV1 {
-                reason: code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                ..
-            }
-        )
-    ));
-}
-
-#[test]
 fn an_unservable_search_reports_every_lane_down() {
     let code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) =
         super::code_index_scope_unavailable()

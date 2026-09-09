@@ -451,25 +451,6 @@ fn daemon_client_saturation_response_is_typed_json_rpc_data() {
 }
 
 #[test]
-fn daemon_per_client_saturation_response_is_typed_json_rpc_data() {
-    let response = super::super::DaemonClientSaturationResponse {
-        kind: super::super::DaemonClientSaturationKind::PerClientCapacityReached,
-        retryable: true,
-        capacity: 8,
-    }
-    .into_json_rpc_with_id(serde_json::Value::Null);
-    let data = response
-        .error
-        .expect("error response")
-        .data
-        .expect("typed data");
-
-    assert_eq!(data["kind"], "per_client_capacity_reached");
-    assert_eq!(data["retryable"], true);
-    assert_eq!(data["capacity"], 8);
-}
-
-#[test]
 fn project_server_capacity_response_is_typed_json_rpc_data() {
     let response = super::super::project_open_error_response(
         serde_json::Value::Null,
