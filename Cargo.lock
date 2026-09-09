@@ -6026,6 +6026,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-configuration",
  "tracedecay-contracts",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",

@@ -28,7 +28,6 @@ use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
-mod adoption;
 mod branches;
 mod identity;
 mod registry;
