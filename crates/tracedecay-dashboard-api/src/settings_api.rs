@@ -312,12 +312,18 @@ pub struct PrAutoTrackManagedSummaryEntryV1 {
 }
 
 /// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
-pub type PrAutoTrackManagedSummaryReader =
-    Arc<dyn Fn(PathBuf) -> Vec<PrAutoTrackManagedSummaryEntryV1> + Send + Sync + 'static>;
+pub type PrAutoTrackManagedSummaryReader = Arc<
+    dyn Fn(PathBuf) -> tracedecay_domain::errors::Result<Vec<PrAutoTrackManagedSummaryEntryV1>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
-    Ok(Json(settings_envelope(&state, None, None, None).await?))
+    Ok(Json(
+        settings_envelope(&state, None, None, None, pr_autotrack_payload(&state)?).await?,
+    ))
 }
 
 #[hotpath::measure(label = "dashboard_api.settings.patch_project", future = true)]
@@ -326,6 +332,7 @@ pub async fn patch_project_settings(
     Json(patch): Json<Value>,
 ) -> ProjectSettingsPatchResult {
     let patch = parse_project_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
             settings_validation_error(json!([{
@@ -401,7 +408,14 @@ pub async fn patch_project_settings(
 
     Ok(Json(ProjectSettingsPatchResponseV1 {
         application_outcome,
-        current: settings_envelope(&state, Some(preview.resync_recommended), None, None).await?,
+        current: settings_envelope(
+            &state,
+            Some(preview.resync_recommended),
+            None,
+            None,
+            pr_autotrack,
+        )
+        .await?,
     }))
 }
 
@@ -411,6 +425,7 @@ pub async fn patch_user_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_user_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     validate_user_settings_patch(&patch, |value| parse_duration_millis(value).is_some())?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
@@ -466,7 +481,14 @@ pub async fn patch_user_settings(
     }
 
     Ok(Json(
-        settings_envelope(&state, None, Some(plan.restart_recommended), None).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(plan.restart_recommended),
+            None,
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
@@ -479,6 +501,7 @@ pub async fn patch_code_index_worker_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_code_index_worker_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     validate_code_index_worker_settings_patch(&patch)?;
     let worker_admission_errors = code_index_worker_admission_errors(
         &patch.code_index_workers,
@@ -527,7 +550,14 @@ pub async fn patch_code_index_worker_settings(
     };
 
     Ok(Json(
-        settings_envelope(&state, None, Some(true), Some(&committed.current)).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(true),
+            Some(&committed.current),
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
@@ -569,6 +599,7 @@ async fn settings_envelope(
     resync_recommended: Option<bool>,
     restart_recommended: Option<bool>,
     committed_worker_configuration: Option<&DashboardCodeIndexWorkerConfigurationV1>,
+    pr_autotrack: PrAutoTrackPayloadV1,
 ) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
 {
     let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
@@ -603,7 +634,7 @@ async fn settings_envelope(
             configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
             tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
-            pr_autotrack: pr_autotrack_payload(state),
+            pr_autotrack,
         },
         user: user_settings_payload(&user, &worker_configuration),
         automation,
@@ -723,8 +754,21 @@ fn automation_settings_payload(
 }
 
 /// Lists the PR branches the daemon currently auto-tracks for this project, read
-/// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
-/// feature has tracked nothing yet.
+/// from the store's PR-autotrack state sidecar.
+fn pr_autotrack_payload(
+    state: &DashboardState,
+) -> std::result::Result<PrAutoTrackPayloadV1, DashboardConfigurationRouteErrorV1> {
+    let reader = state
+        .pr_autotrack_reader
+        .as_ref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let tracked = map_managed_pr_autotrack_entries(
+        reader(state.store_root.clone())
+            .map_err(|_| configuration_authority_unavailable_error())?,
+    );
+    Ok(PrAutoTrackPayloadV1 { tracked })
+}
+
 fn map_managed_pr_autotrack_entries(
     entries: Vec<PrAutoTrackManagedSummaryEntryV1>,
 ) -> Vec<PrAutoTrackEntryV1> {
@@ -736,15 +780,6 @@ fn map_managed_pr_autotrack_entries(
             head_branch: entry.head_branch,
         })
         .collect()
-}
-
-fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
-    let tracked = state
-        .pr_autotrack_reader
-        .as_ref()
-        .map(|reader| map_managed_pr_autotrack_entries(reader(state.store_root.clone())))
-        .unwrap_or_default();
-    PrAutoTrackPayloadV1 { tracked }
 }
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {

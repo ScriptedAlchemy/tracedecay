@@ -14,29 +14,6 @@ use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
 
-/// Builds a `Config` error from a message, for argument-validation failures.
-pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
-}
-
-pub(super) fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
-    let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    if encoded.len() > 4_096 {
-        return Err(argument_error(
-            "cursor exceeds its bounded authenticated envelope",
-        ));
-    }
-    let cursor: tracedecay_domain::RetrievalCursor = serde_json::from_str(encoded)?;
-    cursor.validate().map_err(|_| {
-        argument_error("cursor is not a valid authenticated retrieval continuation")
-    })?;
-    Ok(Some(cursor))
-}
-
 /// Key under which context handlers stash analytics that must reach the server
 /// but never the client. [`rendered_tool_result`] is the one place it is lifted
 /// back out, so no handler has to remember to strip it.

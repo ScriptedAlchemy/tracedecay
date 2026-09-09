@@ -3,7 +3,7 @@
 mod runtime;
 mod test_map;
 
-pub(super) use runtime::handle_runtime;
+pub(crate) use runtime::{collect_database_snapshot, handle_runtime};
 pub(super) use test_map::{handle_test_map, handle_test_risk};
 
 use std::collections::HashSet;

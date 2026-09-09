@@ -10,29 +10,35 @@ use tracedecay_contracts::retrieval::{
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
-use tracedecay_mcp::tools::render::{self, Md};
 
-pub(super) fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
+use crate::tool_context::McpToolContext;
+use crate::tools::render::{self, Md};
+
+pub fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
     result_count == 0 || result_count < limit.clamp(1, 20)
 }
 
-pub(super) fn lazy_indexing_requested(args: &Value) -> bool {
+pub fn lazy_indexing_requested(args: &Value) -> bool {
     args.get("lazy_index_ignored_dependencies")
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }
 
-#[hotpath::measure(future = true, label = "mcp.search.import_hint.total")]
-pub(super) async fn external_import_hint(
+/// Advisory external-import evidence for a sparse search.
+///
+/// The bound context carries the graph's admitted scope plus the caller's
+/// deadline and cancellation, so this read cannot outlive the request or reach
+/// a graph admitted for another checkout.
+#[hotpath::measure(label = "mcp.search.import_hint.total")]
+pub fn external_import_hint(
+    ctx: &McpToolContext<'_>,
     graph: &VerifiedGraphQuery,
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_contracts::Deadline>,
-    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
 ) -> Result<Option<Value>> {
     let candidates = hotpath::measure_block!("mcp.search.import_hint.scan", {
-        ignored_dependency_candidates(graph, query, limit, scope_prefix, deadline, cancellation)?
+        ignored_dependency_candidates(ctx, graph, query, limit, scope_prefix)?
     });
     if candidates.is_empty() {
         return Ok(None);
@@ -51,7 +57,7 @@ pub(super) async fn external_import_hint(
     })))
 }
 
-pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
+pub fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
     let (reason_code, retryable, detail) =
         if let Some((reason_code, retryable, detail)) = error.project_route_context() {
             (reason_code, retryable, detail.to_owned())
@@ -72,21 +78,19 @@ pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavaila
     }
 }
 
-pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
+pub fn unavailable_hint(error: &TraceDecayError) -> Value {
     json!(unavailable_evidence(error))
 }
 
 #[hotpath::measure(label = "mcp.search.import_admit.total")]
-pub(super) async fn admit_verified_ignored_dependency(
+pub async fn admit_verified_ignored_dependency(
+    ctx: &McpToolContext<'_>,
     admission: Option<&dyn CodeIndexIgnoredDependencyAdmissionPortV1>,
     graph: &VerifiedGraphQuery,
     query: &str,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_contracts::Deadline>,
-    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
 ) -> Result<()> {
-    let candidates =
-        ignored_dependency_candidates(graph, query, 1, scope_prefix, deadline, cancellation)?;
+    let candidates = ignored_dependency_candidates(ctx, graph, query, 1, scope_prefix)?;
     let Some(import) = candidates.first() else {
         return Ok(());
     };
@@ -158,13 +162,15 @@ pub(super) async fn admit_verified_ignored_dependency(
 }
 
 fn ignored_dependency_candidates(
+    ctx: &McpToolContext<'_>,
     graph: &VerifiedGraphQuery,
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_contracts::Deadline>,
-    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
 ) -> Result<Vec<CodeIndexImportEvidenceV1>> {
+    ctx.verify_graph_scope(graph)?;
+    let cancellation = ctx.cancellation();
+    let deadline = ctx.deadline();
     if cancellation.is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled) {
         return Err(TraceDecayError::project_route(
             "code-graph-cancelled",
@@ -190,7 +196,7 @@ fn generation_advanced() -> TraceDecayError {
     )
 }
 
-pub(super) fn append_external_import_hint_md(md: &mut Md, value: &Value) {
+pub fn append_external_import_hint_md(md: &mut Md, value: &Value) {
     let Some(hint) = value.get("external_import_hint") else {
         return;
     };

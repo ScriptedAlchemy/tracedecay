@@ -65,7 +65,7 @@ pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
 /// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
-/// Candidate documents one lexical request hydrates before ranking. Every
+/// Summed document-frequency budget for lexical term-source admission. Every
 /// candidate is decoded from its row and scored, so the union of the request's
 /// term sources — not the winner cap — decides the lane's transient allocation
 /// and wall time: unbounded, a natural-language task whose terms include
@@ -73,18 +73,22 @@ pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 /// decoded, 5.7 s) and missed the context deadline. Term sources are admitted
 /// in ascending document-frequency order until their summed frequencies would
 /// exceed this bound; the most selective source is always admitted so a
-/// single common-term query still answers. Sized as the reader cache over a
-/// conservative 16 KiB per hydrated row (measured mean ~6.6 KiB), so one
-/// request's decode churn stays near 100 MiB.
-pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize =
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / (16 * 1024);
+/// single common-term query still answers. Phrase sources are admitted separately.
+/// This is a recall/latency policy, not a hard document or allocation ceiling:
+/// documents matching only pruned terms cannot rank. The initial 16,384 value
+/// retains the measured policy (~100 MiB decode churn at ~6.6 KiB per row);
+/// changing the reader cache must not change candidate eligibility.
+pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize = 16_384;
 
 /// Admit `(document_frequency, source)` pairs rarest-first while the summed
 /// frequency stays within [`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`]; the rarest
 /// nonempty source is always admitted. Ties keep request order so admission
 /// is deterministic. Sources past the bound still weigh admitted candidates
 /// through scoring; a document matching only those sources is never hydrated.
-pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S> {
+pub(crate) fn admit_candidate_sources<S>(
+    mut sources: Vec<(usize, S)>,
+    mut on_pruned: impl FnMut(usize, &S),
+) -> Vec<S> {
     sources.retain(|(frequency, _)| *frequency > 0);
     sources.sort_by_key(|(frequency, _)| *frequency);
     let total = sources.len();
@@ -93,7 +97,8 @@ pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S>
     for (ordinal, (frequency, source)) in sources.into_iter().enumerate() {
         let next = admitted_documents.saturating_add(frequency);
         if ordinal > 0 && next > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 {
-            break;
+            on_pruned(frequency, &source);
+            continue;
         }
         admitted_documents = next;
         admitted.push(source);
@@ -104,6 +109,29 @@ pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S>
     hotpath::gauge!("query.lane.lexical.candidate_documents_admitted")
         .set(admitted_documents as u64);
     admitted
+}
+
+fn candidate_admission_outcome<E>(
+    batch: RetrieverBatch<E>,
+    term_sources: Vec<(String, u64)>,
+) -> RetrieverOutcome<RetrieverBatch<E>> {
+    if term_sources.is_empty() {
+        RetrieverOutcome::Complete(batch)
+    } else {
+        tracing::debug!(
+            pruned_source_count = term_sources.len(),
+            source_document_frequencies = ?term_sources.iter().map(|(_, frequency)| *frequency).collect::<Vec<_>>(),
+            document_frequency_budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+            "lexical candidate term sources pruned by retrieval policy"
+        );
+        RetrieverOutcome::Partial {
+            value: batch,
+            reason: RetrievalFailure::CandidateSourcesPruned {
+                term_sources,
+                document_frequency_budget: MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

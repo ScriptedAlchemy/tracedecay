@@ -225,6 +225,7 @@ fn verified_graph_options_with_freshness<'a>(
         store,
         freshness,
     }));
+    options.admitted_project_scope = Some(scope.clone());
     options.code_graph_read_admission_port = Some(Arc::new(FixtureCodeGraphAdmission { scope }));
     options.verified_graph_query_port = Some(
         crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(

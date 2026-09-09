@@ -535,6 +535,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+    pr_autotrack_reader: Option<PrAutoTrackManagedSummaryReader>,
 }
 
 #[cfg(feature = "test-transport")]
@@ -560,7 +561,13 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             delivery_read_authority: None,
             profile_code_index_worker_settings: None,
             application_invocation_executor: None,
+            pr_autotrack_reader: None,
         }
+    }
+
+    pub fn with_pr_autotrack_reader(mut self, reader: PrAutoTrackManagedSummaryReader) -> Self {
+        self.pr_autotrack_reader = Some(reader);
+        self
     }
 
     /// Attaches the daemon-owned application runtime used by mutating
@@ -1082,7 +1089,8 @@ where
             code_index_freshness_reader: None,
             explorer_semantic_reader: None,
             feedback_status_reader: None,
-            pr_autotrack_reader: None,
+            pr_autotrack_reader: test_authority
+                .and_then(|authority| authority.pr_autotrack_reader.clone()),
             code_diagnostics_broker: Some(code_diagnostics_broker),
             application_invocation_executor: test_authority
                 .and_then(|authority| authority.application_invocation_executor.clone()),

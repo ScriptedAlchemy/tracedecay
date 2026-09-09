@@ -1,12 +1,13 @@
 //! Exact-final profile registry maintenance.
 //!
-//! This composition boundary opens the daemon-owned final registry for
-//! explicit offline maintenance. Orphan inspection, relinking, and retirement
-//! semantics live with the registry store in `tracedecay-global-db`; this
-//! wrapper owns only profile/runtime composition.
+//! Orphan inspection, relinking, and retirement live with the registry store.
+//! This type is constructed from an already-admitted
+//! [`RegisteredGlobalDbLeaseV1`] so the crate never opens store-runtime
+//! (store-runtime depends on this crate).
 
 use std::path::{Component, Path, PathBuf};
-use tracedecay_global_db::{
+
+use crate::{
     ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     registry_maintenance::ForgetRegistryProjectRows, registry_maintenance::RegistryGcReport,
     registry_maintenance::RegistryOrphanRelinkApplyReport,
@@ -128,47 +129,9 @@ pub struct ProfileRegistryMaintenanceRuntime {
 }
 
 impl ProfileRegistryMaintenanceRuntime {
-    /// Opens an existing exact-final profile registry without creating one.
-    #[hotpath::measure(label = "daemon.profile_registry.open_existing", future = true)]
-    pub async fn try_open_existing(
-        profile_root: &Path,
-    ) -> tracedecay_domain::errors::Result<Option<Self>> {
-        if !profile_root.try_exists().map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "inspect existing profile root".to_string(),
-                message: error.to_string(),
-            }
-        })? {
-            return Ok(None);
-        }
-        let profile_root = profile_root.canonicalize().map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "resolve existing profile registry".to_string(),
-                message: error.to_string(),
-            }
-        })?;
-        if !profile_root
-            .join("global.db")
-            .try_exists()
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "inspect existing profile registry".to_string(),
-                    message: error.to_string(),
-                },
-            )?
-        {
-            return Ok(None);
-        }
-        Self::open(&profile_root).await.map(Some)
-    }
-
-    #[hotpath::measure(label = "daemon.profile_registry.open", future = true)]
-    pub async fn open(profile_root: &Path) -> tracedecay_domain::errors::Result<Self> {
-        let identity = tracedecay_daemon_identity::profile_identity::load_existing(profile_root)?;
-        let registry =
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity).await?;
-        let profile_database = registry.profile_database().await?;
-        Ok(Self { profile_database })
+    /// Wraps one already-admitted profile registry lease.
+    pub fn from_admitted_lease(profile_database: RegisteredGlobalDbLeaseV1) -> Self {
+        Self { profile_database }
     }
 
     #[hotpath::measure(label = "daemon.profile_registry.classify_storage", future = true)]
@@ -203,7 +166,7 @@ impl ProfileRegistryMaintenanceRuntime {
         &self,
         project_paths: &[PathBuf],
     ) -> tracedecay_domain::errors::Result<usize> {
-        tracedecay_global_db::registry_maintenance::retire_registry_project_paths(
+        crate::registry_maintenance::retire_registry_project_paths(
             self.profile_database.as_ref(),
             project_paths,
         )
@@ -288,7 +251,7 @@ impl ProfileRegistryMaintenanceRuntime {
         &self,
         report: &RegistryOrphanRelinkReport,
     ) -> std::result::Result<RegistryOrphanRelinkApplyReport, Vec<String>> {
-        tracedecay_global_db::registry_maintenance::apply_registry_orphan_relink_report(
+        crate::registry_maintenance::apply_registry_orphan_relink_report(
             self.profile_database.as_ref(),
             report,
         )
@@ -303,14 +266,14 @@ impl ProfileRegistryMaintenanceRuntime {
         apply: bool,
     ) -> tracedecay_domain::errors::Result<RegistryGcReport> {
         if apply {
-            tracedecay_global_db::registry_maintenance::apply_registry_gc(
+            crate::registry_maintenance::apply_registry_gc(
                 self.profile_database.as_ref(),
                 profile_root,
                 prefix,
             )
             .await
         } else {
-            tracedecay_global_db::registry_maintenance::registry_gc_report(
+            crate::registry_maintenance::registry_gc_report(
                 self.profile_database.as_ref(),
                 profile_root,
                 prefix,
