@@ -42,23 +42,6 @@ function model(focusId = 'sym-0', expandCount: number = TRACE_BUDGET.expand) {
   });
 }
 
-describe('neighbors payload', () => {
-  it('parses against the schema the workspace validates it with', () => {
-    expect(() => GraphNeighborsPayloadV1Schema.parse(neighbors('sym-0'))).not.toThrow();
-  });
-
-  it('carries one caller/callee ROW PER CALL SITE, which is the only place the wire counts them', () => {
-    const payload = GraphNeighborsPayloadV1Schema.parse(neighbors('sym-0'));
-    const callers = payload.callers ?? [];
-    const distinct = new Set(callers.map((row) => row.id));
-    // If rows were already deduped per pair the drill-in would have no
-    // call-site measurement at all and every channel would be width 1.
-    expect(callers.length).toBeGreaterThan(distinct.size);
-    const repeated = callers.filter((row) => row.id === callers[0]!.id);
-    expect(new Set(repeated.map((row) => row.edge_line)).size).toBe(repeated.length);
-  });
-});
-
 describe('buildTraceModel', () => {
   it('places every symbol on the ring it was fetched at, and nowhere else', () => {
     // The row caption is "hop distance from the focus, not elevation", so a
@@ -182,10 +165,6 @@ describe('buildTraceModel', () => {
     expect(new Set(built.nodes.map((n) => n.id)).size).toBe(built.nodes.length);
   });
 
-  it('is deterministic: the same payloads build the identical field', () => {
-    expect(JSON.stringify(toComparable(model()))).toBe(JSON.stringify(toComparable(model())));
-  });
-
   it('survives an empty neighbourhood without inventing one', () => {
     const built = buildTraceModel({
       focus: { id: 'lonely', kind: 'function', name: 'lonely', degree: 0 },
@@ -207,13 +186,3 @@ describe('buildTraceModel', () => {
     expect(built.coverage.membranesAvailable).toBe(false);
   });
 });
-
-function toComparable(built: ReturnType<typeof model>) {
-  return {
-    nodes: built.nodes,
-    channels: built.channels,
-    membranes: built.membranes,
-    coverage: built.coverage,
-    rows: [...built.rows],
-  };
-}

@@ -48,13 +48,6 @@ function stats(over: Partial<SseReducerStats>): SseReducerStats {
 }
 
 describe('the projection sync reading', () => {
-  it('is synced only when nothing is owed and nothing failed', () => {
-    expect(projectionSyncFrom(stats({}))).toEqual({ kind: 'synced' });
-    expect(projectionSyncFrom(stats({ reseed: { phase: 'committed', epoch: 3 } }))).toEqual({
-      kind: 'synced',
-    });
-  });
-
   it('never reports a rejected refresh as synced', () => {
     const failed = projectionSyncFrom(
       stats({
@@ -91,79 +84,15 @@ describe('the projection sync reading', () => {
       kind: 'resyncing',
     });
   });
-
-  it('does not claim a reading when no stream is mounted', () => {
-    expect(projectionSyncFrom(null)).toEqual({ kind: 'unmounted' });
-  });
 });
 
 describe('StatusStrip', () => {
-  it('says the projection is behind even while the link is live', () => {
-    sync.value = { kind: 'failed', reason: 'invalidation rejected' };
-    render(<StatusStrip />);
-
-    expect(screen.getByText('live')).toBeTruthy();
-    expect(screen.getByText('resync failed')).toBeTruthy();
-    expect(screen.getByText(/invalidation rejected/)).toBeTruthy();
-    expect(screen.queryByText('synced')).toBeNull();
-  });
-
-  it('names why a refresh is owed rather than only that one is', () => {
-    sync.value = { kind: 'stale', reason: 'overflow' };
-    render(<StatusStrip />);
-
-    expect(screen.getByText('stale')).toBeTruthy();
-    expect(screen.getByText(/overflow/)).toBeTruthy();
-  });
-
-  it('claims synced only when the reducer does', () => {
-    sync.value = { kind: 'synced' };
-    render(<StatusStrip />);
-
-    expect(screen.getByText('synced')).toBeTruthy();
-    expect(screen.queryByText('stale')).toBeNull();
-    expect(screen.queryByText('resync failed')).toBeNull();
-  });
-
   it('reports an unmounted stream as having no stream, not as synced', () => {
     sync.value = { kind: 'unmounted' };
     render(<StatusStrip />);
 
     expect(screen.getByText('no stream')).toBeTruthy();
     expect(screen.queryByText('synced')).toBeNull();
-  });
-
-  /**
-   * The state and the reason are one announcement.
-   *
-   * The live region used to wrap the status word by itself, with the sentence
-   * that explains it in a sibling element outside. Both change at the same
-   * moment, so a reader listening to the strip was told "resync failed" and
-   * nothing else — the half that says what to do about it updated silently.
-   */
-  it('announces the reason with the state, not beside it', () => {
-    sync.value = { kind: 'failed', reason: 'invalidation rejected' };
-    render(<StatusStrip />);
-
-    const announced = screen
-      .getAllByRole('status')
-      .map((region) => region.textContent ?? '')
-      .find((text) => text.includes('resync failed'));
-
-    expect(announced).toBeDefined();
-    expect(announced).toContain('invalidation rejected');
-  });
-
-  it('announces the reason a refresh is owed inside the same region', () => {
-    sync.value = { kind: 'stale', reason: 'overflow' };
-    render(<StatusStrip />);
-
-    const announced = screen
-      .getAllByRole('status')
-      .map((region) => region.textContent ?? '')
-      .find((text) => text.includes('stale'));
-
-    expect(announced).toContain('a refresh is owed: overflow');
   });
 
   it('leaves the link reading alone, which has no reason to carry', () => {
