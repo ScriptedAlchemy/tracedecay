@@ -38,13 +38,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[cfg(test)]
-use tracedecay_application::pr_tracking::discover_open_prs;
 use tracedecay_application::pr_tracking::{
     DiscoveredPr, ManagedPr, PrAutotrackState, PrCommandControlV1 as PrCommandControl, PrDiscovery,
     default_pr_command_control, discover_open_prs_with_control, load_state, pr_label,
     pr_tracking_ref, run_git_with_control, save_state, successful_git_with_control,
 };
+#[cfg(test)]
+use tracedecay_application::pr_tracking::{discover_open_prs, managed_summary};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::errors::TraceDecayError;

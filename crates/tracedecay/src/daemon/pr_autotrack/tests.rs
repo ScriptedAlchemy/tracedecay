@@ -1201,3 +1201,91 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
     drop(lifecycle);
     schedulers.shutdown().await;
 }
+
+#[test]
+fn dashboard_managed_summary_reader_matches_canonical_state() {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    let data_root = tempfile::tempdir().expect("temp data root");
+    let state = PrAutotrackState {
+        managed: BTreeMap::from([
+            (
+                pr_label(3),
+                ManagedPr {
+                    pr: 3,
+                    head_branch: "feature-three".into(),
+                    head_sha: String::new(),
+                    worktree: PathBuf::from("/tmp/pr-3"),
+                    tracking_ref: pr_tracking_ref(3),
+                },
+            ),
+            (
+                pr_label(1),
+                ManagedPr {
+                    pr: 1,
+                    head_branch: "feature-one".into(),
+                    head_sha: String::new(),
+                    worktree: PathBuf::from("/tmp/pr-1"),
+                    tracking_ref: pr_tracking_ref(1),
+                },
+            ),
+        ]),
+    };
+    save_state(data_root.path(), &state).expect("write pr-autotrack state");
+
+    let canonical = managed_summary(data_root.path()).expect("read canonical managed summary");
+    let reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader =
+        Arc::new(|store_root| {
+            managed_summary(&store_root).map(|entries| {
+                entries
+                    .into_iter()
+                    .map(
+                        |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                            branch: entry.branch,
+                            pr: entry.pr,
+                            head_branch: entry.head_branch,
+                        },
+                    )
+                    .collect()
+            })
+        });
+    let projected = reader(data_root.path().to_path_buf()).expect("read projected managed summary");
+
+    assert_eq!(projected.len(), canonical.len());
+    for (entry, summary) in projected.iter().zip(canonical.iter()) {
+        assert_eq!(entry.branch, summary.branch);
+        assert_eq!(entry.pr, summary.pr);
+        assert_eq!(entry.head_branch, summary.head_branch);
+    }
+    assert_eq!(projected[0].pr, 1);
+    assert_eq!(projected[1].pr, 3);
+}
+
+#[test]
+fn dashboard_managed_summary_reader_is_empty_without_state() {
+    use std::sync::Arc;
+
+    let data_root = tempfile::tempdir().expect("temp data root");
+    let reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader =
+        Arc::new(|store_root| {
+            managed_summary(&store_root).map(|entries| {
+                entries
+                    .into_iter()
+                    .map(
+                        |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                            branch: entry.branch,
+                            pr: entry.pr,
+                            head_branch: entry.head_branch,
+                        },
+                    )
+                    .collect()
+            })
+        });
+    assert!(
+        reader(data_root.path().to_path_buf())
+            .expect("read empty managed summary")
+            .is_empty()
+    );
+}

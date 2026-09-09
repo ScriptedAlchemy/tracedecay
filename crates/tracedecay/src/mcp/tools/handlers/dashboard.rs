@@ -666,14 +666,13 @@ pub(super) async fn handle_dashboard(
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
-    remote_operational_status: Option<
-        std::sync::Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>,
-    >,
+    remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     code_index_freshness_reader: Option<
         tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     >,
     explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     feedback_status_reader: Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    pr_autotrack_reader: Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
@@ -781,21 +780,22 @@ pub(super) async fn handle_dashboard(
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
-            let retained_server = retained_project_server_resolver
-                .as_ref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "retained dashboard project server resolver is unavailable"
-                        .to_string(),
-                })?
-                .resolve(
-                    crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
-                        cg.project_root().to_path_buf(),
-                    ),
-                )
-                .await?
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "retained dashboard project server is unavailable".to_string(),
+            let retained_server_resolver =
+                retained_project_server_resolver.as_ref().ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "retained dashboard project server resolver is unavailable"
+                            .to_string(),
+                    }
                 })?;
+            let retained_server = retained_server_resolver(
+                crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
+                    cg.project_root().to_path_buf(),
+                ),
+            )
+            .await?
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "retained dashboard project server is unavailable".to_string(),
+            })?;
             if let Some(expected_profile_id) = daemon_user_profile_id.as_ref()
                 && retained_server
                     .profile_identity()
@@ -934,13 +934,11 @@ pub(super) async fn handle_dashboard(
                     automation_observation,
                     automation_writer,
                     doctor_report_reader,
-                    remote_operational_status_reader: remote_operational_status.map(|provider| {
-                        Arc::new(move || provider.read())
-                            as tracedecay_dashboard_api::RemoteOperationalStatusReader
-                    }),
+                    remote_operational_status_reader: remote_operational_status,
                     code_index_freshness_reader,
                     explorer_semantic_reader,
                     feedback_status_reader,
+                    pr_autotrack_reader,
                     code_diagnostics_broker,
                     application_invocation_executor,
                     delivery_settlement_authority,

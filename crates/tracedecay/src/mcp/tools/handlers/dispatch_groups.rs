@@ -670,7 +670,7 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_remote_status" => portable_info::handle_remote_status(
                 cg.project_root(),
                 &args,
-                options.remote_operational_status.as_deref(),
+                options.remote_operational_status.as_ref(),
             ),
             "tracedecay_status" => {
                 info::handle_status(
@@ -1521,6 +1521,7 @@ fn dispatch_session_workflow_tools_inner<'a>(
                     options.code_index_freshness_reader.clone(),
                     options.explorer_semantic_reader.clone(),
                     options.feedback_status_reader.clone(),
+                    options.pr_autotrack_reader.clone(),
                     options.diagnostics_lsp.clone(),
                     options.dashboard_application_invocation_executor.clone(),
                     options.dashboard_delivery_settlement_authority.clone(),

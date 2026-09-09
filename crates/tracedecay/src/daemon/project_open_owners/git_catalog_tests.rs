@@ -1,7 +1,6 @@
 use super::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use crate::runtime_ports::compose_application_catalog_snapshot;
 use tracedecay_application::git_intelligence::NativeGitIntelligence;
-use tracedecay_code_index_runtime::ApplicationCatalogProviderV1;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_contracts::git::GitIndexTransactionPortError;
 use tracedecay_contracts::{
@@ -80,9 +79,8 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         .mount_registered_project_sessions(project_id.clone())
         .await
         .unwrap();
-    let registry = DaemonGitIndexTransactionServiceRegistry::new(
-        ApplicationCatalogProviderV1::new(compose_application_catalog_snapshot),
-    );
+    let registry =
+        DaemonGitIndexTransactionServiceRegistry::new(compose_application_catalog_snapshot);
     registry
         .ensure(
             database.clone(),
@@ -119,9 +117,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
 
     // A separate owner can refuse its own provider without replacing the
     // canonical dependency already retained by the first owner.
-    let independent = DaemonGitIndexTransactionServiceRegistry::new(
-        ApplicationCatalogProviderV1::new(unavailable_catalog),
-    );
+    let independent = DaemonGitIndexTransactionServiceRegistry::new(unavailable_catalog);
     independent
         .ensure(
             database.clone(),

@@ -78,7 +78,7 @@ use tracedecay_code_index::test_attribution::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_graph_query::SourceReadRuntime;
+use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
@@ -585,13 +585,13 @@ fn files_for_occurrences(
 }
 
 pub struct TraceDecayLexicalGrepAuthorityV1 {
-    source_runtime: Arc<SourceReadRuntime>,
+    source_runtime: Arc<SourceReadContext>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
 }
 
 impl TraceDecayLexicalGrepAuthorityV1 {
     pub fn new(
-        source_runtime: Arc<SourceReadRuntime>,
+        source_runtime: Arc<SourceReadContext>,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     ) -> Self {
         Self {
@@ -1051,11 +1051,11 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
 }
 
 pub struct TraceDecaySourceLinesPortV1 {
-    source_runtime: Arc<SourceReadRuntime>,
+    source_runtime: Arc<SourceReadContext>,
 }
 
 impl TraceDecaySourceLinesPortV1 {
-    pub fn new(source_runtime: Arc<SourceReadRuntime>) -> Self {
+    pub fn new(source_runtime: Arc<SourceReadContext>) -> Self {
         Self { source_runtime }
     }
 }
@@ -1111,11 +1111,11 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
 }
 
 pub struct TraceDecayHealthPortV1 {
-    source_runtime: Arc<SourceReadRuntime>,
+    source_runtime: Arc<SourceReadContext>,
 }
 
 impl TraceDecayHealthPortV1 {
-    pub fn new(source_runtime: Arc<SourceReadRuntime>) -> Self {
+    pub fn new(source_runtime: Arc<SourceReadContext>) -> Self {
         Self { source_runtime }
     }
 }
@@ -1192,7 +1192,7 @@ fn public_module_symbols(
 }
 
 pub struct TraceDecayExtendedPrimitivePortV1 {
-    source_runtime: Arc<SourceReadRuntime>,
+    source_runtime: Arc<SourceReadContext>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     database: Database,
     observation_database: RegisteredGlobalDbLeaseV1,
@@ -1203,7 +1203,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
 
 impl TraceDecayExtendedPrimitivePortV1 {
     fn new(
-        source_runtime: Arc<SourceReadRuntime>,
+        source_runtime: Arc<SourceReadContext>,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         database: Database,
         observation_database: RegisteredGlobalDbLeaseV1,
@@ -1381,7 +1381,7 @@ fn update_storage_status_history_with_lock(
 #[hotpath::measure(label = "usecases.primitives.storage_status", future = true)]
 pub(crate) async fn canonical_storage_status(
     database: &Database,
-    source_runtime: &SourceReadRuntime,
+    source_runtime: &SourceReadContext,
     project_id: &ProjectId,
     include_details: bool,
 ) -> StorageStatusPrimitiveResult {
@@ -2702,7 +2702,7 @@ pub struct ProductionPrimitiveCodeAuthoritiesV1 {
 }
 
 pub struct ProductionPrimitiveOpenRequestV1 {
-    source_runtime: Arc<SourceReadRuntime>,
+    source_runtime: Arc<SourceReadContext>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     session_db: RegisteredGlobalDbLeaseV1,
@@ -2716,7 +2716,7 @@ pub struct ProductionPrimitiveOpenRequestV1 {
 
 impl ProductionPrimitiveOpenRequestV1 {
     pub fn new(
-        source_runtime: Arc<SourceReadRuntime>,
+        source_runtime: Arc<SourceReadContext>,
         code: ProductionPrimitiveCodeAuthoritiesV1,
         session_db: RegisteredGlobalDbLeaseV1,
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,

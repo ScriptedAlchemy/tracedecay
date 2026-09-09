@@ -264,14 +264,15 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     pub automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     pub(crate) doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
-    pub(crate) remote_operational_status: Option<
-        std::sync::Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>,
-    >,
+    pub(crate) remote_operational_status:
+        Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     pub(crate) code_index_freshness_reader:
         Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    pub(crate) pr_autotrack_reader:
+        Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:
@@ -350,6 +351,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_freshness_reader: None,
             explorer_semantic_reader: None,
             feedback_status_reader: None,
+            pr_autotrack_reader: None,
             diagnostics_lsp: None,
             application_invocation_executor: None,
             dashboard_application_invocation_executor: None,

@@ -731,7 +731,8 @@ cargo nextest run \
   --manifest-path "$code_extraction_package/Cargo.toml" \
   --all-features \
   --config "$patch_config" \
-  --test rust \
+  --test main \
+  -E 'test(/^rust::/)' \
   --no-tests=fail
 
 echo "distribution acceptance: compiling packaged library with production features"

@@ -31,7 +31,7 @@ use super::{
     map_projection_error,
 };
 #[cfg(any(test, feature = "test-helpers"))]
-use crate::SourceReadRuntimePort;
+use crate::SourceReadContext;
 use crate::context::read_modes;
 use crate::context::source_read::{self, SourceReadOutput, SourceReadRequest};
 use tracedecay_session_memory::context::{RequestInterruption, run_deadline_signal_interruptible};
@@ -109,12 +109,12 @@ impl VerifiedGraphQuery {
         )
     }
 
-    /// Fixture-only source binding. It runs the same freeze as the admitted
-    /// open path, so even fixtures cannot retain a live runtime facade.
+    /// Fixture-only source binding. It runs the same validation and freeze as
+    /// the admitted open path.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn with_source(mut self, source: Arc<dyn SourceReadRuntimePort>) -> Self {
+    pub fn with_source(mut self, source: SourceReadContext) -> Self {
         self.source = Some(
-            AdmittedSourceAuthority::capture(&self.request_context, source.as_ref())
+            AdmittedSourceAuthority::capture(&self.request_context, source)
                 .expect("fixture source authority matches the fixture scope"),
         );
         self
@@ -694,7 +694,7 @@ pub async fn open_verified_graph_query(
         None => None,
         Some(port) => {
             let observed_at = tracedecay_contracts::now_micros();
-            let runtime = await_graph_port_wait(
+            let source = await_graph_port_wait(
                 &request.deadline,
                 request.cancellation,
                 port.bind(CodeGraphSourceBindRequest {
@@ -705,10 +705,7 @@ pub async fn open_verified_graph_query(
             .await?
             .map_err(map_code_graph_read_runtime_error)?;
             refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-            Some(AdmittedSourceAuthority::capture(
-                &context,
-                runtime.as_ref(),
-            )?)
+            Some(AdmittedSourceAuthority::capture(&context, source)?)
         }
     };
     let graph_cancellation = application_graph_cancellation(request.cancellation);

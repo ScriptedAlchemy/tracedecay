@@ -41,9 +41,15 @@ pub(super) async fn open_and_register_project_primitive_runtime(
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
         server.project_session_application_retrieval_service(&access.scope)?,
     ));
+    let source = graph
+        .source_read_context()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open primitive runtime requires an exact registered source identity"
+                .to_owned(),
+        })?;
     let primitive_runtime =
         open_production_primitive_runtime(ProductionPrimitiveOpenRequestV1::new(
-            graph,
+            Arc::new(source),
             ProductionPrimitiveCodeAuthoritiesV1 {
                 code_graph,
                 ignored_dependency_admission: Some(ignored_dependency_admission),

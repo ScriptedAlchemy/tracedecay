@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use tracedecay_graph_query::SourceReadRuntimePort;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphSourceAuthorityPort,
-    CodeGraphSourceBindFuture, CodeGraphSourceBindRequest, VerifiedGraphQueryFuture,
-    VerifiedGraphQueryPort, VerifiedGraphQueryRequest, open_verified_graph_query,
+    CodeGraphSourceBindFuture, CodeGraphSourceBindRequest, SourceReadContext,
+    VerifiedGraphQueryFuture, VerifiedGraphQueryPort, VerifiedGraphQueryRequest,
+    open_verified_graph_query,
 };
 
 struct BoundCodeGraphSourceAuthority {
-    source: Arc<dyn SourceReadRuntimePort>,
+    source: SourceReadContext,
 }
 
 impl CodeGraphSourceAuthorityPort for BoundCodeGraphSourceAuthority {
@@ -16,7 +16,7 @@ impl CodeGraphSourceAuthorityPort for BoundCodeGraphSourceAuthority {
         &'a self,
         _request: CodeGraphSourceBindRequest<'a>,
     ) -> CodeGraphSourceBindFuture<'a> {
-        let source = Arc::clone(&self.source);
+        let source = self.source.clone();
         Box::pin(async move { Ok(source) })
     }
 }
@@ -33,7 +33,7 @@ impl AdmittedVerifiedGraphQueryPort {
     pub(crate) fn new(
         admission: Arc<dyn CodeGraphReadAdmissionPort>,
         projection: Arc<dyn CodeGraphProjectionReadPort>,
-        source: Option<Arc<dyn SourceReadRuntimePort>>,
+        source: Option<SourceReadContext>,
     ) -> Self {
         Self {
             admission,
@@ -68,7 +68,7 @@ pub(crate) fn admitted_verified_graph_query_port(
 pub(crate) fn admitted_verified_graph_query_port_with_source(
     admission: Arc<dyn CodeGraphReadAdmissionPort>,
     projection: Arc<dyn CodeGraphProjectionReadPort>,
-    source: Option<Arc<dyn SourceReadRuntimePort>>,
+    source: Option<SourceReadContext>,
 ) -> Arc<dyn VerifiedGraphQueryPort> {
     Arc::new(AdmittedVerifiedGraphQueryPort::new(
         admission, projection, source,

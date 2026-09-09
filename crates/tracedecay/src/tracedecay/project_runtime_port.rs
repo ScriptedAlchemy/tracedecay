@@ -14,7 +14,7 @@ use tracedecay_dashboard_api::DashboardProjectRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_graph_query::SourceReadRuntimePort;
+use tracedecay_graph_query::SourceReadContext;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_source_edit::{
@@ -238,24 +238,13 @@ impl SourceEditRuntimePort for TraceDecay {
     }
 }
 
-impl SourceReadRuntimePort for TraceDecay {
-    fn project_root(&self) -> &Path {
-        TraceDecay::project_root(self)
-    }
-
-    fn db(&self) -> &Database {
-        TraceDecay::db(self)
-    }
-
-    fn is_read_only(&self) -> bool {
-        TraceDecay::is_read_only(self)
-    }
-
-    fn project_id(&self) -> &str {
-        self.store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .unwrap_or("")
+impl TraceDecay {
+    pub(crate) fn source_read_context(&self) -> Option<SourceReadContext> {
+        Some(SourceReadContext::new(
+            TraceDecay::project_root(self).to_path_buf(),
+            TraceDecay::db(self).clone(),
+            TraceDecay::is_read_only(self),
+            self.store_layout().identity.project_id.clone()?,
+        ))
     }
 }

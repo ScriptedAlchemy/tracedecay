@@ -110,7 +110,7 @@ async fn dispatch_returns_provider_json_or_typed_unavailable() {
     .unwrap();
 
     let expected = observed_fixture();
-    let provider = {
+    let provider: tracedecay_contracts::RemoteOperationalStatusReaderV1 = {
         let expected = expected.clone();
         Arc::new(move || expected.clone())
     };

@@ -46,7 +46,7 @@ mod service;
 pub use execution_authority::{
     ExecutedSemanticCompositionV1, SemanticCompositionAuthorityErrorV1,
     SemanticCompositionExecutionAuthorityV1, SemanticCompositionExecutionOutcomeV1,
-    SemanticRerankExecutionPortV1, SemanticRerankReadinessV1, restore_frozen_semantic_order,
+    apply_bounded_rerank_outcome, restore_frozen_semantic_order,
 };
 pub use service::{
     CalibratedSemanticQueryService, CompleteSemanticGenerationV1, SemanticAbstentionDispositionV1,

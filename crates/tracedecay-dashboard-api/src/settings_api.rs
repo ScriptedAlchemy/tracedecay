@@ -1,9 +1,9 @@
 //! Dashboard endpoints for project and user settings.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
@@ -296,34 +296,28 @@ struct PrAutoTrackPayloadV1 {
     tracked: Vec<PrAutoTrackEntryV1>,
 }
 
-#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize)]
 struct PrAutoTrackEntryV1 {
     branch: String,
     pr: u64,
     head_branch: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct DashboardPrAutoTrackEntryV1 {
+/// One managed PR branch projected for dashboard settings payloads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrAutoTrackManagedSummaryEntryV1 {
     pub branch: String,
     pub pr: u64,
     pub head_branch: String,
 }
 
-pub trait DashboardPrAutoTrackReadPort: Send + Sync {
-    fn managed_summary(
-        &self,
-        store_root: &Path,
-    ) -> tracedecay_domain::errors::Result<Vec<DashboardPrAutoTrackEntryV1>>;
-}
-
-static PR_AUTOTRACK_READ_PORT: OnceLock<Arc<dyn DashboardPrAutoTrackReadPort>> = OnceLock::new();
-
-pub fn install_dashboard_pr_autotrack_read_port(
-    port: Arc<dyn DashboardPrAutoTrackReadPort>,
-) -> Result<(), Arc<dyn DashboardPrAutoTrackReadPort>> {
-    PR_AUTOTRACK_READ_PORT.set(port)
-}
+/// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
+pub type PrAutoTrackManagedSummaryReader = Arc<
+    dyn Fn(PathBuf) -> tracedecay_domain::errors::Result<Vec<PrAutoTrackManagedSummaryEntryV1>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
@@ -738,20 +732,27 @@ fn automation_settings_payload(
 fn pr_autotrack_payload(
     state: &DashboardState,
 ) -> std::result::Result<PrAutoTrackPayloadV1, DashboardConfigurationRouteErrorV1> {
-    let tracked = match PR_AUTOTRACK_READ_PORT.get() {
-        Some(port) => port
-            .managed_summary(&state.store_root)
-            .map_err(|_| configuration_authority_unavailable_error())?
-            .into_iter()
-            .map(|entry| PrAutoTrackEntryV1 {
-                branch: entry.branch,
-                pr: entry.pr,
-                head_branch: entry.head_branch,
-            })
-            .collect(),
+    let tracked = match &state.pr_autotrack_reader {
+        Some(reader) => map_managed_pr_autotrack_entries(
+            reader(state.store_root.clone())
+                .map_err(|_| configuration_authority_unavailable_error())?,
+        ),
         None => Vec::new(),
     };
     Ok(PrAutoTrackPayloadV1 { tracked })
+}
+
+fn map_managed_pr_autotrack_entries(
+    entries: Vec<PrAutoTrackManagedSummaryEntryV1>,
+) -> Vec<PrAutoTrackEntryV1> {
+    entries
+        .into_iter()
+        .map(|entry| PrAutoTrackEntryV1 {
+            branch: entry.branch,
+            pr: entry.pr,
+            head_branch: entry.head_branch,
+        })
+        .collect()
 }
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {
@@ -916,6 +917,37 @@ mod tests {
                 "field": "code_index_workers",
                 "message": "code_index_workers exact mode must request no more than 4 available logical CPUs",
             })]
+        );
+    }
+
+    #[test]
+    fn managed_pr_autotrack_projection_preserves_payload_fields() {
+        let mapped = map_managed_pr_autotrack_entries(vec![
+            PrAutoTrackManagedSummaryEntryV1 {
+                branch: "tracedecay/autotrack/pr/1".into(),
+                pr: 1,
+                head_branch: "alpha".into(),
+            },
+            PrAutoTrackManagedSummaryEntryV1 {
+                branch: "tracedecay/autotrack/pr/3".into(),
+                pr: 3,
+                head_branch: "beta".into(),
+            },
+        ]);
+        assert_eq!(
+            mapped,
+            vec![
+                PrAutoTrackEntryV1 {
+                    branch: "tracedecay/autotrack/pr/1".into(),
+                    pr: 1,
+                    head_branch: "alpha".into(),
+                },
+                PrAutoTrackEntryV1 {
+                    branch: "tracedecay/autotrack/pr/3".into(),
+                    pr: 3,
+                    head_branch: "beta".into(),
+                },
+            ]
         );
     }
 

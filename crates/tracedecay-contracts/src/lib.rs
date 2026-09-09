@@ -134,30 +134,26 @@ pub use diagnostics::{
     ProviderSourceIdentity, RevisionDigest,
 };
 pub use doctor::{
-    AdvisoryFeedbackDoctorAdapterV1, AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1,
-    AdvisoryFeedbackReadV1, AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorAdapterV1,
-    CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
-    ConfigurationAuthorityDoctorAdapterV1, ConfigurationAuthorityDoctorPort,
-    ConfigurationAuthorityReadV1, ConfigurationDriftV1, DOCTOR_FINDING_FAMILIES,
-    DaemonRuntimeHealthSignalV1, DoctorCoverageCompletenessV1, DoctorCoverageStatementV1,
-    DoctorEvidenceRefV1, DoctorEvidenceReferenceV1, DoctorEvidenceStateV1,
-    DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
-    DoctorFindingFamilyV1, DoctorFindingV1, DoctorKernelInputsV1, DoctorReportComposerV1,
-    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture,
-    DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
-    HostConformanceV1, HostIntegrationDoctorAdapterV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
-    LanguageServerDoctorAdapterV1, LanguageServerDoctorPort, LanguageServerReadV1,
-    LanguageServerStateV1, ObservabilityDoctorAdapterV1, ObservabilityDoctorPort,
-    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorAdapterV1,
-    OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
-    RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
-    RuntimeHealthDoctorAdapterV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
-    StorageDoctorAdapterV1, StorageDoctorPort, advisory_feedback_findings,
-    advisory_feedback_read_from_publication, code_index_finding, compose_doctor_report,
-    configuration_finding, doctor_finding_family_label, host_integration_finding,
-    ingest_refusal_finding, language_server_finding, merge_storage_reads, observability_finding,
-    operational_audit_findings, runtime_health_finding, runtime_health_read, storage_family_read,
+    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
+    AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
+    CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
+    ConfigurationDriftV1, DOCTOR_FINDING_FAMILIES, DaemonRuntimeHealthSignalV1,
+    DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
+    DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
+    DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1,
+    DoctorFindingV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportCoverageV1,
+    DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
+    DoctorStorageFindingKindV1, DoctorStorageFindingV1, HostConformanceV1,
+    HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
+    IngestRefusalCountV1, LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
+    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1,
+    RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageDoctorPort, advisory_feedback_findings, advisory_feedback_read_from_publication,
+    code_index_finding, configuration_finding, doctor_finding_family_label,
+    host_integration_finding, ingest_refusal_finding, language_server_finding, merge_storage_reads,
+    observability_finding, operational_audit_findings, runtime_health_finding, runtime_health_read,
+    storage_family_read,
 };
 pub use error::ApplicationContractError;
 pub use execution_topology_metrics::*;
@@ -233,8 +229,7 @@ pub use multi_root::{
 };
 pub use observability::*;
 pub use observatory_surface::{
-    OBSERVATORY_READ_OPERATION, ObservatoryReadFuture, ObservatoryReadPortV1,
-    ObservatoryReadRequestV1, ObservatoryReadResultV1, ObservatoryReadServiceV1,
+    OBSERVATORY_READ_OPERATION, ObservatoryReadRequestV1, ObservatoryReadResultV1,
     observatory_read_catalog_contribution, observatory_read_handler_descriptor,
     observatory_read_operation, observatory_read_request_schema, observatory_read_result_schema,
 };
@@ -251,7 +246,7 @@ pub use project_registry::{
     ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
     list_registered_projects, read_registered_project_context, render_project_registry_view,
 };
-pub use remote::status::RemoteOperationalStatusReadPort;
+pub use remote::status::RemoteOperationalStatusReaderV1;
 pub use result::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationExecutionFailureClassV1,
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,

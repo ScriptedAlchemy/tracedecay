@@ -344,8 +344,7 @@ pub struct McpServer {
         Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
-    remote_operational_status:
-        Option<Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>>,
+    remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
@@ -353,6 +352,8 @@ pub struct McpServer {
     dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    dashboard_pr_autotrack_reader:
+        Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
@@ -848,6 +849,7 @@ impl McpServer {
             dashboard_code_index_freshness_reader,
             dashboard_explorer_semantic_reader,
             dashboard_feedback_status_reader,
+            dashboard_pr_autotrack_reader,
             diagnostics_lsp,
             background_refresh_writer,
             code_index_hook_sink,
@@ -1110,6 +1112,7 @@ impl McpServer {
             dashboard_code_index_freshness_reader,
             dashboard_explorer_semantic_reader,
             dashboard_feedback_status_reader,
+            dashboard_pr_autotrack_reader,
             background_refresh_writer,
             code_index_hook_sink,
             code_index_reconcile_sink,
