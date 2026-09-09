@@ -51,6 +51,8 @@
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
 
 pub mod invocation;
+mod mcp_project_registry;
+mod mcp_workflow_index;
 pub mod project_runtime;
 pub mod request_cancellation;
 mod shutdown_coordination;
@@ -89,6 +91,8 @@ pub use invocation::{
     callable_code_request_context, daemon_operation_event_authority,
     register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
+pub use mcp_project_registry::DaemonProjectRegistryReadService;
+pub use mcp_workflow_index::DaemonWorkflowIndexReadService;
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
     ProjectRuntimePublicationAttemptV1, ProjectRuntimePublicationStateV1,

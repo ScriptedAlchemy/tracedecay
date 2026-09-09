@@ -26,7 +26,7 @@ fn workflow_error(err: WorkflowIndexError) -> WorkflowReadError {
     WorkflowReadError::new(err.to_string())
 }
 
-pub(crate) struct DaemonWorkflowIndexReadService {
+pub struct DaemonWorkflowIndexReadService {
     /// The active project's retained `ProjectSessions` authority. Reads borrow
     /// this handle and never discover or open another store.
     database: RegisteredGlobalDbLeaseV1,
@@ -34,7 +34,7 @@ pub(crate) struct DaemonWorkflowIndexReadService {
 
 impl DaemonWorkflowIndexReadService {
     #[hotpath::skip]
-    pub(crate) const fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
+    pub const fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
 

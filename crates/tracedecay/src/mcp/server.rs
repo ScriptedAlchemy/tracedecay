@@ -53,17 +53,12 @@ mod ledger;
 mod lifecycle;
 mod live_transcript_refresh;
 mod project_open_access;
-mod project_registry;
 mod requests;
 mod rmcp;
 mod routing;
 mod session_refresh;
 mod staleness;
 mod status_resource;
-mod workflow_index;
-
-pub(crate) use project_registry::DaemonProjectRegistryReadService;
-pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
@@ -79,6 +74,7 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
+use tracedecay_daemon_service::{DaemonProjectRegistryReadService, DaemonWorkflowIndexReadService};
 pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
 use tracedecay_mcp::server::{
     IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest, RetainedDispatchAuthority,
