@@ -42,9 +42,11 @@ afterEach(() => {
 describe('SignalPanel connection honesty', () => {
   it('opens exact admitted identity and reports when that event leaves the retained window', () => {
     const event = { ...pulses()[0]!, projectId: null, observationTime: '1700000000000001' };
-    const view = render(<SignalPanel pulses={[event]} sseState="live" lastEventAt={NOW} />);
+    const inspect = vi.fn();
+    const view = render(<SignalPanel pulses={[event]} sseState="live" lastEventAt={NOW} onInspectProject={inspect} />);
     fireEvent.click(view.getByText(/Inspect admitted events/));
     fireEvent.click(view.getByRole('button', { name: `heartbeat · ${event.eventId}` }));
+    expect(inspect).toHaveBeenCalledWith(null);
     const evidence = within(view.getByRole('region', { name: 'Admitted event evidence' }));
     expect(evidence.getByText(event.eventId)).toBeTruthy();
     expect(evidence.getByText('1700000000000001')).toBeTruthy();

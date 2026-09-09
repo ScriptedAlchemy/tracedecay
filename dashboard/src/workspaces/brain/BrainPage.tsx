@@ -369,7 +369,7 @@ function RegistryFieldView({
             { label: 'artifacts', value: totals.artifacts },
           ]}
         />
-        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
+        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} onInspectProject={(id) => onInspect(id !== null && drawnIds.has(id) ? id : null)} />
         {repository ? <figure className="border border-edge-subtle p-2">
           <svg width="160" height="90" viewBox="0 0 160 90" role="img" aria-label="Registry minimap: highlighted projects belong to the viewed repository">
             {field.nodes.map((node) => {

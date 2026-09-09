@@ -68,5 +68,11 @@ describe('Brain exact interaction identity', () => {
     await waitFor(() => expect(graph.activation?.heatOf('p1')).toBeGreaterThan(0));
     expect(graph.activation?.heatOf('repo:/repo/.git')).toBeGreaterThan(0);
     expect(graph.activation?.heatOf('p2')).toBe(0);
+    fireEvent.click(screen.getByText(/Inspect admitted events/));
+    fireEvent.click(screen.getByRole('button', { name: 'hook_activity · run:activity:1' }));
+    expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p1')).toBeTruthy();
+    expect(useScope.getState().scope.kind).toBe('all');
+    fireEvent.click(screen.getByRole('button', { name: 'heartbeat · run:heartbeat:1' }));
+    expect(screen.queryByRole('region', { name: 'Inspected project' })).toBeNull();
   });
 });
