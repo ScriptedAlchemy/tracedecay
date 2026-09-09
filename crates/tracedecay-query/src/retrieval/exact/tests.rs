@@ -211,14 +211,20 @@ fn central_authority_admits_unprefixed_contextual_error_text() {
 #[test]
 fn central_authority_classification_matches_extraction_grammar() {
     let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
-    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
-        "-v --flag_x a.b e123 ts12345 git e0308 err_x scripts/justfile deadbee",
-        id::<SanitizerRevision>("query-sanitizer.v1"),
-        id::<QueryNormalizationRevision>("query-normalization.v1"),
-    )
-    .expect("query sanitizes");
-
-    let literals = authority.parse_literals(&query_view, &base_request(16));
+    // Classification is a whole-query lookup; multiword identifier intent is
+    // covered separately from the extraction grammar.
+    let literals = "-v --flag_x a.b e123 ts12345 git e0308 err_x scripts/justfile deadbee"
+        .split_whitespace()
+        .flat_map(|query| {
+            let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+                query,
+                id::<SanitizerRevision>("query-sanitizer.v1"),
+                id::<QueryNormalizationRevision>("query-normalization.v1"),
+            )
+            .expect("query sanitizes");
+            authority.parse_literals(&query_view, &base_request(16))
+        })
+        .collect::<Vec<_>>();
     let literal_for = |original: &str| {
         literals
             .iter()
@@ -276,6 +282,54 @@ fn central_authority_does_not_promote_unprefixed_natural_language() {
             .iter()
             .all(|literal| literal.field != ExactFieldV1::CompilerOrRuntimeError)
     );
+}
+
+#[test]
+fn central_authority_requires_identifier_intent_in_multiword_text() {
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let parse = |query: &str| {
+        let view = EphemeralSanitizedQueryViewV1::sanitize(
+            query,
+            id::<SanitizerRevision>("query-sanitizer.v1"),
+            id::<QueryNormalizationRevision>("query-normalization.v1"),
+        )
+        .expect("query sanitizes");
+        authority.parse_literals(&view, &base_request(16))
+    };
+    for query in [
+        "repository dirty state and remote identity evidence",
+        "who writes to the config file",
+        "how are canonical digests computed for manifests",
+    ] {
+        assert!(
+            parse(query).is_empty(),
+            "prose gained exact protection: {query}"
+        );
+    }
+    for query in ["evidence", "ConfigStore", "write_config"] {
+        let literals = parse(query);
+        assert_eq!(literals.len(), 1, "whole-query identifier: {query}");
+        assert_eq!(literals[0].field, ExactFieldV1::Identifier);
+    }
+    for (query, expected) in [
+        ("find id:evidence", ExactFieldV1::Identifier),
+        ("find symbol:ConfigStore", ExactFieldV1::Identifier),
+        (
+            "find phrase:\"remote identity\"",
+            ExactFieldV1::QuotedPhrase,
+        ),
+        (
+            "find ConfigStore::write_config",
+            ExactFieldV1::QualifiedName,
+        ),
+        ("find --config", ExactFieldV1::CliFlag),
+        ("find src/config.rs", ExactFieldV1::Path),
+        ("find E0425", ExactFieldV1::DiagnosticCode),
+    ] {
+        let literals = parse(query);
+        assert_eq!(literals.len(), 1, "explicit or specialized intent: {query}");
+        assert_eq!(literals[0].field, expected, "{query}");
+    }
 }
 
 /// Build one exact candidate/evidence pair whose proof is minted by the

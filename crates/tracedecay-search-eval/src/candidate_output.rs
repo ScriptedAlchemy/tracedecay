@@ -3857,6 +3857,17 @@ pub(crate) mod tests {
             serde_json::from_slice::<QueryCandidateRowV1>(&bytes).expect("candidate row")
         };
 
+        let natural = retrieve("validation-006");
+        assert!(!natural.ranked.is_empty());
+        assert!(
+            natural
+                .ranked
+                .iter()
+                .all(|candidate| candidate.tier == "approximate"),
+            "ordinary words in a natural-language question must not protect unrelated exact hits: {:#?}",
+            natural.ranked
+        );
+
         let diagnostic = retrieve("train-004");
         let diagnostic_top = diagnostic.ranked.iter().take(10).collect::<Vec<_>>();
         let diagnostic_target = diagnostic.ranked.iter().enumerate().find(|(_, candidate)| {

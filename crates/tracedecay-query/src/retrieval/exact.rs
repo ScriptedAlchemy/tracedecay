@@ -276,6 +276,15 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
             let Some(field) = field else {
                 continue;
             };
+            // A bare word is an ambiguous identifier inside prose. Whole-query
+            // lookup and explicit operators express identifier intent; specialized
+            // syntax (paths, qualified names, flags, etc.) remains self-identifying.
+            if field == ExactFieldV1::Identifier
+                && atom.field.is_none()
+                && atom.text != query.trim()
+            {
+                continue;
+            }
             if !exact_field_accepts(field, &atom.text) {
                 continue;
             }
