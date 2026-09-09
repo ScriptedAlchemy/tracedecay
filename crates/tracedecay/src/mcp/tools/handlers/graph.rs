@@ -229,8 +229,6 @@ pub(super) async fn handle_search<F>(
     graph: F,
     args: Value,
     scope_prefix: Option<&str>,
-    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
     ignored_dependency_admission: Option<
         &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
@@ -240,6 +238,8 @@ pub(super) async fn handle_search<F>(
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
+    let search_executor = ctx.code_index_search_executor();
+    let search_authority = ctx.code_index_search_authority();
     let deadline = ctx.deadline().cloned();
     let cancellation = ctx.cancellation().cloned();
     let query =
@@ -789,14 +789,14 @@ pub(super) async fn handle_context<F>(
     graph: F,
     args: Value,
     scope_prefix: Option<&str>,
-    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
     freshness_reader: Option<&CodeIndexFreshnessReader>,
     ctx: &McpToolContext<'_>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
+    let search_executor = ctx.code_index_search_executor();
+    let search_authority = ctx.code_index_search_authority();
     let deadline = ctx.deadline().cloned();
     let cancellation = ctx.cancellation().cloned();
     let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
