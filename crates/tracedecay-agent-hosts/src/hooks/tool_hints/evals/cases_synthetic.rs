@@ -37,8 +37,7 @@ pub(super) fn synthetic_prompt_cases() -> Vec<HintEval> {
             "search source for a quoted string",
             Some(HintCategory::Search),
             &["tracedecay_grep"],
-        )
-        .with_families(&[ScenarioFamily::QuotedData]),
+        ),
         shell_eval(
             "cargo-test-without-failure-silent",
             "cargo test hooks::tool_hints",
@@ -101,16 +100,14 @@ pub(super) fn synthetic_prompt_cases() -> Vec<HintEval> {
             "look for docs mentioning cargo check",
             None,
             &[],
-        )
-        .with_families(&[ScenarioFamily::QuotedData]),
+        ),
         shell_eval(
             "quoted-git-command-is-search-data",
             "grep \"git status\" README.md",
             "look for docs mentioning git status",
             None,
             &[],
-        )
-        .with_families(&[ScenarioFamily::QuotedData]),
+        ),
         shell_eval(
             "git-status-no-hint",
             "git status --short --branch",

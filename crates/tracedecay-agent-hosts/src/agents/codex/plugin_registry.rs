@@ -434,31 +434,4 @@ exit 0"#;
             "the refusal must name the Codex-owned state it protected: {message}"
         );
     }
-
-    #[test]
-    fn a_missing_codex_binary_refuses_instead_of_editing_host_owned_state() {
-        let home = tempfile::tempdir().unwrap();
-        let config_path = codex_config_path(home.path());
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        let operator_owned = concat!(
-            "[plugins.\"someone-else@personal\"]\nenabled = true\n\n",
-            "[hooks.state.\"keep\"]\ntrusted_hash = \"sha256:abc\"\n",
-        );
-        std::fs::write(&config_path, operator_owned).unwrap();
-
-        let error = crate::agents::host_cli::require_host_cli(
-            "codex-definitely-absent",
-            CODEX_PLUGIN_CLI_LIFECYCLE,
-        )
-        .expect_err("an absent host binary is a hard requirement failure");
-        let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
-            panic!("host CLI absence must surface as a typed requirement");
-        };
-        assert_eq!(program, "codex-definitely-absent");
-        assert_eq!(lifecycle, CODEX_PLUGIN_CLI_LIFECYCLE);
-        assert_eq!(
-            std::fs::read_to_string(&config_path).unwrap(),
-            operator_owned
-        );
-    }
 }

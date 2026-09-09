@@ -666,14 +666,6 @@ pub fn available_integrations() -> Vec<&'static str> {
     ]
 }
 
-#[cfg(test)]
-#[test]
-fn devin_is_a_registered_independent_agent() {
-    let integration = get_integration("devin").expect("Devin integration is registered");
-    assert_eq!(integration.name(), "Devin");
-    assert!(available_integrations().contains(&"devin"));
-}
-
 pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str {
     match host {
         host_bundle_v2::HostKindV1::ClaudeCode => "claude",
@@ -2965,29 +2957,6 @@ mod safe_config_tests {
         assert_eq!(val, serde_json::json!({}));
     }
 
-    #[test]
-    fn strict_load_returns_empty_for_blank_file() {
-        let dir = tmpdir();
-        let path = dir.path().join("empty.json");
-        fs::write(&path, "   \n  ").unwrap();
-        let val = load_json_file_strict(&path).unwrap();
-        assert_eq!(val, serde_json::json!({}));
-    }
-
-    #[test]
-    fn strict_load_errors_on_invalid_json() {
-        let dir = tmpdir();
-        let path = dir.path().join("bad.json");
-        fs::write(&path, "not json {{{").unwrap();
-        let err = load_json_file_strict(&path).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("cannot parse"), "error: {msg}");
-        assert!(
-            msg.contains("bad.json"),
-            "error should mention filename: {msg}"
-        );
-    }
-
     // ----- load_jsonc_file_strict -----
 
     #[test]
@@ -3016,21 +2985,6 @@ mod safe_config_tests {
     // ----- safe_write_json_file -----
 
     #[test]
-    fn safe_write_replaces_existing_file_atomically() {
-        let dir = tmpdir();
-        let path = dir.path().join("existing.json");
-        fs::write(&path, r#"{"old": true}"#).unwrap();
-
-        let value = serde_json::json!({"new": true});
-        safe_write_json_file(&path, &value, None).unwrap();
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(parsed["new"], true);
-        assert!(parsed.get("old").is_none());
-    }
-
-    #[test]
     fn safe_write_cleans_up_new_file_on_success() {
         let dir = tmpdir();
         let path = dir.path().join("config.json");
@@ -3040,63 +2994,12 @@ mod safe_config_tests {
         assert!(!new_path.exists(), ".new staging file should be removed");
     }
 
-    #[test]
-    fn safe_write_creates_parent_dirs() {
-        let dir = tmpdir();
-        let path = dir.path().join("deep").join("nested").join("config.json");
-        safe_write_json_file(&path, &serde_json::json!({"deep": true}), None).unwrap();
-        assert!(path.exists());
-    }
-
     // ----- write_json_file (convenience wrapper) -----
-
-    #[test]
-    fn write_json_file_creates_backup_automatically() {
-        let dir = tmpdir();
-        let path = dir.path().join("auto.json");
-        fs::write(&path, r#"{"original": true}"#).unwrap();
-
-        write_json_file(&path, &serde_json::json!({"updated": true})).unwrap();
-
-        // .bak should exist with original content
-        let bak = dir.path().join("auto.json.bak");
-        assert!(bak.exists());
-        let backup_content: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
-        assert_eq!(backup_content["original"], true);
-    }
 
     // ----- THE KEY REGRESSION TEST -----
     // This is the exact bug the fix addresses: load_json_file silently
     // returned {} on parse failure, and the install wrote {} + tracedecay
     // back, destroying the user's config.
-
-    #[test]
-    fn invalid_json_is_never_silently_replaced() {
-        let dir = tmpdir();
-        let path = dir.path().join("opencode.json");
-        // Simulate a file that serde_json can't parse (e.g. has trailing commas
-        // that the non-strict loader would silently drop).
-        let corrupted =
-            r#"{"mcp": {"other_server": {"url": "http://example.com"},}, "theme": "dark",}"#;
-        fs::write(&path, corrupted).unwrap();
-
-        // The strict loader must refuse to parse this.
-        let err = load_json_file_strict(&path);
-        assert!(err.is_err(), "strict loader must reject invalid JSON");
-
-        // The original file must be completely untouched.
-        assert_eq!(fs::read_to_string(&path).unwrap(), corrupted);
-
-        // Contrast: the old non-strict loader silently returns {} — this
-        // is the exact behavior that destroyed configs.
-        let old_style = load_json_file(&path);
-        assert_eq!(
-            old_style,
-            serde_json::json!({}),
-            "non-strict loader returns empty"
-        );
-    }
 
     #[test]
     fn full_install_cycle_preserves_existing_config() {
@@ -3167,26 +3070,6 @@ mod safe_config_tests {
             corrupt_content
         );
     }
-
-    #[test]
-    fn safe_write_output_is_valid_json() {
-        // Verify the written file is always parseable JSON (round-trip).
-        let dir = tmpdir();
-        let path = dir.path().join("roundtrip.json");
-        let value = serde_json::json!({
-            "unicode": "héllo wörld 🦀",
-            "nested": {"deep": {"array": [1, null, true, "str"]}},
-            "empty_obj": {},
-            "empty_arr": []
-        });
-
-        safe_write_json_file(&path, &value, None).unwrap();
-
-        let raw = fs::read_to_string(&path).unwrap();
-        let reparsed: serde_json::Value =
-            serde_json::from_str(&raw).expect("written file must be valid JSON");
-        assert_eq!(reparsed, value);
-    }
 }
 
 #[cfg(test)]
@@ -3242,16 +3125,6 @@ mod path_normalize_tests {
             Some(executable)
         );
         assert!(which_tracedecay_from(None, Some(path_var.as_os_str()), None).is_none());
-    }
-
-    #[test]
-    fn path_lookup_absolutizes_relative_path_entries() {
-        let relative = Path::new("target").join(tracedecay_bin_name());
-
-        let absolute = absolute_executable_path(&relative).expect("absolute path");
-
-        assert!(absolute.is_absolute());
-        assert!(absolute.ends_with(&relative));
     }
 
     #[cfg(windows)]

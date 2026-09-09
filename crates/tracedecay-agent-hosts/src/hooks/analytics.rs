@@ -706,8 +706,6 @@ fn now_unix_millis() -> u64 {
 
 mod readiness;
 
-#[cfg(test)]
-pub(crate) use readiness::empty_hook_completed_readiness_distributions;
 pub use readiness::{HookCompletedReadinessDistributions, aggregate_hook_completed_readiness};
 #[cfg(test)]
 use readiness::{

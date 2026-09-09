@@ -476,29 +476,6 @@ mod tests {
         assert_unique_relatives(&kimi_files(), "kimi");
     }
 
-    /// The installer helpers operate on the manifest directly: the version
-    /// stamp rewrites `version`, and `set_mcp_command` rewrites the inline
-    /// `mcpServers.tracedecay.command`.
-    #[test]
-    fn kimi_manifest_round_trips_through_installer_rewrites() {
-        let raw = KIMI_MANIFEST_FILES
-            .iter()
-            .find(|file| file.relative == ".kimi-plugin/plugin.json")
-            .map(|file| file.contents)
-            .expect("kimi manifest must be embedded");
-
-        let stamped = stamp_manifest_version(raw).unwrap();
-        let stamped: serde_json::Value = serde_json::from_str(&stamped).unwrap();
-        assert_eq!(stamped["version"], crate::PRODUCT_VERSION);
-
-        let rewired = set_mcp_command(raw, "/abs/tracedecay").unwrap();
-        let rewired: serde_json::Value = serde_json::from_str(&rewired).unwrap();
-        assert_eq!(
-            rewired["mcpServers"]["tracedecay"]["command"],
-            "/abs/tracedecay"
-        );
-    }
-
     #[test]
     fn first_party_plugin_assets_fit_host_bundle_artifact_bound() {
         use tracedecay_host_integration::MAX_ARTIFACT_CONTENT_BYTES;

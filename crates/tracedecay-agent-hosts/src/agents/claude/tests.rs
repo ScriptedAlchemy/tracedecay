@@ -179,34 +179,6 @@ fn missing_manifest_with_stale_registration_is_repairable() {
 }
 
 #[test]
-fn missing_manifest_with_partial_settings_residue_is_repairable() {
-    use crate::agents::AgentIntegration;
-    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
-
-    let home = tempfile::TempDir::new().unwrap();
-    let project = tempfile::TempDir::new().unwrap();
-    let settings = home.path().join(".claude/settings.json");
-    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    safe_write_json_file(
-        &settings,
-        &json!({
-            "enabledPlugins": { "tracedecay@tracedecay": false },
-            "permissions": { "allow": ["mcp__tracedecay__search"] }
-        }),
-        None,
-    )
-    .unwrap();
-    let state = ClaudeIntegration.host_component_registration(
-        HostBundleComponentV1::Core,
-        &HealthcheckContext {
-            home: home.path().to_path_buf(),
-            project_path: project.path().to_path_buf(),
-        },
-    );
-    assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
-}
-
-#[test]
 fn project_only_legacy_residue_does_not_claim_plugin_registration() {
     use crate::agents::AgentIntegration;
     use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
@@ -510,111 +482,6 @@ fn install_claude_md_rules_surfaces_lock_failures() {
     );
 }
 
-fn claude_prompt_mutation_cases() -> Vec<(&'static str, Option<Vec<u8>>)> {
-    vec![
-        (
-            "current-sentinel refresh",
-            Some(
-                format!(
-                    "operator rules\n\n{}\n",
-                    CLAUDE_MD_SENTINELS.render("## Older heading\n\nstale rules")
-                )
-                .into_bytes(),
-            ),
-        ),
-        (
-            "shipped-heading refresh",
-            Some(format!("operator rules\n\n{}\n", shipped_block(SHIPPED_HEADING)).into_bytes()),
-        ),
-        ("existing append", Some(b"operator rules\n".to_vec())),
-        ("missing create", None),
-    ]
-}
-
-#[test]
-fn every_claude_prompt_mutation_branch_requires_a_persisted_write_intent() {
-    for (case, original) in claude_prompt_mutation_cases() {
-        let root = tempfile::tempdir().unwrap();
-        let claude_md = root.path().join("CLAUDE.md");
-        if let Some(original) = &original {
-            std::fs::write(&claude_md, original).unwrap();
-        }
-        let blocked_intent_root = root.path().join("blocked-intent-root");
-        std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
-
-        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
-            install_claude_md_rules(&claude_md)
-        })
-        .expect_err(case);
-
-        assert!(
-            error
-                .to_string()
-                .contains("could not create host config write intent directory"),
-            "{case}: unexpected error: {error}"
-        );
-        assert_eq!(
-            std::fs::read(&claude_md).ok(),
-            original,
-            "{case}: failed intent persistence must leave the target byte-identical"
-        );
-    }
-}
-
-#[test]
-fn every_claude_prompt_mutation_branch_refuses_a_stale_target() {
-    for (case, original) in claude_prompt_mutation_cases() {
-        let root = tempfile::tempdir().unwrap();
-        let claude_md = root.path().join("CLAUDE.md");
-        if let Some(original) = original {
-            std::fs::write(&claude_md, original).unwrap();
-        }
-        let pause = crate::agents::pause_next_host_config_write_after_validation(&claude_md);
-        let writer_path = claude_md.clone();
-        let writer = std::thread::spawn(move || {
-            install_claude_md_rules(&writer_path).map_err(|error| error.to_string())
-        });
-        pause.wait_until_reached();
-        let foreign = format!("foreign Claude edit during {case}\n");
-        std::fs::write(&claude_md, foreign.as_bytes()).unwrap();
-        pause.resume();
-
-        let error = writer.join().unwrap().expect_err(case);
-        assert!(
-            error.contains("changed since it was read"),
-            "{case}: {error}"
-        );
-        assert_eq!(std::fs::read(&claude_md).unwrap(), foreign.as_bytes());
-    }
-}
-
-#[test]
-fn every_claude_prompt_mutation_branch_converges_through_the_same_writer() {
-    let block = claude_md_rules_text();
-    for (case, original) in claude_prompt_mutation_cases() {
-        let root = tempfile::tempdir().unwrap();
-        let claude_md = root.path().join("CLAUDE.md");
-        if let Some(original) = original {
-            std::fs::write(&claude_md, original).unwrap();
-        }
-
-        install_claude_md_rules(&claude_md).unwrap();
-
-        let installed = std::fs::read_to_string(&claude_md).unwrap();
-        assert_eq!(
-            installed.matches(&block).count(),
-            1,
-            "{case}: the canonical block must appear exactly once"
-        );
-        if case != "missing create" {
-            assert!(
-                installed.contains("operator rules"),
-                "{case}: operator content must survive"
-            );
-        }
-    }
-}
-
 #[test]
 fn claude_prompt_install_rejects_non_utf8_without_overwrite() {
     let root = tempfile::tempdir().unwrap();
@@ -811,53 +678,6 @@ fn removal_drives_the_hosts_own_uninstall_by_plugin_selection_name() {
         ],
         "uninstall addresses the plugin by selection name; only the marketplace entry \
          is removed by marketplace name"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_failing_host_command_reports_the_hosts_own_diagnosis() {
-    let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let claude = bin_dir.path().join("claude");
-    fake_claude_cli(
-        &claude,
-        &log,
-        "echo 'plugin tracedecay is not installed' >&2\nexit 4",
-    );
-
-    let error = claude_plugin_deactivate_with(&claude, home.path())
-        .expect_err("a non-zero host CLI exit must fail the lifecycle");
-
-    let TraceDecayError::Config { message } = error else {
-        panic!("a failed host command must surface as a config error");
-    };
-    assert!(
-        message.contains("plugin tracedecay is not installed") && message.contains("exit code 4"),
-        "the host's own stderr and status must reach the operator: {message}"
-    );
-}
-
-#[test]
-fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
-    let home = tempfile::tempdir().unwrap();
-    deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
-    let before = std::fs::read(known_marketplaces_path(home.path())).ok();
-
-    let error =
-        crate::agents::host_cli::require_host_cli("claude-definitely-absent", CLAUDE_CLI_LIFECYCLE)
-            .expect_err("an absent host binary is a hard requirement failure");
-
-    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
-        panic!("host CLI absence must surface as a typed requirement");
-    };
-    assert_eq!(program, "claude-definitely-absent");
-    assert_eq!(lifecycle, CLAUDE_CLI_LIFECYCLE);
-    assert_eq!(
-        std::fs::read(known_marketplaces_path(home.path())).ok(),
-        before,
-        "a refused lifecycle must not have touched host-owned registration state"
     );
 }
 

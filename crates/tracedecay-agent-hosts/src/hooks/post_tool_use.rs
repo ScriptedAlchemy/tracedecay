@@ -2,24 +2,6 @@
 
 use serde_json::Value;
 
-#[cfg(test)]
-fn tool_input_command(parsed: &Value) -> &str {
-    parsed
-        .get("tool_input")
-        .and_then(|ti| ti.get("command"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-}
-
-/// The `tool_input.command` string, if any (Bash's shell command). Empty when
-/// absent. Shared with the Claude hint path so it reads the command from the
-/// same place the daemon-sync path does.
-#[cfg(test)]
-pub(super) fn tool_input_command_str(parsed: &Value) -> Option<String> {
-    let command = tool_input_command(parsed);
-    (!command.is_empty()).then(|| command.to_string())
-}
-
 /// Host-captured tool output from a post-tool event. Only top-level outcome
 /// fields are accepted: command text under `tool_input` is agent-controlled
 /// and must never masquerade as execution evidence.
