@@ -85,57 +85,6 @@ pub struct HookRuntimeV1 {
     pub store_layout_resolver: StoreLayoutResolver,
 }
 
-impl HookRuntimeV1 {
-    /// Calls one daemon tool and returns its JSON payload.
-    #[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.daemon_tool")]
-    pub async fn daemon_tool_json(
-        &self,
-        project_root: Option<&Path>,
-        tool_name: &str,
-        arguments: Value,
-        require_project_identity: bool,
-    ) -> Result<Value> {
-        (self.daemon_tool)(project_root, tool_name, arguments, require_project_identity).await
-    }
-
-    #[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.resolve_root")]
-    pub async fn resolve_project_root_with_identity(&self, start: &Path) -> Option<PathBuf> {
-        (self.project_root_resolver)(start).await
-    }
-
-    #[hotpath::measure(label = "agent_hosts.hook_runtime.resolve_scope")]
-    pub fn resolve_hook_scope(
-        &self,
-        project_root: &Path,
-        project_id: &ProjectId,
-    ) -> std::result::Result<ResolvedScope, String> {
-        (self.scope_resolver)(project_root, project_id)
-    }
-
-    #[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.notify_event")]
-    pub async fn notify_hook_event(&self, project_root: &Path, event: DaemonHookEvent) {
-        (self.event_notifier)(project_root, event).await;
-    }
-
-    /// The daemon's authoritative timing decision for this checkout; `None`
-    /// is "no override published".
-    #[must_use]
-    pub fn hook_timings_enabled(&self, project_root: &Path) -> Option<bool> {
-        (self.timing_gate)(project_root)
-    }
-
-    #[must_use]
-    #[hotpath::measure(label = "agent_hosts.hook_runtime.project_initialized")]
-    pub fn is_project_initialized(&self, project_root: &Path) -> bool {
-        (self.project_initialization_gate)(project_root)
-    }
-
-    #[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.store_layout")]
-    pub async fn resolve_store_layout(&self, project_root: &Path) -> Result<StoreLayout> {
-        (self.store_layout_resolver)(project_root).await
-    }
-}
-
 #[cfg(test)]
 pub(crate) use test_runtime::crate_test_runtime;
 
