@@ -226,7 +226,21 @@ impl DashboardTestRuntimeV1 {
             Arc::clone(self),
             self.profile_database.clone(),
             self.project_database.clone(),
-        ))
+        )
+        .with_pr_autotrack_reader(Arc::new(|root| {
+            tracedecay_application::pr_tracking::managed_summary(&root).map(|entries| {
+                entries
+                    .into_iter()
+                    .map(
+                        |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                            branch: entry.branch,
+                            pr: entry.pr,
+                            head_branch: entry.head_branch,
+                        },
+                    )
+                    .collect()
+            })
+        })))
     }
 
     /// The dashboard authority plus the daemon-owned LCM and verified graph

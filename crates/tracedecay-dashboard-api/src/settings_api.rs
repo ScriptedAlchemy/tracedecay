@@ -321,7 +321,9 @@ pub type PrAutoTrackManagedSummaryReader = Arc<
 
 #[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
-    Ok(Json(settings_envelope(&state, None, None, None).await?))
+    Ok(Json(
+        settings_envelope(&state, None, None, None, pr_autotrack_payload(&state)?).await?,
+    ))
 }
 
 #[hotpath::measure(label = "dashboard_api.settings.patch_project", future = true)]
@@ -330,6 +332,7 @@ pub async fn patch_project_settings(
     Json(patch): Json<Value>,
 ) -> ProjectSettingsPatchResult {
     let patch = parse_project_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
             settings_validation_error(json!([{
@@ -405,7 +408,14 @@ pub async fn patch_project_settings(
 
     Ok(Json(ProjectSettingsPatchResponseV1 {
         application_outcome,
-        current: settings_envelope(&state, Some(preview.resync_recommended), None, None).await?,
+        current: settings_envelope(
+            &state,
+            Some(preview.resync_recommended),
+            None,
+            None,
+            pr_autotrack,
+        )
+        .await?,
     }))
 }
 
@@ -415,6 +425,7 @@ pub async fn patch_user_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_user_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     validate_user_settings_patch(&patch, |value| parse_duration_millis(value).is_some())?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
@@ -470,7 +481,14 @@ pub async fn patch_user_settings(
     }
 
     Ok(Json(
-        settings_envelope(&state, None, Some(plan.restart_recommended), None).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(plan.restart_recommended),
+            None,
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
@@ -483,6 +501,7 @@ pub async fn patch_code_index_worker_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_code_index_worker_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     validate_code_index_worker_settings_patch(&patch)?;
     let worker_admission_errors = code_index_worker_admission_errors(
         &patch.code_index_workers,
@@ -531,7 +550,14 @@ pub async fn patch_code_index_worker_settings(
     };
 
     Ok(Json(
-        settings_envelope(&state, None, Some(true), Some(&committed.current)).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(true),
+            Some(&committed.current),
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
@@ -573,6 +599,7 @@ async fn settings_envelope(
     resync_recommended: Option<bool>,
     restart_recommended: Option<bool>,
     committed_worker_configuration: Option<&DashboardCodeIndexWorkerConfigurationV1>,
+    pr_autotrack: PrAutoTrackPayloadV1,
 ) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
 {
     let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
@@ -607,7 +634,7 @@ async fn settings_envelope(
             configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
             tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
-            pr_autotrack: pr_autotrack_payload(state)?,
+            pr_autotrack,
         },
         user: user_settings_payload(&user, &worker_configuration),
         automation,
