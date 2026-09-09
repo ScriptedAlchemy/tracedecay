@@ -33,8 +33,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(test)]
-use tracedecay_application::pr_tracking::managed_summary;
 use tracedecay_application::pr_tracking::{
     DiscoveredPr, ManagedPr, ManualBranchActivation, ManualBranchActivationError,
     ManualBranchArtifactOwnershipV1, ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1,
@@ -43,8 +41,10 @@ use tracedecay_application::pr_tracking::{
     default_pr_command_control, discover_open_prs_with_control, load_state,
     manual_branch_artifact_ownership_off_runtime, manual_branch_artifacts_match_off_runtime,
     manual_branch_source_owns_artifacts, pr_label, pr_tracking_ref, prepare_manual_branch_worktree,
-    prepare_pr_worktree, resolve_branch_head, save_state, try_acquire_manual_branch_lifecycle,
+    prepare_pr_worktree, resolve_branch_head, save_state,
 };
+#[cfg(test)]
+use tracedecay_application::pr_tracking::{managed_summary, try_acquire_manual_branch_lifecycle};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::TraceDecayError;
 

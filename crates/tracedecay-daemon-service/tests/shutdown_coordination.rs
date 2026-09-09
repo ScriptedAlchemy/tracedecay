@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tracedecay_daemon_service::{ShutdownCoordinatorV1, ShutdownStatus};
+use tracedecay_daemon_service::ShutdownCoordinatorV1;
+use tracedecay_store_runtime::ShutdownStatus;
 
 #[tokio::test]
 async fn timed_out_waiter_does_not_cancel_the_owned_shutdown() {

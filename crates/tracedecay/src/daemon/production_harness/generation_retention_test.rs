@@ -25,8 +25,9 @@ use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticResourceCeilings,
 };
 
-use super::journey_test_support::git;
+use super::journey_test_support::{StageLedgerReportV1, git, timed_stage};
 use super::*;
+use crate::daemon::maintenance::project_store_maintenance_lease;
 use tracedecay_application::semantic_runtime::{
     ProjectSemanticActivationExt, RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
     SemanticVectorGraphScopeV1, SemanticVectorRetentionAuthorizationV1,
@@ -709,16 +710,13 @@ async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progr
     };
     let route_started = Arc::new(tokio::sync::Notify::new());
     let route_started_by_task = Arc::clone(&route_started);
-    let route_state = match route_tasks
-        .start_cancellable(route, move |cancellation| async move {
-            route_started_by_task.notify_one();
-            cancellation.cancelled().await;
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "CPU-quota route cancelled".to_owned(),
-            })
+    let route_state = match route_tasks.start_cancellable(route, move |cancellation| async move {
+        route_started_by_task.notify_one();
+        cancellation.cancelled().await;
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "CPU-quota route cancelled".to_owned(),
         })
-        .await
-    {
+    }) {
         crate::daemon::ProjectOpenTaskClaim::InFlight(state) => state,
         crate::daemon::ProjectOpenTaskClaim::Failed(_) => {
             panic!("route cancellation fixture must start")
@@ -761,8 +759,8 @@ async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progr
     );
 
     route_tasks.shutdown().await;
-    assert_eq!(route_tasks.tracked_task_count().await, 0);
-    assert_eq!(route_tasks.tracked_route_count().await, 0);
+    assert_eq!(route_tasks.tracked_task_count(), 0);
+    assert_eq!(route_tasks.tracked_route_count(), 0);
     crate::daemon::ProjectOpenTasks::wait_for_completion(route_state)
         .await
         .expect_err("route shutdown publishes terminal cancellation");
@@ -877,33 +875,33 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     let observations = resources.store_administration.store_telemetry_sampling();
     let cancellation = tracedecay_session_memory::context::CancellationToken::new();
     assert!(matches!(
-        crate::daemon::store_maintenance::resolve_vector_retention_inventory(
-            graph.as_ref(),
+        tracedecay_maintenance::store_maintenance::resolve_vector_retention_inventory(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
         )
         .await,
-        crate::daemon::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
+        tracedecay_maintenance::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
     ));
     assert_eq!(
-        crate::daemon::store_maintenance::run_code_generation_retention(
-            graph.as_ref(),
+        tracedecay_maintenance::store_maintenance::run_code_generation_retention(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
             &cancellation,
         )
         .await,
-        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
+        tracedecay_maintenance::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
         "an unknown census cannot discard a mounted vector provider's leases"
     );
     assert!(first_source_file.is_file());
     assert!(
-        !crate::daemon::maintenance::generation::run_project_generation_maintenance(
-            graph.as_ref(),
+        !tracedecay_maintenance::generation::run_project_generation_maintenance(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
             &cancellation,
-            &crate::config::RetentionConfig::default(),
+            None,
             None,
         )
         .await
@@ -915,12 +913,12 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         "code deletion must not race ahead of the retained vector source"
     );
     assert!(
-        crate::daemon::maintenance::generation::run_project_generation_maintenance(
-            graph.as_ref(),
+        tracedecay_maintenance::generation::run_project_generation_maintenance(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
             &cancellation,
-            &crate::config::RetentionConfig::default(),
+            None,
             None,
         )
         .await
@@ -931,16 +929,17 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         first_source_file.is_file(),
         "exact vector-source liveness must veto the source-code deletion plan"
     );
-    let observed_inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
-        graph.as_ref(),
-        schedulers,
-        &observations,
-    )
-    .await;
+    let observed_inventory =
+        tracedecay_maintenance::store_maintenance::resolve_vector_retention_inventory(
+            &project_store_maintenance_lease(graph.as_ref()),
+            schedulers,
+            &observations,
+        )
+        .await;
     assert!(
         matches!(
             observed_inventory,
-            crate::daemon::store_maintenance::VectorRetentionInventoryV1::Online { .. }
+            tracedecay_maintenance::store_maintenance::VectorRetentionInventoryV1::Online { .. }
         ),
         "a complete post-convergence census pins through the online vector inventory"
     );
@@ -973,16 +972,17 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     // fail-closed refusal (the offline degradation names an absent provider);
     // either way the pass must report it and retain every source.
     observations.record_semantic_vector_retention_failure(&canonical_root);
-    let reset_inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
-        graph.as_ref(),
-        schedulers,
-        &observations,
-    )
-    .await;
+    let reset_inventory =
+        tracedecay_maintenance::store_maintenance::resolve_vector_retention_inventory(
+            &project_store_maintenance_lease(graph.as_ref()),
+            schedulers,
+            &observations,
+        )
+        .await;
     assert!(
         matches!(
             reset_inventory,
-            crate::daemon::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
+            tracedecay_maintenance::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
         ),
         "an unreadable inventory under a mounted vector provider is a fail-closed refusal"
     );
@@ -992,14 +992,14 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         "the CI-facing retention_degraded event still reports pass=code_generations"
     );
     assert_eq!(
-        crate::daemon::store_maintenance::run_code_generation_retention(
-            graph.as_ref(),
+        tracedecay_maintenance::store_maintenance::run_code_generation_retention(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
             &cancellation,
         )
         .await,
-        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
+        tracedecay_maintenance::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
         "an unreadable vector inventory fails the pass instead of sweeping"
     );
     assert!(
@@ -1009,12 +1009,12 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
 
     drop(activation_lease);
     assert!(
-        !crate::daemon::maintenance::generation::run_project_generation_maintenance(
-            graph.as_ref(),
+        !tracedecay_maintenance::generation::run_project_generation_maintenance(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
             &cancellation,
-            &crate::config::RetentionConfig::default(),
+            None,
             None,
         )
         .await
@@ -1055,20 +1055,20 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     // satisfy.
     let mut source_released_under = None;
     for _ in 0..12 {
-        converged = crate::daemon::maintenance::generation::run_project_generation_maintenance(
-            restarted_graph.as_ref(),
+        converged = tracedecay_maintenance::generation::run_project_generation_maintenance(
+            &project_store_maintenance_lease(restarted_graph.as_ref()),
             restarted_schedulers,
             &restarted_observations,
             &restarted_cancellation,
-            &crate::config::RetentionConfig::default(),
+            None,
             None,
         )
         .await
         .is_complete();
         if source_released_under.is_none() && !first_source_file.exists() {
             source_released_under = Some(
-                crate::daemon::store_maintenance::resolve_vector_retention_inventory(
-                    restarted_graph.as_ref(),
+                tracedecay_maintenance::store_maintenance::resolve_vector_retention_inventory(
+                    &project_store_maintenance_lease(restarted_graph.as_ref()),
                     restarted_schedulers,
                     &restarted_observations,
                 )
@@ -1263,12 +1263,12 @@ async fn run_generation_cadence(
         .expect("project server")
         .cg()
         .await;
-    crate::daemon::maintenance::generation::run_project_generation_maintenance(
-        graph.as_ref(),
+    tracedecay_maintenance::generation::run_project_generation_maintenance(
+        &project_store_maintenance_lease(graph.as_ref()),
         &resources.invocation.code_index_schedulers,
         &resources.store_administration.store_telemetry_sampling(),
         &tracedecay_session_memory::context::CancellationToken::new(),
-        &crate::config::RetentionConfig::default(),
+        None,
         None,
     )
     .await
@@ -1318,6 +1318,9 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         );
         return;
     };
+    // Drop last so a rejected qualification still reports the completed
+    // model acquisition and evaluation dispatch stages.
+    let _stage_report = StageLedgerReportV1::arm("linked-worktree retention journey");
     let _profile = crate::config::PinnedUserDataDir::new();
 
     let isolation = TempDir::new().expect("linked-worktree journey isolation");
@@ -1341,13 +1344,20 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     git(&linked, &["add", "."]);
     git(&linked, &["commit", "-qm", "linked semantic source"]);
 
-    let harness = ProductionProjectCompositionHarnessV1::open(
-        isolation.path(),
-        [primary.clone(), linked.clone()],
+    let harness = timed_stage(
+        "harness.open(daemon composition)",
+        ProductionProjectCompositionHarnessV1::open(
+            isolation.path(),
+            [primary.clone(), linked.clone()],
+        ),
     )
     .await
     .expect("mounted linked-worktree production composition");
-    let lifecycle = install_project_distribution_fixture(&harness, &primary, &fixture_root).await;
+    let lifecycle = timed_stage(
+        "model.verify_and_install",
+        install_project_distribution_fixture(&harness, &primary, &fixture_root),
+    )
+    .await;
     let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
     let linked_project_id = tracedecay_domain::ProjectId::new(
         harness
@@ -1385,10 +1395,16 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         .await
         .expect("linked code generation");
     assert_ne!(primary_code_id, linked_code_id);
-    let (primary_code, primary_vector) =
-        wait_for_semantic_generation(&harness, &primary, &primary_code_id).await;
-    let (linked_code, linked_vector) =
-        wait_for_semantic_generation(&harness, &linked, &linked_code_id).await;
+    let (primary_code, primary_vector) = timed_stage(
+        "primary.index+embed+publish(settle)",
+        wait_for_semantic_generation(&harness, &primary, &primary_code_id),
+    )
+    .await;
+    let (linked_code, linked_vector) = timed_stage(
+        "linked.index+embed+publish(settle)",
+        wait_for_semantic_generation(&harness, &linked, &linked_code_id),
+    )
+    .await;
     assert_ne!(
         primary_vector.generation_id(),
         linked_vector.generation_id()
@@ -1743,12 +1759,12 @@ async fn mounted_default_off_retention_requires_an_empty_vector_census() {
         .join("code-generations-v1")
         .join(&candidate.generation_file);
     assert!(source_file.is_file());
-    let observations = crate::daemon::maintenance::StoreTelemetrySamplingRegistry::default();
+    let observations = tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default();
     // This is the durable default-off observation emitted while the semantic
     // coordinator is unseated; the vector provider still belongs to the mount.
     observations.record_semantic_vector_retention_unseated(&root);
-    let inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
-        graph.as_ref(),
+    let inventory = tracedecay_maintenance::store_maintenance::resolve_vector_retention_inventory(
+        &project_store_maintenance_lease(graph.as_ref()),
         schedulers,
         &observations,
     )
@@ -1756,21 +1772,21 @@ async fn mounted_default_off_retention_requires_an_empty_vector_census() {
     assert!(
         matches!(
             inventory,
-            crate::daemon::store_maintenance::VectorRetentionInventoryV1::SemanticUnseated
+            tracedecay_maintenance::store_maintenance::VectorRetentionInventoryV1::SemanticUnseated
         ),
         "empty default-off inventory was refused: {:?}",
         inventory.degraded_reason(),
     );
     let cancellation = tracedecay_session_memory::context::CancellationToken::new();
     assert_eq!(
-        crate::daemon::store_maintenance::run_code_generation_retention(
-            graph.as_ref(),
+        tracedecay_maintenance::store_maintenance::run_code_generation_retention(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
             &cancellation,
         )
         .await,
-        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::MoreWork,
+        tracedecay_maintenance::store_maintenance::CodeGenerationRetentionOutcomeV1::MoreWork,
     );
     assert!(
         !source_file.exists(),
@@ -1779,23 +1795,23 @@ async fn mounted_default_off_retention_requires_an_empty_vector_census() {
 
     publish_vector_generation(schedulers, &root, &latest).await;
     assert!(matches!(
-        crate::daemon::store_maintenance::resolve_vector_retention_inventory(
-            graph.as_ref(),
+        tracedecay_maintenance::store_maintenance::resolve_vector_retention_inventory(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
         )
         .await,
-        crate::daemon::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
+        tracedecay_maintenance::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
     ));
     assert_eq!(
-        crate::daemon::store_maintenance::run_code_generation_retention(
-            graph.as_ref(),
+        tracedecay_maintenance::store_maintenance::run_code_generation_retention(
+            &project_store_maintenance_lease(graph.as_ref()),
             schedulers,
             &observations,
             &cancellation,
         )
         .await,
-        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
+        tracedecay_maintenance::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
         "disabled configuration alone cannot discard published vector state",
     );
     drop(graph);

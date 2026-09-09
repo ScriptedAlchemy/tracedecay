@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use tokio::time::Instant;
-pub(crate) use tracedecay_daemon_service::ShutdownStatus;
+pub(crate) use tracedecay_store_runtime::ShutdownStatus;
 
 type ShutdownJoin = Pin<Box<dyn Future<Output = ShutdownStatus> + Send + 'static>>;
 type ShutdownJoinFactory = Box<dyn FnOnce(Instant) -> ShutdownJoin + Send + 'static>;

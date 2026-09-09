@@ -118,10 +118,6 @@ fn awaited_sizes() -> Vec<(&'static str, usize)> {
             future_size(project_open_owners::spawn_semantic_owner_registration),
         ),
         (
-            "install_project_open_source_edit_preview_owner",
-            future_size(project_open_owners::install_project_open_source_edit_preview_owner),
-        ),
-        (
             "StoreAdministration::registered_project_session_database",
             future_size(StoreAdministration::registered_project_session_database),
         ),

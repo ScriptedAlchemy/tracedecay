@@ -1371,7 +1371,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::error
             // The MCP server is long-lived, so it may run the detached
             // structured-row backfill sweep; one-shot CLI/hook processes never
             // do (they would drop the sweep mid-parse on exit).
-            tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
+            tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
             hotpath::future!(serve_cmd::run_serve(path, timings), label = "cli.serve.run").await?;
         }
         Commands::Daemon { action } => {
@@ -1392,7 +1392,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
             remote_tls_key,
         } => {
             // Long-lived host: allowed to run the structured-row sweep.
-            tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
+            tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
             let socket_path = tracedecay_daemon_control::socket_path_or_default(socket)?;
             let remote_tls = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
                 remote_listen,

@@ -285,7 +285,7 @@ async fn context_memory_matches(
     options: &ContextMemoryOptions,
     read_control: &FactReadControl,
 ) -> Result<ContextMemoryMatches> {
-    let memory = cg.project_memory_application().await?;
+    let memory = cg.project_memory_application()?;
     let min_trust =
         Confidence::new(options.min_trust).map_err(|error| TraceDecayError::Config {
             message: format!("invalid context memory trust threshold: {error}"),

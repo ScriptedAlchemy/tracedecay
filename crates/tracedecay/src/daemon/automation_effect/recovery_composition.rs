@@ -49,7 +49,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
     let read_receipts = |run_id, read_control| {
         let owner = owner.clone();
         async move {
-            let database = project.open_project_store_db().await?;
+            let database = project.open_project_store_db()?;
             let memory = MemoryApplication::new(owner, DatabaseFactStore::new(&database)).map_err(
                 |error| {
                     tracedecay_automation_runtime::automation::effect_runtime::contract_error(
