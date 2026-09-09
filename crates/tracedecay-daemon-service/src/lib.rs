@@ -135,7 +135,7 @@ pub use query_mcp_admission::{
 };
 pub use remote_protocol::build_daemon_remote_protocol_router;
 pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
-pub use shutdown_coordination::{ShutdownCoordinatorV1, ShutdownStatus};
+pub use shutdown_coordination::ShutdownCoordinatorV1;
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
     DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,

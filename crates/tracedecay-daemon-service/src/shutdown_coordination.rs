@@ -3,18 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ShutdownStatus {
-    Clean,
-    Failed(String),
-    TimedOut,
-}
-
-impl ShutdownStatus {
-    pub fn is_clean(&self) -> bool {
-        matches!(self, Self::Clean)
-    }
-}
+use tracedecay_store_runtime::ShutdownStatus;
 
 pub struct ShutdownCoordinatorV1 {
     state: Arc<ShutdownCoordinatorState>,
