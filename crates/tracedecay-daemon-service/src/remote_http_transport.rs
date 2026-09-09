@@ -124,7 +124,9 @@ impl RemoteBrainTlsListener {
         router: Router,
         mut shutdown_requested: oneshot::Receiver<()>,
     ) -> Result<()> {
-        let router = router.layer(middleware::from_fn(force_remote_connection_close));
+        let router = crate::application_surface::with_hotpath_server_layer(
+            router.layer(middleware::from_fn(force_remote_connection_close)),
+        );
         let graceful = CancellationToken::new();
         let mut connections = JoinSet::new();
         loop {

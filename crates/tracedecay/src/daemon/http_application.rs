@@ -737,10 +737,7 @@ impl DaemonHttpApplicationService {
                 Some(RemoteBrainTlsServer {
                     listener,
                     endpoint,
-                    router:
-                        tracedecay_daemon_service::application_surface::with_hotpath_server_layer(
-                            Router::new().nest("/remote", router),
-                        ),
+                    router: Router::new().nest("/remote", router),
                     #[cfg(test)]
                     admission,
                     credentials,
