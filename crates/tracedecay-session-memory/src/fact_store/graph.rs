@@ -1239,6 +1239,7 @@ mod tests {
         let path = directory.path().join(format!("{label}.db"));
         let authority = DatabaseAuthority::acquire_test(&path, "graph telemetry test authority")
             .expect("acquire graph telemetry fixture authority");
+        tracedecay_global_db::register_test_schema_installer();
         let (database, _) = Database::publish_profile_memory_test_runtime(
             &path,
             &authority,

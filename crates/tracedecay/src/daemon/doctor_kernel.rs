@@ -1,12 +1,10 @@
 //! Daemon-side Doctor signal gatherers for the read-only kernel source ports.
 //!
-//! The transport-neutral Doctor kernel
-//! ([`tracedecay_contracts::doctor`]) owns the seven source-port adapters,
-//! [`DaemonRuntimeHealthSignalV1`], and [`compose_doctor_report`]. This module
-//! gathers live daemon signals (scheduler, diagnostic broker, registered
-//! stores, host-bundle receipts) and maps daemon-owned types into those kernel
-//! reads. Truthfulness is preserved end to end: a signal that cannot be
-//! consulted maps to the kernel's typed
+//! The transport-neutral Doctor kernel ([`tracedecay_contracts::doctor`]) owns
+//! the source-port traits, read mappers, and [`DoctorReportComposerV1`]. This
+//! module gathers live daemon signals, maps daemon-owned types into kernel
+//! reads, and wires those reads into the composer. Truthfulness is preserved
+//! end to end: a signal that cannot be consulted maps to the kernel's typed
 //! `Unsupported`/`Absent`/`Denied`/`Unknown` read — never a fabricated healthy
 //! result — and partial coverage carries its real reason.
 //!
@@ -18,14 +16,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::PinnedRuntimeConfiguration;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_contracts::doctor::{
-    AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
+    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
+    CodeIndexMountReadV1, CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort,
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
-    DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorStorageFamilyReadV1,
-    DoctorStorageIncompleteReasonV1, HostConformanceV1, HostIntegrationReadV1,
-    IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerReadV1, LanguageServerStateV1,
-    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditReadV1, ProfileAuthorityReadV1,
-    RemoteOperationalReadV1, SemanticOwnerReadV1, advisory_feedback_read_from_publication,
-    compose_doctor_report, merge_storage_reads, runtime_health_read, storage_family_read,
+    DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportV1,
+    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1,
+    HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
+    IngestRefusalCountV1, LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
+    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
+    RuntimeHealthDoctorPort, RuntimeHealthReadV1, SemanticOwnerDoctorPort, SemanticOwnerReadV1,
+    StorageDoctorPort, advisory_feedback_read_from_publication, merge_storage_reads,
+    runtime_health_read, storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{
@@ -850,6 +852,147 @@ pub(super) async fn collect_code_generation_retention_findings(
 /// at project-composition time.
 pub(in crate::daemon) type RemoteOperationalReadProviderV1 =
     Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>;
+
+/// Resolved kernel reads wired into the Doctor composer for one report.
+struct KernelDoctorSources<'a> {
+    inputs: &'a DoctorKernelInputsV1,
+}
+
+impl ConfigurationAuthorityDoctorPort for KernelDoctorSources<'_> {
+    fn configuration_health<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, ConfigurationAuthorityReadV1> {
+        let read = self.inputs.configuration.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl RuntimeHealthDoctorPort for KernelDoctorSources<'_> {
+    fn runtime_health<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, RuntimeHealthReadV1> {
+        let read = self.inputs.runtime.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl OperationalAuditDoctorPort for KernelDoctorSources<'_> {
+    fn operational_audit<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, OperationalAuditReadV1> {
+        let read = self.inputs.operational_audit.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl HostIntegrationDoctorPort for KernelDoctorSources<'_> {
+    fn host_conformance<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, HostIntegrationReadV1> {
+        let read = self.inputs.host.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl AdvisoryFeedbackDoctorPort for KernelDoctorSources<'_> {
+    fn advisory_feedback<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, AdvisoryFeedbackReadV1> {
+        let read = self.inputs.advisory_feedback.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl LanguageServerDoctorPort for KernelDoctorSources<'_> {
+    fn language_server_health<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, LanguageServerReadV1> {
+        let read = self.inputs.language_server.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl CodeIndexMountDoctorPort for KernelDoctorSources<'_> {
+    fn code_index_mount<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, CodeIndexMountReadV1> {
+        let read = self.inputs.code_index.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl SemanticOwnerDoctorPort for KernelDoctorSources<'_> {
+    fn semantic_owner<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, SemanticOwnerReadV1> {
+        let read = self.inputs.semantic_owner.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl ObservabilityDoctorPort for KernelDoctorSources<'_> {
+    fn observability_health<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, ObservabilityReadV1> {
+        let read = self.inputs.observability.clone();
+        Box::pin(async move { read })
+    }
+
+    fn ingest_refusal_census<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, IngestRefusalCensusReadV1> {
+        let read = self.inputs.ingest_refusals.clone();
+        Box::pin(async move { read })
+    }
+}
+
+impl StorageDoctorPort for KernelDoctorSources<'_> {
+    fn storage_findings<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, DoctorStorageFamilyReadV1> {
+        let read = self.inputs.storage.clone();
+        Box::pin(async move { read })
+    }
+}
+
+/// Compose a Doctor report from already-resolved kernel reads.
+///
+/// Wires the resolved bundle into [`DoctorReportComposerV1`]. The composer
+/// enumerates every finding family truthfully: a family whose read is
+/// unavailable is carried with its real evidence state and an explicit coverage
+/// record, and the report asserts health only when every family was consulted
+/// with complete coverage and every finding is healthy.
+#[hotpath::measure(label = "daemon.doctor.compose", future = true)]
+pub(in crate::daemon) async fn compose_doctor_report(
+    context: &RequestContext,
+    inputs: &DoctorKernelInputsV1,
+) -> Result<DoctorReportV1, ApplicationContractError> {
+    let sources = KernelDoctorSources { inputs };
+    DoctorReportComposerV1::new()
+        .with_configuration(&sources)
+        .with_runtime(&sources)
+        .with_operational_audit(&sources)
+        .with_host(&sources)
+        .with_advisory_feedback(&sources)
+        .with_language_server(&sources)
+        .with_code_index(&sources)
+        .with_semantic_owner(&sources)
+        .with_observability(&sources)
+        .with_storage(&sources)
+        .compose(context)
+        .await
+}
 
 /// Build the daemon-owned live Doctor reader installed into a project MCP
 /// server. Every read re-resolves exact project/worktree identity, observes the

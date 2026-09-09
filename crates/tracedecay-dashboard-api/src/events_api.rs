@@ -976,6 +976,7 @@ pub(crate) async fn dashboard_state_fixture(
         code_index_freshness_reader: None,
         explorer_semantic_reader: None,
         feedback_status_reader: None,
+        pr_autotrack_reader: None,
         storage_mode: "profile_sharded".to_owned(),
         store_root,
         config_path: project.path().join("config.json"),
