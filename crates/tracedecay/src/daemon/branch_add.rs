@@ -1,7 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_application::pr_tracking::PrCommandControlV1;
+use tracedecay_application::pr_tracking::{
+    ManualBranchLifecycleLeaseV1, PrCommandControlV1, manual_branch_source_owns_artifacts,
+    try_acquire_manual_branch_lifecycle,
+};
+
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexSchedulerRegistryV1, branch_publication::BranchPublicationContextV1,
 };
@@ -149,14 +153,13 @@ async fn activate_and_track_manual_branch(
     administration
         .run_manual_branch_publication(|cancellation| async move {
             let lifecycle =
-                super::pr_autotrack::try_acquire_manual_branch_lifecycle(&data_root, &branch)
-                    .map_err(|error| {
-                        TraceDecayError::project_route(
-                            error.reason_code(),
-                            error.retryable(),
-                            error.detail(),
-                        )
-                    })?;
+                try_acquire_manual_branch_lifecycle(&data_root, &branch).map_err(|error| {
+                    TraceDecayError::project_route(
+                        error.reason_code(),
+                        error.retryable(),
+                        error.detail(),
+                    )
+                })?;
             activate_and_track_manual_branch_owned(
                 project_root,
                 graph,
@@ -179,7 +182,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
     schedulers: CodeIndexSchedulerRegistryV1,
     branch: String,
     data_root: std::path::PathBuf,
-    lifecycle: super::pr_autotrack::ManualBranchLifecycleLeaseV1,
+    lifecycle: ManualBranchLifecycleLeaseV1,
     cancellation: CancellationToken,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
     let publication = branch_publication_context(&graph)?;
@@ -223,9 +226,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
                 && let Some(previous) = previous_source
                 && previous.source_oid != activation.head_sha
                 && previous.worktree_root != activation.worktree.to_string_lossy()
-                && super::pr_autotrack::manual_branch_source_owns_artifacts(
-                    &data_root, &branch, &previous,
-                )
+                && manual_branch_source_owns_artifacts(&data_root, &branch, &previous)
             {
                 super::pr_autotrack::cleanup_manual_branch_retirement(
                     &project_root, &data_root, &schedulers, &branch, &previous, lifecycle,
