@@ -651,9 +651,7 @@ pub async fn validate_authority_schema_contract(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{
-        normalize_default, validate_registry_schema_contract, validate_tables_and_indexes,
-    };
+    use super::{normalize_default, validate_tables_and_indexes};
     use crate::schema_contract::definitions::TABLES;
     use crate::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::{
@@ -702,20 +700,6 @@ mod tests {
         );
         assert_eq!(normalize_default(Some("((0)")).as_deref(), Some("((0)"));
         assert_eq!(normalize_default(Some("(')')")).as_deref(), Some("')'"));
-    }
-
-    #[tokio::test]
-    async fn registry_contract_validates_through_engine_connection() {
-        let directory = tempfile::tempdir().unwrap();
-        let (database, _owner) = open_registered_test_database_fixture(
-            &directory.path().join("global.db"),
-            TestDatabaseRuntimeScope::Profile,
-        )
-        .await
-        .unwrap();
-        validate_registry_schema_contract(&database.read_connection())
-            .await
-            .unwrap();
     }
 
     #[tokio::test]

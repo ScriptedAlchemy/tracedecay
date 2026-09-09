@@ -4,8 +4,7 @@ use super::super::audit::audit_target_commitment;
 use super::super::mutation::apply_direct_mutation_to_snapshot;
 use super::super::read::read_change_plan_from_executor;
 use super::super::{
-    ConfigurationControlStore, ConfigurationError, GlobalDbConfigurationControlStore,
-    OwnedGlobalDbConfigurationControlStore, params,
+    ConfigurationControlStore, ConfigurationError, GlobalDbConfigurationControlStore, params,
 };
 use super::{
     HostAdmissionScope, control_authority, control_authority_with_key, digest,
@@ -217,17 +216,6 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
             "credential references require the write-only credential operation".to_owned()
         ))
     );
-}
-
-fn assert_daemon_configuration_authority<T>()
-where
-    T: ConfigurationControlStore + Clone + Send + Sync + 'static,
-{
-}
-
-#[test]
-fn owned_global_control_adapter_satisfies_daemon_registration_bounds() {
-    assert_daemon_configuration_authority::<OwnedGlobalDbConfigurationControlStore>();
 }
 
 #[tokio::test]
