@@ -197,12 +197,7 @@ async fn activate_manual_branch_with_administration(
     administration: PrStoreAdministration<'_>,
     lifecycle: &ManualBranchLifecycleLeaseV1,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
-    let Some(schedulers) = administration.schedulers else {
-        return Err(ManualBranchActivationError::scheduler_unavailable(
-            "code-index scheduler authority is unavailable for branch activation",
-        ));
-    };
-    let Some(graph) = administration.graph else {
+    let Some((schedulers, graph)) = administration.schedulers.zip(administration.graph) else {
         return Err(ManualBranchActivationError::scheduler_unavailable(
             "code-index scheduler authority is unavailable for branch activation",
         ));
@@ -222,19 +217,15 @@ async fn activate_manual_branch_with_administration(
     let command_control = administration.command_control.clone();
     let repo = repo_root.to_path_buf();
     let branch_name = branch.to_string();
-    let head_sha = match tokio::task::spawn_blocking(move || {
+    let head_sha = tokio::task::spawn_blocking(move || {
         resolve_branch_head(&repo, &branch_name, &command_control)
     })
     .await
-    {
-        Ok(Ok(sha)) => sha,
-        Ok(Err(error)) => return Err(error),
-        Err(error) => {
-            return Err(ManualBranchActivationError::activation_failed(format!(
-                "branch resolution join error: {error}"
-            )));
-        }
-    };
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "branch resolution join error: {error}"
+        ))
+    })??;
 
     if !lifecycle.matches_branch(branch) {
         return Err(ManualBranchActivationError::activation_failed(
@@ -282,51 +273,24 @@ async fn activate_manual_branch_with_administration(
             worktree.display()
         )));
     }
-    let repo = repo_root.to_path_buf();
-    let wt = worktree.clone();
-    let tref = tracking_ref.clone();
-    let label_for_prep = label.clone();
-    let expected_head = head_sha.clone();
-    let command_control = administration.command_control.clone();
-    match tokio::task::spawn_blocking(move || {
-        prepare_manual_branch_worktree(
-            &repo,
-            &wt,
-            &tref,
-            &label_for_prep,
-            &expected_head,
-            &command_control,
-        )
-    })
+    if let Err(reason) = prepare_manual_branch_off_runtime(
+        repo_root,
+        &artifacts,
+        &head_sha,
+        administration.command_control.clone(),
+    )
     .await
     {
-        Ok(Ok(())) => {}
-        Ok(Err(reason)) => {
-            return cleanup_failed_manual_track(
-                repo_root,
-                &worktree,
-                &tracking_ref,
-                &label,
-                &head_sha,
-                administration,
-                ManualBranchActivationError::activation_failed(reason),
-            )
-            .await;
-        }
-        Err(error) => {
-            return cleanup_failed_manual_track(
-                repo_root,
-                &worktree,
-                &tracking_ref,
-                &label,
-                &head_sha,
-                administration,
-                ManualBranchActivationError::activation_failed(format!(
-                    "worktree preparation join error: {error}"
-                )),
-            )
-            .await;
-        }
+        return cleanup_failed_manual_track(
+            repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &head_sha,
+            administration,
+            ManualBranchActivationError::activation_failed(reason),
+        )
+        .await;
     }
 
     match activate_linked_worktree(schedulers, graph, &worktree).await {
@@ -349,6 +313,31 @@ async fn activate_manual_branch_with_administration(
             .await
         }
     }
+}
+
+async fn prepare_manual_branch_off_runtime(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    head_sha: &str,
+    command_control: PrCommandControl,
+) -> std::result::Result<(), String> {
+    let repo = repo_root.to_path_buf();
+    let worktree = artifacts.worktree.clone();
+    let tracking_ref = artifacts.tracking_ref.clone();
+    let label = artifacts.label.clone();
+    let expected_head = head_sha.to_owned();
+    tokio::task::spawn_blocking(move || {
+        prepare_manual_branch_worktree(
+            &repo,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| format!("worktree preparation join error: {error}"))?
 }
 
 async fn cleanup_failed_manual_track(
@@ -551,63 +540,16 @@ async fn reconcile_project_with_administration(
         .map(|pr| (pr_label(pr.number), pr))
         .collect();
 
-    // Removals first (cheap, unblocks disk) — managed entries no longer open.
-    // Suppress them entirely when the discovery is `partial`: an incomplete
-    // listing must never be read as "these PRs closed", or a truncated `gh`
-    // page (or gh↔ls-remote flapping) would churn-untrack still-open PRs.
-    if discovery.partial {
-        report.removals_suppressed = true;
-        log_daemon_event(
-            "pr_autotrack",
-            &[
-                ("project", repo_root.display().to_string()),
-                ("action", "poll".to_string()),
-                ("outcome", "partial".to_string()),
-                (
-                    "reason",
-                    "removals suppressed: discovery incomplete".to_string(),
-                ),
-            ],
-        );
-    } else {
-        // Sweep leaked checkouts before removals: a `pr-worktrees/pr-<N>` dir
-        // whose PR is neither open nor managed is an orphan left by a daemon
-        // crash between `worktree add` and `save_state`. Remove it so stale
-        // worktrees don't accumulate on disk across restarts.
-        sweep_orphan_pr_worktrees(repo_root, data_root, &desired, &state, administration).await;
-
-        let stale: Vec<String> = state
-            .managed
-            .keys()
-            .filter(|label| !desired.contains_key(*label))
-            .cloned()
-            .collect();
-        for label in stale {
-            let Some(managed) = state.managed.get(&label).cloned() else {
-                continue;
-            };
-            match untrack_pr(repo_root, data_root, &label, &managed, administration).await {
-                Ok(()) => {
-                    state.managed.remove(&label);
-                    state_dirty = true;
-                    report.untracked.push(label.clone());
-                    log_daemon_event(
-                        "pr_autotrack",
-                        &[
-                            ("project", repo_root.display().to_string()),
-                            ("action", "untracked".to_string()),
-                            ("branch", label),
-                            ("pr", managed.pr.to_string()),
-                        ],
-                    );
-                }
-                Err(reason) => {
-                    report.failures.push((label.clone(), reason.clone()));
-                    log_pr_skip(repo_root, Some(&label), Some(managed.pr), &reason);
-                }
-            }
-        }
-    }
+    state_dirty |= remove_closed_pull_requests(
+        repo_root,
+        data_root,
+        discovery.partial,
+        &desired,
+        &mut state,
+        administration,
+        &mut report,
+    )
+    .await;
 
     // Additions, capped per cycle.
     let mut added = 0usize;
@@ -645,61 +587,23 @@ async fn reconcile_project_with_administration(
                 }
             }
         }
-        match track_pr(repo_root, data_root, pr, administration).await {
-            Ok(managed) => {
-                let dirty_before_insert = state_dirty;
-                state.managed.insert(label.clone(), managed.clone());
-                match save_state(data_root, &state) {
-                    Ok(()) => {
-                        state_dirty = false;
-                        report.tracked.push(label.clone());
-                        if is_new {
-                            added += 1;
-                        }
-                        log_daemon_event(
-                            "pr_autotrack",
-                            &[
-                                ("project", repo_root.display().to_string()),
-                                ("action", "tracked".to_string()),
-                                ("branch", label.clone()),
-                                ("pr", pr.number.to_string()),
-                                ("head", pr.head_branch.clone()),
-                            ],
-                        );
-                    }
-                    Err(error) => {
-                        let persist_reason = format!("failed to persist managed state: {error}");
-                        match untrack_pr(repo_root, data_root, label, &managed, administration)
-                            .await
-                        {
-                            Ok(()) => {
-                                state.managed.remove(label);
-                                state_dirty = dirty_before_insert;
-                                report
-                                    .failures
-                                    .push((label.clone(), persist_reason.clone()));
-                                log_pr_skip(
-                                    repo_root,
-                                    Some(label),
-                                    Some(pr.number),
-                                    &persist_reason,
-                                );
-                            }
-                            Err(cleanup_reason) => {
-                                // The successfully-added branch remains owned and
-                                // recoverable. Do not drop it from in-memory state
-                                // before the coordinator has actually removed its
-                                // store, and expose both failures to the caller.
-                                state_dirty = dirty_before_insert;
-                                let reason = format!(
-                                    "{persist_reason}; rollback cleanup failed: {cleanup_reason}"
-                                );
-                                report.failures.push((label.clone(), reason.clone()));
-                                log_pr_skip(repo_root, Some(label), Some(pr.number), &reason);
-                            }
-                        }
-                    }
+        match track_and_persist_pr(repo_root, data_root, pr, administration, &mut state).await {
+            Ok(()) => {
+                state_dirty = false;
+                report.tracked.push(label.clone());
+                if is_new {
+                    added += 1;
                 }
+                log_daemon_event(
+                    "pr_autotrack",
+                    &[
+                        ("project", repo_root.display().to_string()),
+                        ("action", "tracked".to_string()),
+                        ("branch", label.clone()),
+                        ("pr", pr.number.to_string()),
+                        ("head", pr.head_branch.clone()),
+                    ],
+                );
             }
             Err(reason) => {
                 report.failures.push((label.clone(), reason.clone()));
@@ -720,6 +624,104 @@ async fn reconcile_project_with_administration(
         log_pr_skip(repo_root, None, None, &reason);
     }
     Ok(report)
+}
+
+async fn remove_closed_pull_requests(
+    repo_root: &Path,
+    data_root: &Path,
+    discovery_partial: bool,
+    desired: &BTreeMap<String, &DiscoveredPr>,
+    state: &mut PrAutotrackState,
+    administration: PrStoreAdministration<'_>,
+    report: &mut ReconcileReport,
+) -> bool {
+    let mut removed = false;
+    // Removals first (cheap, unblocks disk) — managed entries no longer open.
+    // Suppress them entirely when the discovery is `partial`: an incomplete
+    // listing must never be read as "these PRs closed", or a truncated `gh`
+    // page (or gh↔ls-remote flapping) would churn-untrack still-open PRs.
+    if discovery_partial {
+        report.removals_suppressed = true;
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("project", repo_root.display().to_string()),
+                ("action", "poll".to_string()),
+                ("outcome", "partial".to_string()),
+                (
+                    "reason",
+                    "removals suppressed: discovery incomplete".to_string(),
+                ),
+            ],
+        );
+    } else {
+        // Sweep leaked checkouts before removals: a `pr-worktrees/pr-<N>` dir
+        // whose PR is neither open nor managed is an orphan left by a daemon
+        // crash between `worktree add` and `save_state`. Remove it so stale
+        // worktrees don't accumulate on disk across restarts.
+        sweep_orphan_pr_worktrees(repo_root, data_root, desired, state, administration).await;
+
+        let stale: Vec<String> = state
+            .managed
+            .keys()
+            .filter(|label| !desired.contains_key(*label))
+            .cloned()
+            .collect();
+        for label in stale {
+            let Some(managed) = state.managed.get(&label).cloned() else {
+                continue;
+            };
+            match untrack_pr(repo_root, data_root, &label, &managed, administration).await {
+                Ok(()) => {
+                    state.managed.remove(&label);
+                    removed = true;
+                    report.untracked.push(label.clone());
+                    log_daemon_event(
+                        "pr_autotrack",
+                        &[
+                            ("project", repo_root.display().to_string()),
+                            ("action", "untracked".to_string()),
+                            ("branch", label),
+                            ("pr", managed.pr.to_string()),
+                        ],
+                    );
+                }
+                Err(reason) => {
+                    report.failures.push((label.clone(), reason.clone()));
+                    log_pr_skip(repo_root, Some(&label), Some(managed.pr), &reason);
+                }
+            }
+        }
+    }
+
+    removed
+}
+
+/// Publish tracking state only after activation; roll back the exact owned
+/// worktree when persistence fails, retaining ownership if cleanup cannot finish.
+async fn track_and_persist_pr(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: &DiscoveredPr,
+    administration: PrStoreAdministration<'_>,
+    state: &mut PrAutotrackState,
+) -> std::result::Result<(), String> {
+    let label = pr_label(pr.number);
+    let managed = track_pr(repo_root, data_root, pr, administration).await?;
+    state.managed.insert(label.clone(), managed.clone());
+    if let Err(error) = save_state(data_root, state) {
+        let persist_reason = format!("failed to persist managed state: {error}");
+        return match untrack_pr(repo_root, data_root, &label, &managed, administration).await {
+            Ok(()) => {
+                state.managed.remove(&label);
+                Err(persist_reason)
+            }
+            Err(cleanup_reason) => Err(format!(
+                "{persist_reason}; rollback cleanup failed: {cleanup_reason}"
+            )),
+        };
+    }
+    Ok(())
 }
 
 /// Fetches a PR head, checks it out into a linked worktree, and mounts that

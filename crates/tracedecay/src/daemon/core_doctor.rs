@@ -7,6 +7,7 @@ use tokio::time::{Duration, timeout};
 
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
+use crate::tracedecay::TraceDecay;
 use tracedecay_application::semantic_runtime::{
     SemanticConfigurationPinV1, project_lifecycle_status,
 };
@@ -260,10 +261,6 @@ async fn doctor_runtime_value_inner(
         };
         return doctor_runtime_unavailable(build_version, Some(project_path), reason);
     };
-    let graph_path = graph.db_path();
-    let canonical_graph_path = graph_path
-        .canonicalize()
-        .unwrap_or_else(|_| graph_path.clone());
     // A daemon-retained project route that passed post-open health validation
     // and has not been revoked is live evidence on its own: the fast runtime
     // snapshot projects that retained liveness instead of re-probing SQLite
@@ -275,6 +272,51 @@ async fn doctor_runtime_value_inner(
                 && entry.server.project_route_live() == Some(true)
         })
     };
+    let mut value = match Box::pin(doctor_project_runtime_snapshot(
+        &graph,
+        project_path,
+        route_live,
+        build_version,
+    ))
+    .await
+    {
+        Ok(value) => value,
+        Err(reason) => {
+            return doctor_runtime_unavailable(build_version, Some(project_path), reason);
+        }
+    };
+    if let Some(coverage) = doctor_runtime_coverage(startup_health_only) {
+        value["doctor_runtime"]["coverage"] = coverage;
+        return value;
+    }
+
+    append_observation_authority_audit(&mut value, handshake, store_administration).await;
+
+    append_session_runtime_health(&mut value, &session_path, store_administration).await;
+    let semantic_configuration = Box::pin(graph.configuration_runtime().client().current())
+        .await
+        .ok()
+        .and_then(|pinned| {
+            SemanticConfigurationPinV1::from_current(&pinned.into_current_state()).ok()
+        });
+    value["semantic_runtime"] =
+        doctor_semantic_runtime_status(Some(project_path), semantic_configuration);
+    // Model acquisition and loading are independent of serving-generation
+    // readiness; both observations come from this exact mounted project.
+    value["semantic_model"] = json!(project_lifecycle_status(project_path));
+    value
+}
+
+async fn doctor_project_runtime_snapshot(
+    graph: &TraceDecay,
+    project_path: &Path,
+    route_live: bool,
+    build_version: &str,
+) -> std::result::Result<serde_json::Value, &'static str> {
+    let graph_path = graph.db_path();
+    let canonical_graph_path = graph_path
+        .canonicalize()
+        .unwrap_or_else(|_| graph_path.clone());
     let (quick_check_ok, quick_check_error) = if route_live {
         (None, None)
     } else {
@@ -282,11 +324,7 @@ async fn doctor_runtime_value_inner(
             Ok(None) => (Some(true), None),
             Ok(Some(problem)) => (Some(false), Some(problem)),
             Err(_) => {
-                return doctor_runtime_unavailable(
-                    build_version,
-                    Some(project_path),
-                    "project_store_unavailable",
-                );
+                return Err("project_store_unavailable");
             }
         }
     };
@@ -318,17 +356,13 @@ async fn doctor_runtime_value_inner(
         {
             Ok(version) => Some(version),
             Err(_) => {
-                return doctor_runtime_unavailable(
-                    build_version,
-                    Some(project_path),
-                    "project_schema_unavailable",
-                );
+                return Err("project_schema_unavailable");
             }
         }
     };
     let schema_state = schema_version.map(doctor_graph_schema_state);
     let schema_drift = schema_state.map(|state| state != DoctorGraphSchemaState::Current);
-    let mut value = json!({
+    Ok(json!({
         "tracedecay_version": build_version,
         "process": {
             "pid": std::process::id(),
@@ -351,12 +385,14 @@ async fn doctor_runtime_value_inner(
             "reason": null,
             "read_only": true,
         },
-    });
-    if let Some(coverage) = doctor_runtime_coverage(startup_health_only) {
-        value["doctor_runtime"]["coverage"] = coverage;
-        return value;
-    }
+    }))
+}
 
+async fn append_observation_authority_audit(
+    value: &mut serde_json::Value,
+    handshake: &DaemonHandshake,
+    store_administration: &super::StoreAdministration,
+) {
     let registry = Box::pin(store_administration.registered_profile_database())
         .await
         .ok();
@@ -399,10 +435,16 @@ async fn doctor_runtime_value_inner(
     // key still see the same vocabulary.
     value["database"]["authority_audit_error"] =
         json!(authority_detail.or_else(|| authority_reason.map(str::to_string)));
+}
 
+async fn append_session_runtime_health(
+    value: &mut serde_json::Value,
+    session_path: &Path,
+    store_administration: &super::StoreAdministration,
+) {
     let canonical_session_path = session_path
         .canonicalize()
-        .unwrap_or_else(|_| session_path.clone());
+        .unwrap_or_else(|_| session_path.to_path_buf());
     let session_db = Box::pin(store_administration.mounted_registered_session_databases())
         .await
         .into_iter()
@@ -461,18 +503,6 @@ async fn doctor_runtime_value_inner(
         });
         value["cursor_session_placeholder_paths"] = json!([]);
     }
-    let semantic_configuration = Box::pin(graph.configuration_runtime().client().current())
-        .await
-        .ok()
-        .and_then(|pinned| {
-            SemanticConfigurationPinV1::from_current(&pinned.into_current_state()).ok()
-        });
-    value["semantic_runtime"] =
-        doctor_semantic_runtime_status(Some(project_path), semantic_configuration);
-    // Model acquisition and loading are independent of serving-generation
-    // readiness; both observations come from this exact mounted project.
-    value["semantic_model"] = json!(project_lifecycle_status(project_path));
-    value
 }
 
 fn doctor_semantic_runtime_status(
