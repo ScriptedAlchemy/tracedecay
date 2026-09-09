@@ -238,6 +238,15 @@ impl BranchMeta {
         self.branches.contains_key(name)
     }
 
+    /// Returns true when a tracked branch has enough provenance to serve
+    /// queries. The default branch owns the legacy canonical store; every
+    /// other branch becomes eligible only after its exact source is sealed.
+    pub fn is_query_eligible(&self, name: &str) -> bool {
+        self.branches
+            .get(name)
+            .is_some_and(|entry| name == self.default_branch || entry.graph_source.is_some())
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.default_branch.is_empty() {
             return Err("default_branch must not be empty".to_string());
@@ -598,6 +607,8 @@ mod tests {
         let mut meta = BranchMeta::new("main");
         meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
         assert!(meta.is_tracked("feature/foo"));
+        assert!(!meta.is_query_eligible("feature/foo"));
+        assert!(meta.is_query_eligible("main"));
         assert_eq!(meta.branches["feature/foo"].parent.as_deref(), Some("main"));
 
         let removed = meta.remove_branch("feature/foo");

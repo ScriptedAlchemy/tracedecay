@@ -2579,7 +2579,7 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
 /// rather than asserting a success the product does not offer there.
 #[cfg(unix)]
 #[test]
-fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifacts() {
+fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifacts() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
@@ -2597,12 +2597,30 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
 
     assert!(
         output.status.success(),
-        "branch add must complete the daemon's exact branch sealing journey\nstdout:\n{}\nstderr:\n{}",
+        "branch add must admit exact branch publication\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
-        .expect("branch add must publish tracking metadata in the profile shard");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("indexing continues in the background"),
+        "branch add must report truthful pending state"
+    );
+    let started = Instant::now();
+    let meta = loop {
+        if let Ok(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
+            && meta
+                .branches
+                .get("feature/new")
+                .is_some_and(|entry| entry.graph_source.is_some())
+        {
+            break meta;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "background branch publication did not seal exact provenance"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     let entry = meta
         .branches
         .get("feature/new")
@@ -2615,7 +2633,7 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
     let source = entry
         .graph_source
         .as_ref()
-        .expect("branch add must seal exact branch provenance before replying");
+        .expect("background branch publication must seal exact provenance");
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(&project_root)

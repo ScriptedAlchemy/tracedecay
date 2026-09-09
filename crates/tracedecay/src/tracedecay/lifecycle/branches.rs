@@ -184,6 +184,13 @@ impl TraceDecay {
                 message: format!("branch '{branch_name}' is not tracked"),
             });
         }
+        if !meta.is_query_eligible(branch_name) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "branch '{branch_name}' is still indexing; exact provenance has not been published"
+                ),
+            });
+        }
         let db_path = store_layout.graph_db_path.clone();
 
         if !db_path.exists() {

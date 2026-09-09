@@ -151,25 +151,46 @@ async fn activate_and_track_manual_branch(
     let branch = branch.to_owned();
 
     administration
-        .run_manual_branch_publication(|cancellation| async move {
-            let lifecycle =
-                try_acquire_manual_branch_lifecycle(&data_root, &branch).map_err(|error| {
-                    TraceDecayError::project_route(
-                        error.reason_code(),
-                        error.retryable(),
-                        error.detail(),
-                    )
-                })?;
-            activate_and_track_manual_branch_owned(
-                project_root,
-                graph,
-                schedulers,
-                branch,
-                data_root,
-                lifecycle,
-                cancellation,
-            )
-            .await
+        .admit_manual_branch_publication(|cancellation| async move {
+            let result = async {
+                let lifecycle =
+                    try_acquire_manual_branch_lifecycle(&data_root, &branch).map_err(|error| {
+                        TraceDecayError::project_route(
+                            error.reason_code(),
+                            error.retryable(),
+                            error.detail(),
+                        )
+                    })?;
+                activate_and_track_manual_branch_owned(
+                    project_root,
+                    graph,
+                    schedulers,
+                    branch.clone(),
+                    data_root,
+                    lifecycle,
+                    cancellation,
+                )
+                .await
+            }
+            .await;
+            match &result {
+                Ok(outcome) => super::log_daemon_event(
+                    "manual_branch_publication",
+                    &[
+                        ("branch", branch.clone()),
+                        ("outcome", branch_add_outcome_name(outcome).to_owned()),
+                    ],
+                ),
+                Err(error) => super::log_daemon_event(
+                    "manual_branch_publication",
+                    &[
+                        ("branch", branch.clone()),
+                        ("outcome", "failed".to_owned()),
+                        ("reason", error.to_string()),
+                    ],
+                ),
+            }
+            result
         })
         .await
 }
