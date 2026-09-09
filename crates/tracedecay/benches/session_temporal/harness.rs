@@ -858,89 +858,95 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
 }
 
 async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurement> {
-    let prepared = prepare_repetition(repetition).await?;
-    let record_count = prepared.root_record_count;
-    if record_count < root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT {
-        return Err(format!(
-            "root refresh persisted {record_count} records for {} participant sessions",
-            root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT
-        ));
-    }
-    let replay_started = Instant::now();
-    prepared
-        .registered
-        .complete_session_refresh_result(
-            prepared.complete_request.clone(),
-            ExecutionControl::new(None),
-        )
-        .await
-        .map_err(|error| format!("exact replay complete: {error:?}"))?;
-    let exact_replay_ns = elapsed_ns(replay_started);
+    // Keep fixture setup and retrieval state in one owned frame per repetition.
+    // Allocate before entering its body so phase timers measure the same work.
+    Box::pin(async move {
+        let prepared = prepare_repetition(repetition).await?;
+        let record_count = prepared.root_record_count;
+        if record_count < root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT {
+            return Err(format!(
+                "root refresh persisted {record_count} records for {} participant sessions",
+                root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT
+            ));
+        }
+        let replay_started = Instant::now();
+        prepared
+            .registered
+            .complete_session_refresh_result(
+                prepared.complete_request.clone(),
+                ExecutionControl::new(None),
+            )
+            .await
+            .map_err(|error| format!("exact replay complete: {error:?}"))?;
+        let exact_replay_ns = elapsed_ns(replay_started);
 
-    let execution = RegisteredGlobalDbSessionTemporalExecution::new(prepared.registered.as_ref());
-    let retrieval = SessionRetrievalService::new(
-        AllowAuthorizer,
-        &execution,
-        Words("words-v1"),
-        SessionRetrievalConfiguration::new(3, 5).unwrap(),
-    );
-    let query = |grain: RetrievalGrainV1, text: &str| {
-        SessionTemporalQuery::new(
-            prepared.session.clone(),
-            Some("codex".to_owned()),
-            text.to_owned(),
-            None,
-            TemporalModeV1::Current,
-            grain,
-            8,
-            DiversityLimits::default(),
-            ContextBudget {
-                max_bytes: 64_000,
-                max_tokens: 16_000,
-                estimator_version: "words-v1".to_owned(),
-            },
-        )
-        .unwrap()
-    };
+        let execution =
+            RegisteredGlobalDbSessionTemporalExecution::new(prepared.registered.as_ref());
+        let retrieval = SessionRetrievalService::new(
+            AllowAuthorizer,
+            &execution,
+            Words("words-v1"),
+            SessionRetrievalConfiguration::new(3, 5).unwrap(),
+        );
+        let query = |grain: RetrievalGrainV1, text: &str| {
+            SessionTemporalQuery::new(
+                prepared.session.clone(),
+                Some("codex".to_owned()),
+                text.to_owned(),
+                None,
+                TemporalModeV1::Current,
+                grain,
+                8,
+                DiversityLimits::default(),
+                ContextBudget {
+                    max_bytes: 64_000,
+                    max_tokens: 16_000,
+                    estimator_version: "words-v1".to_owned(),
+                },
+            )
+            .unwrap()
+        };
 
-    let compact_started = Instant::now();
-    require_retrieval_success(
-        "compact_rank",
-        retrieval
+        let compact_started = Instant::now();
+        require_retrieval_success(
+            "compact_rank",
+            retrieval
+                .retrieve(
+                    &prepared.context,
+                    &prepared.binding,
+                    query(RetrievalGrainV1::LogicalMessage, "pipeline"),
+                )
+                .await,
+        )?;
+        let compact_rank_ns = elapsed_ns(compact_started);
+
+        // Preserve the frozen wire shape: the existing late-hydrate sample records
+        // the root-wide occurrence hydration rather than minting another phase.
+        let hydrate_started = Instant::now();
+        let root_hydration = retrieval
             .retrieve(
                 &prepared.context,
                 &prepared.binding,
-                query(RetrievalGrainV1::LogicalMessage, "pipeline"),
+                root_relation_fixture::root_relation_query(prepared.session.clone())?,
             )
-            .await,
-    )?;
-    let compact_rank_ns = elapsed_ns(compact_started);
+            .await;
+        root_relation_fixture::require_root_relation_hydration(
+            root_hydration,
+            &prepared.root_sessions,
+        )?;
+        let late_hydrate_ns = elapsed_ns(hydrate_started);
 
-    // Preserve the frozen wire shape: the existing late-hydrate sample records
-    // the root-wide occurrence hydration rather than minting another phase.
-    let hydrate_started = Instant::now();
-    let root_hydration = retrieval
-        .retrieve(
-            &prepared.context,
-            &prepared.binding,
-            root_relation_fixture::root_relation_query(prepared.session.clone())?,
-        )
-        .await;
-    root_relation_fixture::require_root_relation_hydration(
-        root_hydration,
-        &prepared.root_sessions,
-    )?;
-    let late_hydrate_ns = elapsed_ns(hydrate_started);
-
-    Ok(RepetitionMeasurement {
-        phase_latencies: vec![
-            (Phase::RebuildActivate, prepared.rebuild_activate_ns),
-            (Phase::ExactReplay, exact_replay_ns),
-            (Phase::CompactRank, compact_rank_ns),
-            (Phase::LateHydrate, late_hydrate_ns),
-        ],
-        record_count,
+        Ok(RepetitionMeasurement {
+            phase_latencies: vec![
+                (Phase::RebuildActivate, prepared.rebuild_activate_ns),
+                (Phase::ExactReplay, exact_replay_ns),
+                (Phase::CompactRank, compact_rank_ns),
+                (Phase::LateHydrate, late_hydrate_ns),
+            ],
+            record_count,
+        })
     })
+    .await
 }
 
 fn enroll_benchmark_project(project: &Path) -> BenchResult<ProjectId> {
@@ -1306,6 +1312,22 @@ mod tests {
         fs::write(temp.path().join("source.txt"), "dirty\n").unwrap();
         let error = clean_source_commit(temp.path()).unwrap_err();
         assert!(error.contains("tracked changes"), "{error}");
+    }
+
+    #[test]
+    fn capture_driver_keeps_repetition_state_out_of_caller_frames() {
+        let repetition = run_one_repetition(0);
+        let capture = capture_measurement();
+        let repetition_bytes = std::mem::size_of_val(&repetition);
+        let capture_bytes = std::mem::size_of_val(&capture);
+        println!(
+            "repetition future: {repetition_bytes} bytes; capture future: {capture_bytes} bytes"
+        );
+        assert!(
+            repetition_bytes < 16_384,
+            "repetition future: {repetition_bytes}"
+        );
+        assert!(capture_bytes < 16_384, "capture future: {capture_bytes}");
     }
 
     #[tokio::test]
