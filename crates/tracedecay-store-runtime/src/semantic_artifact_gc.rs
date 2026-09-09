@@ -1,29 +1,22 @@
-//! Background maintenance owned by the daemon root.
-//!
-//! Long-lived-process opt-in for session-store maintenance, and the periodic
-//! semantic artifact GC whose task is joined during daemon shutdown.
+//! Periodic semantic-artifact GC whose task handle is joined during shutdown.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::*;
+use tokio::task::JoinHandle;
 
-/// Enables background maintenance only for long-lived daemon/MCP processes.
-///
-/// Session-store mounts retain the registered database authority for the
-/// lifetime of each maintenance task. One-shot commands never enable it.
-pub fn mark_process_long_lived_for_session_maintenance() {
-    tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
-}
+use crate::DaemonSessionRuntimeRegistryV1;
 
 const SEMANTIC_ARTIFACT_GC_PERIOD: Duration = Duration::from_hours(24);
 
+/// Admitted handle for the process-wide semantic artifact GC task.
 #[derive(Clone)]
-pub(super) struct SemanticArtifactGcMaintenanceTask {
+pub struct SemanticArtifactGcMaintenanceTask {
     task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl SemanticArtifactGcMaintenanceTask {
-    pub(super) fn cancel(&self) {
+    pub fn cancel(&self) {
         if let Ok(task) = self.task.try_lock()
             && let Some(task) = task.as_ref()
         {
@@ -32,7 +25,7 @@ impl SemanticArtifactGcMaintenanceTask {
     }
 
     #[hotpath::skip]
-    pub(super) async fn shutdown(self) -> std::result::Result<(), String> {
+    pub async fn shutdown(self) -> std::result::Result<(), String> {
         let mut retained = self.task.lock().await;
         let Some(task) = retained.as_mut() else {
             return Ok(());
@@ -54,8 +47,9 @@ impl Drop for SemanticArtifactGcMaintenanceTask {
     }
 }
 
-pub(super) fn spawn_semantic_artifact_gc_maintenance(
-    registry: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
+/// Spawn the admitted semantic-artifact GC task for a live session registry.
+pub fn spawn_semantic_artifact_gc_maintenance(
+    registry: Arc<DaemonSessionRuntimeRegistryV1>,
 ) -> SemanticArtifactGcMaintenanceTask {
     let task = tokio::spawn(hotpath::future!(
         async move {
@@ -73,9 +67,6 @@ pub(super) fn spawn_semantic_artifact_gc_maintenance(
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                // The task-lifetime future above measures the whole loop; this
-                // wall span is one GC sweep, the unit a hang or cost regression
-                // is diagnosed against.
                 let receipts = hotpath::measure_block!(
                     "daemon.maintenance.semantic_artifact_gc_sweep",
                     owner.run_daemon_artifact_gc(now_unix)
@@ -88,7 +79,7 @@ pub(super) fn spawn_semantic_artifact_gc_maintenance(
                     Err(_) => {
                         hotpath::gauge!("daemon.maintenance.semantic_artifact_gc.failed_total")
                             .inc(1_u64);
-                        log_daemon_event(
+                        crate::session_registry::log_store_runtime_event(
                             "semantic_artifact_gc",
                             &[("outcome", "retry_next_interval".to_owned())],
                         );

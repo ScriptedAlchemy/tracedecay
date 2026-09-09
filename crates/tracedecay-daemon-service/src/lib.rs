@@ -61,6 +61,7 @@ pub mod callable_code_authorization;
 pub mod invocation;
 mod mcp_project_registry;
 mod mcp_workflow_index;
+pub mod profile_host_admission_replay;
 pub mod project_owner_registration;
 pub mod project_runtime;
 pub mod query_authority_provider;
@@ -109,6 +110,12 @@ pub use invocation::{
 };
 pub use mcp_project_registry::DaemonProjectRegistryReadService;
 pub use mcp_workflow_index::DaemonWorkflowIndexReadService;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use profile_host_admission_replay::BootstrapCompletion;
+pub use profile_host_admission_replay::{
+    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
+    ProfileHostAdmissionReplayPass, ProfileHostAdmissionReplayRegistry,
+};
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
     ProjectRuntimePublicationAttemptV1, ProjectRuntimePublicationStateV1,
@@ -128,7 +135,7 @@ pub use query_mcp_admission::{
 };
 pub use remote_protocol::build_daemon_remote_protocol_router;
 pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
-pub use shutdown_coordination::{ShutdownCoordinatorV1, ShutdownStatus};
+pub use shutdown_coordination::ShutdownCoordinatorV1;
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
     DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,

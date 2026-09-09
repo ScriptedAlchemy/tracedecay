@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use super::super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
 use super::{StoreAdministration, StoreOwnerKey};
+use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
 
 pub(super) struct ProjectServerRetirement {
     pub(super) owner: StoreOwnerKey,
@@ -126,14 +126,14 @@ pub(in crate::daemon) struct ProjectRetirementFenceV1 {
     // removed by this temporary recovery guard.
     _invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
     _project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
-    _writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
+    _writer: tracedecay_store_runtime::WriterAdmissionGuard,
 }
 
 impl ProjectRetirementFenceV1 {
     pub(super) fn new(
         invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
         project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
-        writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
+        writer: tracedecay_store_runtime::WriterAdmissionGuard,
     ) -> Self {
         Self {
             _invocation: invocation,
@@ -470,7 +470,7 @@ mod tests {
 
     use super::*;
     use crate::daemon::project_server_lifecycle;
-    use crate::daemon::store_writer_gate::{StoreWriterClass, WriterScope};
+    use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
     fn owner(project_id: &str) -> StoreOwnerKey {
         isolated_owner(std::path::Path::new("/profile"), project_id)

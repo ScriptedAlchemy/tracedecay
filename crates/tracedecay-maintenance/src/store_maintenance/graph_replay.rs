@@ -1,12 +1,13 @@
 use std::path::Path;
 
-use super::{TraceDecay, log_daemon_event};
+use crate::lease::ProjectStoreMaintenanceLeaseV1;
+use crate::log_maintenance_event;
 use tracedecay_code_index_retention::code_index_generations::{
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
     try_acquire_code_generation_store_lock,
 };
 
-pub(super) enum ReconcileOutcome {
+pub enum ReconcileOutcome {
     /// Every queued release event has been consumed.
     Complete,
     /// The bounded page was served and more queued release events remain; the
@@ -36,8 +37,8 @@ fn retire_generation_read_bundle(store_root: &Path, generation_file: &str) -> Re
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn log_code_generation_retention_degraded(
-    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+pub fn log_code_generation_retention_degraded(
+    observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
     project_root: &Path,
     failure: &str,
 ) {
@@ -47,8 +48,8 @@ pub(super) fn log_code_generation_retention_degraded(
 /// Shared deferral for a held graph-replay pool: the outer probe and the
 /// collection executor's typed busy result arm the same backoff and must
 /// not keep the daemon writer gate.
-pub(super) fn defer_graph_replay_pool_busy(
-    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+pub fn defer_graph_replay_pool_busy(
+    observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
     project_root: &Path,
 ) -> super::CodeGenerationRetentionOutcomeV1 {
     observations.record_graph_replay_release_unhealthy(project_root);
@@ -62,12 +63,12 @@ pub(super) fn defer_graph_replay_pool_busy(
 /// on every retention tick with no way to tell an unregistered graph shard
 /// from a pool-lock deadline from a conflict.
 fn log_code_generation_retention_degraded_with_error(
-    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
     failure: &str,
     error: &dyn std::fmt::Debug,
 ) {
     observations.mark_loud_retention_log();
-    log_daemon_event(
+    log_maintenance_event(
         "retention_degraded",
         &[
             ("pass", "code_generations".to_string()),
@@ -103,7 +104,7 @@ fn release_failure_is_runtime_unhealthy(error: &tracedecay_graph_db::GraphDbErro
 /// probe-to-execute window defers with `GraphReplayPoolBusy` instead of
 /// pinning the daemon writer gate.
 #[hotpath::measure(label = "daemon.git.maintenance.replay_pool_probe")]
-pub(super) fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
+pub fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
     if !replay_pool_root.is_dir() {
         return false;
     }
@@ -120,16 +121,16 @@ pub(super) fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
 }
 
 #[hotpath::measure(label = "daemon.git.maintenance.graph_replay_release", future = true)]
-pub(super) async fn reconcile_graph_replay_releases(
-    graph: &TraceDecay,
+pub async fn reconcile_graph_replay_releases(
+    lease: &ProjectStoreMaintenanceLeaseV1,
     store_root: &Path,
-    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> ReconcileOutcome {
-    let Some(project_id) = graph.hook_store_layout().identity.project_id.as_ref() else {
+    let Some(project_id) = lease.store_layout().identity.project_id.as_ref() else {
         log_code_generation_retention_degraded(
             observations,
-            graph.project_root(),
+            lease.project_root(),
             "graph_replay_project_identity_unavailable",
         );
         return ReconcileOutcome::Failed;
@@ -139,13 +140,13 @@ pub(super) async fn reconcile_graph_replay_releases(
         Err(_) => {
             log_code_generation_retention_degraded(
                 observations,
-                graph.project_root(),
+                lease.project_root(),
                 "graph_replay_project_identity_invalid",
             );
             return ReconcileOutcome::Failed;
         }
     };
-    let project_root = graph.project_root();
+    let project_root = lease.project_root();
     // A runtime that answered its last attempts with deadline or
     // unavailability failures is skipped for the bounded backoff window
     // instead of being polled — and timed out against — on every tick. The
@@ -156,11 +157,11 @@ pub(super) async fn reconcile_graph_replay_releases(
         return ReconcileOutcome::Deferred;
     }
     let staging_cursor = observations.graph_staging_release_cursor(project_root);
-    let staging_release = graph
-        .store_runtime_registry()
+    let staging_release = lease
+        .store_runtime()
         .release_one_sealed_generation_staging_rows(
             project_id.clone(),
-            graph.db(),
+            lease.graph_db(),
             cancellation,
             staging_cursor,
         )
@@ -203,11 +204,11 @@ pub(super) async fn reconcile_graph_replay_releases(
         if cancellation.is_cancelled() {
             return ReconcileOutcome::Failed;
         }
-        match graph
-            .store_runtime_registry()
+        match lease
+            .store_runtime()
             .reconcile_deleted_code_generation_graph_replays(
                 project_id.clone(),
-                graph.db(),
+                lease.graph_db(),
                 &release.generation.generation_id,
                 &release.generation.generation_file,
                 cancellation,
@@ -223,7 +224,7 @@ pub(super) async fn reconcile_graph_replay_releases(
                     retire_generation_read_bundle(store_root, &release.generation.generation_file)
                 {
                     observations.mark_loud_retention_log();
-                    log_daemon_event(
+                    log_maintenance_event(
                         "retention_degraded",
                         &[
                             ("pass", "code_generations".to_string()),

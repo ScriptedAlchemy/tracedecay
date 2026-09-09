@@ -9,11 +9,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use crate::daemon::maintenance::{
-    SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
-    StoreTelemetrySamplingRegistry,
-};
-use crate::daemon::store_writer_gate::{StoreWriterGates, WriterScope};
+use crate::daemon::maintenance::project_store_maintenance_lease;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_retention::code_index_generations::{
@@ -26,15 +22,20 @@ use tracedecay_code_index_retention::code_index_generations::{
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
 use tracedecay_domain::UtcMicros;
-use tracedecay_semantic_contracts::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
-};
-
-use super::{
+use tracedecay_maintenance::store_maintenance::{
     CodeGenerationRetentionOutcomeV1, VectorRetentionInventoryV1, apply_code_generation_retention,
     classify_vector_readable_sources, resolve_vector_retention_inventory,
     run_code_generation_retention, run_semantic_vector_generation_retention,
+    semantic_retrieval_profiles_disabled,
 };
+use tracedecay_maintenance::telemetry::{
+    SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
+    StoreTelemetrySamplingRegistry,
+};
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
+};
+use tracedecay_store_runtime::{StoreWriterGates, WriterScope};
 
 const FIXTURE_GENERATION_COUNT: usize = 6;
 
@@ -247,7 +248,7 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
         document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
     };
     assert!(
-        super::semantic_retrieval_profiles_disabled(&disabled),
+        semantic_retrieval_profiles_disabled(&disabled),
         "no committed retrieval profile is the genuine Plan 20 default-off state"
     );
 
@@ -256,7 +257,7 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
         ..disabled.clone()
     };
     assert!(
-        !super::semantic_retrieval_profiles_disabled(&active),
+        !semantic_retrieval_profiles_disabled(&active),
         "a committed active profile expects a seated coordinator: stay retryable"
     );
 
@@ -265,7 +266,7 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
         ..disabled
     };
     assert!(
-        !super::semantic_retrieval_profiles_disabled(&rollback_only),
+        !semantic_retrieval_profiles_disabled(&rollback_only),
         "a committed rollback profile still pins vector machinery: stay retryable"
     );
 }
@@ -280,7 +281,7 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
     for pass in 0..2_usize {
         assert!(
             run_semantic_vector_generation_retention(
-                &fixture.graph,
+                &project_store_maintenance_lease(&fixture.graph),
                 &fixture.schedulers,
                 &fixture.observations,
                 &fixture.cancellation,
@@ -295,7 +296,7 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
             "pass {pass}: the census read must pin the typed unseated state"
         );
         let inventory = resolve_vector_retention_inventory(
-            &fixture.graph,
+            &project_store_maintenance_lease(&fixture.graph),
             &fixture.schedulers,
             &fixture.observations,
         )
@@ -311,7 +312,7 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
         );
         assert_eq!(
             run_code_generation_retention(
-                &fixture.graph,
+                &project_store_maintenance_lease(&fixture.graph),
                 &fixture.schedulers,
                 &fixture.observations,
                 &fixture.cancellation,
@@ -349,22 +350,22 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
             ticks <= FIXTURE_GENERATION_COUNT + 2,
             "the generation-maintenance unit must converge instead of continuing forever"
         );
-        let outcome = crate::daemon::maintenance::generation::run_project_generation_maintenance(
-            &fixture.graph,
+        let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
+            &project_store_maintenance_lease(&fixture.graph),
             &fixture.schedulers,
             &fixture.observations,
             &fixture.cancellation,
-            &crate::config::RetentionConfig::default(),
+            None,
             continuation,
         )
         .await;
         match outcome {
-            crate::daemon::maintenance::MaintenanceTickOutcome::Complete => break,
-            crate::daemon::maintenance::MaintenanceTickOutcome::Continue(
-                crate::daemon::maintenance::MaintenanceContinuation::CodeGenerationRetention,
+            tracedecay_maintenance::tick::MaintenanceTickOutcome::Complete => break,
+            tracedecay_maintenance::tick::MaintenanceTickOutcome::Continue(
+                tracedecay_maintenance::tick::MaintenanceContinuation::CodeGenerationRetention,
             ) => {
                 continuation = Some(
-                    crate::daemon::maintenance::MaintenanceContinuation::CodeGenerationRetention,
+                    tracedecay_maintenance::tick::MaintenanceContinuation::CodeGenerationRetention,
                 );
             }
             other => panic!("unexpected generation-maintenance outcome: {other:?}"),
@@ -387,13 +388,13 @@ async fn semantic_vector_continuation_skips_code_generation_retention() {
     let fixture = open_unseated_graph_fixture().await;
     let before = sealed_generation_files(&fixture.store_root);
 
-    let outcome = crate::daemon::maintenance::generation::run_project_generation_maintenance(
-        &fixture.graph,
+    let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
+        &project_store_maintenance_lease(&fixture.graph),
         &fixture.schedulers,
         &fixture.observations,
         &fixture.cancellation,
-        &crate::config::RetentionConfig::default(),
-        Some(crate::daemon::maintenance::MaintenanceContinuation::SemanticVectorRetention),
+        None,
+        Some(tracedecay_maintenance::tick::MaintenanceContinuation::SemanticVectorRetention),
     )
     .await;
 
@@ -414,7 +415,7 @@ async fn scanning_census_defers_the_sweep_without_the_degraded_reason() {
     record_paging_census(&fixture.observations, fixture.graph.project_root());
 
     let inventory = resolve_vector_retention_inventory(
-        &fixture.graph,
+        &project_store_maintenance_lease(&fixture.graph),
         &fixture.schedulers,
         &fixture.observations,
     )
@@ -431,7 +432,7 @@ async fn scanning_census_defers_the_sweep_without_the_degraded_reason() {
 
     assert_eq!(
         run_code_generation_retention(
-            &fixture.graph,
+            &project_store_maintenance_lease(&fixture.graph),
             &fixture.schedulers,
             &fixture.observations,
             &fixture.cancellation,
@@ -454,7 +455,7 @@ async fn unknown_census_reports_offline_and_retains_every_source() {
     // Unknown (no progress recorded at all) stays a reported degradation:
     // a seated runtime whose census was reset by a failure or mutation.
     let inventory = resolve_vector_retention_inventory(
-        &fixture.graph,
+        &project_store_maintenance_lease(&fixture.graph),
         &fixture.schedulers,
         &fixture.observations,
     )
@@ -476,7 +477,7 @@ async fn unknown_census_reports_offline_and_retains_every_source() {
     for pass in 0..2_usize {
         assert_eq!(
             run_code_generation_retention(
-                &fixture.graph,
+                &project_store_maintenance_lease(&fixture.graph),
                 &fixture.schedulers,
                 &fixture.observations,
                 &fixture.cancellation,
@@ -541,7 +542,7 @@ async fn reset_corrupt_and_denied_vector_authorities_refuse_the_sweep() {
         );
         assert_eq!(
             apply_code_generation_retention(
-                &fixture.graph,
+                &project_store_maintenance_lease(&fixture.graph),
                 &fixture.schedulers,
                 &fixture.observations,
                 inventory,
@@ -624,7 +625,7 @@ async fn held_replay_pool_defers_then_backs_off_then_recovers() {
     // collection or release work starts; nothing blocks on the holder.
     assert_eq!(
         run_code_generation_retention(
-            &fixture.graph,
+            &project_store_maintenance_lease(&fixture.graph),
             &fixture.schedulers,
             &fixture.observations,
             &fixture.cancellation,
@@ -652,7 +653,7 @@ async fn held_replay_pool_defers_then_backs_off_then_recovers() {
     // evidence durably queued.
     assert_eq!(
         run_code_generation_retention(
-            &fixture.graph,
+            &project_store_maintenance_lease(&fixture.graph),
             &fixture.schedulers,
             &fixture.observations,
             &fixture.cancellation,
@@ -677,7 +678,7 @@ async fn held_replay_pool_defers_then_backs_off_then_recovers() {
     // backlog as bounded progress.
     assert_eq!(
         run_code_generation_retention(
-            &fixture.graph,
+            &project_store_maintenance_lease(&fixture.graph),
             &fixture.schedulers,
             &fixture.observations,
             &fixture.cancellation,

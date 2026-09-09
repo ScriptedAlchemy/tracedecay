@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_runtime_core::branch::BranchAddOutcome;
 
 use super::{
     PrCommandControlV1, PrGitCommandError, pr_label, pr_tracking_ref, run_git_with_control,
@@ -15,6 +16,26 @@ const GIT_AUTHORITY_UNAVAILABLE: &str = "git_authority_unavailable";
 const INVALID_BRANCH_REF: &str = "invalid_branch_ref";
 const BRANCH_ACTIVATION_FAILED: &str = "branch_activation_failed";
 const BRANCH_LIFECYCLE_CONTENDED: &str = "branch_lifecycle_contended";
+
+/// Outcome of a successful manual branch-head activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualBranchActivation {
+    pub branch: String,
+    pub head_sha: String,
+    pub worktree: PathBuf,
+    pub outcome: BranchAddOutcome,
+}
+
+/// A summary of what one reconcile pass changed, for logging and tests.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub tracked: Vec<String>,
+    pub untracked: Vec<String>,
+    pub skipped_forks: Vec<u64>,
+    pub capped: bool,
+    pub removals_suppressed: bool,
+    pub failures: Vec<(String, String)>,
+}
 
 /// The exact Git and filesystem artifacts owned by one manually activated
 /// branch. The raw branch name remains the Git ref identity; only the
@@ -31,7 +52,7 @@ pub struct ManualBranchArtifactsV1 {
 }
 
 impl ManualBranchArtifactsV1 {
-    fn for_branch(data_root: &Path, branch: &str) -> Self {
+    pub fn for_branch(data_root: &Path, branch: &str) -> Self {
         let branch_digest = sha256_hex(branch.as_bytes());
         Self {
             branch: branch.to_owned(),
@@ -942,6 +963,113 @@ fn remove_worktree(
         })?;
     }
     Ok(())
+}
+
+pub async fn cleanup_owned_worktree_off_runtime(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let worktree = worktree.to_path_buf();
+    let tracking_ref = tracking_ref.to_owned();
+    let label = label.to_owned();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        cleanup_owned_worktree(
+            &repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch cleanup task did not complete: {error}"
+        ))
+    })?
+}
+
+pub async fn manual_branch_artifact_ownership_off_runtime(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let worktree = worktree.to_path_buf();
+    let tracking_ref = tracking_ref.to_owned();
+    let label = label.to_owned();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        manual_branch_artifact_ownership(
+            &repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch ownership check task did not complete: {error}"
+        ))
+    })?
+}
+
+pub async fn manual_branch_artifacts_match_off_runtime(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    expected_head: &str,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let artifacts = artifacts.clone();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        manual_branch_artifacts_match(&repo_root, &artifacts, &expected_head, &command_control)
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch exactness inspection task did not complete: {error}"
+        ))
+    })?
+}
+
+pub async fn cleanup_pr_worktree_off_runtime(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    expected_head: &str,
+    remove_synthetic_branch: bool,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
+    let repo_root = repo_root.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        cleanup_pr_worktree(
+            &repo_root,
+            &data_root,
+            pr,
+            &expected_head,
+            remove_synthetic_branch,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| PrCleanupError::Join(error.to_string()))?
 }
 
 #[cfg(test)]

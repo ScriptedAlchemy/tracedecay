@@ -14,13 +14,14 @@ use tracedecay_daemon_service::{
     DaemonPrimitiveRuntimeRegistrationError, daemon_operation_event_authority,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_graph_query::SourceReadContext;
 use tracedecay_session_runtime::session_retrieval::DaemonSessionLookupPrimitiveV1;
 
 #[hotpath::measure(label = "daemon.project.owners.primitive", future = true)]
 pub(super) async fn open_and_register_project_primitive_runtime(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    graph: Arc<crate::tracedecay::TraceDecay>,
+    source: SourceReadContext,
     server: &McpServer,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     access: ProjectSourceAccessSnapshot,
@@ -41,12 +42,6 @@ pub(super) async fn open_and_register_project_primitive_runtime(
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
         server.project_session_application_retrieval_service(&access.scope)?,
     ));
-    let source = graph
-        .source_read_context()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open primitive runtime requires an exact registered source identity"
-                .to_owned(),
-        })?;
     invocation
         .primitive_runtime_registrar()
         .open_and_register(
