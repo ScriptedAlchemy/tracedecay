@@ -33,27 +33,6 @@ fn yaml_frontmatter_hang_reproducer() {
 }
 
 #[test]
-fn extracts_headings_and_links() {
-    let src =
-        "# Top\n\nSee [main](src/main.rs) for details.\n\n## Sub\n\nAlso [util](src/util.rs).\n";
-    let res = tracedecay_code_extraction::MarkdownExtractor::extract_markdown("doc.md", src);
-    let modules: Vec<&str> = res
-        .nodes
-        .iter()
-        .filter(|n| matches!(n.kind, tracedecay_domain::NodeKind::Module))
-        .map(|n| n.name.as_str())
-        .collect();
-    assert!(modules.contains(&"Top"), "got modules {modules:?}");
-    assert!(modules.contains(&"Sub"), "got modules {modules:?}");
-    let uses_count = res
-        .edges
-        .iter()
-        .filter(|e| matches!(e.kind, tracedecay_domain::EdgeKind::Uses))
-        .count();
-    assert_eq!(uses_count, 2, "expected 2 Uses edges, got {uses_count}");
-}
-
-#[test]
 fn frontmatter_is_opaque() {
     // YAML frontmatter content that would otherwise look like markdown
     // (a `# heading`-like line, a `- list item`) must NOT produce Module

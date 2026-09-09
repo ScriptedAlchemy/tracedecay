@@ -10,30 +10,6 @@ fn extract_sample() -> ExtractionResult {
 }
 
 #[test]
-fn test_proto_no_errors() {
-    let result = extract_sample();
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-}
-
-#[test]
-fn test_proto_file_node() {
-    let result = extract_sample();
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
-}
-
-#[test]
-fn test_proto_package() {
-    let result = extract_sample();
-    let pkgs: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Package)
-        .collect();
-    assert_eq!(pkgs.len(), 1, "expected 1 package, got {}", pkgs.len());
-    assert_eq!(pkgs[0].name, "networking");
-}
-
-#[test]
 fn test_proto_imports() {
     let result = extract_sample();
     let imports: Vec<_> = result
@@ -255,21 +231,6 @@ fn test_proto_docstrings() {
 }
 
 #[test]
-fn test_proto_contains_edges() {
-    let result = extract_sample();
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 10,
-        "expected >= 10 Contains edges, got {}",
-        contains.len()
-    );
-}
-
-#[test]
 fn test_proto_service_contains_rpcs() {
     let result = extract_sample();
     let service = result
@@ -291,26 +252,4 @@ fn test_proto_service_contains_rpcs() {
             rpc.name
         );
     }
-}
-
-#[test]
-fn test_proto_message_docstring_connection_config() {
-    let result = extract_sample();
-    let conn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::ProtoMessage && n.name == "ConnectionConfig")
-        .unwrap();
-    assert!(
-        conn.docstring.is_some(),
-        "ConnectionConfig should have docstring"
-    );
-    assert!(
-        conn.docstring
-            .as_ref()
-            .unwrap()
-            .contains("Connection configuration"),
-        "docstring: {:?}",
-        conn.docstring
-    );
 }

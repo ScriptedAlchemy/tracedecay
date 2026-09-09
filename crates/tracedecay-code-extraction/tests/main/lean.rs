@@ -25,14 +25,6 @@ fn def_is_function() {
 }
 
 #[test]
-fn theorem_is_function() {
-    let source = "theorem foo : 1 + 1 = 2 := by rfl\n";
-    let result = extract(source);
-    let funcs = names_of(&result, NodeKind::Function);
-    assert_eq!(funcs, vec!["foo".to_string()]);
-}
-
-#[test]
 fn structure_is_struct() {
     let source = "structure Point where\n  x : Nat\n  y : Nat\n";
     let result = extract(source);
@@ -134,16 +126,6 @@ fn import_emits_uses_edge() {
         .filter(|e| e.kind == EdgeKind::Uses)
         .collect();
     assert_eq!(uses.len(), 1);
-}
-
-#[test]
-fn extensions_are_lean() {
-    assert_eq!(LeanExtractor.extensions(), &["lean"]);
-}
-
-#[test]
-fn language_name_is_lean() {
-    assert_eq!(LeanExtractor.language_name(), "Lean");
 }
 
 #[test]

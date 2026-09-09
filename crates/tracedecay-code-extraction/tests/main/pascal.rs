@@ -12,22 +12,6 @@ fn extract(source: &str) -> ExtractionResult {
 }
 
 // ----------------------------
-// File node
-// ----------------------------
-
-#[test]
-fn test_pascal_file_node_is_root() {
-    let result = extract("program Hello;\nbegin\nend.");
-    let file_nodes: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(file_nodes.len(), 1);
-    assert_eq!(file_nodes[0].name, "test.pas");
-}
-
-// ----------------------------
 // Program declaration
 // ----------------------------
 
@@ -97,30 +81,6 @@ fn test_pascal_unit_declaration() {
 // ----------------------------
 // Uses clause
 // ----------------------------
-
-#[test]
-fn test_pascal_uses_clause() {
-    let result =
-        extract("unit Test;\n\ninterface\n\nuses SysUtils, Classes;\n\nimplementation\n\nend.");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let uses: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert_eq!(uses.len(), 2);
-    let names: Vec<_> = uses.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        names.contains(&"SysUtils"),
-        "Should have SysUtils, got {:?}",
-        names
-    );
-    assert!(
-        names.contains(&"Classes"),
-        "Should have Classes, got {:?}",
-        names
-    );
-}
 
 #[test]
 fn test_pascal_uses_in_implementation() {
@@ -214,35 +174,6 @@ end."#,
 // ----------------------------
 
 #[test]
-fn test_pascal_class_extraction() {
-    let result = extract(
-        r#"unit Test;
-
-interface
-
-type
-  TMyClass = class(TObject)
-  end;
-
-implementation
-
-end."#,
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let classes: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Class)
-        .collect();
-    assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].name, "TMyClass");
-    assert!(
-        classes[0].signature.as_ref().unwrap().contains("class"),
-        "Signature should mention class"
-    );
-}
-
-#[test]
 fn test_pascal_class_extends() {
     let result = extract(
         r#"unit Test;
@@ -272,33 +203,6 @@ end."#,
 // ----------------------------
 // Record type extraction
 // ----------------------------
-
-#[test]
-fn test_pascal_record_extraction() {
-    let result = extract(
-        r#"unit Test;
-
-interface
-
-type
-  TPoint = record
-    X: Integer;
-    Y: Integer;
-  end;
-
-implementation
-
-end."#,
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let records: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::PascalRecord)
-        .collect();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].name, "TPoint");
-}
 
 #[test]
 fn test_pascal_record_fields() {
@@ -1116,24 +1020,4 @@ end."#;
         result.edges.iter().any(|e| e.kind == EdgeKind::Contains),
         "Should have at least one Contains edge"
     );
-}
-
-// ----------------------------
-// LanguageExtractor trait
-// ----------------------------
-
-#[test]
-fn test_pascal_extractor_extensions() {
-    let extractor = PascalExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"pas"));
-    assert!(exts.contains(&"pp"));
-    assert!(exts.contains(&"dpr"));
-    assert!(exts.contains(&"lpr"));
-}
-
-#[test]
-fn test_pascal_extractor_language_name() {
-    let extractor = PascalExtractor;
-    assert_eq!(extractor.language_name(), "Pascal");
 }

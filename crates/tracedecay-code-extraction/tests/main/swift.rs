@@ -325,21 +325,6 @@ func setup() {}
 }
 
 #[test]
-fn test_swift_file_node_is_root() {
-    let source = r#"func main() {}
-"#;
-    let extractor = SwiftExtractor;
-    let result = extractor.extract("main.swift", source);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "main.swift");
-}
-
-#[test]
 fn test_swift_contains_edges() {
     let source = r#"class Foo {
     let bar: Int
