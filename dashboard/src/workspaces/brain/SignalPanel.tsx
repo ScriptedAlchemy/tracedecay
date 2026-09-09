@@ -20,7 +20,7 @@ const CONNECTION_STATE: Record<
   live: {
     kind: 'ready',
     detail: 'event stream open',
-    sentence: 'Connected. Figures below are current.',
+    sentence: 'Connected. Counts cover only the retained pulse window, not the full stream.',
   },
   connecting: {
     kind: 'loading',
@@ -86,7 +86,7 @@ export function SignalPanel({
         <dl className="flex flex-wrap items-end gap-x-5 gap-y-2">
           <div className="flex flex-col-reverse gap-1">
             <dt className="td-legend">
-              {offline ? 'rate · not measured' : `per min · last ${RATE_WINDOW_MS / 1000}s`}
+              {offline ? 'rate · not measured' : `retained · last ${RATE_WINDOW_MS / 1000}s`}
             </dt>
             <dd className="td-value text-xs text-text-primary" data-cell="numeric">
               {/* A rate is a claim that something is being measured right now.
