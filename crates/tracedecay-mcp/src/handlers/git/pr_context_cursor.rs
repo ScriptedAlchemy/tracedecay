@@ -361,6 +361,9 @@ pub(super) fn encode_pr_context_cursor(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt as _;
+
     use super::*;
     use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
     use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
@@ -449,8 +452,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn distinct_non_utf8_roots_cannot_share_a_cursor() {
-        use std::os::unix::ffi::OsStrExt as _;
-
         let left = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/projects/a\xff"));
         let right = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/projects/a\xfe"));
         assert_eq!(
