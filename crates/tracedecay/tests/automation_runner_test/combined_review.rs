@@ -153,7 +153,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -259,7 +259,7 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
 
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -320,7 +320,7 @@ async fn retained_combined_review_defers_recorded_failures_until_settlement() {
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
 
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -434,7 +434,7 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -483,7 +483,7 @@ async fn combined_review_not_dispatched_when_skill_writer_is_not_due() {
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -523,7 +523,7 @@ async fn combined_review_task_configuration_skips_before_retrieval_or_backend() 
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
         let dispatch = run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -576,7 +576,7 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
         let dispatch = run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -617,7 +617,7 @@ async fn combined_review_respects_escape_hatch_flag() {
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -658,7 +658,7 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
 
     let dispatch =
         tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -696,7 +696,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
 
         let dispatch =
             tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-                &cg,
+                &automation_project_context(&cg),
                 &config,
                 &test_configuration_revision(),
                 &backend,
@@ -733,7 +733,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     let retrieval = EmptyAutomationSessionRetrieval::new();
     let dispatch =
         tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -773,7 +773,7 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
     );
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -817,7 +817,7 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
     );
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,

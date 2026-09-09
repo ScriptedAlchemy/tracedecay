@@ -7,6 +7,19 @@ use tracedecay_graph_query::{
     open_verified_graph_query,
 };
 
+use crate::tracedecay::TraceDecay;
+
+impl TraceDecay {
+    pub(crate) fn source_read_context(&self) -> Option<SourceReadContext> {
+        Some(SourceReadContext::new(
+            self.project_root().to_path_buf(),
+            self.db().clone(),
+            self.is_read_only(),
+            self.store_layout().identity.project_id.clone()?,
+        ))
+    }
+}
+
 struct BoundCodeGraphSourceAuthority {
     source: SourceReadContext,
 }
