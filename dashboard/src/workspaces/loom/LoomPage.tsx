@@ -28,6 +28,8 @@ import {
   type PlacedThread,
 } from './weave.ts';
 import {
+  AnalyticsSubagentTreePayloadV1Schema,
+  type AnalyticsSubagentTreePayloadV1,
   LcmTimelinePayloadV1Schema,
   type LoomSourceStatusV1,
   type LoomTemporalPayloadV1,
@@ -69,6 +71,7 @@ export function LoomPage() {
     '/api/plugins/hermes-lcm/timeline',
     LcmTimelinePayloadV1Schema,
   );
+  const hierarchy = useEnvelope(['loom', 'hierarchy'], '/api/plugins/analytics/subagent-tree', AnalyticsSubagentTreePayloadV1Schema);
   const [params, setParams] = useSearchParams();
   const selectedId = params.get('loomSession');
   const setSelectedId = (id: string | null) => {
@@ -99,6 +102,8 @@ export function LoomPage() {
         {(envelope) => (
           <TemporalBody
             envelope={envelope}
+            hierarchy={envelopePayload(hierarchy.data)}
+            hierarchyPending={hierarchy.isPending}
             busiestDay={busiestDay}
             timelinePending={timeline.isPending}
             timelineServed={timeline.data?.outcome === 'envelope'}
@@ -118,6 +123,8 @@ export function LoomPage() {
  */
 function TemporalBody({
   envelope,
+  hierarchy,
+  hierarchyPending,
   busiestDay,
   timelinePending,
   timelineServed,
@@ -125,6 +132,8 @@ function TemporalBody({
   onSelect,
 }: {
   envelope: DashboardEnvelopeV1<LoomTemporalPayloadV1>;
+  hierarchy: AnalyticsSubagentTreePayloadV1 | undefined;
+  hierarchyPending: boolean;
   busiestDay: { bucket: string; count: number } | null;
   timelinePending: boolean;
   timelineServed: boolean;
@@ -274,10 +283,12 @@ function TemporalBody({
             <>
               <WeaveCanvas
                 weave={weave}
+                hierarchy={hierarchy}
                 selectedId={selectedId}
                 onSelect={onSelect}
                 ariaLabel={weaveDescription(weave)}
               />
+              <p className="text-3xs text-text-muted">Session hierarchy: {hierarchyPending ? "loading" : !hierarchy?.available || hierarchy.error ? "unavailable" : `${hierarchy.truncated ? "partial" : "loaded"} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}. Curved links express recorded parent identity between session bounds, not timed spawn or rejoin. Only this temporal page is drawn.</p>
               <WeaveAxis weave={weave} />
               <ThreadTable
                 threads={weave.threads}
