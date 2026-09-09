@@ -33,7 +33,6 @@ mod branches;
 mod identity;
 mod registry;
 
-pub(crate) use registry::git_remote_url;
 pub use tracedecay_daemon_protocol::MovedStoreAdoption;
 
 #[cfg(not(any(test, feature = "test-transport")))]

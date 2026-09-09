@@ -84,6 +84,7 @@ mod remote_deletion;
 pub mod schema_contract;
 pub mod schema_stages;
 mod stack_delivery;
+mod store_registration;
 pub use schema_stages::ensure_registered_schema;
 pub use stack_delivery::{
     GitHubStackDeliveryKeyV1, GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1,
@@ -146,6 +147,7 @@ pub use remote_deletion::{
     RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
     RemoteDeletionTombstoneTransitionOutcome,
 };
+pub use store_registration::register_project_store;
 pub use tracedecay_runtime_core::shard_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
 };
