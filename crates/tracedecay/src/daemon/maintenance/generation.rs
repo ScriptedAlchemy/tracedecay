@@ -1,6 +1,9 @@
 //! Ordered generation retention for one mounted project.
 
-use super::{MaintenanceContinuation, MaintenanceTickOutcome, StoreTelemetrySamplingRegistry};
+use super::{
+    MaintenanceContinuation, MaintenanceTickOutcome, StoreTelemetrySamplingRegistry,
+    record_live_compaction_outcome,
+};
 use crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1;
 
 /// Run the production generation-maintenance journey for one mounted project.
@@ -98,9 +101,14 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
         && let Some(compaction) = &retention.compaction
     {
         hotpath::measure_block!("daemon.maintenance.compaction", {
-            let project_compacted =
-                crate::daemon::store_maintenance::run_project_compaction(graph.db(), compaction)
-                    .await;
+            let project_compacted = record_live_compaction_outcome(
+                crate::config::DB_FILENAME,
+                tracedecay_maintenance::retention::live_compaction::compact_project_store(
+                    graph.db(),
+                    compaction,
+                )
+                .await,
+            );
             if !project_compacted {
                 outcome = MaintenanceTickOutcome::Retry;
             }

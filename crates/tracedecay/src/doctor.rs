@@ -20,11 +20,6 @@ use tracedecay_daemon_service::application_surface::{
 };
 use tracedecay_runtime_core::text::format_token_count;
 
-// Consumed by the unix-only daemon git-watch maintenance path; on other
-// targets only the module's tests reference it.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) mod registry_drift;
-
 /// Opens an isolated daemon-registered profile database so Doctor tests can
 /// exercise the read-only session-temporal health adapter against the real
 /// registered reader pool instead of an ad-hoc connection.
