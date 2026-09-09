@@ -4,7 +4,6 @@
 //! client permit wait, and concurrent kicks collapse into one bounded pass.
 
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -23,14 +22,6 @@ use tracedecay_host_admission::{
     replay_backoff,
 };
 use tracedecay_sessions::admission::HostAdmissionOutcome;
-
-fn log_replay_event(event: &str, fields: &[(&str, String)]) {
-    let mut extras = String::new();
-    for (key, value) in fields {
-        let _ = write!(extras, " {key}={value}");
-    }
-    tracing::info!("{event}{extras}");
-}
 
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
 const BOOTSTRAP_RUNNING: u8 = 0;
@@ -612,9 +603,9 @@ impl ProfileHostAdmissionBootstrapWorker {
             match result {
                 Ok(()) => {
                     if consecutive_retryable > 0 {
-                        log_replay_event(
-                            "profile_host_admission_bootstrap_recovered",
-                            &[("attempts", (consecutive_retryable + 1).to_string())],
+                        tracing::info!(
+                            event = "profile_host_admission_bootstrap_recovered",
+                            attempts = consecutive_retryable + 1,
                         );
                     }
                     self.finish(BOOTSTRAP_READY);
@@ -623,9 +614,10 @@ impl ProfileHostAdmissionBootstrapWorker {
                 Err(error) => {
                     let (reason_code, retryable) = bootstrap_error_disposition(&error);
                     if !retryable {
-                        log_replay_event(
-                            "profile_host_admission_bootstrap_stopped",
-                            &[("reason_code", reason_code.to_owned())],
+                        tracing::warn!(
+                            event = "profile_host_admission_bootstrap_stopped",
+                            reason_code,
+                            "profile host admission bootstrap stopped on a terminal failure",
                         );
                         self.finish_terminal(error);
                         return;
@@ -633,9 +625,9 @@ impl ProfileHostAdmissionBootstrapWorker {
                     consecutive_retryable = consecutive_retryable.saturating_add(1);
                     self.backoff_count.fetch_add(1, Ordering::AcqRel);
                     if consecutive_retryable == 1 {
-                        log_replay_event(
-                            "profile_host_admission_bootstrap_retry",
-                            &[("reason_code", reason_code.to_owned())],
+                        tracing::info!(
+                            event = "profile_host_admission_bootstrap_retry",
+                            reason_code,
                         );
                     }
                     // Retryable does not mean retry forever. Once the budget is
@@ -652,13 +644,6 @@ impl ProfileHostAdmissionBootstrapWorker {
                                 u64::try_from(self.retry_budget.as_millis()).unwrap_or(u64::MAX),
                             "profile host admission bootstrap gave up after its retry budget; \
                              it resumes on the next admission or daemon restart"
-                        );
-                        log_replay_event(
-                            "profile_host_admission_bootstrap_exhausted",
-                            &[
-                                ("reason_code", reason_code.to_owned()),
-                                ("attempts", consecutive_retryable.to_string()),
-                            ],
                         );
                         self.finish_terminal(error);
                         return;
@@ -847,15 +832,11 @@ impl ProfileHostAdmissionReplayWorker {
                     }
                     ReplayPassDecision::Stop => {
                         consecutive_retryable = 0;
-                        log_replay_event(
-                            "profile_host_admission_replay_stopped",
-                            &[(
-                                "reason_code",
-                                outcome
-                                    .reason_code
-                                    .unwrap_or("host_admission_unavailable")
-                                    .to_string(),
-                            )],
+                        tracing::warn!(
+                            event = "profile_host_admission_replay_stopped",
+                            reason_code =
+                                outcome.reason_code.unwrap_or("host_admission_unavailable"),
+                            "profile host admission replay stopped on a terminal failure",
                         );
                         // Non-retryable failure: stop until the next explicit kick.
                         break;

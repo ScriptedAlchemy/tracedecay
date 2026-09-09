@@ -702,7 +702,7 @@ pub fn prepare_pr_worktree(
     checkout_linked_worktree(repo_root, worktree, tracking_ref, label, command_control)
 }
 
-pub fn checkout_linked_worktree(
+fn checkout_linked_worktree(
     repo_root: &Path,
     worktree: &Path,
     tracking_ref: &str,
@@ -848,7 +848,7 @@ pub fn cleanup_pr_worktree(
     Ok(PrCleanupReceipt(()))
 }
 
-pub fn ref_points_to(
+fn ref_points_to(
     repo_root: &Path,
     reference: &str,
     expected_head: &str,
@@ -936,7 +936,7 @@ fn remaining_pr_artifacts(
     Ok(remaining)
 }
 
-pub fn remove_worktree(
+fn remove_worktree(
     repo_root: &Path,
     worktree: &Path,
     command_control: &PrCommandControlV1,
