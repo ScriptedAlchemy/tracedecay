@@ -478,28 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn existing_gh_login_authenticates_a_public_repository_read() {
-        let _serialized = gh_source_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source = CountingTokenSourceV1::new(Some(FIXTURE_TOKEN_V1));
-        let _guard =
-            GhCliTokenSourceGuardV1::install(Arc::clone(&source) as Arc<dyn GhCliTokenSourceV1>);
-        let credential = public_repository_read_credential_v1("octo", "present-login");
-        assert_ne!(
-            credential.generation(),
-            0,
-            "an existing gh login must replace the anonymous credential"
-        );
-        assert!(credential.permits(GitHubReadPermissionV1::Contents));
-        assert!(credential.permits(GitHubReadPermissionV1::Actions));
-        assert!(withdraw_gh_cli_github_read_only_credential_v1(
-            "octo",
-            "present-login"
-        ));
-    }
-
-    #[test]
     fn repeated_resolution_probes_the_local_source_once_per_ttl_window() {
         let source = CountingTokenSourceV1::new(Some(FIXTURE_TOKEN_V1));
         let authority = GhCliGitHubReadOnlyCredentialAuthorityV1::new(

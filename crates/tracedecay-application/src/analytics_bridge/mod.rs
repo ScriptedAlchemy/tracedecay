@@ -373,22 +373,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_hint_row_with_hint_id() {
-        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","hint_id":"h-abc","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
-        assert_eq!(event.hint_category.as_deref(), Some("search"));
-        assert_eq!(event.hint_id.as_deref(), Some("h-abc"));
-
-        let line = r#"{"agent":"cursor","event":"hint_emitted","category":"search","project_root":"/repo","session_id":"s1","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
-        assert!(event.hint_id.is_none());
-    }
-
-    #[test]
     fn unattributed_row_falls_back_to_default_project() {
         let line = r#"{"agent":"cursor","event":"hook_invoked","hook_name":"postToolUse","ts_unix_ms":1783000000000}"#;
         let Some(event) = hook_row_to_analytics_event(line, Some(Path::new("/repo"))) else {

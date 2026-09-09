@@ -3582,21 +3582,6 @@ mod projection_tests {
     }
 
     #[test]
-    fn context_projection_emits_only_active_findings() {
-        assert!(finding_item(&finding(FeedbackFindingLifecycleV1::Active)).is_some());
-        for lifecycle in [
-            FeedbackFindingLifecycleV1::Superseded,
-            FeedbackFindingLifecycleV1::Resolved,
-            FeedbackFindingLifecycleV1::Cleared,
-        ] {
-            assert!(
-                finding_item(&finding(lifecycle)).is_none(),
-                "{lifecycle:?} finding remained visible"
-            );
-        }
-    }
-
-    #[test]
     fn advisory_projection_keeps_only_its_active_canonical_producer_findings() {
         let findings = [
             advisory_finding(

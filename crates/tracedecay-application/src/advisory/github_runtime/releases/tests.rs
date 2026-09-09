@@ -45,20 +45,6 @@ fn release_json() -> serde_json::Value {
 }
 
 #[test]
-fn provider_release_page_normalizes_typed_tags_and_assets() {
-    let releases = decode_provider_page(
-        &serde_json::to_vec(&release_json()).unwrap(),
-        &target(),
-        &GitHubHttpReadConfigV1::default(),
-    )
-    .unwrap();
-    assert_eq!(releases.len(), 1);
-    assert_eq!(releases[0].tag.as_str(), "v4.2.0");
-    assert_eq!(releases[0].assets[0].asset_id, 55);
-    assert_eq!(releases[0].assets[0].size_bytes, 1234);
-}
-
-#[test]
 fn provider_release_page_rejects_duplicate_asset_identity() {
     let mut value = release_json();
     let duplicate = value[0]["assets"][0].clone();

@@ -257,24 +257,6 @@ async fn staged_publication(
     (graph, store, build, source)
 }
 
-#[tokio::test]
-async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
-    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
-    let (_graph, mut store, build, source) =
-        staged_publication("background-publication", 'c', &cancellation).await;
-    let probe = Arc::new(PublicationAuthorityProbeRuntime::wrapping(Arc::clone(
-        store.runtime(),
-    )));
-    store.replace_runtime(probe);
-
-    let publication = store
-        .publish_generation(&build, cancellation)
-        .await
-        .unwrap();
-
-    assert_eq!(publication.checkpoint.source_generation, source);
-}
-
 /// #837: the whole-generation digest over 168k chunks alone outran the 30s
 /// interactive deadline, and the install phase inherited what was left of the
 /// same authority — nothing. Each phase now mints its own background

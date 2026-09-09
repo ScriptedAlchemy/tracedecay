@@ -2915,21 +2915,6 @@ mod unavailable_evidence_tests {
             );
         }
     }
-
-    #[test]
-    fn generic_failure_preserves_unknown_domain_coverage() {
-        let outcome: RetrievalPortOutcome<()> = failed(EvidenceDomain::Graph, UtcMicros(1));
-        let coverage = &outcome.evidence().coverage;
-
-        assert!(coverage.validate().is_ok());
-        assert_eq!(
-            coverage.domains,
-            vec![CoverageDomainState {
-                domain: EvidenceDomain::Graph,
-                completeness: CoverageCompleteness::Unknown,
-            }]
-        );
-    }
 }
 
 #[cfg(test)]

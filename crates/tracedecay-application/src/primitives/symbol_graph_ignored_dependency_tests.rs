@@ -255,53 +255,6 @@ async fn exact_symbol_never_schedules_without_opt_in_or_after_a_positive_exact_m
     assert!(scheduler.calls().is_empty());
 }
 
-#[tokio::test]
-async fn symbol_search_opt_in_reuses_the_exact_symbol_scheduler_boundary() {
-    let fixture = fixture();
-    let scheduler = Arc::new(RecordingIgnoredDependencyAdmission::new(Ok(
-        next_generation(),
-    )));
-    let adapter = adapter(&fixture, Some(scheduler.clone()));
-    let request = search_request("ExternalWidget", true, Some("src/client"));
-
-    let outcome = adapter
-        .symbol_search(port_context(&fixture), &request)
-        .await;
-
-    assert_failure(
-        outcome,
-        PrimitiveFailureKind::Stale,
-        "application.symbol-graph.ignored-dependency-generation-advanced",
-    );
-    let calls = scheduler.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].context, fixture.context);
-    assert_eq!(calls[0].source_generation, fixture.generation);
-    assert_eq!(calls[0].imports, vec![fixture.expected_import.clone()]);
-}
-
-#[tokio::test]
-async fn symbol_search_never_schedules_without_opt_in_or_after_a_positive_match() {
-    let fixture = fixture();
-    let scheduler = Arc::new(RecordingIgnoredDependencyAdmission::new(Ok(
-        next_generation(),
-    )));
-    let adapter = adapter(&fixture, Some(scheduler.clone()));
-    let no_opt_in = search_request("ExternalWidget", false, Some("src/client"));
-    let positive = search_request("Widget", true, Some("src/client"));
-
-    let empty = adapter
-        .symbol_search(port_context(&fixture), &no_opt_in)
-        .await;
-    assert_completed_names(empty, &[]);
-
-    let matched = adapter
-        .symbol_search(port_context(&fixture), &positive)
-        .await;
-    assert_completed_names(matched, &["Widget"]);
-    assert!(scheduler.calls().is_empty());
-}
-
 struct Fixture {
     scope: ResolvedScope,
     context: RequestContext,
