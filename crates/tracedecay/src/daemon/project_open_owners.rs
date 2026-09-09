@@ -1161,12 +1161,35 @@ pub(super) async fn register_project_open_production_owners(
 
     // At-rest privacy remediation is bounded background work after fail-closed
     // admission; it never blocks admission or retrieval.
-    let _privacy_remediation_admitted =
-        crate::daemon::privacy_remediation::spawn_at_rest_privacy_remediation(
-            server,
-            Arc::clone(&graph),
-            session_db.clone(),
-        );
+    let privacy_graph = Arc::clone(&graph);
+    let privacy_session_db = session_db.clone();
+    let _privacy_remediation_admitted = tracedecay_privacy::spawn_at_rest_privacy_remediation(
+        |task| server.spawn_background_task(task),
+        tracedecay_privacy::AdmittedPrivacyProjectV1::new(
+            project_id.clone(),
+            project_root.display(),
+        ),
+        tracedecay_privacy::PrivacyRemediationGrantV1::new(access.grant_expires_at, now_micros()),
+        async move {
+            privacy_graph
+                .project_memory_application()
+                .await?
+                .privacy_remediation_rescan(
+                    tracedecay_session_memory::memory::PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
+                    &tracedecay_privacy::remediation_read_control(),
+                    &tracedecay_privacy::remediation_write_control(),
+                )
+                .await
+                .map(Into::into)
+                .map_err(tracedecay_session_memory::memory::memory_application_error)
+        },
+        async move {
+            privacy_session_db
+                .lcm_privacy_rescan_raw_messages()
+                .await
+                .map(Into::into)
+        },
+    );
 
     // Once-per-project-open adoption-eligibility census over the composed
     // capability catalog, recorded through the project-bound session
