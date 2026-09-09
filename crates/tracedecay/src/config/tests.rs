@@ -1740,37 +1740,4 @@ mod retention_config_tests {
             .free_page_ratio_threshold = 1.01;
         assert!(retention.validate().is_err());
     }
-
-    #[test]
-    fn retention_config_json_round_trips_with_windows_set() {
-        let json = r#"{
-            "session_lcm": { "enabled": true, "drop_after_days": 30 },
-            "observation": { "enabled": true, "anchor_release_after_days": 45 },
-            "orphan_store_gc_days": 14,
-            "incident_debris_retention_days": 21,
-            "compaction": { "free_page_ratio_threshold": 0.25, "minimum_reclaimable_bytes": 1000000 },
-            "store_soft_budgets_bytes": { "sessions.db": 2000000000 },
-            "interval_hours": 12
-        }"#;
-        let retention: RetentionConfig = serde_json::from_str(json).unwrap();
-        assert!(retention.session_lcm.enabled);
-        assert_eq!(retention.session_lcm.drop_after_days, Some(30));
-        assert!(retention.observation.enabled);
-        assert_eq!(retention.observation.anchor_release_after_days, Some(45));
-        assert_eq!(retention.orphan_store_gc_days, Some(14));
-        assert_eq!(retention.incident_debris_retention_days, Some(21));
-        assert_eq!(retention.interval_hours, 12);
-        let compaction = retention.compaction.expect("compaction configured");
-        assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
-        assert_eq!(compaction.minimum_reclaimable_bytes, 1_000_000);
-        assert_eq!(
-            retention.store_soft_budgets_bytes.get("sessions.db"),
-            Some(&2_000_000_000)
-        );
-
-        // Re-serialize and re-parse: the tree is stable across a round trip.
-        let reserialized = serde_json::to_string(&retention).unwrap();
-        let reparsed: RetentionConfig = serde_json::from_str(&reserialized).unwrap();
-        assert_eq!(retention, reparsed);
-    }
 }

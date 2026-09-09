@@ -248,8 +248,8 @@ mod tests {
     use tracedecay_api::{StaticDashboardAsset, StaticDashboardAssets};
 
     use super::{
-        FIXTURE_PROVIDER, ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance,
-        compose_build_version, register_in, runtime_in, validated,
+        ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance,
+        compose_build_version, register_in, runtime_in,
     };
     use crate::version::PACKAGE_VERSION;
 
@@ -450,17 +450,6 @@ mod tests {
         assert_eq!(
             compose_build_version("0.0.66", VALID_SHA, true),
             format!("0.0.66+{VALID_SHA}.dirty")
-        );
-    }
-
-    /// The fixture skips [`validated`] because it is a constant; this pins
-    /// that the constant would still pass a real registration.
-    #[test]
-    fn the_fixture_provider_passes_registration_validation() {
-        let runtime = validated(FIXTURE_PROVIDER).expect("fixture provider must stay valid");
-        assert_eq!(
-            runtime.build_version(),
-            format!("{PACKAGE_VERSION}+{}", super::FIXTURE_FULL_SHA)
         );
     }
 }

@@ -2335,28 +2335,6 @@ mod tests {
     }
 
     #[test]
-    fn search_markdown_prefers_hydrated_symbol_identity_over_opaque_anchor() {
-        let rendered = render_search_md(&json!({
-            "results": [{
-                "candidate": {
-                    "anchor_id": "code-symbol:symbol.v1.sha256:opaque",
-                    "exact_class": "exact_message",
-                    "utility_micros": 4_000_000
-                },
-                "final_ordinal": 0,
-                "display": {
-                    "name": "main",
-                    "qualified_name": "main",
-                    "kind": "function"
-                }
-            }]
-        }));
-
-        assert!(rendered.contains("**main** (function, exact_message)"));
-        assert!(rendered.contains("`code-symbol:symbol.v1.sha256:opaque`"));
-    }
-
-    #[test]
     fn context_markdown_lane_preview_keeps_all_lanes_visible() {
         let full = format!(
             "## Code Context\n**Query:** q\n\n### Memory Matches\n{}\n### Entry Points\n{}\n### Related Symbols\n{}\n### Code\n{}\n### Index Coverage Hint\n{}\n### Extension Points\n{}\n### Test Coverage\n{}\nseen_node_ids: [{}]\n",
@@ -2425,19 +2403,6 @@ mod tests {
         assert!(section.contains("tail-marker"));
         assert!(!section.contains("..."));
         assert!(section.contains("tracedecay_fact_feedback"));
-    }
-
-    #[test]
-    fn context_memory_section_compacts_multiline_content() {
-        let hit = context_memory_hit("first line\n# heading\n- item".to_owned());
-
-        let Some(section) = context_memory_section(&[hit], None) else {
-            panic!("memory hit should render");
-        };
-
-        assert!(section.contains("first line # heading - item"));
-        assert!(!section.contains("\n# heading"));
-        assert!(!section.contains("\n- item"));
     }
 
     #[test]

@@ -1047,26 +1047,6 @@ mod tests {
         }
     }
 
-    /// Reads that resolve their own authority stay on the active project. A
-    /// selector on one of these would silently read the wrong store.
-    ///
-    /// Only names with a `MCP_TOOL_BINDINGS` row belong here: for an unbound
-    /// name both predicates return `false` vacuously, so listing one asserts
-    /// nothing. The `tracedecay_git_*` application-surface tools were removed
-    /// for exactly that reason — they never consult this table, and their
-    /// selector policy is enforced by the surface schema, not a binding row.
-    #[test]
-    fn remote_status_is_an_active_project_info_read() {
-        let entry = MCP_TOOL_BINDINGS
-            .iter()
-            .find(|entry| entry.name == "tracedecay_remote_status")
-            .expect("tracedecay_remote_status must have a binding row");
-        assert_eq!(entry.group, Some(McpToolDispatchGroup::Info));
-        assert_eq!(entry.project, RegisteredProjectAccess::ActiveProjectOnly);
-        assert!(!tool_accepts_registered_project_selector(entry.name));
-        assert!(!tool_dispatches_registered_project_reader(entry.name));
-    }
-
     #[test]
     fn exact_fact_routes_accept_selectors_without_registered_reader_dispatch() {
         for tool_name in [

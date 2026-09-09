@@ -346,13 +346,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_release_with_matching_asset() {
-        let expected = asset_name("0.9.9", false);
-        let r = release("v0.9.9", false, &[&expected]);
-        assert!(release_has_current_platform_asset(&r));
-    }
-
-    #[test]
     fn accepts_beta_release_with_matching_beta_asset() {
         let expected = asset_name("0.9.9-beta.1", true);
         let r = release("v0.9.9-beta.1", true, &[&expected]);

@@ -235,17 +235,6 @@ fn scheduler_record_log_fields(
     fields
 }
 
-#[cfg(test)]
-pub(super) fn daemon_scheduler_record_log_line(
-    project_path: &Path,
-    record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
-) -> String {
-    super::format_daemon_log_line(
-        "scheduler_task",
-        &scheduler_record_log_fields(project_path, record),
-    )
-}
-
 fn log_daemon_scheduler_record(
     project_path: &Path,
     record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,

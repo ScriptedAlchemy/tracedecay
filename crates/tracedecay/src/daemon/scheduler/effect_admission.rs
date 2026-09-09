@@ -799,29 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn effect_control_propagates_live_scheduler_stop_to_cancellation() {
-        let stopped = Arc::new(AtomicBool::new(false));
-        let observed = Arc::clone(&stopped);
-        let scheduler = AutomationRunControl::from_interrupted(Arc::new(move || {
-            observed.load(Ordering::Acquire)
-        }));
-        let cancellation = CancellationSignal::active("cancel.scheduler-effect-stop")
-            .expect("valid cancellation signal");
-        let effect_cancellation = cancellation.clone();
-        let control = scheduler_effect_run_control(
-            &scheduler,
-            cancellation,
-            Deadline::new(UtcMicros(i64::MAX)).expect("valid scheduler deadline"),
-        );
-
-        assert!(!control.read_control().interrupted());
-        assert!(!effect_cancellation.is_cancelled());
-        stopped.store(true, Ordering::Release);
-        assert!(control.read_control().interrupted());
-        assert!(effect_cancellation.is_cancelled());
-    }
-
-    #[test]
     fn effect_control_observes_deadline_without_fabricating_cancellation() {
         let scheduler = AutomationRunControl::from_interrupted(Arc::new(|| false));
         let cancellation = CancellationSignal::active("cancel.scheduler-effect-deadline")

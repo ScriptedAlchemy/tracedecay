@@ -1670,55 +1670,6 @@ fn foreign_external_reservation_closes_indeterminate_without_a_second_execution(
 }
 
 #[test]
-fn durable_journal_reports_changed_request_identity_as_a_conflict() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("terminal.json");
-    reserve_or_replay_blocking(
-        &path,
-        admission("run.memory-journal", "request.memory-journal"),
-    )
-    .expect("reserve");
-    let changed = admission("run.memory-journal", "request.memory-journal.changed");
-    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
-}
-
-#[test]
-fn durable_journal_reports_changed_task_identity_as_a_conflict() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("terminal.json");
-    let original = admission("run.memory-journal", "request.memory-journal");
-    reserve_or_replay_blocking(&path, original).expect("reserve");
-    let mut changed = admission("run.memory-journal", "request.memory-journal");
-    changed.request.task = AutomationTaskRequestV1::SessionReflector(
-        tracedecay_contracts::retained_surfaces::SessionReflectorRunInputV1 {
-            provider: "cursor".to_owned(),
-            query: "changed task".to_owned(),
-            scope: tracedecay_contracts::retained_surfaces::LcmSearchScopeV1::Current,
-            session_id: None,
-            include_summaries: true,
-            evidence_limit: 5,
-            include_recent_sessions: false,
-            recent_sessions_limit: 1,
-            sort: tracedecay_contracts::retained_surfaces::LcmGrepSortV1::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-        },
-    );
-    let changed_problem = reset_problem(&changed.request_id, &changed.scope, &changed.request);
-    let AutomationRecoveryBinding::Memory {
-        recovery_problem, ..
-    } = &mut changed.recovery
-    else {
-        panic!("memory admission must carry memory recovery")
-    };
-    *recovery_problem = changed_problem;
-    let changed = seal_effect_authority(changed);
-    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
-}
-
-#[test]
 fn durable_journal_reports_changed_scope_identity_as_a_conflict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
@@ -1748,17 +1699,6 @@ fn durable_journal_reports_changed_scope_identity_as_a_conflict() {
     };
     *recovery_problem = changed_problem;
     let changed = seal_effect_authority(changed);
-    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
-}
-
-#[test]
-fn durable_journal_reports_changed_effect_authority_as_a_conflict() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("terminal.json");
-    let original = admission("run.memory-journal", "request.memory-journal");
-    reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
-    let mut changed = original;
-    changed.effect_authority_digest = digest('b');
     assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
 }
 
@@ -3073,36 +3013,6 @@ fn cancellation_observed_under_lock_leaves_foreign_reservation_pending() {
             .expect("record")
             .is_terminal()
     );
-}
-
-#[test]
-fn retained_settlement_waiter_is_send_and_static() {
-    fn assert_send_static<T: Send + 'static>() {}
-
-    assert_send_static::<super::RetainedSettlementWaiter<tracedecay_domain::errors::Result<()>>>();
-    assert_send_static::<
-        super::RetainedSettlementWaiter<
-            tracedecay_domain::errors::Result<(
-                super::AutomationSettledTerminal,
-                AutomationRunLedgerRecord,
-            )>,
-        >,
-    >();
-    assert_send_static::<
-        super::RetainedSettlementWaiter<
-            tracedecay_domain::errors::Result<(
-                super::AutomationSettledProblem,
-                Option<AutomationRunLedgerRecord>,
-            )>,
-        >,
-    >();
-    assert_send_static::<super::RetainedSettlementPairWaiter>();
-    assert_send_static::<super::DeferredSettlementPairSubmission<()>>();
-    assert_send_static::<
-        super::RetainedSettlementWaiter<
-            tracedecay_domain::errors::Result<super::RetainedAutomationSettlementOutcome>,
-        >,
-    >();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

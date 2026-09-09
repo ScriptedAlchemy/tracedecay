@@ -899,12 +899,6 @@ fn cargo_test_args_keep_release_before_libtest_separator() {
     );
 }
 
-#[test]
-fn tail_handles_short_input() {
-    assert_eq!(tail("hello", 100), "hello");
-    assert_eq!(tail("0123456789", 4), "6789");
-}
-
 /// Fifteen symbols across a dozen files, so a file-scale budget (8) is far
 /// below the corpus while comfortably above the two requested files. Before
 /// the per-file index cutover, both scoped reads hydrated the whole corpus

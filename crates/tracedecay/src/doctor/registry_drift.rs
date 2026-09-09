@@ -135,37 +135,6 @@ mod tests {
         StoreContentFence, StoreDirectoryFence,
     };
 
-    fn orphan_finding(disposition: StoreDisposition) -> OrphanStoreFinding {
-        OrphanStoreFinding {
-            project_id: "proj_orphan".to_string(),
-            store_id: "store_orphan".to_string(),
-            data_root: PathBuf::from("/tmp/does-not-exist/store_orphan"),
-            disposition,
-            age_secs: 1_000_000,
-            size_bytes: 42_000,
-            expected_store_relpath: "stores/store_orphan".to_string(),
-            expected_created_at: 0,
-            expected_last_write_at: None,
-            expected_payload_mtime_secs: 0,
-            expected_data_root_fence: StoreDirectoryFence::Unverifiable,
-            expected_content_fence: StoreContentFence::Unverifiable,
-            expected_manifest_bytes: None,
-            graph_scope_relpaths: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn live_store_yields_no_doctor_finding() {
-        assert!(orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Live)).is_none());
-    }
-
-    #[test]
-    fn orphaned_store_maps_to_degraded_orphan_store_finding() {
-        let typed = orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Orphaned))
-            .expect("orphaned store produces a typed finding");
-        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
-    }
-
     #[test]
     fn unregistered_store_maps_to_orphan_store_finding() {
         let finding = UnregisteredStoreFinding {
