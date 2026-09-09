@@ -9,7 +9,7 @@ use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registry_context_candidate_roots};
-use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
 use tracedecay_runtime_core::storage;
 use tracedecay_session_memory::fact_store::ProjectMemoryDbHandle;
 use tracedecay_session_runtime::retained::map_execution_error;
@@ -27,12 +27,18 @@ pub struct RetainedMemoryTargetAuthorityV1 {
     pub store_layout_project_id: ProjectId,
     /// Served project root from the live graph, not the admitted request root.
     pub served_project_root: PathBuf,
+    /// Whether the served graph is published read-only.
+    pub graph_read_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryTargetAccessV1 {
     Read,
     Write,
+    /// Search, probe, reason, and related record a retrieval projection.
+    /// Writable graphs take a write lease; a read-only graph degrades to a
+    /// read-only lease and reports `ReadOnly` telemetry instead of refusing.
+    RecordRetrieval,
 }
 
 pub struct RetainedMemoryTargetV1<'a> {
@@ -129,10 +135,29 @@ pub async fn open_project_retained_memory_target(
         {
             return denied();
         }
+        if access == MemoryTargetAccessV1::Write && authority.graph_read_only {
+            return denied();
+        }
         let database = authority
             .registry
-            .mounted_project_memory(admitted_project_id)
+            .mounted_project_memory(
+                admitted_project_id,
+                match access {
+                    MemoryTargetAccessV1::Read => DatabaseAccessMode::ReadOnly,
+                    MemoryTargetAccessV1::Write => DatabaseAccessMode::ReadWrite,
+                    MemoryTargetAccessV1::RecordRetrieval => {
+                        if authority.graph_read_only {
+                            DatabaseAccessMode::ReadOnly
+                        } else {
+                            DatabaseAccessMode::ReadWrite
+                        }
+                    }
+                },
+            )
             .map_err(map_execution_error)?;
+        if access == MemoryTargetAccessV1::Write && !database.is_writable() {
+            return denied();
+        }
         return Ok(RetainedMemoryTargetV1::new(
             ProjectMemoryDbHandle::Owned(Box::new(database)),
             owner,
@@ -286,6 +311,7 @@ mod tests {
                 project_id: self.project_id.clone(),
                 store_layout_project_id,
                 served_project_root,
+                graph_read_only: false,
             }
         }
     }
@@ -295,12 +321,10 @@ mod tests {
         registered_root: &Path,
         admitted_project_id: &ProjectId,
     ) -> Result<RetainedMemoryTargetV1<'static>, RetainedSurfaceExecutionErrorV1> {
-        open_project_retained_memory_target(
+        open_same_project_with(
             authority,
             registered_root,
             admitted_project_id,
-            Some(MemoryScopeV1::Project),
-            None,
             MemoryTargetAccessV1::Read,
         )
         .await
@@ -315,6 +339,97 @@ mod tests {
             .await
             .err()
             .expect("store identity drift must deny");
+        assert!(matches!(
+            error,
+            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
+        ));
+    }
+
+    #[tokio::test]
+    async fn same_project_read_open_issues_a_read_only_lease() {
+        let fixture = MemoryTargetFixture::new("read-lease").await;
+        let authority = fixture.authority(fixture.project_id.clone(), fixture.project_root.clone());
+        let target = open_same_project(&authority, &fixture.project_root, &fixture.project_id)
+            .await
+            .expect("matching store identity must open");
+        assert!(
+            !target.database().is_writable(),
+            "Read access must issue a read-only lease"
+        );
+    }
+
+    async fn open_same_project_with(
+        authority: &RetainedMemoryTargetAuthorityV1,
+        registered_root: &Path,
+        admitted_project_id: &ProjectId,
+        access: MemoryTargetAccessV1,
+    ) -> Result<RetainedMemoryTargetV1<'static>, RetainedSurfaceExecutionErrorV1> {
+        open_project_retained_memory_target(
+            authority,
+            registered_root,
+            admitted_project_id,
+            Some(MemoryScopeV1::Project),
+            None,
+            access,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn same_project_record_retrieval_open_issues_a_writable_lease() {
+        let fixture = MemoryTargetFixture::new("retrieval-lease").await;
+        let authority = fixture.authority(fixture.project_id.clone(), fixture.project_root.clone());
+        let target = open_same_project_with(
+            &authority,
+            &fixture.project_root,
+            &fixture.project_id,
+            MemoryTargetAccessV1::RecordRetrieval,
+        )
+        .await
+        .expect("matching store identity must open");
+        assert!(
+            target.database().is_writable(),
+            "RecordRetrieval on a writable graph must issue a write lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_project_record_retrieval_on_read_only_graph_issues_a_read_only_lease() {
+        let fixture = MemoryTargetFixture::new("retrieval-readonly").await;
+        let mut authority =
+            fixture.authority(fixture.project_id.clone(), fixture.project_root.clone());
+        authority.graph_read_only = true;
+        let target = open_same_project_with(
+            &authority,
+            &fixture.project_root,
+            &fixture.project_id,
+            MemoryTargetAccessV1::RecordRetrieval,
+        )
+        .await
+        .expect("read-only graph must degrade retrieval recording, not deny");
+        assert!(
+            !target.database().is_writable(),
+            "RecordRetrieval on a read-only graph must issue a read-only lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_project_write_against_read_only_graph_is_denied() {
+        let fixture = MemoryTargetFixture::new("write-readonly").await;
+        let mut authority =
+            fixture.authority(fixture.project_id.clone(), fixture.project_root.clone());
+        authority.graph_read_only = true;
+        let error = open_project_retained_memory_target(
+            &authority,
+            &fixture.project_root,
+            &fixture.project_id,
+            Some(MemoryScopeV1::Project),
+            None,
+            MemoryTargetAccessV1::Write,
+        )
+        .await
+        .err()
+        .expect("write against a read-only graph must deny");
         assert!(matches!(
             error,
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized

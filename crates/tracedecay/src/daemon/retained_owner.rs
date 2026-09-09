@@ -59,11 +59,13 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) invocation_service: Option<DaemonInvocationService>,
 }
 
-fn served_store_identity(cg: &TraceDecay) -> Option<(PathBuf, ProjectId)> {
+fn served_store_identity(cg: &TraceDecay) -> Option<(PathBuf, ProjectId, bool)> {
     match cg.project_memory_owner() {
-        Ok(FactOwnerV1::Project { project_id }) => {
-            Some((cg.project_root().to_path_buf(), project_id))
-        }
+        Ok(FactOwnerV1::Project { project_id }) => Some((
+            cg.project_root().to_path_buf(),
+            project_id,
+            cg.is_read_only(),
+        )),
         Ok(FactOwnerV1::Profile) | Err(_) => None,
     }
 }
@@ -72,7 +74,7 @@ pub(crate) fn retained_surface_ports(
     authorities: ProductionRetainedAuthoritiesV1,
 ) -> Arc<RetainedSurfacePortsV1<'static>> {
     let mut ports = RetainedSurfacePortsV1::default();
-    if let Some((served_project_root, store_layout_project_id)) = authorities
+    if let Some((served_project_root, store_layout_project_id, graph_read_only)) = authorities
         .cg
         .try_read()
         .ok()
@@ -88,6 +90,7 @@ pub(crate) fn retained_surface_ports(
                     project_id: authorities.project_id.clone(),
                     store_layout_project_id,
                     served_project_root,
+                    graph_read_only,
                 },
                 authorities.configuration_digest.clone(),
             ),
@@ -197,6 +200,7 @@ pub(crate) async fn open_project_retained_memory_target(
         project_id: admitted_project_id.clone(),
         store_layout_project_id,
         served_project_root,
+        graph_read_only: cg.is_read_only(),
     };
     tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(
         &authority,

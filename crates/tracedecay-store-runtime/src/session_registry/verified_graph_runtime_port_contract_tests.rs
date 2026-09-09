@@ -23,6 +23,7 @@ use super::DaemonSessionRuntimeRegistryV1;
 use super::code_graph::inline_graph_publication_input_digest;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
+use tracedecay_runtime_core::db::DatabaseAccessMode;
 
 mod concurrency;
 mod mount_scope;
@@ -94,6 +95,23 @@ impl ContractFixture {
             .expect("project sessions database");
         (project_database, sessions)
     }
+}
+
+#[tokio::test]
+async fn mounted_project_memory_read_issues_a_read_only_lease() {
+    let fixture = ContractFixture::new("mounted-memory-read").await;
+    let project_id = project_id("mounted-memory-read");
+    let (_database, _sessions) = fixture.mount_project(&project_id).await;
+    let read = fixture
+        .registry
+        .mounted_project_memory(&project_id, DatabaseAccessMode::ReadOnly)
+        .expect("read lease");
+    assert!(!read.is_writable());
+    let write = fixture
+        .registry
+        .mounted_project_memory(&project_id, DatabaseAccessMode::ReadWrite)
+        .expect("write lease");
+    assert!(write.is_writable());
 }
 
 fn project_id(label: &str) -> ProjectId {

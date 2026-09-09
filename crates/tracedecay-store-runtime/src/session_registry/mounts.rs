@@ -1387,32 +1387,48 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
-    /// Issues a write lease for a project-memory store that is already mounted.
+    /// Issues a lease for a project-memory store that is already mounted.
     ///
     /// Retained project memory never discovers or initializes a store; the root
     /// assembler selected this runtime because the project is already Ready.
-    pub fn mounted_project_memory(&self, project_id: &ProjectId) -> Result<Database> {
+    /// Read access and read-only graphs take a read-only lease. A write
+    /// request against a read-only owner is refused rather than silently
+    /// narrowed.
+    pub fn mounted_project_memory(
+        &self,
+        project_id: &ProjectId,
+        access: DatabaseAccessMode,
+    ) -> Result<Database> {
         let mounted = self
             .project_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match mounted.get(project_id) {
-            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => owners
-                .memory
-                .as_ref()
-                .ok_or_else(|| {
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
+                let owner = owners.memory.as_ref().ok_or_else(|| {
                     session_registry_error(
                         "issue mounted project memory database client",
                         "project memory owner is not mounted".to_string(),
                     )
-                })?
-                .issue_database_lease()
+                })?;
+                let database = match access {
+                    DatabaseAccessMode::ReadOnly => owner.issue_database_read_only_lease(),
+                    DatabaseAccessMode::ReadWrite => owner.issue_database_lease(),
+                }
                 .map_err(|error| {
                     session_registry_error(
                         "issue mounted project memory database client",
                         error.to_string(),
                     )
-                }),
+                })?;
+                if matches!(access, DatabaseAccessMode::ReadWrite) && !database.is_writable() {
+                    return Err(session_registry_error(
+                        "issue mounted project memory database client",
+                        "project memory owner is read-only".to_string(),
+                    ));
+                }
+                Ok(database)
+            }
             Some(ProjectRuntimeOwnerStateV1::Opening(_)) => Err(TraceDecayError::project_route(
                 "project_runtime_opening",
                 true,

@@ -103,7 +103,7 @@ async fn selected_project_opens_its_exact_read_only_store_not_the_active_store()
     .await
     .unwrap();
 
-    assert!(active_target.database().is_writable());
+    assert!(!active_target.database().is_writable());
     assert!(!selected_target.database().is_writable());
     assert_eq!(
         selected_target.owner(),
@@ -168,6 +168,7 @@ async fn same_project_open_denies_when_store_identity_disagrees() {
         project_id: active_id.clone(),
         store_layout_project_id: selected_id,
         served_project_root: active.project_root().to_path_buf(),
+        graph_read_only: false,
     };
 
     let error = tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(

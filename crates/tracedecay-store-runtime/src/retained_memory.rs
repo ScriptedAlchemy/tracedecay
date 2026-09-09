@@ -187,12 +187,18 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         request: Read<'_>,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let (memory_scope, selector) = request.scope();
+        let access = match request {
+            Read::Search(_) | Read::Probe(_) | Read::Related(_) | Read::Reason(_) => {
+                MemoryTargetAccessV1::RecordRetrieval
+            }
+            Read::Contradict(_) | Read::Get(_) | Read::List(_) => MemoryTargetAccessV1::Read,
+        };
         execute_scoped_memory!(
             self,
             context,
             memory_scope,
             selector,
-            MemoryTargetAccessV1::Read,
+            access,
             execute_read_on_db(request)
         )
     }
