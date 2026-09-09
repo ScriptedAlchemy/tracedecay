@@ -659,16 +659,16 @@ mod tests {
         let identity = profile_retrieval_root(&profile_identity).identity().clone();
         let connection =
             profile_retained_connection_authority(&profile_identity, &identity).unwrap();
+        // A directory at the canonical database locator makes only session
+        // storage unusable; the independently mounted profile memory remains valid.
+        let session_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        std::fs::create_dir_all(&session_path).unwrap();
+        assert!(registry.profile_sessions().await.is_err());
         let acquisitions = AtomicUsize::new(0);
         let authorities = ProfileRetainedAuthoritiesV1 {
             profile_sessions: Some(Arc::new(|| {
                 acquisitions.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async {
-                    Err(TraceDecayError::Database {
-                        operation: "mount profile session store".to_owned(),
-                        message: "unrelated session storage unavailable".to_owned(),
-                    })
-                })
+                Box::pin(registry.profile_sessions())
             })),
             session_identity: identity,
             configuration_digest: connection.configuration_digest().clone(),
