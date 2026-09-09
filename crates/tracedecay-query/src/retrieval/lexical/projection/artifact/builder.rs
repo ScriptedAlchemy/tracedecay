@@ -4108,12 +4108,38 @@ fn derive_statistics_step(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     match ordinal {
         0 => hotpath::measure_block!("query.artifact.finalization.derive_field_stats", {
-            transaction.execute_batch(
-                "INSERT INTO field_stats(field, total_length) SELECT field, SUM(frequency) FROM term_postings GROUP BY field;
-                 CREATE TRIGGER frozen_field_stats_insert BEFORE INSERT ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
+            // There are only seven canonical fields. Aggregate them in one
+            // scan instead of sorting every posting into a temporary GROUP BY.
+            transaction.execute(
+                "WITH totals AS MATERIALIZED (
+                    SELECT SUM(frequency) FILTER (WHERE field = ?1) AS f1,
+                           SUM(frequency) FILTER (WHERE field = ?2) AS f2,
+                           SUM(frequency) FILTER (WHERE field = ?3) AS f3,
+                           SUM(frequency) FILTER (WHERE field = ?4) AS f4,
+                           SUM(frequency) FILTER (WHERE field = ?5) AS f5,
+                           SUM(frequency) FILTER (WHERE field = ?6) AS f6,
+                           SUM(frequency) FILTER (WHERE field = ?7) AS f7
+                    FROM term_postings
+                 )
+                 INSERT INTO field_stats(field, total_length)
+                 SELECT ?1, f1 FROM totals WHERE f1 IS NOT NULL UNION ALL
+                 SELECT ?2, f2 FROM totals WHERE f2 IS NOT NULL UNION ALL
+                 SELECT ?3, f3 FROM totals WHERE f3 IS NOT NULL UNION ALL
+                 SELECT ?4, f4 FROM totals WHERE f4 IS NOT NULL UNION ALL
+                 SELECT ?5, f5 FROM totals WHERE f5 IS NOT NULL UNION ALL
+                 SELECT ?6, f6 FROM totals WHERE f6 IS NOT NULL UNION ALL
+                 SELECT ?7, f7 FROM totals WHERE f7 IS NOT NULL",
+                [
+                    LexicalFieldV1::SymbolName, LexicalFieldV1::QualifiedName,
+                    LexicalFieldV1::Path, LexicalFieldV1::BodyText,
+                    LexicalFieldV1::PreambleText, LexicalFieldV1::ExactTerm,
+                    LexicalFieldV1::Subtoken,
+                ].map(field_code),
+            ).and_then(|_| transaction.execute_batch(
+                "CREATE TRIGGER frozen_field_stats_insert BEFORE INSERT ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
                  CREATE TRIGGER frozen_field_stats_update BEFORE UPDATE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
                  CREATE TRIGGER frozen_field_stats_delete BEFORE DELETE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;",
-            )
+            ))
         }),
         1 => hotpath::measure_block!("query.artifact.finalization.derive_term_stats", {
             transaction.execute_batch(
@@ -5602,6 +5628,47 @@ mod tests {
             register_builder_mutation_gate(connection).expect("register builder mutation gate");
         create_schema(connection, LexicalArtifactLayoutV1::V11).expect("create artifact schema");
         BuilderMutationGuardV1::enter(&gate).expect("enter test builder mutation authority")
+    }
+
+    #[test]
+    fn field_statistics_preserve_posting_sums_and_omit_absent_fields() {
+        for empty in [false, true] {
+            let mut connection = Connection::open_in_memory().expect("statistics database");
+            let _authority = create_mutable_test_schema(&connection);
+            if !empty {
+                connection
+                    .execute_batch(
+                        "INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES
+                     (1, 1, 1, 2), (2, 1, 1, 3), (1, 1, 2, 4),
+                     (1, 3, 1, 7), (2, 7, 2, 11);",
+                    )
+                    .expect("posting fixture");
+            }
+            let expected = connection
+                .prepare(
+                    "SELECT field, SUM(frequency) FROM term_postings GROUP BY field ORDER BY field",
+                )
+                .expect("reference sums")
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .expect("reference rows")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("reference totals");
+            let transaction = connection.transaction().expect("statistics transaction");
+            derive_statistics_step(&transaction, 0).expect("derive statistics");
+            let actual = transaction
+                .prepare("SELECT field, total_length FROM field_stats ORDER BY field")
+                .expect("derived sums")
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .expect("derived rows")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("derived totals");
+            assert_eq!(actual, expected);
+            assert!(
+                transaction
+                    .execute("INSERT INTO field_stats VALUES (2, 5)", [])
+                    .is_err()
+            );
+        }
     }
 
     #[test]

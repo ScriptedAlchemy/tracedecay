@@ -331,8 +331,30 @@ fn query_request(scope: RemoteRepositoryScopeV1) -> RemoteHttpRequestV1<RemoteQu
     }
 }
 
-fn authenticated_router(port_calls: Arc<AtomicUsize>) -> Router {
+fn test_protocol_router(
+    port: UnreachedProtocolPort,
+    admission: Arc<dyn RemoteCredentialAdmissionPortV1>,
+    clock: fn() -> UtcMicros,
+) -> Router {
+    let port = Arc::new(port);
     remote_protocol_router(
+        port.clone(),
+        RemoteOperationProtocolPortsV1 {
+            capture: port.clone(),
+            replay: port.clone(),
+            frame_transfer: port.clone(),
+            query: port.clone(),
+            backup: port.clone(),
+            restore: port.clone(),
+            promotion: port,
+        },
+        admission,
+        clock,
+    )
+}
+
+fn authenticated_router(port_calls: Arc<AtomicUsize>) -> Router {
+    test_protocol_router(
         UnreachedProtocolPort {
             calls: port_calls,
             controlled_deadline: None,
@@ -347,7 +369,7 @@ fn rejecting_router(
     admission_calls: Arc<AtomicUsize>,
     port_calls: Arc<AtomicUsize>,
 ) -> Router {
-    remote_protocol_router(
+    test_protocol_router(
         UnreachedProtocolPort {
             calls: port_calls,
             controlled_deadline: None,
@@ -364,7 +386,7 @@ fn deadline_capturing_router(
     port_calls: Arc<AtomicUsize>,
     controlled_deadline: Arc<AtomicI64>,
 ) -> Router {
-    remote_protocol_router(
+    test_protocol_router(
         UnreachedProtocolPort {
             calls: port_calls,
             controlled_deadline: Some(controlled_deadline),

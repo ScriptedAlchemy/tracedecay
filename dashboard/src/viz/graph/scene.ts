@@ -26,6 +26,10 @@ export interface GraphScene {
   /** Repaint the current composition. Static: no loop is started. */
   repaint(): void;
   resize(): void;
+  focusNode(node: string | null): void;
+  zoomIn(): void;
+  zoomOut(): void;
+  fit(): void;
   settle(): void;
   wake(): void;
   retheme(): void;
@@ -46,7 +50,9 @@ export interface SceneRequest {
   extent: FieldExtent | undefined;
   field: ActivationField;
   selectedId: () => string | null | undefined;
+  inspectedId: () => string | null | undefined;
   onSelect: (id: string | null) => void;
+  onInspect: (id: string | null) => void;
   isReduced: () => boolean;
 }
 
@@ -95,7 +101,8 @@ function compose(
   prepared: PreparedField,
   frame: FieldFrame,
 ): GraphScene {
-  const { container, edges, field, isReduced, onSelect, selectedId } = request;
+  const { container, edges, field, inspectedId, isReduced, onInspect, onSelect, selectedId } =
+    request;
   const { graph, realNodes, neighborsOf, nodeCount, denseField, roominess } = prepared;
   const strands = buildDendrites(graph, edges.length);
   const focus = createFocusState();
@@ -138,8 +145,11 @@ function compose(
     // Selection is reader intent, never an admitted activity event.
     onNodeClick: onSelect,
     onStageClick: () => onSelect(null),
+    onInspect,
     onFocusChange: () => overlay.wake(),
   });
+  const initialInspection = inspectedId();
+  if (initialInspection != null) renderer.focusNode(initialInspection);
 
   // One static composition of the resting field, so the graph is fully
   // rendered before anything ever fires.
@@ -153,6 +163,18 @@ function compose(
     repaint: paint,
     resize: () => {
       if (alive) renderer?.resize();
+    },
+    focusNode: (node) => {
+      if (alive) renderer?.focusNode(node);
+    },
+    zoomIn: () => {
+      if (alive) renderer?.zoomIn(isReduced());
+    },
+    zoomOut: () => {
+      if (alive) renderer?.zoomOut(isReduced());
+    },
+    fit: () => {
+      if (alive) renderer?.fit(isReduced());
     },
     settle: () => {
       if (alive) overlay.settle();

@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from 'react';
+import { useEffect, useReducer, useState } from 'react';
 import type { LiveActivityPulse, SseConnectionState } from '../../data/sse/connect.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Meter } from '../../ui/instrument.tsx';
@@ -20,7 +20,7 @@ const CONNECTION_STATE: Record<
   live: {
     kind: 'ready',
     detail: 'event stream open',
-    sentence: 'Connected. Figures below are current.',
+    sentence: 'Connected. Counts cover only the retained pulse window, not the full stream.',
   },
   connecting: {
     kind: 'loading',
@@ -56,19 +56,23 @@ export function SignalPanel({
   pulses,
   sseState,
   lastEventAt,
+  onInspectProject,
 }: {
   pulses: readonly LiveActivityPulse[];
   sseState: SseConnectionState;
   lastEventAt: number | null;
+  onInspectProject?: (projectId: string | null) => void;
 }) {
   const now = useClockWhileAging(lastEventAt);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const selectedEvent = pulses.find((pulse) => pulse.eventId === selectedEventId);
   const summary = summarizeActivity(pulses, now);
   const connection = CONNECTION_STATE[sseState];
   const ageMs = lastEventAt == null ? null : Math.max(0, now - lastEventAt);
   const offline = sseState === 'offline';
   const peak = summary.peak;
   return (
-    <div className="flex max-w-full select-none items-stretch">
+    <div className="pointer-events-auto flex max-w-full items-stretch">
       <span aria-hidden className="w-2 border-y border-l border-accent/40" />
       <div className="flex min-w-0 flex-col gap-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
         <StateChip kind={connection.kind} detail={connection.detail} />
@@ -82,7 +86,7 @@ export function SignalPanel({
         <dl className="flex flex-wrap items-end gap-x-5 gap-y-2">
           <div className="flex flex-col-reverse gap-1">
             <dt className="td-legend">
-              {offline ? 'rate · not measured' : `per min · last ${RATE_WINDOW_MS / 1000}s`}
+              {offline ? 'rate · not measured' : `retained · last ${RATE_WINDOW_MS / 1000}s`}
             </dt>
             <dd className="td-value text-xs text-text-primary" data-cell="numeric">
               {/* A rate is a claim that something is being measured right now.
@@ -127,6 +131,33 @@ export function SignalPanel({
           // events" under it reads as a second, redundant apology.
           <p className="td-legend">no events observed yet</p>
         )}
+        <details className="max-w-sm text-2xs">
+          <summary className="cursor-pointer">Inspect admitted events ({pulses.length} retained)</summary>
+          <div className="mt-2 max-h-56 overflow-auto">
+            {pulses.length === 0 ? <p>No admitted event is retained. Transcript target unavailable.</p> : (
+              <ol aria-label="Retained admitted events" className="space-y-1">
+                {[...pulses].reverse().map((pulse) => <li key={pulse.eventId}>
+                  <button type="button" className="td-hit w-full break-all border border-edge-subtle p-1 text-left" aria-pressed={selectedEventId === pulse.eventId} onClick={() => {
+                    setSelectedEventId(pulse.eventId);
+                    onInspectProject?.(pulse.projectId);
+                  }}>
+                    {pulse.family} · {pulse.eventId}
+                  </button>
+                </li>)}
+              </ol>
+            )}
+            {selectedEvent ? <section aria-label="Admitted event evidence" className="mt-2 border border-accent/50 p-2">
+              <dl className="space-y-1 [&>dd]:break-all">
+                <dt>Event ID</dt><dd>{selectedEvent.eventId}</dd>
+                <dt>Observed at (Unix microseconds)</dt><dd>{selectedEvent.observationTime}</dd>
+                <dt>Family</dt><dd>{selectedEvent.family}</dd>
+                <dt>Touched project</dt><dd>{selectedEvent.projectId ?? 'unavailable: event is unscoped'}</dd>
+                <dt>Stream cursor</dt><dd>{selectedEvent.streamId}</dd>
+              </dl>
+              <p className="mt-2">Exact admitted envelope. Transcript target unavailable: this event carries no session/message identity.</p>
+            </section> : selectedEventId ? <p className="mt-2">Selected event is no longer retained in the bounded stream window.</p> : null}
+          </div>
+        </details>
       </div>
       <span aria-hidden className="w-2 border-y border-r border-accent/40" />
     </div>

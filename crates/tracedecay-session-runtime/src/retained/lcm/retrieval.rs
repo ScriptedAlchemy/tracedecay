@@ -557,7 +557,10 @@ fn clamped_text(
     Ok((clamped, truncated))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Maps independent retained request filters into the canonical temporal query; no additional request authority is introduced."
+)]
 fn retrieval_query(
     session_id: &SessionId,
     provider: Option<&str>,

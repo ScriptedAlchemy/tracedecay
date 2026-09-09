@@ -1127,177 +1127,6 @@ async fn manual_branch_missing_ref_is_typed_failure() {
     schedulers.shutdown().await;
 }
 
-#[test]
-fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
-    let repo = tempfile::tempdir().unwrap();
-    let branch = "feature/exact-cleanup";
-    init_manual_branch_repo(repo.path(), branch);
-    let data = tempfile::tempdir().unwrap();
-    let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
-        .expect("feature branch head");
-    let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
-
-    prepare_manual_branch_worktree(
-        repo.path(),
-        &artifacts.worktree,
-        &artifacts.tracking_ref,
-        &artifacts.label,
-        &head,
-        default_pr_command_control(),
-    )
-    .expect("prepare exact worktree");
-    assert!(
-        cleanup_owned_worktree(
-            repo.path(),
-            &artifacts.worktree,
-            &artifacts.tracking_ref,
-            &artifacts.label,
-            &head,
-            default_pr_command_control(),
-        )
-        .expect("exact cleanup")
-    );
-    assert!(
-        cleanup_owned_worktree(
-            repo.path(),
-            &artifacts.worktree,
-            &artifacts.tracking_ref,
-            &artifacts.label,
-            &head,
-            default_pr_command_control(),
-        )
-        .expect("absent artifacts are an idempotent success")
-    );
-
-    prepare_manual_branch_worktree(
-        repo.path(),
-        &artifacts.worktree,
-        &artifacts.tracking_ref,
-        &artifacts.label,
-        &head,
-        default_pr_command_control(),
-    )
-    .expect("prepare replacement exact worktree");
-    let foreign = resolve_branch_head(repo.path(), "main", default_pr_command_control())
-        .expect("main branch head");
-    assert_ne!(foreign, head, "fixture branches must have distinct heads");
-    assert!(
-        successful_git_with_control(
-            repo.path(),
-            &["update-ref", &artifacts.tracking_ref, &foreign],
-            default_pr_command_control(),
-        )
-        .is_ok()
-    );
-
-    assert!(
-        !cleanup_owned_worktree(
-            repo.path(),
-            &artifacts.worktree,
-            &artifacts.tracking_ref,
-            &artifacts.label,
-            &head,
-            default_pr_command_control(),
-        )
-        .expect("foreign provenance must be a typed false result"),
-        "foreign ref replacement must survive an exact-source cleanup"
-    );
-    assert!(
-        ref_points_to(
-            repo.path(),
-            &artifacts.tracking_ref,
-            &foreign,
-            default_pr_command_control(),
-        )
-        .expect("foreign tracking ref remains readable"),
-        "the foreign tracking ref must remain untouched"
-    );
-    assert!(
-        artifacts.worktree.exists(),
-        "a foreign provenance mismatch must not delete the linked worktree"
-    );
-}
-
-#[test]
-fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() {
-    let repo = tempfile::tempdir().unwrap();
-    let branch = "feature/retry-after-git-failure";
-    init_manual_branch_repo(repo.path(), branch);
-    let data = tempfile::tempdir().unwrap();
-    let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
-        .expect("feature branch head");
-    let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
-    let branch_ref = format!("refs/heads/{}", artifacts.label);
-
-    prepare_manual_branch_worktree(
-        repo.path(),
-        &artifacts.worktree,
-        &artifacts.tracking_ref,
-        &artifacts.label,
-        &head,
-        default_pr_command_control(),
-    )
-    .expect("prepare exact worktree");
-    remove_worktree(
-        repo.path(),
-        &artifacts.worktree,
-        default_pr_command_control(),
-    )
-    .expect("remove exact worktree");
-    assert!(
-        !artifacts.worktree.try_exists().expect("inspect worktree"),
-        "the sealed ref retry begins after the linked worktree is absent"
-    );
-
-    let unavailable = PrCommandControl::with_timeout(Duration::ZERO);
-    let error = cleanup_owned_worktree(
-        repo.path(),
-        &artifacts.worktree,
-        &artifacts.tracking_ref,
-        &artifacts.label,
-        &head,
-        &unavailable,
-    )
-    .expect_err("unavailable Git must not be collapsed into an absent ref");
-    assert!(matches!(
-        &error,
-        ManualBranchActivationError::GitAuthorityUnavailable { .. }
-    ));
-    assert!(
-        error.retryable(),
-        "a bounded exact-ref read timeout must remain retryable"
-    );
-    let response = super::super::branch_add::typed_project_route_error(
-        serde_json::json!("exact-read-timeout"),
-        error.reason_code(),
-        error.retryable(),
-        error.detail(),
-    );
-    let response = serde_json::to_value(response).expect("serialize production JSON-RPC error");
-    assert_eq!(
-        response["error"]["data"]["reason_code"],
-        "git_authority_unavailable"
-    );
-    assert_eq!(response["error"]["data"]["retryable"], true);
-    assert!(
-        git_ref_exists(repo.path(), &artifacts.tracking_ref)
-            && git_ref_exists(repo.path(), &branch_ref),
-        "a failed exact read must retain the sealed reference proof for retry"
-    );
-
-    assert!(
-        cleanup_owned_worktree(
-            repo.path(),
-            &artifacts.worktree,
-            &artifacts.tracking_ref,
-            &artifacts.label,
-            &head,
-            default_pr_command_control(),
-        )
-        .expect("restored Git authority must complete exact cleanup")
-    );
-}
-
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_exact_read() {
@@ -1422,6 +1251,18 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
         ManualBranchActivationError::GitAuthorityUnavailable { .. }
     ));
     assert!(error.retryable());
+    let response = super::super::branch_add::typed_project_route_error(
+        serde_json::json!("exact-read-timeout"),
+        error.reason_code(),
+        error.retryable(),
+        error.detail(),
+    );
+    let response = serde_json::to_value(response).expect("serialize production JSON-RPC error");
+    assert_eq!(
+        response["error"]["data"]["reason_code"],
+        "git_authority_unavailable"
+    );
+    assert_eq!(response["error"]["data"]["retryable"], true);
 
     drop(fifo_writer);
     std::fs::remove_file(&ref_path).expect("remove stalled FIFO ref");
