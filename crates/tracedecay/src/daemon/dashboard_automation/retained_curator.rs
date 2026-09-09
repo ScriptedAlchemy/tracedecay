@@ -46,7 +46,7 @@ pub(crate) async fn execute_retained_memory_curator(
     config.timeout_secs = config.timeout_secs.min(MEMORY_CURATOR_REQUEST_TIMEOUT_SECS);
     let backend = CodexAppServerBackend::from_automation_config(&config);
     let configuration_digest =
-        crate::daemon::automation_effect::pinned_automation_configuration_digest(
+        tracedecay_automation_runtime::automation::effect_runtime::pinned_automation_configuration_digest(
             pinned.revision_id(),
             &pinned.snapshot().effective_behavior_digest,
             &pinned.snapshot().resolution_provenance_digest,
@@ -65,7 +65,7 @@ pub(crate) async fn execute_retained_memory_curator(
             "the automation project context could not be composed: {error}"
         ))
     })?;
-    let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+    let admission = crate::daemon::automation_effect::prepare(
         invocation_service,
         cg,
         automation_context.project_root(),
@@ -84,14 +84,14 @@ pub(crate) async fn execute_retained_memory_curator(
         ))
     })?;
     let effect = match admission {
-        crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => effect,
-        crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Execute(effect) => effect,
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Replay(terminal) => {
             return terminal.into_outcome().map_err(automation_problem);
         }
-        crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Conflict => {
             return Err(RetainedSurfaceExecutionErrorV1::Conflict);
         }
-        crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::PreAdmissionProblem(
             problem,
         ) => {
             return Err(RetainedSurfaceExecutionErrorV1::ApplicationProblem(
@@ -136,18 +136,18 @@ pub(crate) async fn execute_retained_memory_curator(
         ))
     })?;
     match settlement {
-        crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Run {
+        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Run {
             terminal,
             record: _record,
         } => terminal.into_outcome().map_err(automation_problem),
-        crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Problem {
+        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Problem {
             problem,
             record: _record,
         } => Err(automation_problem(problem)),
-        crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Reused {
+        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Reused {
             record: _record,
         }
-        | crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::AbandonedObserved {
+        | tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::AbandonedObserved {
             record: _record,
         } => Err(RetainedSurfaceExecutionErrorV1::unavailable(
             "the automation run settled without a retained terminal (reused or abandoned)",

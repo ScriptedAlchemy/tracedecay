@@ -1,16 +1,18 @@
-/// Completion latch shared by daemon-owned background maintenance tasks.
-pub(in crate::daemon) struct MaintenanceTaskTermination {
+//! Completion latch shared by daemon-owned background maintenance tasks.
+
+pub struct MaintenanceTaskTermination {
     finished: tokio::sync::watch::Sender<bool>,
 }
 
 impl MaintenanceTaskTermination {
-    pub(in crate::daemon) fn pending() -> Self {
+    #[must_use]
+    pub fn pending() -> Self {
         let (finished, _) = tokio::sync::watch::channel(false);
         Self { finished }
     }
 
     #[hotpath::skip]
-    pub(in crate::daemon) async fn wait(&self) {
+    pub async fn wait(&self) {
         self.wait_for_finish(self.finished.subscribe()).await;
     }
 
@@ -23,7 +25,7 @@ impl MaintenanceTaskTermination {
         }
     }
 
-    pub(in crate::daemon) fn finish(&self) {
+    pub fn finish(&self) {
         self.finished.send_replace(true);
     }
 }
