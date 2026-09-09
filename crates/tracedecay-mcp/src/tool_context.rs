@@ -309,7 +309,14 @@ pub struct McpRequestAuthoritiesV1<'a> {
     pub freshness: Option<&'a CodeIndexFreshnessPayloadV1>,
     pub generation_census: Option<&'a GenerationCensusSnapshot>,
     pub semantic_owner: Option<&'a SemanticOwnerStateV1>,
+    /// Distinguishes “no daemon service attached” from “service attached but
+    /// the owner task is unregistered”. Only consulted when `semantic_owner`
+    /// is `None`.
+    pub semantic_owner_authority_attached: bool,
     pub doctor_report: Option<&'a AdmittedDoctorReportV1>,
+    /// Distinguishes “no doctor reader attached” from “reader ran and failed”.
+    /// Only consulted when `doctor_report` is `None`.
+    pub doctor_report_read_failed: bool,
 }
 
 /// Everything the composition root admits for one MCP tool call.
@@ -495,8 +502,26 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
+    pub fn semantic_owner_authority_attached(&self) -> bool {
+        self.request.semantic_owner_authority_attached
+    }
+
+    #[must_use]
     pub fn doctor_report(&self) -> Option<&'a AdmittedDoctorReportV1> {
         self.request.doctor_report
+    }
+
+    #[must_use]
+    pub fn doctor_report_read_failed(&self) -> bool {
+        self.request.doctor_report_read_failed
+    }
+
+    #[must_use]
+    pub fn branch_diagnostics(
+        &self,
+    ) -> Option<tracedecay_application::tracedecay::BranchDiagnostics> {
+        self.project
+            .map(McpProjectAuthoritiesV1::branch_diagnostics)
     }
 
     #[must_use]

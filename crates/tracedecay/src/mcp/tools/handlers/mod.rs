@@ -76,7 +76,6 @@ pub mod edit;
     clippy::uninlined_format_args
 )]
 mod graph_search_dispatch_tests;
-pub mod health;
 pub mod hook_runtime;
 pub mod info;
 pub(crate) mod retained_catalog;

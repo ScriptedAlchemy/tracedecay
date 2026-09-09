@@ -14,6 +14,8 @@ use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
+use tracedecay_contracts::doctor::SemanticOwnerStateV1;
+use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::ast_grep as portable_ast_grep;
@@ -25,6 +27,8 @@ use tracedecay_mcp::{
     AdmittedCodeIndex, AdmittedProjectStore, McpProjectAuthoritiesV1, McpProjectIdentityV1,
     McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
 };
+use tracedecay_runtime_core::storage::registered_project_id;
+use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 use super::ToolCallRegistryOptions;
@@ -500,8 +504,11 @@ fn dispatch_graph_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let project = admitted_project_authorities(cg, &options)?;
-        let freshness = admitted_freshness_payload(cg, &options).await;
-        let ctx = admitted_tool_context(cg, &options, project.as_ref(), freshness.as_ref())?;
+        let snapshots = AdmittedRequestSnapshotsV1 {
+            freshness: admitted_freshness_payload(cg, &options).await,
+            ..AdmittedRequestSnapshotsV1::default()
+        };
+        let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
         match tool_name {
             "tracedecay_search" => {
                 portable_graph::handle_search(
@@ -648,7 +655,7 @@ fn dispatch_info_tools_inner<'a>(
     server_stats: Option<Value>,
     scope_prefix: Option<&'a str>,
     selected_scope_prefix: Option<&'a str>,
-    active_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
+    _active_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     // Erase the deeply nested match-arm futures before they reach the
@@ -661,24 +668,17 @@ fn dispatch_info_tools_inner<'a>(
                 options.remote_operational_status.as_ref(),
             ),
             "tracedecay_status" => {
-                info::handle_status(
-                    cg,
-                    args,
-                    server_stats,
-                    scope_prefix,
-                    active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                    options.code_index_freshness_reader.as_ref(),
-                    options.generation_census_reader.as_ref(),
-                    options.daemon_invocation_service,
-                )
-                .await
+                let project = admitted_project_authorities(cg, &options)?;
+                let snapshots = admitted_status_snapshots(cg, &options).await;
+                let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
+                portable_info::handle_status(&ctx, args, server_stats, scope_prefix).await
             }
-            "tracedecay_active_project" => Ok(info::handle_active_project(
-                cg,
-                &args,
-                server_stats,
-                scope_prefix,
-            )),
+            "tracedecay_active_project" => {
+                let project = admitted_project_authorities(cg, &options)?;
+                let snapshots = AdmittedRequestSnapshotsV1::default();
+                let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
+                portable_info::handle_active_project(&ctx, &args, server_stats, scope_prefix)
+            }
             "tracedecay_project_list" => {
                 portable_info::handle_project_list(
                     cg.project_root(),
@@ -1018,7 +1018,8 @@ fn dispatch_git_tools_inner<'a>(
         let carried_deadline = options.application_deadline.as_ref();
         let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
         let project = admitted_project_authorities(cg, &options)?;
-        let ctx = admitted_tool_context(cg, &options, project.as_ref(), None)?;
+        let snapshots = AdmittedRequestSnapshotsV1::default();
+        let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
 
         let handler = async {
             match tool_name {
@@ -1074,14 +1075,31 @@ fn dispatch_git_tools_inner<'a>(
 }
 
 /// Builds the project-lifetime authority bundle from the retained project
-/// server. `None` when the request never resolved a checkout: scoped
-/// authorities cannot be admitted without one.
+/// server. The live `TraceDecay` is that composition: graph DB, store
+/// layout, and runtimes exist whether or not the MCP request carried a
+/// separately admitted scope. A request-carried scope is preferred and
+/// still has to match the layout project id; fixture `handle_tool_call`
+/// derives the checkout from the opened project instead.
 fn admitted_project_authorities(
     cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<Option<McpProjectAuthoritiesV1>> {
-    let Some(scope) = options.admitted_project_scope.clone() else {
-        return Ok(None);
+    let scope = match options.admitted_project_scope.clone() {
+        Some(scope) => scope,
+        None => {
+            let project_id = registered_project_id(cg.store_layout())?;
+            tracedecay_code_index_runtime::resolved_scope_for_project(
+                cg.project_root(),
+                &project_id,
+            )
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "admitted_project_scope_unresolved",
+                    false,
+                    error.to_string(),
+                )
+            })?
+        }
     };
     Ok(Some(McpProjectAuthoritiesV1::new(
         McpProjectIdentityV1 {
@@ -1096,7 +1114,10 @@ fn admitted_project_authorities(
         cg.db_path(),
         Some(cg.store_runtime_registry.clone()),
         Some(cg.configuration_runtime().clone()),
-        options.registered_project_session_db.clone(),
+        options
+            .registered_project_session_db
+            .clone()
+            .or_else(|| options.session_authorities.project.cloned()),
     )?))
 }
 
@@ -1110,6 +1131,89 @@ fn admitted_project_authorities(
 /// admitted for. An authority the daemon did not admit stays absent and the
 /// handler reports its own typed unavailable state; an authority that
 /// contradicts the admitted checkout refuses the whole call.
+#[derive(Default)]
+struct AdmittedRequestSnapshotsV1 {
+    freshness: Option<CodeIndexFreshnessPayloadV1>,
+    generation_census: Option<GenerationCensusSnapshot>,
+    semantic_owner: Option<SemanticOwnerStateV1>,
+    semantic_owner_authority_attached: bool,
+    doctor_report: Option<AdmittedDoctorReportV1>,
+    doctor_report_read_failed: bool,
+}
+
+async fn admitted_generation_census(
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<GenerationCensusSnapshot> {
+    match options.generation_census_reader.as_ref() {
+        Some(reader) => Some(reader().await),
+        None => None,
+    }
+}
+
+async fn admitted_semantic_owner(
+    cg: &TraceDecay,
+    options: &ToolCallRegistryOptions<'_>,
+) -> (Option<SemanticOwnerStateV1>, bool) {
+    match options.daemon_invocation_service {
+        Some(service) => (
+            tracedecay_daemon_service::DaemonSemanticOwnerRuntimeRegistrar::new(service)
+                .state(cg.project_root())
+                .await,
+            true,
+        ),
+        None => (None, false),
+    }
+}
+
+async fn admitted_doctor_report(
+    options: &ToolCallRegistryOptions<'_>,
+) -> (Option<AdmittedDoctorReportV1>, bool) {
+    match options.doctor_report_reader.as_ref() {
+        Some(reader) => match reader().await {
+            Ok(report) => (Some(report), false),
+            Err(_) => (None, true),
+        },
+        None => (None, false),
+    }
+}
+
+/// Status needs freshness, census, and the semantic-owner snapshot. It does
+/// not run the doctor reader — that report is runtime-only and is expensive
+/// enough to stall a warming code-index if it ran on every status call.
+async fn admitted_status_snapshots(
+    cg: &TraceDecay,
+    options: &ToolCallRegistryOptions<'_>,
+) -> AdmittedRequestSnapshotsV1 {
+    let (semantic_owner, semantic_owner_authority_attached) =
+        admitted_semantic_owner(cg, options).await;
+    AdmittedRequestSnapshotsV1 {
+        freshness: admitted_freshness_payload(cg, options).await,
+        generation_census: admitted_generation_census(options).await,
+        semantic_owner,
+        semantic_owner_authority_attached,
+        ..AdmittedRequestSnapshotsV1::default()
+    }
+}
+
+/// Runtime always needs the census. The doctor report is snapshotted only
+/// when the caller asked for it, matching the previous handler's cost.
+async fn admitted_runtime_snapshots(
+    options: &ToolCallRegistryOptions<'_>,
+    include_doctor: bool,
+) -> AdmittedRequestSnapshotsV1 {
+    let (doctor_report, doctor_report_read_failed) = if include_doctor {
+        admitted_doctor_report(options).await
+    } else {
+        (None, false)
+    };
+    AdmittedRequestSnapshotsV1 {
+        generation_census: admitted_generation_census(options).await,
+        doctor_report,
+        doctor_report_read_failed,
+        ..AdmittedRequestSnapshotsV1::default()
+    }
+}
+
 async fn admitted_freshness_payload(
     cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
@@ -1126,7 +1230,7 @@ fn admitted_tool_context<'a>(
     cg: &'a TraceDecay,
     options: &'a ToolCallRegistryOptions<'a>,
     project: Option<&'a McpProjectAuthoritiesV1>,
-    freshness: Option<&'a CodeIndexFreshnessPayloadV1>,
+    snapshots: &'a AdmittedRequestSnapshotsV1,
 ) -> Result<McpToolContext<'a>> {
     // Project open resolves one checkout per served route and publishes it
     // alongside the authorities that mount behind it, so this is the checkout
@@ -1158,7 +1262,12 @@ fn admitted_tool_context<'a>(
     // authorization this request carries. `bind` proves independently that the
     // lease's own logical shard names that project before any handler reads it.
     let project_session_store = scope
-        .and(options.registered_project_session_db.as_ref())
+        .and(
+            options
+                .registered_project_session_db
+                .as_ref()
+                .or(options.session_authorities.project),
+        )
         .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
     Ok(McpToolContext::bind(McpToolBinding {
         project,
@@ -1168,7 +1277,12 @@ fn admitted_tool_context<'a>(
                 cancellation: options.application_cancellation.as_ref(),
             },
             code_index,
-            freshness,
+            freshness: snapshots.freshness.as_ref(),
+            generation_census: snapshots.generation_census.as_ref(),
+            semantic_owner: snapshots.semantic_owner.as_ref(),
+            semantic_owner_authority_attached: snapshots.semantic_owner_authority_attached,
+            doctor_report: snapshots.doctor_report.as_ref(),
+            doctor_report_read_failed: snapshots.doctor_report_read_failed,
             ..McpRequestAuthoritiesV1::default()
         },
         project_root: cg.project_root(),
