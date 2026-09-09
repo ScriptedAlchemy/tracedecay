@@ -1006,7 +1006,7 @@ mod tests {
                     .expect("changed budget"),
                 (evaluated_profile.clone(), evaluated_diversity.clone()),
             );
-            evaluated_profile.retrieval_budget = profile.retrieval_budget.clone();
+            evaluated_profile.retrieval_budget = profile.retrieval_budget;
             evaluated_diversity.per_file = Some(1);
             assert_eq!(
                 super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)
