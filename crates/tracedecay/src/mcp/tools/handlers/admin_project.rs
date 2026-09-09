@@ -246,7 +246,8 @@ pub(super) async fn handle_admin_project(
                     detail: "the benchmark is not yet mounted on an admitted code-graph authority"
                         .to_owned(),
                 });
-            }        }
+            }
+        }
         AdminProjectAction::AutomaticFactReceiptList { state, limit } => {
             let db = cg.open_project_store_db()?;
             let memory = project_memory_application(cg, &db)?;
