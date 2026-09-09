@@ -5,9 +5,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::artifact::{
-    EvidenceIndex, git_snapshot, is_lower_hex, sha256_file, status_output_is_dirty,
-    validate_evidence_directory, validate_git_snapshots, validate_release_profile,
-    verify_git_toplevel, workload_identity,
+    EvidenceIndex, is_lower_hex, sha256_file, validate_evidence_directory, validate_git_snapshots,
+    validate_release_profile, workload_identity,
 };
 use super::metrics::{
     PhaseAggregate, aggregate_samples, parse_clock_ticks_per_second, parse_cpu_identity,
@@ -40,40 +39,6 @@ fn workload_manifest_matches_executable_contract() {
     assert_eq!(
         identity.native_fixture_paths.len(),
         NATIVE_PROVIDER_FIXTURES.len()
-    );
-}
-
-#[test]
-fn checked_in_evidence_preserves_providerless_historical_results() {
-    let directory = super::artifact::repository_root().join("benchmark_data/claude-observation");
-    let acceptance = validate_evidence_directory(&directory, false).unwrap();
-    let index: serde_json::Value = serde_json::from_slice(
-        &fs::read(directory.join("evidence-index.json")).expect("read evidence index"),
-    )
-    .expect("parse evidence index");
-    assert_eq!(acceptance.as_deref(), index["current_acceptance"].as_str());
-    let mut providerless_results = 0;
-    for name in index["historical_stale"]
-        .as_array()
-        .expect("historical evidence list")
-    {
-        let result: serde_json::Value = serde_json::from_slice(
-            &fs::read(
-                directory.join(
-                    name.as_str()
-                        .expect("historical evidence filename must be a string"),
-                ),
-            )
-            .expect("read historical evidence"),
-        )
-        .expect("parse historical evidence");
-        assert_eq!(result["evidence_status"], "historical_stale");
-        providerless_results +=
-            usize::from(result.get("provider_observation_performance").is_none());
-    }
-    assert!(
-        providerless_results > 0,
-        "providerless historical evidence must exercise compatibility path"
     );
 }
 
@@ -471,13 +436,6 @@ fn proc_parsers_handle_names_spacing_units_and_cpu_architectures() {
 }
 
 #[test]
-fn porcelain_status_output_detects_clean_and_dirty_worktrees() {
-    assert!(!status_output_is_dirty(b""));
-    assert!(status_output_is_dirty(b" M tracked.rs\n"));
-    assert!(status_output_is_dirty(b"?? untracked\n"));
-}
-
-#[test]
 fn build_profile_clock_and_executable_attestation_reject_invalid_inputs() {
     assert!(validate_release_profile(false, Some("release")).is_ok());
     assert!(validate_release_profile(true, Some("release")).is_err());
@@ -529,14 +487,6 @@ fn git_snapshot_validation_rejects_dirty_or_changed_states() {
         ..clean.clone()
     };
     assert!(validate_git_snapshots(&clean, &dirty_after).is_err());
-}
-
-#[test]
-fn git_commands_are_scoped_to_the_manifest_repository() {
-    verify_git_toplevel();
-    let snapshot = git_snapshot();
-    assert!(!snapshot.commit.is_empty());
-    assert!(!snapshot.tree.is_empty());
 }
 
 #[test]

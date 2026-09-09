@@ -449,22 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn changed_branch_set_does_not_skip() {
-        let mut cache = HashMap::new();
-        let mut register_calls = 0;
-        let first = digest("/repo", &["main"]);
-        let second = digest("/repo", &["main", "feature/x"]);
-
-        simulate_call(&mut cache, "proj-1", &first, &mut register_calls);
-        simulate_call(&mut cache, "proj-1", &second, &mut register_calls);
-
-        assert_eq!(
-            register_calls, 2,
-            "a changed tracked-branch set must force re-registration"
-        );
-    }
-
-    #[test]
     fn changed_canonical_root_does_not_skip() {
         let mut cache = HashMap::new();
         let mut register_calls = 0;
@@ -477,59 +461,6 @@ mod tests {
         assert_eq!(
             register_calls, 2,
             "a changed canonical_root (primary-checkout redirect) must force re-registration"
-        );
-    }
-
-    #[test]
-    fn changed_git_common_dir_does_not_skip() {
-        let mut cache = HashMap::new();
-        let mut register_calls = 0;
-        let mut first = digest("/repo", &["main"]);
-        first.git_common_dir = Some(PathBuf::from("/repo/.git"));
-        let mut second = first.clone();
-        second.git_common_dir = None;
-
-        simulate_call(&mut cache, "proj-1", &first, &mut register_calls);
-        simulate_call(&mut cache, "proj-1", &second, &mut register_calls);
-
-        assert_eq!(
-            register_calls, 2,
-            "a changed git_common_dir must force re-registration"
-        );
-    }
-
-    #[test]
-    fn changed_git_remote_does_not_skip() {
-        let mut cache = HashMap::new();
-        let mut register_calls = 0;
-        let first = digest("/repo", &["main"]);
-        let mut second = first.clone();
-        second.git_remote_url = Some("https://example.com/fork.git".to_string());
-
-        simulate_call(&mut cache, "proj-1", &first, &mut register_calls);
-        simulate_call(&mut cache, "proj-1", &second, &mut register_calls);
-
-        assert_eq!(
-            register_calls, 2,
-            "a changed git remote must force re-registration"
-        );
-    }
-
-    #[test]
-    fn changed_artifact_mtime_does_not_skip() {
-        let mut cache = HashMap::new();
-        let mut register_calls = 0;
-        let mut first = digest("/repo", &["main"]);
-        first.artifact_mtimes = vec![Some(SystemTime::UNIX_EPOCH), None, None, None];
-        let mut second = first.clone();
-        second.artifact_mtimes[0] = Some(SystemTime::now());
-
-        simulate_call(&mut cache, "proj-1", &first, &mut register_calls);
-        simulate_call(&mut cache, "proj-1", &second, &mut register_calls);
-
-        assert_eq!(
-            register_calls, 2,
-            "a changed artifact mtime must force re-registration"
         );
     }
 

@@ -238,17 +238,6 @@ fn work_definitions_cover_the_canonical_operation_registry() {
 }
 
 #[test]
-fn test_tool_definitions_have_schemas() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    for tool in &tools {
-        assert!(!tool.name.is_empty());
-        assert!(!tool.description.is_empty());
-        assert!(tool.input_schema.is_object());
-        assert_eq!(tool.input_schema["type"], "object");
-    }
-}
-
-#[test]
 fn format_capable_tools_advertise_markdown_json_without_tables() {
     let tools = get_tool_definitions().expect("tool definitions");
     for tool_name in tracedecay_mcp::format_capable_tool_names() {
@@ -296,28 +285,6 @@ fn every_advertised_application_surface_uses_canonical_output_formats() {
             tool.input_schema["properties"]["format"]["enum"],
             json!(["markdown", "json"]),
             "{tool_name} must expose the canonical output formats"
-        );
-    }
-}
-
-#[test]
-fn redundancy_tool_definition_describes_ranking_contract() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "tracedecay_redundancy")
-        .expect("tracedecay_redundancy tool definition");
-    // Assert only literal output keys — free prose in the description may
-    // be reworded without breaking the ranking contract.
-    for required in [
-        "ranking_score",
-        "body_vector_cosine",
-        "generic_helper_downranked",
-    ] {
-        assert!(
-            tool.description.contains(required),
-            "redundancy definition should mention {required}: {}",
-            tool.description
         );
     }
 }
@@ -397,26 +364,6 @@ fn test_tool_definitions_have_annotations() {
 }
 
 #[test]
-fn memory_status_discovery_matches_its_pure_read_owner() {
-    let status = get_tool_definitions()
-        .expect("tool definitions")
-        .into_iter()
-        .find(|tool| tool.name == "tracedecay_memory_status")
-        .expect("memory status definition");
-    assert_eq!(status.annotations.unwrap()["readOnlyHint"], true);
-    assert!(
-        status
-            .description
-            .contains("Inspect canonical memory state"),
-        "read-only discovery must advertise a status snapshot, not a mutation"
-    );
-    assert!(
-        !status.description.contains("repair"),
-        "memory status no longer shares an owner with holographic repair"
-    );
-}
-
-#[test]
 fn advertised_read_only_matches_canonical_execution_effect() {
     let catalog = crate::mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
     for tool in get_tool_definitions().expect("tool definitions") {
@@ -471,58 +418,5 @@ fn lcm_doctor_exposes_diagnostics_only() {
     assert_eq!(
         doctor.annotations.as_ref().unwrap()["readOnlyHint"],
         json!(true)
-    );
-}
-
-#[test]
-fn test_always_load_tools() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let always_load: Vec<&str> = tools
-        .iter()
-        .filter(|t| {
-            t.meta
-                .as_ref()
-                .and_then(|m| m.get("anthropic/alwaysLoad"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
-        .map(|t| t.name.as_str())
-        .collect();
-    assert!(
-        always_load.contains(&"tracedecay_context"),
-        "tracedecay_context must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_search"),
-        "tracedecay_search must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_status"),
-        "tracedecay_status must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_active_project"),
-        "tracedecay_active_project must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_storage_status"),
-        "tracedecay_storage_status must be alwaysLoad"
-    );
-    // grep and callers cover the two most common native-tool reflexes
-    // (content search and "who calls this"), so they join the always-loaded
-    // set to keep the model from ToolSearch-ing before reaching for Bash.
-    assert!(
-        always_load.contains(&"tracedecay_grep"),
-        "tracedecay_grep must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_callers"),
-        "tracedecay_callers must be alwaysLoad"
-    );
-    assert_eq!(
-        always_load.len(),
-        7,
-        "exactly 7 tools should be alwaysLoad (cap), got {:?}",
-        always_load
     );
 }

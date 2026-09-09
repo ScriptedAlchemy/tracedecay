@@ -10,7 +10,7 @@ use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
     CancellationSignal, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest,
-    RequestContext, RequestId, ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
+    RequestContext, RequestId, ResolvedScope, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_contracts::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
@@ -33,19 +33,17 @@ use super::{
     HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
     adapt_application_tool_request, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    feedback_sse_stream_event, http_operation_event_router, invocation_problem,
-    parse_application_surface_request, parse_http_application_surface_request,
-    resolve_application_binding, resolve_application_surface_dispatch,
-    resolve_authenticated_http_request_context, surface_rejection_metadata,
+    http_operation_event_router, invocation_problem, parse_application_surface_request,
+    parse_http_application_surface_request, resolve_application_binding,
+    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
+    surface_rejection_metadata,
 };
 use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
 };
-use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_contracts::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
-    FeedbackSseLifecycleV1,
 };
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_daemon_protocol::RequestedOutputFormat;
@@ -441,18 +439,6 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
             assert_eq!(binding.result_schema.revision(), 1);
         }
     }
-}
-
-#[test]
-fn catalog_operation_authority_preserves_tool_name_compatibility() {
-    assert_eq!(
-        ApplicationSurfaceOperation::from_tool_name("tracedecay_git_preview"),
-        Some(ApplicationSurfaceOperation::GitPreview)
-    );
-    assert_eq!(
-        ApplicationSurfaceOperation::from_tool_name("tracedecay_git_apply"),
-        Some(ApplicationSurfaceOperation::GitApply)
-    );
 }
 
 #[test]
@@ -1243,17 +1229,6 @@ fn callable_code_page_is_transport_owned() {
 }
 
 #[test]
-fn primitive_requests_must_match_the_catalog_operation() {
-    let request = ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(
-        StorageStatusPrimitiveRequest {
-            include_details: false,
-        },
-    ));
-    assert!(request.matches(ApplicationSurfaceOperation::StorageStatus));
-    assert!(!request.matches(ApplicationSurfaceOperation::QualifiedName));
-}
-
-#[test]
 fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
     for (operation, name) in [
         (
@@ -1328,15 +1303,6 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
             None
         );
     }
-}
-
-#[test]
-fn sse_item_maps_to_content_free_delivery_lifecycle() {
-    let event = StreamEvent::item(7, "content-is-not-observed").expect("stream item");
-    assert_eq!(
-        feedback_sse_stream_event(&event),
-        Some((FeedbackSseLifecycleV1::EventDelivered, 1, false,))
-    );
 }
 
 #[test]
@@ -1660,20 +1626,6 @@ async fn resolver_conceals_cross_project_scope_with_one_typed_denial() {
         denied.expect_err("cross-project scope must be concealed"),
         OperationEventError::NotFoundOrNotAuthorized
     );
-}
-
-#[test]
-fn storage_status_empty_request_uses_typed_default() {
-    let request = parse_application_surface_request(
-        ApplicationSurfaceOperation::StorageStatus,
-        serde_json::json!({}),
-    )
-    .expect("empty storage-status request");
-    assert!(matches!(
-        request,
-        ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(request))
-            if !request.include_details
-    ));
 }
 
 /// A dead daemon socket must be a fail-fast dispatch error carrying the

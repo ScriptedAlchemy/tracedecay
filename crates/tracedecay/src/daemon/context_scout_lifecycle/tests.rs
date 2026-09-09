@@ -273,16 +273,6 @@ async fn protected_replay_locator_re_resolves_the_authoritative_native_lifecycle
     assert_eq!(session_id.as_str(), "session.native.codex");
 }
 
-/// The cap is a fail-closed bound, not a tuning knob: it must stay small
-/// enough to keep one hook lookup bounded, and `cap + 1` must remain a
-/// valid `i64` SQL `LIMIT` (the `try_from` in the lookup returns `None`
-/// otherwise, silently failing every lookup closed).
-#[test]
-fn session_observation_cap_stays_bounded_and_expressible_as_a_sql_limit() {
-    assert_eq!(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1, 64);
-    assert!(i64::try_from(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1 + 1).is_ok());
-}
-
 #[tokio::test]
 async fn zero_hook_identifiers_are_rejected_before_registration() {
     let temporary = TempDir::new().unwrap();

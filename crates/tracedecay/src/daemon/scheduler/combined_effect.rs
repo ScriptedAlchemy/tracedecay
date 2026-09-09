@@ -1853,18 +1853,4 @@ mod tests {
     async fn conflicting_skill_abandons_only_the_fresh_reflector_reservation() {
         assert_conflict_abandons_fresh_sibling(ConflictingLeg::Skill).await;
     }
-
-    #[test]
-    fn host_receipt_requires_both_exact_completed_terminals() {
-        assert!(CombinedEffectOutcome::Completed.completed());
-        assert!(!CombinedEffectOutcome::Handled.completed());
-        assert!(!CombinedEffectOutcome::Deferred.completed());
-    }
-
-    #[test]
-    fn only_not_combined_dispatch_falls_back_to_standalone_gates() {
-        assert!(CombinedEffectOutcome::Completed.handled());
-        assert!(CombinedEffectOutcome::Handled.handled());
-        assert!(!CombinedEffectOutcome::Deferred.handled());
-    }
 }

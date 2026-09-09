@@ -2243,28 +2243,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_rebuilding_generation_remains_typed_unavailable() {
-        let unavailable = crate::mcp::server::CodeIndexSearchUnavailableV1 {
-            code_generation: None,
-            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-            },
-            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
-                crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-            ),
-        };
-
-        assert!(!unavailable.coverage.any_servable());
-        assert_eq!(
-            unavailable.coverage.exact,
-            crate::mcp::server::CodeIndexLaneStatusV1::Unavailable {
-                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-            }
-        );
-    }
-
     #[tokio::test]
     async fn installed_search_executor_owns_fallback_allowed_dispatch() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

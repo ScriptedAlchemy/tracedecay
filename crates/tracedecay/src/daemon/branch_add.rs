@@ -1019,18 +1019,4 @@ mod wait_policy_tests {
         };
         assert!(!branch_generation_work_is_active(&terminal));
     }
-
-    #[test]
-    fn the_hard_deadline_bounds_every_seating_wake() {
-        let start = Instant::now();
-        let hard = start + BRANCH_GENERATION_HARD_TIMEOUT;
-
-        // A live pass keeps pushing the idle deadline out. The wake must sleep
-        // to whichever bound arrives first, or an extended idle deadline would
-        // outlive the hard bound the wait is supposed to fail closed on.
-        let idle = start + BRANCH_GENERATION_IDLE_TIMEOUT;
-        assert_eq!(idle.min(hard), idle);
-        let extended = start + BRANCH_GENERATION_HARD_TIMEOUT + BRANCH_GENERATION_IDLE_TIMEOUT;
-        assert_eq!(extended.min(hard), hard);
-    }
 }

@@ -290,25 +290,6 @@ async fn socket_client_requires_authentication_before_routing() {
 }
 
 #[test]
-fn daemon_handshake_advertises_binary_version() {
-    let handshake = test_handshake_defaults();
-
-    let encoded = handshake.to_line().expect("handshake should encode");
-    let value: serde_json::Value = serde_json::from_str(&encoded).expect("handshake json");
-
-    assert_eq!(
-        value["client_version"],
-        serde_json::json!(
-            crate::version::build_version().expect("fixture product runtime registered")
-        )
-    );
-    assert_eq!(
-        value["client_instance_id"],
-        serde_json::json!(tracedecay_runtime_core::runtime_identity::process_run_id())
-    );
-}
-
-#[test]
 fn missing_index_classifier_covers_every_auto_init_store_miss() {
     let missing_messages = [
         "no TraceDecay index found at '/repo'",

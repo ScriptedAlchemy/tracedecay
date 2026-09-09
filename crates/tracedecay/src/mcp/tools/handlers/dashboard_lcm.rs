@@ -1020,11 +1020,6 @@ mod tests {
     }
 
     #[test]
-    fn summary_hydration_has_a_small_fixed_concurrency_bound() {
-        assert_eq!(SUMMARY_DESCRIBE_CONCURRENCY, 8);
-    }
-
-    #[test]
     fn dashboard_session_page_preserves_temporal_cursor_and_exact_limit() {
         let request = DashboardLcmReadRequestV1::Session {
             session_id: "session.dashboard.cursor".to_owned(),

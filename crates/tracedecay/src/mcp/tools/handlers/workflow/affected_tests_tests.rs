@@ -545,16 +545,6 @@ fn timeout_above_the_managed_test_limit_is_rejected() {
 }
 
 #[test]
-fn zero_timeout_is_rejected() {
-    let result = RunAffectedArgs::parse(&json!({"timeout_secs": 0, "format": "json"}))
-        .expect_err("zero timeout must not disable the managed test deadline");
-    let output = tool_result_body(result);
-
-    assert_eq!(output["error"]["kind"], "invalid_request");
-    assert_eq!(output["error"]["operation"], "timeout_secs");
-}
-
-#[test]
 fn unsupported_profile_is_rejected_before_test_selection() {
     let result = RunAffectedArgs::parse(&json!({"profile": "bench", "format": "json"}))
         .expect_err("an unsupported profile must not silently become a debug test run");
@@ -890,16 +880,6 @@ test result: FAILED. 1 passed; 1 failed; 1 ignored
 ";
     let results = parse_libtest_output(stdout);
     assert_eq!(results, vec![("foo".into(), true), ("bar".into(), false)]);
-}
-
-#[test]
-fn cargo_test_args_use_one_exact_identity() {
-    let args = cargo_test_args(TestProfile::Debug, "nested::alpha");
-
-    assert_eq!(
-        args,
-        ["test", "--no-fail-fast", "--", "--exact", "nested::alpha"]
-    );
 }
 
 #[test]

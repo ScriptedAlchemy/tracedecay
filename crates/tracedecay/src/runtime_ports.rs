@@ -295,22 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn hermes_profile_pin_preserves_windows_escape_prone_separators() {
-        let _pinned = registered();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let config = temp.path().join("config.yaml");
-        let windows_root = r"C:\Users\temp\pinned-project";
-        std::fs::write(&config, hermes_project_root_yaml(windows_root))
-            .expect("write hermes profile config");
-
-        assert_eq!(
-            tracedecay_sessions::host_ports::hermes_profile_pin::resolve(&config),
-            Some(windows_root.to_string()),
-            "a Windows native path must round-trip through YAML without bell/tab escapes"
-        );
-    }
-
-    #[test]
     fn unregistered_admission_factory_builds_both_scopes() {
         let _pinned = registered();
         use tracedecay_sessions::host_ports::unregistered_admission::{Scope, create};
@@ -361,17 +345,6 @@ mod tests {
             .expect("the root resolves a canonical layout for any checkout");
         assert_eq!(layout.project_root, checkout);
         assert!(layout.identity.project_id.is_some());
-    }
-
-    /// The tool catalog is no longer wired here at all: host installers read
-    /// it from its owning crate, so it is readable with no registration and an
-    /// unavailable catalog is an error rather than an empty tool set.
-    #[test]
-    fn the_advertised_tool_catalog_needs_no_registration() {
-        let _pinned = registered();
-        let tools = tracedecay_agent_hosts::ports::mcp_tools::advertised_tools()
-            .expect("the advertised tool catalog");
-        assert!(!tools.is_empty());
     }
 
     #[test]

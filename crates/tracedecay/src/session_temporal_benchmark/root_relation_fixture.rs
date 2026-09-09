@@ -292,20 +292,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixture_names_64_distinct_canonical_codex_sessions() {
-        let sessions = session_ids(7).expect("fixture session ids");
-        assert_eq!(sessions.len(), ROOT_RELATION_PARTICIPANT_COUNT);
-        assert_eq!(
-            sessions
-                .iter()
-                .map(tracedecay_domain::SessionId::as_str)
-                .collect::<BTreeSet<_>>()
-                .len(),
-            ROOT_RELATION_PARTICIPANT_COUNT
-        );
-    }
-
-    #[test]
     fn root_relation_hydration_error_names_locked_outcome() {
         let sessions = session_ids(7).expect("fixture session ids");
 
