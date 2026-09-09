@@ -57,7 +57,7 @@ pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
 pub use tracedecay_application::git_query;
-pub mod graph;
+mod graph;
 mod hooks;
 #[cfg(test)]
 mod host_admission_test;
@@ -74,7 +74,7 @@ pub use runtime_ports::{hook_runtime, register_runtime_ports};
 #[cfg(test)]
 #[path = "sessions/claude_observation_benchmark.rs"]
 mod claude_observation_benchmark;
-pub mod runtime_telemetry;
+mod runtime_telemetry;
 pub mod serve;
 #[cfg(test)]
 #[path = "sessions/ingest_tests.rs"]
