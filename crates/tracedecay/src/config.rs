@@ -636,6 +636,7 @@ impl PinnedRuntimeConfiguration {
 
     /// Layers the daemon-only settings over an already validated runtime pin.
     /// Shared settings are taken from the pin, never decoded a second time.
+    #[hotpath::measure(label = "daemon.config.materialize")]
     pub fn from_runtime(
         runtime: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     ) -> Result<Self> {
