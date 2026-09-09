@@ -1037,6 +1037,10 @@
         };
 
         assert_eq!(
+            crate::rerank_adapter::validate_reranker_manifest_pins(&manifest, &pins),
+            Err(crate::rerank_adapter::RerankArtifactAdmissionErrorV1::IncompatibleArtifact)
+        );
+        assert_eq!(
             owner
                 .import_configured_https_reranker_artifact(
                     pins, &manifest, &source, &transport, None, 30,

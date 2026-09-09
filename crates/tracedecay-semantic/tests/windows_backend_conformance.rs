@@ -9,8 +9,7 @@ use tracedecay_semantic_contracts::{
 #[test]
 fn windows_disables_only_fastembed_semantics() {
     let root = tempfile::tempdir().expect("lifecycle root");
-    let owner =
-        SemanticModelLifecycleOwnerV1::open_default(root.path()).expect("lifecycle owner");
+    let owner = SemanticModelLifecycleOwnerV1::open_default(root.path()).expect("lifecycle owner");
 
     let fastembed = owner
         .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
