@@ -94,6 +94,114 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
 }
 
 #[tokio::test]
+async fn cancelled_pr_teardown_preserves_artifacts_and_retries_exactly() {
+    let repo = tempfile::tempdir().expect("repository root");
+    let data_root = tempfile::tempdir().expect("data root");
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    git(repo.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("write fixture");
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "initial"]);
+
+    let pr = 5;
+    let label = pr_label(pr);
+    let tracking_ref = pr_tracking_ref(pr);
+    let head_sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
+    let worktree = data_root.path().join("pr-worktrees/pr-5");
+    std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
+        .expect("create worktree parent");
+    git(repo.path(), &["update-ref", &tracking_ref, &head_sha]);
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &label,
+            worktree.to_str().expect("utf-8 worktree"),
+            &head_sha,
+        ],
+    );
+    let mut state = PrAutotrackState::default();
+    state.managed.insert(
+        label.clone(),
+        ManagedPr {
+            pr,
+            head_branch: "feature-5".to_owned(),
+            head_sha: head_sha.clone(),
+            worktree: worktree.clone(),
+            tracking_ref: tracking_ref.clone(),
+        },
+    );
+    save_state(data_root.path(), &state).expect("persist managed state");
+
+    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    cancellation.cancel();
+    let cancelled_control = PrCommandControl::with_cancellation(cancellation);
+    let cancelled = PrStoreAdministration {
+        schedulers: Some(&schedulers),
+        graph: None,
+        command_control: &cancelled_control,
+    };
+    let report = reconcile_project_with_administration(
+        repo.path(),
+        data_root.path(),
+        &PrDiscovery::default(),
+        10,
+        cancelled,
+    )
+    .await
+    .expect("cancelled reconciliation returns a report");
+
+    assert!(report.untracked.is_empty());
+    assert_eq!(report.failures.len(), 1);
+    assert!(
+        load_state(data_root.path())
+            .expect("reload cancelled state")
+            .managed
+            .contains_key(&label),
+        "cancelled cleanup must preserve durable ownership"
+    );
+    assert!(worktree.exists(), "cancelled cleanup preserves worktree");
+    assert!(git_ref_exists(repo.path(), &format!("refs/heads/{label}")));
+    assert!(git_ref_exists(repo.path(), &tracking_ref));
+
+    let retry_control = PrCommandControl::default();
+    let retry = PrStoreAdministration {
+        schedulers: Some(&schedulers),
+        graph: None,
+        command_control: &retry_control,
+    };
+    let report = reconcile_project_with_administration(
+        repo.path(),
+        data_root.path(),
+        &PrDiscovery::default(),
+        10,
+        retry,
+    )
+    .await
+    .expect("retry reconciliation returns a report");
+
+    assert_eq!(report.untracked, vec![label.clone()]);
+    assert!(report.failures.is_empty());
+    assert!(
+        load_state(data_root.path())
+            .expect("reload cleaned state")
+            .managed
+            .is_empty()
+    );
+    assert!(!worktree.exists(), "retry removes worktree");
+    assert!(!git_ref_exists(repo.path(), &format!("refs/heads/{label}")));
+    assert!(!git_ref_exists(repo.path(), &tracking_ref));
+}
+
+#[tokio::test]
 async fn reconcile_refuses_malformed_state_before_branch_mutation() {
     let data_root = tempfile::tempdir().expect("data root");
     let repo_root = tempfile::tempdir().expect("repository root");
@@ -206,7 +314,8 @@ async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
             .expect("open project graph"),
     );
     let data_root = graph.store_layout().data_root.clone();
-    let discovery = discover_open_prs(repo.path()).expect("discover PR head");
+    let discovery = discover_open_prs_with_control(repo.path(), default_pr_command_control())
+        .expect("discover PR head");
     assert_eq!(discovery.open.len(), 1);
     assert_eq!(discovery.open[0].number, 11);
 
@@ -412,8 +521,8 @@ fn git_ref_exists(repo: &Path, reference: &str) -> bool {
     std::process::Command::new("git")
         .args(["rev-parse", "--verify", "--end-of-options", reference])
         .current_dir(repo)
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -645,8 +754,8 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
     );
     assert_ne!(slashed.worktree, underscored.worktree);
     assert_ne!(
-        manual_branch_worktree_path(&data_root, "feature/a"),
-        manual_branch_worktree_path(&data_root, "feature_a")
+        ManualBranchArtifactsV1::for_branch(&data_root, "feature/a").worktree,
+        ManualBranchArtifactsV1::for_branch(&data_root, "feature_a").worktree
     );
     assert!(git_ref_exists(
         repo.path(),
@@ -768,6 +877,7 @@ async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_track
         Some(&schedulers),
         "feature/failure-cleanup",
         &lifecycle,
+        default_pr_command_control(),
     )
     .await
     .expect("activation before synthetic sealing failure");
@@ -928,7 +1038,7 @@ fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
             &["update-ref", &artifacts.tracking_ref, &foreign],
             default_pr_command_control(),
         )
-        .is_some()
+        .is_ok()
     );
 
     assert!(
@@ -949,7 +1059,8 @@ fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
             &artifacts.tracking_ref,
             &foreign,
             default_pr_command_control(),
-        ),
+        )
+        .expect("foreign tracking ref remains readable"),
         "the foreign tracking ref must remain untouched"
     );
     assert!(
@@ -982,7 +1093,8 @@ fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() 
         repo.path(),
         &artifacts.worktree,
         default_pr_command_control(),
-    );
+    )
+    .expect("remove exact worktree");
     assert!(
         !artifacts.worktree.try_exists().expect("inspect worktree"),
         "the sealed ref retry begins after the linked worktree is absent"

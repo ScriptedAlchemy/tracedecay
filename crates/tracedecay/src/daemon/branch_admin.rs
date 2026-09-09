@@ -12,6 +12,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 #[cfg(unix)]
 use tracedecay_runtime_core::branch::BranchAddOutcome;
+#[cfg(unix)]
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
@@ -476,10 +478,21 @@ pub(super) struct StoreAdministration {
 }
 
 #[cfg(unix)]
-#[derive(Default)]
 struct ManualBranchPublicationTasks {
     closed: AtomicBool,
+    cancellation: CancellationToken,
     tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+
+#[cfg(unix)]
+impl Default for ManualBranchPublicationTasks {
+    fn default() -> Self {
+        Self {
+            closed: AtomicBool::new(false),
+            cancellation: CancellationToken::new(),
+            tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+        }
+    }
 }
 
 /// Waitable receipt for the durable account-deletion tombstone persist.
@@ -577,11 +590,12 @@ impl Default for StoreAdministration {
 
 impl StoreAdministration {
     #[cfg(unix)]
-    pub(super) async fn run_manual_branch_publication<Task>(
+    pub(super) async fn run_manual_branch_publication<Publication, Task>(
         &self,
-        publication: Task,
+        publication: Publication,
     ) -> Result<BranchAddOutcome>
     where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
         Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
     {
         if self
@@ -621,8 +635,9 @@ impl StoreAdministration {
                     );
                 }
             }
+            let cancellation = self.manual_branch_publications.cancellation.clone();
             tasks.spawn(async move {
-                let _ = result_sender.send(publication.await);
+                let _ = result_sender.send(publication(cancellation).await);
             });
         }
         result_receiver.await.map_err(|error| {
@@ -639,12 +654,16 @@ impl StoreAdministration {
         self.manual_branch_publications
             .closed
             .store(true, Ordering::Release);
+        self.manual_branch_publications.cancellation.cancel();
     }
 
     #[cfg(unix)]
     pub(super) async fn shutdown_manual_branch_publications(&self) {
         self.cancel_manual_branch_publications();
-        let mut tasks = self.manual_branch_publications.tasks.lock().await;
+        let mut tasks = {
+            let mut owned = self.manual_branch_publications.tasks.lock().await;
+            std::mem::take(&mut *owned)
+        };
         while let Some(result) = tasks.join_next().await {
             if let Err(error) = result {
                 super::log_daemon_event(

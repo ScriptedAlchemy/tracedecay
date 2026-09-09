@@ -39,7 +39,7 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
     let request = tokio::spawn(async move {
         administration
-            .run_manual_branch_publication(async move {
+            .run_manual_branch_publication(|_| async move {
                 let _ = started_sender.send(());
                 let _ = release_receiver.await;
                 Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
@@ -57,7 +57,7 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     ]);
     let denied = engine
         .store_administration
-        .run_manual_branch_publication(async {
+        .run_manual_branch_publication(|_| async {
             Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked)
         })
         .await
@@ -90,6 +90,65 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     assert!(
         receipt.unfinished().is_empty(),
         "manual branch publication shutdown must complete cleanly"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
+    let engine = DaemonEngine::default();
+    let administration = engine.store_administration.clone();
+    let mutation_after_terminal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mutation = std::sync::Arc::clone(&mutation_after_terminal);
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let request = tokio::spawn(async move {
+        administration
+            .run_manual_branch_publication(
+                move |cancellation: tracedecay_runtime_core::cancellation::CancellationToken| async move {
+                let _ = started_sender.send(());
+                tokio::select! {
+                    () = cancellation.cancelled() => {
+                        Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                            "branch_tracking_failed",
+                            true,
+                            "manual branch publication cancelled by daemon shutdown",
+                        ))
+                    }
+                    () = tokio::time::sleep(std::time::Duration::from_mins(1)) => {
+                        mutation.store(true, std::sync::atomic::Ordering::Release);
+                        Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+                    }
+                }
+            },
+            )
+            .await
+    });
+    started_receiver
+        .await
+        .expect("manual branch publication starts");
+
+    let prepared = crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(
+        engine.shutdown_owner_phases().await,
+    );
+    let shutdown = tokio::spawn(async move {
+        prepared
+            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(15))
+            .await
+    });
+    tokio::time::advance(std::time::Duration::from_secs(16)).await;
+    let receipt = shutdown.await.expect("shutdown joins");
+    assert!(
+        receipt.unfinished().is_empty(),
+        "cooperative cancellation must settle before the terminal receipt"
+    );
+    assert!(
+        request.await.expect("publication request joins").is_err(),
+        "cancelled publication must report failure"
+    );
+    tokio::time::advance(std::time::Duration::from_mins(1)).await;
+    assert!(
+        !mutation_after_terminal.load(std::sync::atomic::Ordering::Acquire),
+        "manual publication mutated state after shutdown terminal receipt"
     );
 }
 

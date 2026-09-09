@@ -17,6 +17,7 @@ use tracedecay_runtime_core::branch_meta::{
     BranchGraphSourceDraftV1, BranchGraphSourcePublicationV1, BranchGraphSourcePublishOutcomeV1,
     BranchGraphSourceRollbackOutcomeV1,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::{
     CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
@@ -30,6 +31,14 @@ const GIT_SNAPSHOT_UNAVAILABLE: &str = "git_snapshot_unavailable";
 const BRANCH_TRACKING_FAILED: &str = "branch_tracking_failed";
 const BRANCH_GENERATION_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const BRANCH_GENERATION_HARD_TIMEOUT: Duration = Duration::from_mins(30);
+
+fn branch_publication_cancelled_error(branch: &str) -> TraceDecayError {
+    TraceDecayError::project_route(
+        BRANCH_TRACKING_FAILED,
+        true,
+        format!("branch publication was cancelled for '{branch}'"),
+    )
+}
 
 /// Immutable project identity and layout required to publish branch metadata.
 #[derive(Clone, Debug)]
@@ -76,6 +85,7 @@ impl BranchPublicationContextV1 {
         project_root: &Path,
         worktree_root: &Path,
         branch: &str,
+        cancellation: &CancellationToken,
     ) -> Result<BranchAddOutcome, TraceDecayError> {
         let canonical_project_root = project_root.canonicalize().map_err(|error| {
             TraceDecayError::project_route(
@@ -96,6 +106,9 @@ impl BranchPublicationContextV1 {
                     canonical_project_root.display()
                 ),
             ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(branch_publication_cancelled_error(branch));
         }
         let canonical_worktree_root = worktree_root.canonicalize().map_err(|error| {
             TraceDecayError::project_route(
@@ -128,6 +141,9 @@ impl BranchPublicationContextV1 {
                 &source_branch,
             )
             .await?;
+        if cancellation.is_cancelled() {
+            return Err(branch_publication_cancelled_error(branch));
+        }
         let prepared = match tracedecay_runtime_core::branch::prepare_branch_tracking_in_layout(
             &canonical_worktree_root,
             branch,
@@ -145,6 +161,12 @@ impl BranchPublicationContextV1 {
             BranchTrackingPreparation::AlreadyTracked => None,
             BranchTrackingPreparation::Deferred => return Ok(BranchAddOutcome::Deferred),
         };
+        if cancellation.is_cancelled() {
+            let error = branch_publication_cancelled_error(branch);
+            self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)
+                .await?;
+            return Err(error);
+        }
         let expected_source = tracedecay_runtime_core::branch_meta::load_branch_meta(
             &self.data_root,
         )
@@ -154,7 +176,12 @@ impl BranchPublicationContextV1 {
                 .and_then(|entry| entry.graph_source.clone())
         });
         let generation = match self
-            .await_exact_branch_generation(schedulers, &canonical_worktree_root, &source)
+            .await_exact_branch_generation(
+                schedulers,
+                &canonical_worktree_root,
+                &source,
+                cancellation,
+            )
             .await
         {
             Ok(generation) => generation,
@@ -404,6 +431,7 @@ impl BranchPublicationContextV1 {
         schedulers: &CodeIndexSchedulerRegistryV1,
         canonical_worktree_root: &Path,
         source: &BranchGraphSourceDraftV1,
+        cancellation: &CancellationToken,
     ) -> Result<Arc<CodeIndexPublishedGenerationV1>, TraceDecayError> {
         let mut serving_changes = schedulers
             .subscribe_serving_generation_changes(canonical_worktree_root)
@@ -434,6 +462,9 @@ impl BranchPublicationContextV1 {
         let hard_deadline = Instant::now() + BRANCH_GENERATION_HARD_TIMEOUT;
         let mut idle_deadline = Instant::now() + BRANCH_GENERATION_IDLE_TIMEOUT;
         loop {
+            if cancellation.is_cancelled() {
+                return Err(branch_publication_cancelled_error(&source.reference));
+            }
             let scope = schedulers
                 .serving_code_scope(canonical_worktree_root)
                 .await
@@ -487,6 +518,9 @@ impl BranchPublicationContextV1 {
                 ));
             }
             tokio::select! {
+                () = cancellation.cancelled() => {
+                    return Err(branch_publication_cancelled_error(&source.reference));
+                }
                 result = serving_changes.changed() => {
                     if result.is_err() {
                         return Err(TraceDecayError::project_route(

@@ -1,12 +1,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use tracedecay_application::pr_tracking::PrCommandControlV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexSchedulerRegistryV1, branch_publication::BranchPublicationContextV1,
 };
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 use tracedecay_runtime_core::branch::BranchAddOutcome;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::{DaemonHandshake, StoreAdministration};
 
@@ -139,24 +141,33 @@ async fn activate_and_track_manual_branch(
     branch: &str,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
     let data_root = graph.store_layout().data_root.clone();
-    let lifecycle = super::pr_autotrack::try_acquire_manual_branch_lifecycle(&data_root, branch)
-        .map_err(|error| {
-            TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
-        })?;
     let project_root = project_root.to_path_buf();
     let graph = Arc::clone(graph);
     let schedulers = schedulers.clone();
     let branch = branch.to_owned();
 
     administration
-        .run_manual_branch_publication(activate_and_track_manual_branch_owned(
-            project_root,
-            graph,
-            schedulers,
-            branch,
-            data_root,
-            lifecycle,
-        ))
+        .run_manual_branch_publication(|cancellation| async move {
+            let lifecycle =
+                super::pr_autotrack::try_acquire_manual_branch_lifecycle(&data_root, &branch)
+                    .map_err(|error| {
+                        TraceDecayError::project_route(
+                            error.reason_code(),
+                            error.retryable(),
+                            error.detail(),
+                        )
+                    })?;
+            activate_and_track_manual_branch_owned(
+                project_root,
+                graph,
+                schedulers,
+                branch,
+                data_root,
+                lifecycle,
+                cancellation,
+            )
+            .await
+        })
         .await
 }
 
@@ -169,6 +180,7 @@ async fn activate_and_track_manual_branch_owned(
     branch: String,
     data_root: std::path::PathBuf,
     lifecycle: super::pr_autotrack::ManualBranchLifecycleLeaseV1,
+    cancellation: CancellationToken,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
     let publication = branch_publication_context(&graph)?;
     let activation = super::pr_autotrack::activate_manual_branch_head_with_lifecycle(
@@ -177,6 +189,7 @@ async fn activate_and_track_manual_branch_owned(
         Some(&schedulers),
         &branch,
         &lifecycle,
+        &PrCommandControlV1::with_cancellation(cancellation.clone()),
     )
     .await
     .map_err(|error| {
@@ -190,7 +203,13 @@ async fn activate_and_track_manual_branch_owned(
         ));
     }
     let tracked = publication
-        .track_exact_worktree_branch(&schedulers, &project_root, &activation.worktree, &branch)
+        .track_exact_worktree_branch(
+            &schedulers,
+            &project_root,
+            &activation.worktree,
+            &branch,
+            &cancellation,
+        )
         .await;
     match tracked {
         Ok(outcome) => Ok(outcome),

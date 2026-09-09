@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -192,20 +193,35 @@ pub fn run_git_with_control(
     )
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PrGitCommandError {
+    #[error(transparent)]
+    Command(#[from] GitCommandError),
+    #[error("git command '{arguments}' exited with {status}: {stderr}")]
+    NonZeroExit {
+        arguments: String,
+        status: ExitStatus,
+        stderr: String,
+    },
+    #[error("git command '{arguments}' returned invalid output: {detail}")]
+    InvalidOutput { arguments: String, detail: String },
+}
+
 pub fn successful_git_with_control(
     repo_root: &Path,
     args: &[&str],
     control: &PrCommandControlV1,
-) -> Option<std::process::Output> {
-    run_git_with_control(repo_root, args, control)
-        .ok()
-        .filter(|output| output.status.success())
-}
-
-/// Discover open, same-repository PR heads without treating command failure as
-/// an empty remote.
-pub fn discover_open_prs(repo_root: &Path) -> Result<PrDiscovery, String> {
-    discover_open_prs_with_control(repo_root, default_pr_command_control())
+) -> Result<std::process::Output, PrGitCommandError> {
+    let output = run_git_with_control(repo_root, args, control)?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(PrGitCommandError::NonZeroExit {
+            arguments: args.join(" "),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
 }
 
 pub fn default_pr_command_control() -> &'static PrCommandControlV1 {
@@ -318,6 +334,7 @@ fn origin_is_github(repo_root: &Path, control: &PrCommandControlV1) -> bool {
         return *cached;
     }
     let result = successful_git_with_control(repo_root, &["remote", "get-url", "origin"], control)
+        .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .is_some_and(|url| url.contains("github.com"));
     if let Ok(mut origins) = cache.lock() {
@@ -395,12 +412,18 @@ fn discover_via_ls_remote(
         &["ls-remote", "origin", "refs/pull/*/head"],
         control,
     )
-    .and_then(|output| String::from_utf8(output.stdout).ok())
-    .ok_or_else(|| "git ls-remote of PR head refs failed".to_owned())?;
+    .map_err(|error| format!("git ls-remote of PR head refs failed: {error}"))
+    .and_then(|output| {
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("git ls-remote PR output was not UTF-8: {error}"))
+    })?;
     let head_shas =
         successful_git_with_control(repo_root, &["ls-remote", "--heads", "origin"], control)
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .ok_or_else(|| "git ls-remote of head refs failed".to_owned())?;
+            .map_err(|error| format!("git ls-remote of head refs failed: {error}"))
+            .and_then(|output| {
+                String::from_utf8(output.stdout)
+                    .map_err(|error| format!("git ls-remote head output was not UTF-8: {error}"))
+            })?;
     Ok(map_pull_heads_to_branches(
         &parse_ls_remote_pull_heads(&pull_heads),
         &parse_ls_remote_heads(&head_shas),
@@ -443,6 +466,14 @@ mod tests {
                 stream: "stdout",
                 bound: 1
             })
+        ));
+        assert!(matches!(
+            successful_git_with_control(
+                root.path(),
+                &["rev-parse", "--verify", "missing"],
+                default_pr_command_control(),
+            ),
+            Err(PrGitCommandError::NonZeroExit { .. })
         ));
     }
 

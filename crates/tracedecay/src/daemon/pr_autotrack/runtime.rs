@@ -23,7 +23,7 @@ const BASE_TICK: Duration = Duration::from_mins(1);
 /// Retained owner for the PR-autotrack loop and every bounded child process it
 /// starts. Shutdown signals the same token carried into Git/GitHub commands
 /// before joining the task.
-pub struct PrAutotrackTask {
+pub(crate) struct PrAutotrackTask {
     cancellation: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -34,7 +34,7 @@ impl PrAutotrackTask {
     }
 
     #[hotpath::skip]
-    pub async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         self.cancellation.cancel();
         if let Err(error) = self.task.await {
             log_daemon_event(

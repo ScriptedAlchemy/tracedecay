@@ -917,20 +917,33 @@ impl ProductionProjectCompositionHarnessV1 {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "production-composition harness is shut down".to_owned(),
             })?;
-        let _lifecycle = super::pr_autotrack::try_acquire_manual_branch_lifecycle(
-            &graph.store_layout().data_root,
-            branch,
-        )
-        .map_err(|error| {
-            TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
-        })?;
-        super::branch_add::branch_publication_context(&graph)?
-            .track_exact_worktree_branch(
-                &resources.invocation.code_index_schedulers,
-                &canonical_project_root,
-                worktree_root.as_ref(),
-                branch,
-            )
+        let administration = resources.store_administration.clone();
+        let schedulers = resources.invocation.code_index_schedulers.clone();
+        let worktree_root = worktree_root.as_ref().to_path_buf();
+        let branch = branch.to_owned();
+        administration
+            .run_manual_branch_publication(|cancellation| async move {
+                let _lifecycle = super::pr_autotrack::try_acquire_manual_branch_lifecycle(
+                    &graph.store_layout().data_root,
+                    &branch,
+                )
+                .map_err(|error| {
+                    TraceDecayError::project_route(
+                        error.reason_code(),
+                        error.retryable(),
+                        error.detail(),
+                    )
+                })?;
+                super::branch_add::branch_publication_context(&graph)?
+                    .track_exact_worktree_branch(
+                        &schedulers,
+                        &canonical_project_root,
+                        &worktree_root,
+                        &branch,
+                        &cancellation,
+                    )
+                    .await
+            })
             .await
     }
 
@@ -1105,6 +1118,11 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 
 #[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
+    #[cfg(unix)]
+    resources
+        .store_administration
+        .shutdown_manual_branch_publications()
+        .await;
     resources
         .store_administration
         .join_project_server_retirements()
