@@ -139,7 +139,7 @@ fn install_project_open_source_edit_owners(
     Ok(())
 }
 
-pub(crate) async fn install_project_open_source_edit_preview_owner(
+pub(crate) fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
@@ -209,8 +209,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         code_graph,
         &project_root,
         project_id.as_str(),
-    )
-    .await?;
+    )?;
     mutation.mark_ready();
     Ok(true)
 }
@@ -226,6 +225,8 @@ pub(super) async fn register_project_open_production_owners(
     server: &McpServer,
     source_edit_mutation: Arc<SourceEditMutationGate>,
 ) -> Result<ProjectOpenDependentOwnerState> {
+    // Retain the admitted owner state once across its asynchronous phases.
+    Box::pin(async move {
     let owner_registration_started = Instant::now();
     let mut owner_phase_started = owner_registration_started;
     let project_id =
@@ -778,8 +779,7 @@ pub(super) async fn register_project_open_production_owners(
         privacy_grant,
         async move {
             privacy_graph
-                .project_memory_application()
-                .await?
+                .project_memory_application()?
                 .privacy_remediation_rescan(
                     tracedecay_session_memory::memory::PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
                     &privacy_read,
@@ -836,6 +836,7 @@ pub(super) async fn register_project_open_production_owners(
         diagnostic_broker,
         lsp_session_factory,
     })
+        }).await
 }
 
 #[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]

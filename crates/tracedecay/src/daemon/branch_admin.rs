@@ -1495,7 +1495,7 @@ impl StoreAdministration {
 
     #[cfg(all(test, unix))]
     #[hotpath::skip]
-    pub(super) async fn retirement_reaper_count(&self) -> usize {
+    pub(super) fn retirement_reaper_count(&self) -> usize {
         self.retirement_reapers.state().reapers.len()
     }
 

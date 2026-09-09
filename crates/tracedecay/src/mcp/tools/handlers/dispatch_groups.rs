@@ -130,8 +130,8 @@ fn extract_doc_nodes(
     Ok((bytes, nodes))
 }
 
-#[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
-async fn handle_verified_doc_coverage(
+#[hotpath::measure(label = "mcp.analysis.doc_coverage.total")]
+fn handle_verified_doc_coverage(
     cg: &TraceDecay,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -961,7 +961,7 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_doc_coverage" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                handle_verified_doc_coverage(cg, &graph, args, scope_prefix).await
+                handle_verified_doc_coverage(cg, &graph, args, scope_prefix)
             }
             "tracedecay_god_class" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;

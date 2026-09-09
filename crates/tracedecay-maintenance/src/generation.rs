@@ -114,7 +114,7 @@ pub async fn run_project_generation_maintenance(
                 outcome = MaintenanceTickOutcome::Retry;
             }
             if !cancellation.is_cancelled() {
-                let branch_compacted = run_branch_compaction(lease, compaction).await;
+                let branch_compacted = run_branch_compaction(lease, compaction);
                 if !branch_compacted {
                     outcome = MaintenanceTickOutcome::Retry;
                 }

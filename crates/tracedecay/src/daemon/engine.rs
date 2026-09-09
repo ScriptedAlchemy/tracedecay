@@ -747,7 +747,7 @@ impl DaemonEngine {
     ) -> Result<Option<ProjectOpenFailure>> {
         let (_, route) = Self::project_route(handshake)?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
-        Ok(tasks.cached_failure(&route).await)
+        Ok(tasks.cached_failure(&route))
     }
 
     #[cfg(test)]

@@ -246,6 +246,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
         SessionRetrievalServingIdentityV1::resolve_project(
             project_id,
             &serving_db,
+            cg.serving_branch(),
             cg.project_root(),
             &project_database.binding().shard_id.profile_id,
             &project_database.binding().shard_id,

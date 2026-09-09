@@ -1718,8 +1718,8 @@ fn log_code_index_scope_reconciliation_degraded(failure: &str) {
 /// and independent per file: a busy or failing branch database never blocks
 /// the rest, but keeps the maintenance cadence retry-eligible — see
 /// `src/retention/branch_compaction.rs` for the compaction policy itself.
-#[hotpath::measure(label = "daemon.git.maintenance.branch_compaction", future = true)]
-pub async fn run_branch_compaction(
+#[hotpath::measure(label = "daemon.git.maintenance.branch_compaction")]
+pub fn run_branch_compaction(
     lease: &ProjectStoreMaintenanceLeaseV1,
     config: &CompactionThresholdConfig,
 ) -> bool {
