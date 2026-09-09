@@ -1421,14 +1421,15 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     let linked_vector_id = linked_vector.generation_id().clone();
     let primary_graph = harness.server(&primary).expect("primary server").cg().await;
     let linked_graph = harness.server(&linked).expect("linked server").cg().await;
-    let linked_scope = crate::daemon::store_maintenance::code_index_scope_store_root(
-        &primary_graph.hook_store_layout().data_root,
-    )
-    .join(
-        tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
-            linked_graph.project_root(),
-        ),
-    );
+    let linked_scope =
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_store_root(
+            &primary_graph.hook_store_layout().data_root,
+        )
+        .join(
+            tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
+                linked_graph.project_root(),
+            ),
+        );
     assert!(linked_scope.is_dir());
     drop(primary_graph);
     drop(linked_graph);
@@ -1615,16 +1616,21 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         .expect("collector resources")
         .invocation
         .code_index_schedulers;
-    let primary_scope = crate::daemon::store_maintenance::code_index_scope_store_root(
-        &collector
-            .server(&primary)
-            .expect("collector primary server")
-            .cg()
-            .await
-            .hook_store_layout()
-            .data_root,
-    )
-    .join(tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(&primary));
+    let primary_scope =
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_store_root(
+            &collector
+                .server(&primary)
+                .expect("collector primary server")
+                .cg()
+                .await
+                .hook_store_layout()
+                .data_root,
+        )
+        .join(
+            tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
+                &primary,
+            ),
+        );
     let _ = run_generation_cadence(&collector, &primary).await;
     assert!(
         !linked_scope.exists(),

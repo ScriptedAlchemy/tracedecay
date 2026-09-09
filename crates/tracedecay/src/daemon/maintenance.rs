@@ -7,7 +7,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracedecay_contracts::storage::{
@@ -27,15 +26,12 @@ use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 
 pub(super) mod generation;
 
-const COLD_STORE_PAGE_LIMIT: usize = 8;
 /// Upper bound on mounted session databases + project graphs a single
 /// maintenance tick may process. Each store gets one writer admission, so an
 /// unbounded loop over every mounted project×branch cannot monopolize the lane;
 /// this budget caps total work and a round-robin cursor (`store_cursor`)
 /// guarantees every store is still reached across ticks.
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
-const CHECKPOINT_DIRECTORY: &str = "maintenance";
-const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
 const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
 const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry.read";
@@ -1269,25 +1265,186 @@ async fn run_maintenance_loop<F, Fut>(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub(super) struct ColdStoreCursorV1 {
-    pub(super) after_project_id: Option<String>,
+async fn run_registered_store_retention(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    config: &crate::config::RetentionConfig,
+) -> bool {
+    let now = match now_secs_i64() {
+        Ok(now) => now,
+        Err(failure) => {
+            super::log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "session_retention".to_owned()),
+                    ("failure", failure.to_owned()),
+                ],
+            );
+            return false;
+        }
+    };
+    let report =
+        tracedecay_maintenance::retention::registered_store::run_registered_store_retention(
+            database,
+            &config.session_lcm,
+            &config.observation,
+            now,
+        )
+        .await;
+    match &report.session_lcm {
+        Some(Ok(session_lcm)) => {
+            let reclaimed = session_lcm.bytes_reclaimed();
+            if reclaimed > 0 || !session_lcm.errors.is_empty() {
+                super::log_daemon_event(
+                    "retention_session_lcm",
+                    &[
+                        ("store", "mounted_sessions".to_owned()),
+                        ("bytes_reclaimed", reclaimed.to_string()),
+                        ("errors", session_lcm.errors.len().to_string()),
+                    ],
+                );
+            }
+        }
+        Some(Err(_)) => super::log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "session_lcm".to_owned()),
+                ("failure", "retention_pass_failed".to_owned()),
+            ],
+        ),
+        None => {}
+    }
+    match &report.observations {
+        Some(Ok(observations)) => {
+            let reclaimed = observations.bytes_reclaimed();
+            if reclaimed > 0 || !observations.errors.is_empty() {
+                super::log_daemon_event(
+                    "retention_observation",
+                    &[
+                        ("store", "mounted_sessions".to_owned()),
+                        ("bytes_reclaimed", reclaimed.to_string()),
+                        ("errors", observations.errors.len().to_string()),
+                    ],
+                );
+            }
+        }
+        Some(Err(_)) => super::log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "observation".to_owned()),
+                ("failure", "retention_pass_failed".to_owned()),
+            ],
+        ),
+        None => {}
+    }
+    match &report.observability {
+        Ok(receipt) if receipt.expired_detail > 0 || receipt.expired_rollup > 0 => {
+            super::log_daemon_event(
+                "retention_observability_analytics",
+                &[
+                    ("store", "mounted_sessions".to_owned()),
+                    ("expired_detail", receipt.expired_detail.to_string()),
+                    ("expired_rollup", receipt.expired_rollup.to_string()),
+                ],
+            );
+        }
+        Err(_) => super::log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "observability_analytics".to_owned()),
+                ("failure", "retention_pass_failed".to_owned()),
+            ],
+        ),
+        Ok(_) => {}
+    }
+    let mut succeeded = report.succeeded();
+    if let Some(compaction) = &config.compaction {
+        let outcome = tracedecay_maintenance::retention::live_compaction::compact_registered_store(
+            database, compaction,
+        )
+        .await;
+        succeeded &= record_live_compaction_outcome("mounted_sessions", outcome);
+    }
+    succeeded
 }
 
-fn next_cold_store_cursor(
-    previous: Option<&str>,
-    project_ids: &[String],
-    has_more: bool,
-) -> Option<ColdStoreCursorV1> {
-    if !has_more {
-        return None;
+async fn run_profile_observability_retention(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+) -> bool {
+    let now = match now_secs_i64() {
+        Ok(now) => now,
+        Err(failure) => {
+            super::log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "observability_analytics".to_owned()),
+                    ("failure", failure.to_owned()),
+                ],
+            );
+            return false;
+        }
+    };
+    match database.prune_observability_events(now).await {
+        Ok(receipt) => {
+            if receipt.expired_detail > 0 || receipt.expired_rollup > 0 {
+                super::log_daemon_event(
+                    "retention_observability_analytics",
+                    &[
+                        ("store", "global.db".to_owned()),
+                        ("expired_detail", receipt.expired_detail.to_string()),
+                        ("expired_rollup", receipt.expired_rollup.to_string()),
+                    ],
+                );
+            }
+            true
+        }
+        Err(_) => {
+            super::log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "observability_analytics".to_owned()),
+                    ("failure", "retention_pass_failed".to_owned()),
+                ],
+            );
+            false
+        }
     }
-    Some(ColdStoreCursorV1 {
-        after_project_id: project_ids
-            .last()
-            .cloned()
-            .or_else(|| previous.map(str::to_owned)),
-    })
+}
+
+pub(in crate::daemon) fn record_live_compaction_outcome(
+    store_name: &'static str,
+    outcome: tracedecay_maintenance::retention::live_compaction::LiveStoreCompactionOutcomeV1,
+) -> bool {
+    use tracedecay_maintenance::retention::live_compaction::LiveStoreCompactionOutcomeV1;
+
+    match outcome {
+        LiveStoreCompactionOutcomeV1::NotScheduled => true,
+        LiveStoreCompactionOutcomeV1::Compacted {
+            freelist_before,
+            freelist_after,
+        } => {
+            super::log_daemon_event(
+                "retention_compaction",
+                &[
+                    ("store", store_name.to_owned()),
+                    (
+                        "freed_pages",
+                        freelist_before.saturating_sub(freelist_after).to_string(),
+                    ),
+                ],
+            );
+            true
+        }
+        LiveStoreCompactionOutcomeV1::Failed(failure) => {
+            super::log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "compaction".to_owned()),
+                    ("failure", failure.as_str().to_owned()),
+                ],
+            );
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1299,9 +1456,20 @@ pub(super) enum MaintenanceStoreOutcomeV1 {
     Cancelled,
 }
 
-impl MaintenanceStoreOutcomeV1 {
-    fn was_processed(self) -> bool {
-        self == Self::Processed
+impl From<tracedecay_maintenance::retention::cold_store::ColdStorePageOutcomeV1>
+    for MaintenanceStoreOutcomeV1
+{
+    fn from(
+        outcome: tracedecay_maintenance::retention::cold_store::ColdStorePageOutcomeV1,
+    ) -> Self {
+        use tracedecay_maintenance::retention::cold_store::ColdStorePageOutcomeV1;
+
+        match outcome {
+            ColdStorePageOutcomeV1::Processed => Self::Processed,
+            ColdStorePageOutcomeV1::Missing => Self::Missing,
+            ColdStorePageOutcomeV1::Unreadable => Self::Unreadable,
+            ColdStorePageOutcomeV1::Cancelled => Self::Cancelled,
+        }
     }
 }
 
@@ -1648,9 +1816,7 @@ impl MaintenanceCoordinator {
                 .try_with_writer(|| async {
                     match &work[index].1 {
                         MaintenanceStoreWork::Session(database) => {
-                            if super::store_maintenance::run_session_retention(database, retention)
-                                .await
-                            {
+                            if run_registered_store_retention(database, retention).await {
                                 MaintenanceTickOutcome::Complete
                             } else {
                                 MaintenanceTickOutcome::Retry
@@ -1692,11 +1858,7 @@ impl MaintenanceCoordinator {
         if continuation.is_none() && !self.cancellation.is_cancelled() {
             match administration
                 .try_with_writer(|| async {
-                    super::store_maintenance::run_observability_analytics_retention(
-                        profile_database,
-                        "global.db",
-                    )
-                    .await
+                    run_profile_observability_retention(profile_database).await
                 })
                 .await
             {
@@ -1715,8 +1877,13 @@ impl MaintenanceCoordinator {
         {
             match administration
                 .try_with_writer(|| async {
-                    super::store_maintenance::run_global_compaction(profile_database, compaction)
-                        .await
+                    let compacted =
+                        tracedecay_maintenance::retention::live_compaction::compact_registered_store(
+                            profile_database,
+                            compaction,
+                        )
+                        .await;
+                    record_live_compaction_outcome("global.db", compacted)
                 })
                 .await
             {
@@ -1731,10 +1898,11 @@ impl MaintenanceCoordinator {
         if continuation.is_none() && !self.cancellation.is_cancelled() {
             match administration
                 .try_with_writer(|| {
-                    run_cold_store_page(
+                    tracedecay_maintenance::retention::cold_store::run_cold_store_page(
                         profile_root,
                         profile_database,
-                        retention,
+                        retention.orphan_store_gc_days,
+                        retention.incident_debris_retention_days,
                         &self.cancellation,
                     )
                 })
@@ -1748,7 +1916,7 @@ impl MaintenanceCoordinator {
                     metrics.unavailable_stores = page.unavailable_stores;
                     metrics.reclaimed_bytes =
                         metrics.reclaimed_bytes.saturating_add(page.reclaimed_bytes);
-                    metrics.last_outcome = Some(page.outcome);
+                    metrics.last_outcome = Some(page.outcome.into());
                     if !page.outcome.was_processed() {
                         outcome = MaintenanceTickOutcome::Retry;
                     }
@@ -1961,202 +2129,12 @@ impl ResidentMemoryLogStateV1 {
     }
 }
 
-#[derive(Debug)]
-struct ColdStorePageMetrics {
-    processed_stores: u64,
-    unavailable_stores: u64,
-    reclaimed_bytes: u64,
-    outcome: MaintenanceStoreOutcomeV1,
-}
-
-impl Default for ColdStorePageMetrics {
-    fn default() -> Self {
-        Self {
-            processed_stores: 0,
-            unavailable_stores: 0,
-            reclaimed_bytes: 0,
-            outcome: MaintenanceStoreOutcomeV1::Processed,
-        }
-    }
-}
-
-#[hotpath::measure(label = "daemon.maintenance.cold_store_page", future = true)]
-async fn run_cold_store_page(
-    profile_root: &Path,
-    profile_database: &tracedecay_global_db::RegisteredGlobalDb,
-    retention: &crate::config::RetentionConfig,
-    cancellation: &tracedecay_session_memory::context::CancellationToken,
-) -> tracedecay_domain::errors::Result<ColdStorePageMetrics> {
-    let checkpoint_path = checkpoint_path(profile_root);
-    let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
-        after_project_id: None,
-    });
-    let page = tracedecay_maintenance::retention::orphan_stores::build_store_census_page(
-        profile_database,
-        profile_root,
-        cursor.after_project_id.as_deref(),
-        COLD_STORE_PAGE_LIMIT,
-    )
-    .await?;
-    let retention_now = if retention.orphan_store_gc_days.is_some()
-        || retention.incident_debris_retention_days.is_some()
-    {
-        Some(now_secs_i64().map_err(|message| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: message.to_owned(),
-            }
-        })?)
-    } else {
-        None
-    };
-    let mut metrics = ColdStorePageMetrics::default();
-    for entry in &page.entries {
-        let outcome = classify_cold_store_state(
-            cancellation.is_cancelled(),
-            entry.manifest_readable,
-            entry.data_root.is_dir(),
-        );
-        match outcome {
-            MaintenanceStoreOutcomeV1::Processed => {
-                metrics.processed_stores = metrics.processed_stores.saturating_add(1);
-            }
-            MaintenanceStoreOutcomeV1::Cancelled => {
-                metrics.outcome = outcome;
-                return Ok(metrics);
-            }
-            MaintenanceStoreOutcomeV1::Busy
-            | MaintenanceStoreOutcomeV1::Missing
-            | MaintenanceStoreOutcomeV1::Unreadable => {
-                if metrics.outcome == MaintenanceStoreOutcomeV1::Processed {
-                    metrics.outcome = outcome;
-                }
-                metrics.unavailable_stores = metrics.unavailable_stores.saturating_add(1);
-            }
-        }
-    }
-    if let Some(days) = retention.orphan_store_gc_days {
-        let findings = tracedecay_maintenance::retention::orphan_stores::classify_stores(
-            &page.entries,
-            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
-            })?,
-        );
-        let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
-            findings,
-            retention_window_secs(days),
-        );
-        let (outcome, _) =
-            tracedecay_maintenance::retention::orphan_stores::execute_registered_collection(
-                profile_database,
-                &plan,
-                profile_root,
-            )
-            .await?;
-        metrics.reclaimed_bytes = metrics
-            .reclaimed_bytes
-            .saturating_add(outcome.reclaimed_bytes);
-        metrics.unavailable_stores = metrics
-            .unavailable_stores
-            .saturating_add(outcome.errors.len() as u64);
-        if !outcome.errors.is_empty() {
-            metrics.outcome = MaintenanceStoreOutcomeV1::Unreadable;
-        }
-    }
-    if let Some(days) = retention.incident_debris_retention_days {
-        let report = tracedecay_maintenance::retention::incident_debris::sweep_incident_debris(
-            &page.entries,
-            profile_root,
-            retention_window_secs(days),
-            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
-            })?,
-        );
-        metrics.reclaimed_bytes = metrics
-            .reclaimed_bytes
-            .saturating_add(report.reclaimed_bytes);
-        metrics.unavailable_stores = metrics
-            .unavailable_stores
-            .saturating_add(report.errors.len() as u64);
-        if !report.errors.is_empty() {
-            metrics.outcome = MaintenanceStoreOutcomeV1::Unreadable;
-        }
-    }
-    let project_ids = page
-        .entries
-        .iter()
-        .map(|entry| entry.project_id.clone())
-        .collect::<Vec<_>>();
-    let next_cursor = next_cold_store_cursor(
-        cursor.after_project_id.as_deref(),
-        &project_ids,
-        page.next_cursor.is_some(),
-    )
-    .unwrap_or(ColdStoreCursorV1 {
-        after_project_id: None,
-    });
-    persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("persist maintenance cold-store cursor: {error}"),
-        }
-    })?;
-    Ok(metrics)
-}
-
-fn classify_cold_store_state(
-    cancelled: bool,
-    manifest_readable: bool,
-    data_root_exists: bool,
-) -> MaintenanceStoreOutcomeV1 {
-    if cancelled {
-        MaintenanceStoreOutcomeV1::Cancelled
-    } else if !data_root_exists {
-        MaintenanceStoreOutcomeV1::Missing
-    } else if !manifest_readable {
-        MaintenanceStoreOutcomeV1::Unreadable
-    } else {
-        MaintenanceStoreOutcomeV1::Processed
-    }
-}
-
-fn checkpoint_path(profile_root: &Path) -> PathBuf {
-    profile_root
-        .join(CHECKPOINT_DIRECTORY)
-        .join(CHECKPOINT_FILE)
-}
-
-#[hotpath::measure(label = "daemon.maintenance.load_cursor")]
-fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-#[hotpath::measure(label = "daemon.maintenance.persist_cursor")]
-fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec(cursor).map_err(std::io::Error::other)?;
-    let mut file = std::fs::File::create(&temporary)?;
-    std::io::Write::write_all(&mut file, &bytes)?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)
-}
-
 pub(super) fn retention_maintenance_enabled(retention: &crate::config::RetentionConfig) -> bool {
     retention.session_lcm.enabled
         || retention.observation.enabled
         || retention.orphan_store_gc_days.is_some()
         || retention.incident_debris_retention_days.is_some()
         || retention.compaction.is_some()
-}
-
-pub(super) fn retention_window_secs(days: u64) -> i64 {
-    i64::try_from(days)
-        .ok()
-        .and_then(|days| days.checked_mul(24 * 60 * 60))
-        .unwrap_or(i64::MAX)
 }
 
 pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
@@ -2180,13 +2158,11 @@ mod tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{
-        CadenceInstant, ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE,
-        MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence, MaintenanceContinuation,
-        MaintenanceStoreOutcomeV1, MaintenanceTickOutcome, RetentionOperatorLogLaneV1,
-        SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
-        StoreTelemetrySamplingRegistry, TableGrowthObservation, checkpoint_path,
-        classify_cold_store_state, compare_table_growth, cursor_after_attempted_units, load_cursor,
-        next_cold_store_cursor, persist_cursor, retention_failure_is_by_design,
+        CadenceInstant, MAINTENANCE_FUTURES_ACTIVE, MAINTENANCE_STORE_PAGE_LIMIT,
+        MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
+        RetentionOperatorLogLaneV1, SemanticVectorRetentionCensusOutcome,
+        SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry, TableGrowthObservation,
+        compare_table_growth, cursor_after_attempted_units, retention_failure_is_by_design,
         run_maintenance_loop, run_resident_memory_sampler_loop, select_store_window,
     };
 
@@ -3122,78 +3098,6 @@ mod tests {
     }
 
     #[test]
-    fn cold_store_cursor_resumes_after_the_last_complete_project() {
-        let first = next_cold_store_cursor(
-            None,
-            &["project-a".to_owned(), "project-b".to_owned()],
-            true,
-        )
-        .expect("first page cursor");
-        assert_eq!(
-            first,
-            ColdStoreCursorV1 {
-                after_project_id: Some("project-b".to_owned()),
-            }
-        );
-
-        assert_eq!(
-            next_cold_store_cursor(
-                first.after_project_id.as_deref(),
-                &["project-c".to_owned()],
-                false,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn cold_store_outcomes_do_not_report_deferred_work_as_processed() {
-        for outcome in [
-            MaintenanceStoreOutcomeV1::Busy,
-            MaintenanceStoreOutcomeV1::Missing,
-            MaintenanceStoreOutcomeV1::Unreadable,
-            MaintenanceStoreOutcomeV1::Cancelled,
-        ] {
-            assert!(!outcome.was_processed());
-        }
-        assert!(MaintenanceStoreOutcomeV1::Processed.was_processed());
-    }
-
-    #[test]
-    fn cold_store_checkpoint_survives_restart() {
-        let root = tempfile::tempdir().expect("checkpoint root");
-        let path = checkpoint_path(root.path());
-        let expected = ColdStoreCursorV1 {
-            after_project_id: Some("project-b".to_owned()),
-        };
-
-        persist_cursor(&path, &expected).expect("persist cursor");
-
-        assert_eq!(load_cursor(&path), Some(expected));
-        assert!(!path.with_extension("json.tmp").exists());
-    }
-
-    #[test]
-    fn cold_store_state_distinguishes_missing_unreadable_and_cancelled() {
-        assert_eq!(
-            classify_cold_store_state(false, true, true),
-            MaintenanceStoreOutcomeV1::Processed
-        );
-        assert_eq!(
-            classify_cold_store_state(false, true, false),
-            MaintenanceStoreOutcomeV1::Missing
-        );
-        assert_eq!(
-            classify_cold_store_state(false, false, true),
-            MaintenanceStoreOutcomeV1::Unreadable
-        );
-        assert_eq!(
-            classify_cold_store_state(true, true, true),
-            MaintenanceStoreOutcomeV1::Cancelled
-        );
-    }
-
-    #[test]
     fn debris_retention_enables_maintenance_without_orphan_gc() {
         let mut retention = crate::config::RetentionConfig::default();
         retention.session_lcm.enabled = false;
@@ -3221,11 +3125,6 @@ mod tests {
             !super::retention_maintenance_enabled(&retention),
             "soft budgets are Doctor findings, never a retention trigger"
         );
-    }
-
-    #[test]
-    fn retention_window_conversion_never_wraps_negative() {
-        assert_eq!(super::retention_window_secs(u64::MAX), i64::MAX);
     }
 
     #[test]
