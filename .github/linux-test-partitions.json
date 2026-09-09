@@ -2,7 +2,7 @@
   "partitions": [
     {
       "name": "root-lib",
-      "timeout_minutes": 110,
+      "timeout_minutes": 40,
       "packages": ["tracedecay", "tracedecay-cli", "tracedecay-search-eval"],
       "targets": ["lib"],
       "features": ["tracedecay/test-helpers"]

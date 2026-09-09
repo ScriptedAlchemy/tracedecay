@@ -57,7 +57,7 @@ pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
 pub use tracedecay_application::git_query;
-pub mod graph;
+mod graph;
 mod hooks;
 #[cfg(test)]
 mod host_admission_test;
@@ -71,7 +71,7 @@ pub mod profile_registry_maintenance;
 mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports};
-pub mod runtime_telemetry;
+mod runtime_telemetry;
 pub mod serve;
 // Benchmark harness, not product surface: the shipped library must not carry
 // its fixture provisioning or process-environment mutation. The `session_temporal`

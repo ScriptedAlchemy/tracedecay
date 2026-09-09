@@ -42,9 +42,9 @@ use tracedecay_session_memory::context::{
 };
 use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRequestBinding,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalQuery,
 };
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_sessions::observation::ObservationCancellation;
@@ -254,15 +254,6 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
             binding,
             request,
         )
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct NoopWake;
-
-impl SessionRefreshSchedulerPort for NoopWake {
-    fn wake(&self) -> Result<(), SessionRefreshSchedulerError> {
-        Ok(())
     }
 }
 

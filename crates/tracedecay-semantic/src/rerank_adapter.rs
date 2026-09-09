@@ -551,4 +551,12 @@ impl ProductionCodeRerankAuthorityV1 {
         BoundedRerankRuntimeV1::new(&mut views, self.executor.as_ref())
             .rerank(request, policy, pre_rerank, control)
     }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn from_executor_for_test(
+        pins: RerankCompatibilityPinsV1,
+        executor: Arc<dyn MountedRerankExecutorV1>,
+    ) -> Self {
+        Self { pins, executor }
+    }
 }
