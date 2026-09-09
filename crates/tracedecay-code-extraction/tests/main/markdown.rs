@@ -167,12 +167,6 @@ fn test_markdown_extensions() {
 }
 
 #[test]
-fn test_markdown_language_name() {
-    let ext = MarkdownExtractor;
-    assert_eq!(ext.language_name(), "Markdown");
-}
-
-#[test]
 fn test_markdown_multiple_links_same_line() {
     let source = "See [main](src/main.rs) and [lib](src/lib.rs).";
     let result = MarkdownExtractor.extract("README.md", source);

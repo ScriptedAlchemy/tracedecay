@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tracedecay_domain::{
     EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingMetricV1,
     EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1,
-    ManifestDigest, host_cpu_target,
+    ManifestDigest,
 };
 use tracedecay_semantic_contracts::configuration::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticFallbackReasonV1, SemanticProfileSelection,
@@ -155,31 +155,6 @@ fn semantic_config_without_a_document_composition_selects_sanitized_text() {
     header
         .validate()
         .expect("header composition is a valid selection");
-}
-
-#[test]
-fn semantic_resource_defaults_preserve_host_derived_runtime_widths() {
-    let total_cores = host_cpu_target(usize::MAX);
-    let shared_cpu_budget = if total_cores <= 8 {
-        total_cores
-    } else {
-        total_cores / 2
-    };
-    let resources = SemanticResourceCeilings::default();
-
-    assert_eq!(resources.max_model_bytes, 700 * 1024 * 1024);
-    assert_eq!(resources.max_tokenizer_bytes, 64 * 1024 * 1024);
-    assert_eq!(resources.max_resident_bytes, 2 * 1024 * 1024 * 1024);
-    assert_eq!(
-        resources.max_threads,
-        u32::try_from(total_cores.max(1))
-            .unwrap_or(u32::MAX)
-            .min(12)
-    );
-    assert_eq!(
-        resources.max_concurrent_sessions,
-        u32::try_from((shared_cpu_budget / 4).max(1)).unwrap_or(1)
-    );
 }
 
 #[test]

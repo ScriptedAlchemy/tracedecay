@@ -99,8 +99,7 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
                 }
                 None => None,
             };
-            Ok(graph
-                .map(|graph| graph as Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime>))
+            Ok(graph.map(|graph| Arc::new(crate::dashboard::dashboard_project_context(&graph))))
         })
     })
 }

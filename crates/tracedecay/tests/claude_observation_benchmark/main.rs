@@ -1,21 +1,11 @@
 //! Reproducible claude-observation pipeline baseline.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)]
-
-#[path = "claude_observation_benchmark/artifact.rs"]
 mod artifact;
-#[path = "claude_observation_benchmark/baseline.rs"]
 mod baseline;
-#[path = "claude_observation_benchmark/manifest.rs"]
 mod manifest;
-#[path = "claude_observation_benchmark/metrics.rs"]
 mod metrics;
-#[path = "claude_observation_benchmark/model.rs"]
 mod model;
-#[path = "claude_observation_benchmark/runner.rs"]
 mod runner;
-#[cfg(test)]
-#[path = "claude_observation_benchmark/tests.rs"]
 mod tests;
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
@@ -28,9 +18,9 @@ const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
 const RECORDS_PER_REPETITION: usize = 64;
 const CONCURRENCY: usize = 1;
-const BENCHMARK_COMMAND: &str = "cargo test --quiet --release --lib claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
+const BENCHMARK_COMMAND: &str = "cargo test --quiet --release -p tracedecay --features test-helpers --test claude_observation_benchmark production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
 const EVIDENCE_RUNNER: &str = "scripts/run-claude-observation-benchmark.sh";
-const WORKLOAD_IMPLEMENTATION: &str = "src/sessions/claude_observation_benchmark.rs";
+const WORKLOAD_IMPLEMENTATION: &str = "tests/claude_observation_benchmark/main.rs";
 const WORKLOAD_MANIFEST_PATH: &str = "benchmark_data/claude-observation/workload-v1.json";
 const BENCHMARK_SECRET_PREFIX: &str = "sk-test-";
 const REDACTION_MARKER: &str = "[TraceDecay redacted:";
@@ -90,36 +80,36 @@ const NATIVE_PROVIDER_FIXTURES: &[(&str, &str)] = &[
 ];
 const HARNESS_SOURCES: &[(&str, &str)] = &[
     (
-        "src/sessions/claude_observation_benchmark.rs",
-        include_str!("claude_observation_benchmark.rs"),
+        "tests/claude_observation_benchmark/main.rs",
+        include_str!("main.rs"),
     ),
     (
-        "src/sessions/claude_observation_benchmark/artifact.rs",
-        include_str!("claude_observation_benchmark/artifact.rs"),
+        "tests/claude_observation_benchmark/artifact.rs",
+        include_str!("artifact.rs"),
     ),
     (
-        "src/sessions/claude_observation_benchmark/baseline.rs",
-        include_str!("claude_observation_benchmark/baseline.rs"),
+        "tests/claude_observation_benchmark/baseline.rs",
+        include_str!("baseline.rs"),
     ),
     (
-        "src/sessions/claude_observation_benchmark/manifest.rs",
-        include_str!("claude_observation_benchmark/manifest.rs"),
+        "tests/claude_observation_benchmark/manifest.rs",
+        include_str!("manifest.rs"),
     ),
     (
-        "src/sessions/claude_observation_benchmark/metrics.rs",
-        include_str!("claude_observation_benchmark/metrics.rs"),
+        "tests/claude_observation_benchmark/metrics.rs",
+        include_str!("metrics.rs"),
     ),
     (
-        "src/sessions/claude_observation_benchmark/model.rs",
-        include_str!("claude_observation_benchmark/model.rs"),
+        "tests/claude_observation_benchmark/model.rs",
+        include_str!("model.rs"),
     ),
     (
-        "src/sessions/claude_observation_benchmark/runner.rs",
-        include_str!("claude_observation_benchmark/runner.rs"),
+        "tests/claude_observation_benchmark/runner.rs",
+        include_str!("runner.rs"),
     ),
     (
-        "src/sessions/claude_observation_benchmark/tests.rs",
-        include_str!("claude_observation_benchmark/tests.rs"),
+        "tests/claude_observation_benchmark/tests.rs",
+        include_str!("tests.rs"),
     ),
 ];
 const BUILD_COMMIT: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_COMMIT");

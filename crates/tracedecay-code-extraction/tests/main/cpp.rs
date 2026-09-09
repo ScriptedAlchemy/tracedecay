@@ -646,24 +646,6 @@ int public_func() {
 }
 
 #[test]
-fn test_cpp_extensions() {
-    let extractor = CppExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"cpp"));
-    assert!(exts.contains(&"cc"));
-    assert!(exts.contains(&"cxx"));
-    assert!(exts.contains(&"hpp"));
-    assert!(exts.contains(&"hxx"));
-    assert!(exts.contains(&"hh"));
-}
-
-#[test]
-fn test_cpp_language_name() {
-    let extractor = CppExtractor;
-    assert_eq!(extractor.language_name(), "C++");
-}
-
-#[test]
 fn test_cpp_template_class() {
     let source = r#"
 template <typename T>

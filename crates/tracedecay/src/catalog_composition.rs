@@ -247,7 +247,9 @@ mod tests {
         ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_mcp::{ToolRegistryMode, project_catalog_discovery_scope};
-    use tracedecay_tool_catalog::{BindingStatus, CapabilityId, SurfaceOperationName};
+    use tracedecay_tool_catalog::{
+        BindingStatus, CapabilityId, SurfaceBindingV1, SurfaceOperationName,
+    };
 
     // Growth tripwire only, not an MCP client or protocol limit. The complete
     // final-V2 profile measures 573,502 bytes after the typed Work and workflow
@@ -256,16 +258,37 @@ mod tests {
     // stated reason for the additional payload.
     const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 640 * 1024;
 
-    fn dashboard_operations() -> Vec<String> {
+    fn current_bindings_on(surface: BindingSurface) -> Vec<SurfaceBindingV1> {
         application_catalog_contributions()
             .expect("application contributions")
             .into_iter()
             .flat_map(|contribution| contribution.bindings().to_vec())
             .filter(|binding| {
-                binding.surface() == BindingSurface::Dashboard
+                binding.surface() == surface
                     && matches!(binding.status(), BindingStatus::Current)
                     && !binding.is_alias()
             })
+            .collect()
+    }
+
+    fn dashboard_operations() -> Vec<String> {
+        current_bindings_on(BindingSurface::Dashboard)
+            .iter()
+            .map(|binding| binding.operation().as_str().to_owned())
+            .collect()
+    }
+
+    /// Dashboard operations whose capability HTTP also serves. A dashboard-only
+    /// read such as `native_integration_status` has no HTTP handler to agree
+    /// with, so it cannot take part in the pre-render parity check.
+    fn dashboard_operations_shared_with_http() -> Vec<String> {
+        let http_capabilities = current_bindings_on(BindingSurface::Http)
+            .into_iter()
+            .map(|binding| binding.capability_id().clone())
+            .collect::<BTreeSet<_>>();
+        current_bindings_on(BindingSurface::Dashboard)
+            .iter()
+            .filter(|binding| http_capabilities.contains(binding.capability_id()))
             .map(|binding| binding.operation().as_str().to_owned())
             .collect()
     }
@@ -337,8 +360,13 @@ mod tests {
     fn dashboard_requests_invoke_the_same_pre_render_handlers_as_http() {
         let composition =
             compose_application_catalog(ParityDispatcher).expect("application composition");
+        let operations = dashboard_operations_shared_with_http();
+        assert!(
+            operations.contains(&"diagnostics_read".to_owned()),
+            "the shared dashboard/HTTP set must include the diagnostics read: {operations:?}"
+        );
 
-        for operation in dashboard_operations() {
+        for operation in operations {
             for outcome in [
                 ParityOutcome::Ready,
                 ParityOutcome::Unavailable,
