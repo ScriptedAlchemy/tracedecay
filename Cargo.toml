@@ -52,6 +52,7 @@ members = [
     "crates/tracedecay-application",
 ]
 exclude = [
+    "vendor/hotpath-macros",
     ".worktrees",
     ".codex-worktrees",
 ]
@@ -205,6 +206,8 @@ opt-level = 3
 # `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
+# Keep profiled async bodies in one frame; see vendor/hotpath-macros/PATCH.md.
+hotpath-macros = { path = "vendor/hotpath-macros" }
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
 # The vendored COBOL external scanner in 0.5.0 spins forever at end of input
 # whenever a token starts in the sequence-number area with no six-column line
