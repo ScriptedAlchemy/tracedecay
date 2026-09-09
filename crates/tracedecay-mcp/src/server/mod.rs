@@ -4,6 +4,9 @@ mod dispatch;
 mod protocol;
 mod settlement;
 
+pub use crate::lifecycle::{
+    McpBackgroundTaskOwner, ProjectServerResponseLifecycle, StartupCatchUpMachineV1,
+};
 pub use dispatch::{
     McpDispatchParams, McpDispatchRequest, ToolCallParams, dispatch_is_independent_read,
 };

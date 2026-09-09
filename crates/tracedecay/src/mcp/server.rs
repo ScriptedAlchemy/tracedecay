@@ -70,10 +70,7 @@ pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
-pub(crate) use lifecycle::{
-    McpBackgroundTaskOwner, ProjectServerResponseLifecycle, StartupCatchUpMachineV1,
-    VersionCheckState,
-};
+pub(crate) use lifecycle::VersionCheckState;
 pub(crate) use live_transcript_refresh::{
     LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
 };
@@ -85,7 +82,11 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
-use tracedecay_mcp::server::{McpDispatchRequest, RetainedDispatchAuthority, ToolCallParams};
+pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
+use tracedecay_mcp::server::{
+    McpBackgroundTaskOwner, McpDispatchRequest, RetainedDispatchAuthority, StartupCatchUpMachineV1,
+    ToolCallParams,
+};
 pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 
 /// The steering instructions advertised from the `initialize` handshake of a
