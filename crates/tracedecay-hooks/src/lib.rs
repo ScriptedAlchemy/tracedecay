@@ -13,6 +13,7 @@ pub mod capture;
 pub mod config;
 pub mod core_events;
 pub mod delivery_spool;
+pub mod hook_v2_replay;
 mod lock_admission;
 pub mod native;
 pub mod runtime;
@@ -36,6 +37,11 @@ pub use core_events::{
 };
 pub use delivery_spool::{
     HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
+};
+pub use hook_v2_replay::{
+    HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookReplayTombstoneReasonV1,
+    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
+    published_hook_scope_binding,
 };
 pub use native::{
     DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,

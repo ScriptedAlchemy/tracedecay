@@ -67,6 +67,10 @@ impl McpServer {
         self.background_tasks.spawn(task)
     }
 
+    pub(crate) fn refuse_background_work(&self) {
+        self.background_tasks.close_admission();
+    }
+
     pub(crate) fn project_server_response_lifecycle(&self) -> ProjectServerResponseLifecycle {
         self.project_server_lifecycle.clone()
     }
@@ -319,6 +323,9 @@ impl McpServer {
     /// advances so every subsequent tool call does not retry immediately.
     #[hotpath::measure(label = "mcp.server.sync_if_stale", future = true)]
     pub async fn maybe_sync_if_stale(&self) {
+        if !self.background_tasks.admits() {
+            return;
+        }
         let cg = self.cg_snapshot().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -385,7 +392,7 @@ impl McpServer {
         cg: &Arc<TraceDecay>,
         live_branch: &tracedecay_runtime_core::branch::BranchMemo,
     ) {
-        if !self.sync_config.read_refresh {
+        if !self.sync_config.read_refresh || !self.background_tasks.admits() {
             return;
         }
         // A checkout racing this call would diff the new branch against the

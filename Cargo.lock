@@ -6286,6 +6286,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-graph-query",
  "tracedecay-lsp",
  "tracedecay-policy",
  "tracedecay-privacy",
@@ -6439,6 +6440,7 @@ dependencies = [
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
  "tracedecay-sessions",
+ "tracedecay-source-edit",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
@@ -6598,8 +6600,10 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.19",
+ "tokio",
  "tracedecay-domain",
  "tracedecay-private-fs",
+ "tracing",
 ]
 
 [[package]]
@@ -6972,6 +6976,7 @@ dependencies = [
  "hotpath",
  "memmap2",
  "regex",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

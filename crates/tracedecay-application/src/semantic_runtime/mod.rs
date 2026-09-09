@@ -17,6 +17,7 @@ mod graph_provider;
 mod owner;
 mod ports;
 mod production;
+mod project_open;
 mod publish_failure_memo;
 mod redundancy;
 mod retention;
@@ -104,6 +105,9 @@ pub use production::{
     register_project_semantic_runtime, resolve_project_semantic_runtime_status,
     resolve_semantic_application_status, unbind_project_semantic_cache_if_current,
     unregister_project_semantic_runtime,
+};
+pub use project_open::{
+    InitialSemanticActivationRestoreV1, classify_initial_semantic_activation_restore,
 };
 pub use publish_failure_memo::{
     DEFAULT_PUBLISH_FAILURE_BACKOFF_BASE, DEFAULT_PUBLISH_FAILURE_BACKOFF_CEILING,

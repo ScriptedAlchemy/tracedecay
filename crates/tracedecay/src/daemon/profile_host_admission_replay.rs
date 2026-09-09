@@ -320,6 +320,14 @@ impl ProfileHostAdmissionReplayRegistry {
         );
     }
 
+    /// Stop further passes without joining. Prepare-time shutdown cancel must
+    /// be synchronous so an in-flight replay starts unwinding before this
+    /// owner's join is polled. Does not latch `shutting_down`: that flag is
+    /// the single-flight for `shutdown`'s drain-and-join.
+    pub(super) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
     #[hotpath::skip]
     pub(super) async fn shutdown(&self) {
         if self.shutting_down.swap(true, Ordering::AcqRel) {

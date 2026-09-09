@@ -113,7 +113,10 @@ impl TraceDecay {
     }
 
     pub(crate) fn retained_project_store_db(&self) -> Result<Database> {
-        if self.db.canonical_database_path() != self.store_layout.graph_db_path {
+        if !tracedecay_runtime_core::path_safety::same_canonical_path(
+            self.db.canonical_database_path(),
+            &self.store_layout.graph_db_path,
+        ) {
             return Err(TraceDecayError::Config {
                 message: format!(
                     "mounted project database '{}' differs from canonical StoreLayout locator '{}'",
