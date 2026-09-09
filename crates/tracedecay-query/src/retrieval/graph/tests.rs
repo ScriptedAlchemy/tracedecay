@@ -989,6 +989,15 @@ fn graph_evidence_ties_use_source_chunks_across_generations() {
             .unwrap();
         let store = publisher.verified_store(&request.generation).unwrap();
         let batch = read_projection(&store, &request, &cancellation);
+        let mut capped_request = request.clone();
+        capped_request.budget.max_candidates_per_lane = 1;
+        let capped = read_projection(&store, &capped_request, &cancellation);
+        assert_eq!(capped.candidates.len(), 1);
+        assert_eq!(capped.coverage.capped, 1);
+        assert_eq!(
+            capped.candidates[0].retriever_evidence_anchor,
+            id("code-graph:chunk:chunk.alpha")
+        );
         assert_eq!(batch.candidates.len(), 2);
         let mut pairs: Vec<_> = batch
             .candidates
