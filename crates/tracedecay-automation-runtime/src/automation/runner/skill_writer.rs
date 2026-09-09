@@ -120,13 +120,13 @@ pub(super) fn validate_skill_writer_decision(output: &Value, proposals: &[Value]
 }
 
 pub async fn run_skill_writer_with_backend(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
-    let retrieval = production_project_automation_retrieval(cg).await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_skill_writer_with_backend_and_retrieval(
         cg,
         config,
@@ -142,13 +142,13 @@ pub async fn run_skill_writer_with_backend(
 /// its ledger terminal ahead of outer settlement. The retained settlement
 /// authority must bind and publish the returned exact record.
 pub async fn run_skill_writer_with_backend_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> RetainedAutomationRun<SkillWriterAutomationRun> {
-    let retrieval = production_project_automation_retrieval(cg).await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
         cg,
         config,
@@ -163,7 +163,7 @@ pub async fn run_skill_writer_with_backend_for_retained_settlement(
 /// Retained-settlement variant that preserves the caller's canonical session
 /// retrieval authority instead of silently reopening the production route.
 pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -188,7 +188,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement
 }
 
 pub async fn run_skill_writer_with_backend_and_retrieval(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -211,7 +211,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
 }
 
 async fn run_skill_writer_with_backend_and_retrieval_publication(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -221,14 +221,14 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
     let authority =
         project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
-    let sessions_db = project_automation_sessions(cg).await?;
+    let sessions_db = project_automation_sessions(cg);
     run_skill_writer_for_store_with_publication(
         SkillWriterStoreRuntime {
-            host_io: cg.host_io(),
-            dashboard_root: cg.store_layout().dashboard_root.clone(),
+            host_io: cg.host_io,
+            dashboard_root: cg.dashboard_root.clone(),
             sessions_db,
-            analytics_project_root: Some(cg.project_root()),
-            analytics_db: Some(cg.profile_database().as_ref()),
+            analytics_project_root: Some(&cg.project_root),
+            analytics_db: Some(cg.profile_database.as_ref()),
             authority,
         },
         retrieval,

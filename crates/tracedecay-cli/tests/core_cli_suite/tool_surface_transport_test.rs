@@ -118,6 +118,36 @@ fn tool_dry_run_reads_piped_args_in_either_order() {
     }
 }
 
+/// The diagnostics read is the one operation whose CLI/MCP spelling differs
+/// from its canonical identity. Both spellings must select the same advertised
+/// definition, so per-key flags parse against one schema whichever name the
+/// operator typed.
+#[test]
+fn tool_dry_run_resolves_diagnostics_by_identity_and_cli_spelling() {
+    let home = TempDir::new().expect("isolated home");
+    let project = TempDir::new().expect("working directory");
+    for name in ["diagnostics_read", "diagnostics", "tracedecay_diagnostics"] {
+        let output = tracedecay_command_with_home(home.path())
+            .current_dir(project.path())
+            .args(["tool", name, "--scope", "workspace", "--dry-run"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("tool {name} dry-run should run: {error}"));
+        assert!(
+            output.status.success(),
+            "tool {name} dry-run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("tool {name} dry-run must print JSON: {error}"));
+        assert_eq!(
+            parsed,
+            serde_json::json!({ "scope": "workspace" }),
+            "{name}"
+        );
+    }
+}
+
 /// Runs `tracedecay tool <tool>` with the given working directory and **no**
 /// `--project`, exactly as an agent or operator standing in a checkout does.
 fn run_surface_tool_from(

@@ -556,8 +556,11 @@ async fn retained_repeated_memory_curator_run(
     };
 
     let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
+    let project_context = cg
+        .automation_project_context()
+        .expect("compose project automation context");
     run_memory_curator_with_backend_for_retained_settlement(
-        cg,
+        &project_context,
         config,
         configuration_revision,
         &NeverAutomationBackend,
@@ -3161,6 +3164,9 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     )
     .await
     .expect("initialize fixed-task automation project");
+    let project_context = cg
+        .automation_project_context()
+        .expect("compose project automation context");
     let dashboard_root = &cg.store_layout().dashboard_root;
     let config = AutomationConfig {
         enabled: true,
@@ -3176,7 +3182,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     let current_run_id = "run.reused-scheduler-skip.current";
 
     let prior = run_memory_curator_with_backend_for_retained_settlement(
-        &cg,
+        &project_context,
         &config,
         &configuration_revision,
         &NeverAutomationBackend,

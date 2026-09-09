@@ -31,7 +31,7 @@ use tracedecay_store::{
     build_observation_retrieval_anchor_v2,
 };
 
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::serving::{
     SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
@@ -370,8 +370,7 @@ async fn profile_authority(temp: &TempDir, label: &str) -> SessionTemporalRefres
     let runtime = HostAdmissionTestRuntimeV1::profile(temp.path().join(label))
         .await
         .unwrap();
-    runtime
-        .into_session_temporal_refresh_test_authority(HostAdmissionScope::Profile)
+    SessionTemporalRefreshTestAuthority::bind(runtime, HostAdmissionScope::Profile)
         .expect("registered profile session authority")
 }
 

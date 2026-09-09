@@ -20,7 +20,7 @@ fn pipe_echo_helper() {
     }
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = input.read(&mut buffer).expect("read helper stdin");
         if read == 0 {
@@ -55,7 +55,12 @@ fn command_with_large_bidirectional_pipes_drains_output_while_writing_input() {
     let output = run_command_with_stdin(command, "pipe-echo", &input)
         .expect("large bidirectional subprocess completes");
     assert_eq!(
-        output.stdout.iter().filter(|byte| **byte == 0xa5).count(),
+        output
+            .stdout
+            .iter()
+            .copied()
+            .filter(|byte| *byte == 0xa5)
+            .count(),
         input.len(),
         "the concurrent drain must retain every emitted byte"
     );

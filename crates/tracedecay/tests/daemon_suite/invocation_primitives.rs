@@ -1,15 +1,17 @@
-use super::*;
+use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_contracts::{
     ApplicationProblemKind, AuthorityReceipt, CallableCodeOperationKind, CancellationContext,
     Deadline, EvidenceCoverage, EvidenceDomain, EvidencePacket, OperationBudgetUsage,
-    OperationReceipt, PageState, PolicyDecisionRef, TemporalState, callable_code_operations,
+    OperationReceipt, PageState, PolicyDecisionRef, ResolvedScope, TemporalState,
+    callable_code_operations,
 };
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ConfigurationRevisionId, UserProfileId, canonical_sha256,
+    ActorId, ComponentVersion, ConfigurationRevisionId, ProjectId, UserProfileId, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_runtime_core::db::Database;

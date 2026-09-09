@@ -60,6 +60,13 @@ pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecor
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+pub(crate) fn automation_project_context(
+    cg: &TraceDecay,
+) -> tracedecay_automation_runtime::ports::project_runtime::AutomationProjectContext {
+    cg.automation_project_context()
+        .expect("automation project context")
+}
+
 pub(crate) fn test_automation_run_control(interrupted: Arc<AtomicBool>) -> AutomationRunControl {
     let observed = Arc::clone(&interrupted);
     AutomationRunControl::from_interrupted(Arc::new(move || observed.load(Ordering::Acquire)))
@@ -284,8 +291,9 @@ pub(crate) async fn run_session_reflector_with_backend(
     AutomationRunError,
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        cg,
+        &context,
         config,
         run_control,
         &test_configuration_revision(),
@@ -306,8 +314,9 @@ pub(crate) async fn run_skill_writer_with_backend(
     AutomationRunError,
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-        cg,
+        &context,
         config,
         &test_configuration_revision(),
         backend,
@@ -325,8 +334,9 @@ pub(crate) async fn run_combined_review_with_backend(
     options: CombinedReviewAutomationOptions,
 ) -> tracedecay_domain::errors::Result<CombinedReviewDispatch> {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-        cg,
+        &context,
         config,
         &test_configuration_revision(),
         backend,
@@ -347,8 +357,9 @@ pub(crate) async fn run_memory_curator_with_backend(
     tracedecay_automation_runtime::automation::runner::MemoryCuratorAutomationRun,
     AutomationRunError,
 > {
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        cg,
+        &context,
         config,
         &test_configuration_revision(),
         backend,

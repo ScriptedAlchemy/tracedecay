@@ -29,7 +29,7 @@ pub use application_surface::{
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardNativeIntegrationStatusFuture, DashboardScopeSetReadFuture,
 };
-pub use tracedecay::DashboardProjectRuntime;
+pub use tracedecay::DashboardProjectContext;
 
 /// Installs the registered global/session schema into the kernel's fail-closed
 /// port for this crate's test process.
@@ -206,7 +206,6 @@ use tower::ServiceExt;
 
 use tracedecay_api::{WorkOperation, WorkflowOperation};
 
-use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_automation_runtime::automation::host_io::HostIo;
@@ -412,7 +411,7 @@ pub struct DashboardState {
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
-    pub project_graph: Option<Arc<TraceDecay>>,
+    pub project_graph: Option<Arc<DashboardProjectContext>>,
     /// Resolves other registered projects only when their graph is already
     /// mounted by the daemon.
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
@@ -640,16 +639,17 @@ impl DashboardHostAdmissionTestAuthorityV1 {
 #[cfg(feature = "test-transport")]
 #[derive(Clone, Default)]
 pub struct DashboardTestProjectGraphsV1 {
-    graphs: Arc<std::sync::RwLock<std::collections::HashMap<PathBuf, Arc<TraceDecay>>>>,
+    graphs:
+        Arc<std::sync::RwLock<std::collections::HashMap<PathBuf, Arc<DashboardProjectContext>>>>,
 }
 
 #[cfg(feature = "test-transport")]
 impl DashboardTestProjectGraphsV1 {
-    pub fn register(&self, graph: Arc<TraceDecay>) {
+    pub fn register(&self, graph: Arc<DashboardProjectContext>) {
         self.graphs
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(graph.project_root().to_path_buf(), graph);
+            .insert(graph.store_layout.project_root.clone(), graph);
     }
 
     fn resolver(&self) -> crate::project_graph::RetainedProjectGraphResolver {
@@ -697,10 +697,10 @@ pub struct LcmStoreSelection {
 }
 
 pub async fn resolve_lcm_store(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> LcmStoreSelection {
-    resolve_lcm_store_for_layout(cg.store_layout(), registered_project_session_db)
+    resolve_lcm_store_for_layout(&cg.store_layout, registered_project_session_db)
 }
 
 fn resolve_lcm_store_for_layout(
@@ -728,10 +728,10 @@ pub fn storage_mode_label(mode: &StorageMode) -> &'static str {
     }
 }
 
-pub fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) {
+pub fn resolve_project_memory_store(cg: &DashboardProjectContext) -> (String, Arc<Database>) {
     (
-        cg.dashboard_db_path().display().to_string(),
-        cg.dashboard_database_guard(),
+        cg.dashboard_db_path.display().to_string(),
+        Arc::clone(&cg.dashboard_database),
     )
 }
 
@@ -739,8 +739,8 @@ pub fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) 
 ///
 /// Dashboard routes must never infer ownership from a path, label, or
 /// optional display field after construction.
-pub fn project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
-    project_memory_owner_for_layout(cg.store_layout())
+pub fn project_memory_owner(cg: &DashboardProjectContext) -> Result<FactOwnerV1> {
+    project_memory_owner_for_layout(&cg.store_layout)
 }
 
 fn project_memory_owner_for_layout(layout: &StoreLayout) -> Result<FactOwnerV1> {
@@ -756,8 +756,8 @@ fn project_memory_owner_for_layout(layout: &StoreLayout) -> Result<FactOwnerV1> 
 }
 
 async fn build_state_inner(
-    cg: &TraceDecay,
-    project_graph: Option<Arc<TraceDecay>>,
+    cg: &DashboardProjectContext,
+    project_graph: Option<Arc<DashboardProjectContext>>,
     warm_token_counts: bool,
     composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
@@ -789,10 +789,10 @@ async fn build_state_inner(
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
     let lcm = resolve_lcm_store(cg, registered_project_session_db).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let store_root = cg.store_layout().data_root.clone();
-    let config_path = cg.store_layout().config_path.clone();
-    let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
+    let dashboard_root = cg.store_layout.dashboard_root.clone();
+    let store_root = cg.store_layout.data_root.clone();
+    let config_path = cg.store_layout.config_path.clone();
+    let storage_mode = storage_mode_label(&cg.store_layout.storage_mode).to_string();
     let code_diagnostics_authority = match (
         code_diagnostics_broker,
         code_graph_read_admission.as_ref(),
@@ -800,7 +800,7 @@ async fn build_state_inner(
     ) {
         (Some(broker), Some(graph_admission), Some(graph_projection)) => Some(
             crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
-                cg.project_root().to_path_buf(),
+                cg.store_layout.project_root.clone(),
                 dashboard_root.clone(),
                 Arc::clone(graph_admission),
                 Arc::clone(graph_projection),
@@ -822,11 +822,11 @@ async fn build_state_inner(
     );
     let mut state = DashboardState {
         build_version,
-        host_io: cg.automation_runtime().host_io(),
-        project_id: cg.store_layout().identity.project_id.clone(),
+        host_io: cg.host_io,
+        project_id: cg.store_layout.identity.project_id.clone(),
         resolved_scope: scope::resolve_dashboard_scope(
-            cg.project_root(),
-            cg.store_layout().identity.project_id.as_deref(),
+            &cg.store_layout.project_root,
+            cg.store_layout.identity.project_id.as_deref(),
         ),
         code_graph_read_admission,
         code_graph_projection_read_port,
@@ -835,11 +835,8 @@ async fn build_state_inner(
         memory_owner,
         graph_conn: mem_db.read_connection(),
         _database_guards: vec![mem_db.clone()],
-        graph_telemetry_handle: cg
-            .dashboard_database_guard()
-            .storage_telemetry_handle()
-            .ok(),
-        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        graph_telemetry_handle: cg.dashboard_database.storage_telemetry_handle().ok(),
+        graph_db_path: cg.dashboard_db_path.display().to_string(),
         mem_db,
         mem_db_path,
         lcm_db: lcm.lcm_db,
@@ -850,7 +847,7 @@ async fn build_state_inner(
         delivery_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
-        project_root: cg.project_root().to_path_buf(),
+        project_root: cg.store_layout.project_root.clone(),
         code_index_freshness_reader,
         explorer_semantic_reader,
         feedback_status_reader,
@@ -859,8 +856,8 @@ async fn build_state_inner(
         store_root,
         config_path,
         dashboard_root,
-        retention_config: cg.retention_config(),
-        user_settings: cg.user_settings_client(),
+        retention_config: cg.retention_config.clone(),
+        user_settings: Arc::clone(&cg.user_settings_client),
         profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
@@ -888,7 +885,7 @@ async fn build_state_inner(
 }
 
 pub async fn build_state_with_automation_reconciler(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
     build_state_inner(cg.as_ref(), Some(Arc::clone(&cg)), true, composition).await
@@ -898,7 +895,7 @@ pub async fn build_state_with_automation_reconciler(
 /// dashboard project picker. Automation authority is inherited from the active
 /// dashboard state so daemon-selected projects cannot fall back to direct open.
 pub async fn build_selected_project_state(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     active: &DashboardState,
 ) -> Result<DashboardState> {
     build_state_inner(
@@ -978,7 +975,7 @@ pub struct DashboardTestEndpointV1<'a> {
 #[doc(hidden)]
 #[cfg(feature = "test-transport")]
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
     endpoint: DashboardTestEndpointV1<'_>,
@@ -1016,12 +1013,12 @@ struct DashboardRunRequest<'a> {
     spa_routes: Router,
     test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
     test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    test_project_graph: Option<Arc<TraceDecay>>,
+    test_project_graph: Option<Arc<DashboardProjectContext>>,
 }
 
 #[cfg(feature = "test-transport")]
 async fn run_until_shutdown_inner<F>(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     request: DashboardRunRequest<'_>,
     shutdown: F,
 ) -> Result<()>
@@ -1043,8 +1040,8 @@ where
     // entry point started the dashboard.
     let code_diagnostics_broker =
         crate::application::dashboard_diagnostics::open_diagnostic_broker(
-            cg.project_root().to_path_buf(),
-            &cg.store_layout().dashboard_root,
+            cg.store_layout.project_root.clone(),
+            &cg.store_layout.dashboard_root,
         )
         .await;
     let state = build_state_inner(
@@ -1100,7 +1097,7 @@ where
     let url = format!("http://{addr}/");
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
     println!("tracedecay dashboard listening on {url}");
-    eprintln!("Serving project {}", cg.project_root().display());
+    eprintln!("Serving project {}", cg.store_layout.project_root.display());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -1362,7 +1359,7 @@ struct ActiveProjectApplicationRoutes {
 
 impl ActiveProjectApplicationRoutes {
     fn for_active_project(
-        cg: &TraceDecay,
+        cg: &DashboardProjectContext,
         executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     ) -> Result<Self> {
         let executor = executor
@@ -1400,7 +1397,7 @@ impl ActiveProjectApplicationRoutes {
 /// panics on overlapping paths. Pass `Router::new()` to serve the JSON API
 /// with no UI.
 pub async fn router(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     mut state: DashboardState,
     spa_routes: Router,
 ) -> Result<Router> {
@@ -1794,7 +1791,7 @@ async fn project_scoped_api_gateway(
                     .active_state()
                     .application_invocation_executor
                     .as_ref(),
-                project_graph.project_root(),
+                &project_graph.store_layout.project_root,
             ) {
                 Ok(application_runtime) => application_runtime,
                 Err(err) => {

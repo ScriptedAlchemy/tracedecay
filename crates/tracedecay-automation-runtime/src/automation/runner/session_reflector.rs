@@ -20,8 +20,9 @@ use crate::automation::lifecycle::{
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::automation::session_reflector::validate_fact_candidates;
-use crate::ports::project_runtime::TraceDecay;
+use crate::ports::project_runtime::AutomationProjectContext;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
+use tracedecay_domain::FactOwnerV1;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -34,7 +35,7 @@ use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
     build_session_reflector_evidence,
 };
-use super::retrieval::{AutomationSessionRetrieval, production_project_automation_retrieval};
+use super::retrieval::{AutomationSessionRetrieval, unavailable_automation_retrieval};
 
 mod privacy;
 use privacy::{
@@ -963,7 +964,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
 }
 
 pub async fn run_session_reflector_with_backend_and_retrieval(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
@@ -987,7 +988,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_session_reflector_with_backend_and_retrieval_publication(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
@@ -1002,11 +1003,12 @@ async fn run_session_reflector_with_backend_and_retrieval_publication(
         "automation:session-reflector",
         configuration_revision_id,
     )?;
-    let sessions_db = super::project_automation_sessions(cg).await?;
-    let project_memory_db = cg.open_project_store_db().await?;
+    let sessions_db = super::project_automation_sessions(cg);
     let memory = MemoryApplication::new(
-        cg.project_memory_owner()?,
-        DatabaseFactStore::new(&project_memory_db),
+        FactOwnerV1::Project {
+            project_id: cg.project_id.clone(),
+        },
+        DatabaseFactStore::new(&cg.project_memory_database),
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!(
@@ -1014,7 +1016,7 @@ async fn run_session_reflector_with_backend_and_retrieval_publication(
         ),
     })?;
     run_session_reflector_for_store_with_publication(
-        cg.store_layout().dashboard_root.clone(),
+        cg.dashboard_root.clone(),
         sessions_db,
         retrieval,
         &memory,
@@ -1031,14 +1033,14 @@ async fn run_session_reflector_with_backend_and_retrieval_publication(
 }
 
 pub async fn run_session_reflector_with_backend(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
-    let retrieval = production_project_automation_retrieval(cg).await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_session_reflector_with_backend_and_retrieval(
         cg,
         config,
@@ -1055,14 +1057,14 @@ pub async fn run_session_reflector_with_backend(
 /// its ledger terminal ahead of outer settlement. The retained settlement
 /// authority must bind and publish the returned exact record.
 pub async fn run_session_reflector_with_backend_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> RetainedAutomationRun<SessionReflectorAutomationRun> {
-    let retrieval = production_project_automation_retrieval(cg).await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
         cg,
         config,
@@ -1079,7 +1081,7 @@ pub async fn run_session_reflector_with_backend_for_retained_settlement(
 /// retrieval authority instead of silently reopening the production route.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
