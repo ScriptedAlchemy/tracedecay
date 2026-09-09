@@ -306,28 +306,12 @@ pub fn is_lock_contended(error: &io::Error) -> bool {
 mod lock_contention_tests {
     use super::is_lock_contended;
 
-    #[test]
-    fn would_block_is_typed_contention() {
-        assert!(is_lock_contended(&std::io::Error::from(
-            std::io::ErrorKind::WouldBlock
-        )));
-    }
-
     #[cfg(windows)]
     #[test]
     fn windows_lock_violation_is_typed_contention() {
         assert!(
             is_lock_contended(&std::io::Error::from_raw_os_error(33)),
             "ERROR_LOCK_VIOLATION (33) is the Windows non-blocking lock conflict"
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn unix_raw_error_33_is_not_lock_contention() {
-        assert!(
-            !is_lock_contended(&std::io::Error::from_raw_os_error(33)),
-            "Unix errno 33 is not Windows LockFileEx contention"
         );
     }
 

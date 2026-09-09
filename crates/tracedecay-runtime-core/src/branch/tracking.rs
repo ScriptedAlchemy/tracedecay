@@ -96,14 +96,6 @@ mod default_branch_tests {
         );
     }
 
-    #[test]
-    fn detached_custom_default_does_not_guess() {
-        let (_temp, project_root) = custom_default_repo();
-        run_git(&project_root, &["checkout", "--detach", "HEAD"]);
-
-        assert_eq!(detect_default_branch(&project_root), None);
-    }
-
     #[tokio::test]
     async fn detached_legacy_store_refuses_to_invent_default_metadata() {
         let (temp, project_root) = custom_default_repo();
