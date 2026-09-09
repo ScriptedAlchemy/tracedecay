@@ -41,6 +41,9 @@ export function GraphCanvas({
   edges,
   selectedId,
   onSelect,
+  inspectedId,
+  onInspect,
+  cameraControls = false,
   height = 320,
   fill = false,
   activation,
@@ -55,6 +58,12 @@ export function GraphCanvas({
   edges: GraphCanvasEdge[];
   selectedId?: string | null;
   onSelect?: (id: string | null) => void;
+  /** Focus shared with the caller's accessible list or inspector. */
+  inspectedId?: string | null;
+  /** Receives pointer focus from the canvas. Focus never creates activity. */
+  onInspect?: (id: string | null) => void;
+  /** Text camera controls for fields whose spatial exploration is meaningful. */
+  cameraControls?: boolean;
   height?: number;
   /** Occupy the parent's full height instead of a fixed one. The parent must
    * establish the height (e.g. `flex-1 min-h-0`). */
@@ -232,6 +241,10 @@ export function GraphCanvas({
   selectedIdRef.current = selectedId;
   const onSelectRef = useRef<((id: string | null) => void) | undefined>(onSelect);
   onSelectRef.current = onSelect;
+  const inspectedIdRef = useRef<string | null | undefined>(inspectedId);
+  inspectedIdRef.current = inspectedId;
+  const onInspectRef = useRef<((id: string | null) => void) | undefined>(onInspect);
+  onInspectRef.current = onInspect;
   // The app's persisted three-state motion control, not the bare OS query this
   // used to read: pinning "Reduced" had no effect on the field, which is the one
   // surface in the product where motion is actually the point. Held in a ref for
@@ -248,6 +261,12 @@ export function GraphCanvas({
   useEffect(() => {
     sceneRef.current?.repaint();
   }, [selectedId]);
+
+  // The accessible list and the WebGL field are two views of the same focus.
+  // Applying list focus only repaints isolation; it never strikes the field.
+  useEffect(() => {
+    sceneRef.current?.focusNode(inspectedId ?? null);
+  }, [inspectedId]);
 
   // A caller-owned field is struck from entirely outside this component: the
   // Brain's SSE effect calls `field.strike(...)` when a real event lands, with
@@ -303,7 +322,9 @@ export function GraphCanvas({
       // field a caller owns must not cost a teardown and a fresh layout.
       field: fieldRef.current ?? field,
       selectedId: () => selectedIdRef.current,
+      inspectedId: () => inspectedIdRef.current,
       onSelect: (id) => onSelectRef.current?.(id),
+      onInspect: (id) => onInspectRef.current?.(id),
       isReduced: () => reducedRef.current,
     };
     const install = (scene: GraphScene): void => {
@@ -444,7 +465,7 @@ export function GraphCanvas({
     );
   }
   return (
-    <figure className={cn('flex flex-col gap-1.5', fill && 'h-full min-h-0')}>
+    <figure className={cn('relative flex flex-col gap-1.5', fill && 'h-full min-h-0')}>
       <div
         ref={attachContainer}
         style={fill ? undefined : { height }}
@@ -468,6 +489,37 @@ export function GraphCanvas({
           `Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`
         }
       />
+      {cameraControls ? (
+        <div
+          role="group"
+          aria-label="Graph camera controls"
+          className="absolute right-3 top-3 z-10 flex border border-edge-subtle bg-surface-0/90 shadow-sm backdrop-blur-sm"
+        >
+          <button
+            type="button"
+            aria-label="Zoom in graph"
+            onClick={() => sceneRef.current?.zoomIn()}
+            className="td-hit border-r border-edge-subtle px-2 py-1 text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            aria-label="Zoom out graph"
+            onClick={() => sceneRef.current?.zoomOut()}
+            className="td-hit border-r border-edge-subtle px-2 py-1 text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onClick={() => sceneRef.current?.fit()}
+            className="td-hit px-2 py-1 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          >
+            Fit
+          </button>
+        </div>
+      ) : null}
       <figcaption className="flex flex-col gap-1.5 text-2xs text-text-muted">
         <GraphEncodingKey encoding={encoding} />
         {unknownDegreeCount > 0 ? (
