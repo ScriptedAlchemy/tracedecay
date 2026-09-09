@@ -242,6 +242,21 @@ const LIVE_NOTE: &str = "last daemon scheduler execution state; generation and s
 const UNAVAILABLE_NOTE: &str =
     "the dashboard is not attached to a daemon-owned code-index scheduler registry";
 
+impl CodeIndexFreshnessPayloadV1 {
+    /// Payload after the daemon scheduler registry answered for this project.
+    ///
+    /// The `note` is owned here — MCP dispatch and the HTTP freshness route
+    /// must not spell it a second time.
+    pub fn from_scheduler_observation(
+        worktrees: impl IntoIterator<Item = CodeIndexWorktreeFreshnessV1>,
+    ) -> Self {
+        Self {
+            worktrees: worktrees.into_iter().collect(),
+            note: LIVE_NOTE.to_owned(),
+        }
+    }
+}
+
 /// `GET /api/code-index/freshness`
 pub async fn freshness(
     State(state): State<DashboardState>,
@@ -264,16 +279,18 @@ async fn project_code_index_freshness(
         None => None,
     };
     let live = read.as_ref();
-    let payload = CodeIndexFreshnessPayloadV1 {
-        worktrees: read.clone().into_iter().collect(),
-        note: if live.is_some() {
-            LIVE_NOTE
-        } else if authority_attached {
-            "the daemon scheduler registry has no mounted scheduler for this project"
-        } else {
-            UNAVAILABLE_NOTE
+    let payload = if live.is_some() {
+        CodeIndexFreshnessPayloadV1::from_scheduler_observation(read.clone())
+    } else {
+        CodeIndexFreshnessPayloadV1 {
+            worktrees: read.clone().into_iter().collect(),
+            note: if authority_attached {
+                "the daemon scheduler registry has no mounted scheduler for this project"
+            } else {
+                UNAVAILABLE_NOTE
+            }
+            .to_string(),
         }
-        .to_string(),
     };
     match live {
         Some(worktree)
@@ -359,6 +376,13 @@ mod tests {
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
         crate::events_api::dashboard_state_fixture("project.dashboard-code-index").await
+    }
+
+    #[test]
+    fn scheduler_observation_payload_owns_the_live_note() {
+        let payload = CodeIndexFreshnessPayloadV1::from_scheduler_observation([]);
+        assert_eq!(payload.note, LIVE_NOTE);
+        assert!(payload.worktrees.is_empty());
     }
 
     #[test]

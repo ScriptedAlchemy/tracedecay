@@ -1219,10 +1219,9 @@ async fn admitted_freshness_payload(
 ) -> Option<CodeIndexFreshnessPayloadV1> {
     let reader = options.code_index_freshness_reader.as_ref()?;
     let worktree = reader(cg.project_root().to_path_buf()).await;
-    Some(CodeIndexFreshnessPayloadV1 {
-        worktrees: worktree.into_iter().collect(),
-        note: "last daemon scheduler execution state; generation and scope come from the durable sealed generation".to_owned(),
-    })
+    Some(CodeIndexFreshnessPayloadV1::from_scheduler_observation(
+        worktree,
+    ))
 }
 
 fn admitted_tool_context<'a>(
