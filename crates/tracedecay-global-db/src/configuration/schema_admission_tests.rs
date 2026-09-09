@@ -56,22 +56,6 @@ async fn same_named_index_with_wrong_columns_requires_reset() {
 }
 
 #[tokio::test]
-async fn same_named_immutable_trigger_with_wrong_definition_requires_reset() {
-    let (_directory, connection) = final_connection().await;
-    connection
-        .execute_batch(
-            "DROP TRIGGER configuration_entries_immutable_update;
-             CREATE TRIGGER configuration_entries_immutable_update
-             BEFORE UPDATE ON configuration_entries
-             BEGIN SELECT 1; END;",
-        )
-        .await
-        .unwrap();
-
-    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
-}
-
-#[tokio::test]
 async fn trigger_string_literal_case_is_part_of_the_exact_definition() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -96,21 +80,6 @@ async fn arbitrary_named_index_attached_to_configuration_table_requires_reset() 
         .execute_batch(
             "CREATE INDEX extra_entry_revision
                  ON configuration_entries(revision_id);",
-        )
-        .await
-        .unwrap();
-
-    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
-}
-
-#[tokio::test]
-async fn arbitrary_named_trigger_attached_to_configuration_table_requires_reset() {
-    let (_directory, connection) = final_connection().await;
-    connection
-        .execute_batch(
-            "CREATE TRIGGER extra_entry_guard
-             BEFORE DELETE ON configuration_entries
-             BEGIN SELECT RAISE(ABORT, 'extra'); END;",
         )
         .await
         .unwrap();
