@@ -44,7 +44,9 @@ export interface ThreadRelations {
 export function ThreadChain({
   thread,
   relations,
+  onReturn,
 }: {
+  onReturn?: () => void;
   thread: PlacedThread | null;
   relations: ThreadRelations;
 }) {
@@ -69,22 +71,22 @@ export function ThreadChain({
   }
 
   return (
-    <Panel legend="Thread" footer={replaying
+    <Panel legend="Loaded execution" footer={replaying
       ? <StateChip kind="unavailable" detail="Session-wide commits, edits and branch rollups are withheld during replay: this read does not bind them to individual transcript events." />
       : <ChainTerminus thread={thread} relations={relations} />}>
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
+          {onReturn && <button type="button" className="td-hit self-start text-xs text-text-secondary" onClick={onReturn}>← All loaded sessions</button>}
           <span className="text-xs font-medium leading-snug text-text-primary">
             {thread.label}
-          </span>
-          <span className="td-value truncate text-3xs text-text-muted">
-            {thread.sessionId}
           </span>
         </div>
 
         <details>
           <summary className="td-hit text-xs text-text-muted">Session metadata</summary>
         <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-2xs">
+          <Fact label="session" value={thread.sessionId} />
           <Fact label="host" value={thread.host} />
           <Fact label="started" value={formatMoment(thread.start)} />
           <Fact
@@ -116,6 +118,7 @@ export function ThreadChain({
         ) : null}
 
         </details>
+        </div>
 
         <ReadSection
           title="Chain"
