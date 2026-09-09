@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
-use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registry_context_candidate_roots};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage;
 use tracedecay_session_memory::fact_store::ProjectMemoryDbHandle;
@@ -184,20 +184,6 @@ async fn open_selected_project_read_only(
             project_id: selected_project_id.clone(),
         },
     ))
-}
-
-fn registry_context_candidate_roots(context: &ProjectRegistryContext) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from(&context.project.canonical_root),
-        PathBuf::from(&context.project.display_root),
-    ];
-    candidates.extend(
-        context
-            .aliases
-            .iter()
-            .map(|alias| PathBuf::from(&alias.alias_path)),
-    );
-    candidates
 }
 
 fn denied<T>() -> Result<T, RetainedSurfaceExecutionErrorV1> {

@@ -30,7 +30,6 @@ use super::{
     CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
     map_projection_error,
 };
-#[cfg(any(test, feature = "test-helpers"))]
 use crate::SourceReadContext;
 use crate::context::read_modes;
 use crate::context::source_read::{self, SourceReadOutput, SourceReadRequest};
@@ -79,6 +78,59 @@ where
     fn open<'a>(&'a self, request: VerifiedGraphQueryRequest<'a>) -> VerifiedGraphQueryFuture<'a> {
         (**self).open(request)
     }
+}
+
+/// Closes over admission, projection, and an optional admitted project source.
+/// `open` never names a composition-root type.
+pub struct AdmittedVerifiedGraphQueryPort {
+    admission: Arc<dyn CodeGraphReadAdmissionPort>,
+    projection: Arc<dyn CodeGraphProjectionReadPort>,
+    source_authority: Option<Arc<dyn CodeGraphSourceAuthorityPort>>,
+}
+
+impl AdmittedVerifiedGraphQueryPort {
+    pub fn new(
+        admission: Arc<dyn CodeGraphReadAdmissionPort>,
+        projection: Arc<dyn CodeGraphProjectionReadPort>,
+        source: Option<SourceReadContext>,
+    ) -> Self {
+        Self {
+            admission,
+            projection,
+            source_authority: source
+                .map(|source| Arc::new(source) as Arc<dyn CodeGraphSourceAuthorityPort>),
+        }
+    }
+}
+
+impl VerifiedGraphQueryPort for AdmittedVerifiedGraphQueryPort {
+    fn open<'a>(&'a self, request: VerifiedGraphQueryRequest<'a>) -> VerifiedGraphQueryFuture<'a> {
+        Box::pin(open_verified_graph_query(
+            &*self.admission,
+            &*self.projection,
+            request,
+            self.source_authority.as_deref(),
+        ))
+    }
+}
+
+#[must_use]
+pub fn admitted_verified_graph_query_port(
+    admission: Arc<dyn CodeGraphReadAdmissionPort>,
+    projection: Arc<dyn CodeGraphProjectionReadPort>,
+) -> Arc<dyn VerifiedGraphQueryPort> {
+    admitted_verified_graph_query_port_with_source(admission, projection, None)
+}
+
+#[must_use]
+pub fn admitted_verified_graph_query_port_with_source(
+    admission: Arc<dyn CodeGraphReadAdmissionPort>,
+    projection: Arc<dyn CodeGraphProjectionReadPort>,
+    source: Option<SourceReadContext>,
+) -> Arc<dyn VerifiedGraphQueryPort> {
+    Arc::new(AdmittedVerifiedGraphQueryPort::new(
+        admission, projection, source,
+    ))
 }
 
 /// Generation-pinned analytical queries over the verified Grafeo projection.

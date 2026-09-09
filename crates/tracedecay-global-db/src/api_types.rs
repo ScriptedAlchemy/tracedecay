@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracedecay_runtime_core::storage::{ProjectStorageLocation, classify_registry_storage_fields};
 
@@ -271,6 +271,22 @@ pub struct ProjectRegistryContext {
     pub project: CodeProjectRecord,
     pub aliases: Vec<ProjectAliasRecord>,
     pub stores: Vec<ProjectStoreContext>,
+}
+
+/// Candidate enrollment roots a registered project claims: its canonical
+/// and display roots plus every registered alias.
+pub fn registry_context_candidate_roots(context: &ProjectRegistryContext) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from(&context.project.canonical_root),
+        PathBuf::from(&context.project.display_root),
+    ];
+    candidates.extend(
+        context
+            .aliases
+            .iter()
+            .map(|alias| PathBuf::from(&alias.alias_path)),
+    );
+    candidates
 }
 
 /// One complete, bounded snapshot of the registered checkout roots that may

@@ -97,7 +97,7 @@ fn remote_query_coverage_preserves_real_shard_and_pending_counts() {
     );
     result.validate().expect("valid stale remote query result");
 
-    let observation = super::remote_protocol::remote_query_result_observation(
+    let observation = tracedecay_daemon_service::remote_protocol::remote_query_result_observation(
         "request.remote-coverage",
         1,
         &result,
@@ -127,7 +127,7 @@ fn remote_query_coverage_does_not_fabricate_unavailable_pending_count() {
         .validate()
         .expect("valid unavailable remote query result");
 
-    let observation = super::remote_protocol::remote_query_result_observation(
+    let observation = tracedecay_daemon_service::remote_protocol::remote_query_result_observation(
         "request.remote-coverage-unavailable",
         1,
         &result,

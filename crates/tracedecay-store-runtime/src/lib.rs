@@ -64,6 +64,7 @@ pub use session_registry::{
 };
 pub use standalone_session::join_standalone_session_registry;
 pub use store_shutdown::{
-    ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus, join_shutdown_tasks_until,
+    ShutdownStatus, ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus,
+    join_shutdown_tasks_until,
 };
 pub use writer_gate::{StoreWriterClass, StoreWriterGates, WriterAdmissionGuard, WriterScope};

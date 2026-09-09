@@ -110,10 +110,11 @@ pub fn publish_daemon_bindings(
             message: format!("cannot validate Hook project identity: {error}"),
         }
     })?;
-    let scope = runtime
-        .resolve_hook_scope(&layout.project_root, &typed_project_id)
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("cannot resolve Hook repository/worktree scope: {error}"),
+    let scope =
+        (runtime.scope_resolver)(&layout.project_root, &typed_project_id).map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("cannot resolve Hook repository/worktree scope: {error}"),
+            }
         })?;
     let now = now_utc();
     let revision = now.0.max(1) as u64;

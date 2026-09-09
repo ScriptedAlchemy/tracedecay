@@ -46,8 +46,9 @@ pub use source_authority::{
     CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
 };
 pub use verified_query::{
-    VerifiedGraphQuery, VerifiedGraphQueryFuture, VerifiedGraphQueryPort,
-    VerifiedGraphQueryRequest, open_verified_graph_query,
+    AdmittedVerifiedGraphQueryPort, VerifiedGraphQuery, VerifiedGraphQueryFuture,
+    VerifiedGraphQueryPort, VerifiedGraphQueryRequest, admitted_verified_graph_query_port,
+    admitted_verified_graph_query_port_with_source, open_verified_graph_query,
 };
 
 /// Immutable filesystem and cache values supplied for one admitted source

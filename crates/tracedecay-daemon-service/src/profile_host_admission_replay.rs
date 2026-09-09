@@ -23,8 +23,6 @@ use tracedecay_host_admission::{
 };
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 
-use super::log_daemon_event;
-
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
 const BOOTSTRAP_RUNNING: u8 = 0;
 const BOOTSTRAP_READY: u8 = 1;
@@ -63,16 +61,26 @@ fn bootstrap_key(profile_root: &Path) -> PathBuf {
 /// `Missing` is distinct from `TimedOut` on purpose: a lookup that finds no
 /// worker is an absence of evidence, not a completed bootstrap, and reporting
 /// it as success turned a keying bug into a passing assertion.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BootstrapCompletion {
+pub enum BootstrapCompletion {
     Completed,
     TimedOut,
     Missing,
 }
 
-pub(super) type ProfileHostAdmissionBootstrapOperation = Arc<
+pub type ProfileHostAdmissionBootstrapOperation = Arc<
     dyn Fn() -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Owner-installed replay pass. Hermes/MCP replay stays in the composition root.
+pub type ProfileHostAdmissionReplayPass = Arc<
+    dyn Fn(
+            SharedHostAdmissionBroker,
+            PathBuf,
+        ) -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>>
         + Send
         + Sync,
 >;
@@ -88,7 +96,7 @@ type ReplayPassOverride = Arc<
 type PendingReplayCountOverride =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = usize> + Send>> + Send + Sync>;
 
-pub(super) struct ProfileHostAdmissionReplayRegistry {
+pub struct ProfileHostAdmissionReplayRegistry {
     workers: Arc<tokio::sync::Mutex<HashMap<PathBuf, ReplayWorkerEntry>>>,
     bootstrap_workers:
         Arc<tokio::sync::Mutex<HashMap<PathBuf, ProfileHostAdmissionBootstrapEntry>>>,
@@ -98,6 +106,7 @@ pub(super) struct ProfileHostAdmissionReplayRegistry {
     bootstrap_ready_cache_for: Duration,
     bootstrap_terminal_cache_for: Duration,
     bootstrap_retry_budget: Duration,
+    replay_pass: Option<ProfileHostAdmissionReplayPass>,
 }
 
 struct ReplayWorkerEntry {
@@ -122,7 +131,7 @@ struct ProfileHostAdmissionBootstrapWorker {
 }
 
 #[derive(Clone)]
-pub(super) enum ProfileHostAdmissionBootstrapStatus {
+pub enum ProfileHostAdmissionBootstrapStatus {
     Running,
     Ready,
     Terminal(Arc<tracedecay_domain::errors::TraceDecayError>),
@@ -144,6 +153,7 @@ struct ProfileHostAdmissionReplayWorker {
     idle: Notify,
     wake: Notify,
     cancellation: Arc<ProfileHostAdmissionCancellation>,
+    replay_pass: Option<ProfileHostAdmissionReplayPass>,
     #[cfg(test)]
     pass_override: Option<ReplayPassOverride>,
     #[cfg(test)]
@@ -161,6 +171,7 @@ impl Default for ProfileHostAdmissionReplayRegistry {
             bootstrap_ready_cache_for: BOOTSTRAP_READY_CACHE_FOR,
             bootstrap_terminal_cache_for: BOOTSTRAP_TERMINAL_CACHE_FOR,
             bootstrap_retry_budget: BOOTSTRAP_RETRY_BUDGET,
+            replay_pass: None,
         }
     }
 }
@@ -173,8 +184,14 @@ impl Drop for ProfileHostAdmissionReplayRegistry {
 }
 
 impl ProfileHostAdmissionReplayRegistry {
+    pub fn with_replay_pass(replay_pass: ProfileHostAdmissionReplayPass) -> Self {
+        let mut registry = Self::default();
+        registry.replay_pass = Some(replay_pass);
+        registry
+    }
+
     #[hotpath::skip]
-    pub(super) async fn ensure_bootstrap(
+    pub async fn ensure_bootstrap(
         &self,
         profile_root: &Path,
         operation: ProfileHostAdmissionBootstrapOperation,
@@ -223,7 +240,7 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[hotpath::skip]
-    pub(super) async fn bootstrap_status(
+    pub async fn bootstrap_status(
         &self,
         profile_root: &Path,
     ) -> Option<ProfileHostAdmissionBootstrapStatus> {
@@ -235,7 +252,7 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[hotpath::skip]
-    pub(super) async fn ensure(
+    pub async fn ensure(
         &self,
         broker_path: &Path,
         profile_root: &Path,
@@ -245,6 +262,7 @@ impl ProfileHostAdmissionReplayRegistry {
             broker,
             profile_root,
             Arc::clone(&self.cancellation),
+            self.replay_pass.clone(),
             #[cfg(test)]
             None,
             #[cfg(test)]
@@ -255,7 +273,7 @@ impl ProfileHostAdmissionReplayRegistry {
 
     #[cfg(test)]
     #[hotpath::skip]
-    pub(super) async fn ensure_with_pass_override(
+    pub async fn ensure_with_pass_override(
         &self,
         broker_path: &Path,
         profile_root: &Path,
@@ -266,6 +284,7 @@ impl ProfileHostAdmissionReplayRegistry {
             broker,
             profile_root,
             Arc::clone(&self.cancellation),
+            None,
             Some(pass_override),
             None,
         ));
@@ -324,12 +343,12 @@ impl ProfileHostAdmissionReplayRegistry {
     /// be synchronous so an in-flight replay starts unwinding before this
     /// owner's join is polled. Does not latch `shutting_down`: that flag is
     /// the single-flight for `shutdown`'s drain-and-join.
-    pub(super) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancellation.cancel();
     }
 
     #[hotpath::skip]
-    pub(super) async fn shutdown(&self) {
+    pub async fn shutdown(&self) {
         if self.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -351,7 +370,7 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[hotpath::skip]
-    pub(super) async fn wait_idle(&self, broker_path: &Path, timeout: Duration) -> bool {
+    pub async fn wait_idle(&self, broker_path: &Path, timeout: Duration) -> bool {
         if self.shutting_down.load(Ordering::Acquire)
             || self.cancellation.cancelled.load(Ordering::Acquire)
         {
@@ -395,7 +414,7 @@ impl ProfileHostAdmissionReplayRegistry {
 
     #[cfg(test)]
     #[hotpath::skip]
-    pub(super) async fn pass_count(&self, broker_path: &Path) -> usize {
+    pub async fn pass_count(&self, broker_path: &Path) -> usize {
         let workers = self.workers.lock().await;
         workers
             .get(broker_path)
@@ -404,7 +423,7 @@ impl ProfileHostAdmissionReplayRegistry {
 
     #[cfg(test)]
     #[hotpath::skip]
-    pub(super) async fn backoff_count(&self, broker_path: &Path) -> usize {
+    pub async fn backoff_count(&self, broker_path: &Path) -> usize {
         let workers = self.workers.lock().await;
         workers.get(broker_path).map_or(0, |entry| {
             entry.worker.backoff_count.load(Ordering::Acquire)
@@ -423,9 +442,9 @@ impl ProfileHostAdmissionReplayRegistry {
         self.bootstrap_workers.lock().await.len()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
-    pub(super) async fn bootstrap_attempt_count(&self, profile_root: &Path) -> usize {
+    pub async fn bootstrap_attempt_count(&self, profile_root: &Path) -> usize {
         self.bootstrap_workers
             .lock()
             .await
@@ -435,9 +454,9 @@ impl ProfileHostAdmissionReplayRegistry {
             })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
-    pub(super) async fn bootstrap_backoff_count(&self, profile_root: &Path) -> usize {
+    pub async fn bootstrap_backoff_count(&self, profile_root: &Path) -> usize {
         self.bootstrap_workers
             .lock()
             .await
@@ -447,9 +466,9 @@ impl ProfileHostAdmissionReplayRegistry {
             })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
-    pub(super) async fn wait_bootstrap_completed(
+    pub async fn wait_bootstrap_completed(
         &self,
         profile_root: &Path,
         timeout: Duration,
@@ -584,9 +603,9 @@ impl ProfileHostAdmissionBootstrapWorker {
             match result {
                 Ok(()) => {
                     if consecutive_retryable > 0 {
-                        log_daemon_event(
-                            "profile_host_admission_bootstrap_recovered",
-                            &[("attempts", (consecutive_retryable + 1).to_string())],
+                        tracing::info!(
+                            event = "profile_host_admission_bootstrap_recovered",
+                            attempts = consecutive_retryable + 1,
                         );
                     }
                     self.finish(BOOTSTRAP_READY);
@@ -595,9 +614,10 @@ impl ProfileHostAdmissionBootstrapWorker {
                 Err(error) => {
                     let (reason_code, retryable) = bootstrap_error_disposition(&error);
                     if !retryable {
-                        log_daemon_event(
-                            "profile_host_admission_bootstrap_stopped",
-                            &[("reason_code", reason_code.to_owned())],
+                        tracing::warn!(
+                            event = "profile_host_admission_bootstrap_stopped",
+                            reason_code,
+                            "profile host admission bootstrap stopped on a terminal failure",
                         );
                         self.finish_terminal(error);
                         return;
@@ -605,9 +625,9 @@ impl ProfileHostAdmissionBootstrapWorker {
                     consecutive_retryable = consecutive_retryable.saturating_add(1);
                     self.backoff_count.fetch_add(1, Ordering::AcqRel);
                     if consecutive_retryable == 1 {
-                        log_daemon_event(
-                            "profile_host_admission_bootstrap_retry",
-                            &[("reason_code", reason_code.to_owned())],
+                        tracing::info!(
+                            event = "profile_host_admission_bootstrap_retry",
+                            reason_code,
                         );
                     }
                     // Retryable does not mean retry forever. Once the budget is
@@ -624,13 +644,6 @@ impl ProfileHostAdmissionBootstrapWorker {
                                 u64::try_from(self.retry_budget.as_millis()).unwrap_or(u64::MAX),
                             "profile host admission bootstrap gave up after its retry budget; \
                              it resumes on the next admission or daemon restart"
-                        );
-                        log_daemon_event(
-                            "profile_host_admission_bootstrap_exhausted",
-                            &[
-                                ("reason_code", reason_code.to_owned()),
-                                ("attempts", consecutive_retryable.to_string()),
-                            ],
                         );
                         self.finish_terminal(error);
                         return;
@@ -691,6 +704,7 @@ impl ProfileHostAdmissionReplayWorker {
         broker: &SharedHostAdmissionBroker,
         profile_root: &Path,
         cancellation: Arc<ProfileHostAdmissionCancellation>,
+        replay_pass: Option<ProfileHostAdmissionReplayPass>,
         #[cfg(test)] pass_override: Option<ReplayPassOverride>,
         #[cfg(test)] pending_count_override: Option<PendingReplayCountOverride>,
     ) -> Self {
@@ -704,6 +718,7 @@ impl ProfileHostAdmissionReplayWorker {
             idle: Notify::new(),
             wake: Notify::new(),
             cancellation,
+            replay_pass,
             #[cfg(test)]
             pass_override,
             #[cfg(test)]
@@ -817,15 +832,11 @@ impl ProfileHostAdmissionReplayWorker {
                     }
                     ReplayPassDecision::Stop => {
                         consecutive_retryable = 0;
-                        log_daemon_event(
-                            "profile_host_admission_replay_stopped",
-                            &[(
-                                "reason_code",
-                                outcome
-                                    .reason_code
-                                    .unwrap_or("host_admission_unavailable")
-                                    .to_string(),
-                            )],
+                        tracing::warn!(
+                            event = "profile_host_admission_replay_stopped",
+                            reason_code =
+                                outcome.reason_code.unwrap_or("host_admission_unavailable"),
+                            "profile host admission replay stopped on a terminal failure",
                         );
                         // Non-retryable failure: stop until the next explicit kick.
                         break;
@@ -860,15 +871,14 @@ impl ProfileHostAdmissionReplayWorker {
         if let Some(pass_override) = &self.pass_override {
             return pass_override().await;
         }
-        crate::mcp::tools::replay_projectless_hermes_host_admission(
-            &self.broker,
-            &self.profile_root,
-        )
-        .await
+        if let Some(replay_pass) = &self.replay_pass {
+            return replay_pass(self.broker.clone(), self.profile_root.clone()).await;
+        }
+        HostAdmissionOutcome::degraded("replay_pass_uninstalled")
     }
 }
 
-pub(super) fn profile_replay_backoff(attempt: u32) -> Duration {
+pub fn profile_replay_backoff(attempt: u32) -> Duration {
     replay_backoff(attempt, REPLAY_BACKOFF_SHIFT_CAP)
 }
 
@@ -1319,6 +1329,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installed_replay_pass_runs_on_ensure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        let passes = Arc::new(AtomicUsize::new(0));
+        let pass_calls = Arc::clone(&passes);
+        let registry = ProfileHostAdmissionReplayRegistry::with_replay_pass(Arc::new(
+            move |_broker, _profile_root| {
+                let pass_calls = Arc::clone(&pass_calls);
+                Box::pin(async move {
+                    pass_calls.fetch_add(1, Ordering::AcqRel);
+                    HostAdmissionOutcome::accepted_for_replay()
+                })
+            },
+        ));
+
+        registry.ensure(&db_path, &profile_root, &broker).await;
+        assert!(
+            registry.wait_idle(&db_path, Duration::from_secs(2)).await,
+            "installed pass must complete a replay worker"
+        );
+        assert_eq!(passes.load(Ordering::Acquire), 1);
+        registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn retryable_failures_apply_bounded_backoff() {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
@@ -1453,6 +1493,7 @@ mod tests {
             &profile_root,
             Arc::clone(&registry.cancellation),
             None,
+            None,
             Some(pending_count_override),
         ));
         let task_worker = Arc::clone(&worker);
@@ -1522,6 +1563,7 @@ mod tests {
             &profile_root,
             Arc::clone(&registry.cancellation),
             None,
+            None,
             Some(pending_count_override),
         ));
         let cancellation = Arc::clone(&registry.cancellation);
@@ -1586,6 +1628,7 @@ mod tests {
             &broker,
             &profile_root,
             cancellation,
+            None,
             None,
             Some(pending_count_override),
         ));

@@ -168,3 +168,29 @@ mod identity_root_canonicalization_tests {
         assert!(!root.join(".git").exists());
     }
 }
+
+#[cfg(test)]
+mod enrolled_project_roots_tests {
+    use super::*;
+    use tracedecay_domain::ProjectId;
+
+    #[test]
+    fn empty_candidates_yield_no_roots() {
+        let project_id = ProjectId::new("proj_0123456789abcdef").expect("project id");
+        let roots = enrolled_project_roots(Vec::<PathBuf>::new(), &project_id).expect("filter");
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn keeps_only_roots_whose_path_derived_id_matches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let enrolled = temp.path().join("enrolled");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&enrolled).expect("enrolled");
+        fs::create_dir_all(&other).expect("other");
+        let project_id = ProjectId::new(default_profile_project_id(&enrolled)).expect("project id");
+        let roots =
+            enrolled_project_roots(vec![enrolled.clone(), other], &project_id).expect("filter");
+        assert_eq!(roots, vec![enrolled.canonicalize().expect("canonical")]);
+    }
+}
