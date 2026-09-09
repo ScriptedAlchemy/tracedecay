@@ -1720,6 +1720,10 @@ impl MaintenanceCoordinator {
     }
 
     #[hotpath::skip]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The task retains independently owned profile, stores, schedulers and cadence for its full cancellation lifetime."
+    )]
     async fn run(
         &self,
         profile_root: PathBuf,
@@ -1745,6 +1749,10 @@ impl MaintenanceCoordinator {
     }
 
     #[hotpath::measure(label = "daemon.maintenance.tick", future = true)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "A tick borrows independently owned stores and policy while retaining the continuation cursor."
+    )]
     async fn run_tick(
         &self,
         profile_root: &Path,

@@ -157,6 +157,10 @@ mod tests {
     use super::{RedundancyOptions, RedundancyScanV1, redundancy_md};
     use tracedecay_graph_query::redundancy_scan::{RedundancyNodeViewV1, RedundancyPairViewV1};
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Fixture varies both node identities, locations, body sizes, and ranking independently"
+    )]
     fn test_pair(
         id_a: &str,
         name_a: &str,

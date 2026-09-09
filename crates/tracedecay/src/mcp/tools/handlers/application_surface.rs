@@ -106,8 +106,7 @@ pub(super) async fn handle_application_surface(
     executor: Option<&dyn DaemonInvocationExecutor>,
     target: InvocationTarget,
     protocol_request_id: Option<RequestId>,
-    protocol_deadline: Option<Deadline>,
-    protocol_cancellation: Option<CancellationSignal>,
+    request_controls: tracedecay_mcp::RequestControls<'_>,
 ) -> Result<tracedecay_mcp::ToolResult> {
     let ApplicationToolRequest {
         request: request_args,
@@ -135,8 +134,8 @@ pub(super) async fn handle_application_surface(
     let controls = complete_protocol_controls(
         operation,
         &request_id,
-        protocol_deadline,
-        protocol_cancellation,
+        request_controls.deadline.cloned(),
+        request_controls.cancellation.cloned(),
     )?;
     let result = match controls {
         Some((deadline, cancellation)) => {

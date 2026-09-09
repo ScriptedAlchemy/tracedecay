@@ -27,9 +27,7 @@ use tracedecay_contracts::remote::protocol::{
     remote_enrollment_result_contract_v1, remote_protocol_problem,
     remote_replay_result_contract_v1,
 };
-use tracedecay_contracts::remote::protocol_owner::{
-    RemoteOperationProtocolPortsV1, RemoteProtocolOwnerV1,
-};
+use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
 use tracedecay_contracts::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
@@ -668,36 +666,35 @@ pub(crate) fn build_daemon_remote_protocol_router(
         restore_contract: remote_result_contract("remote.restore.result")?,
         promotion_contract: remote_result_contract("remote.promotion.result")?,
     });
-    let owner = RemoteProtocolOwnerV1::new(
-        Arc::new(DaemonRemoteEnrollmentProtocolPortV1 {
+    let enrollment = Arc::new(DaemonRemoteEnrollmentProtocolPortV1 {
+        credentials: Arc::clone(&credentials),
+    });
+    let operations = RemoteOperationProtocolPortsV1 {
+        capture: Arc::new(DaemonRemoteCaptureProtocolPortV1 {
             credentials: Arc::clone(&credentials),
         }),
-        RemoteOperationProtocolPortsV1 {
-            capture: Arc::new(DaemonRemoteCaptureProtocolPortV1 {
-                credentials: Arc::clone(&credentials),
-            }),
-            replay: Arc::new(DaemonRemoteReplayProtocolPortV1 {
-                credentials: Arc::clone(&credentials),
-                transaction: Arc::clone(&transaction),
-            }),
-            frame_transfer: Arc::new(DaemonRemoteFrameTransferProtocolPortV1 {
-                credentials: Arc::clone(&credentials),
-            }),
-            query: Arc::new(observability::DaemonRemoteQueryProtocolPortV1::new(
-                Arc::clone(&credentials),
-                transaction,
-                invocation,
-            )),
-            backup: recovery.clone(),
-            restore: recovery.clone(),
-            promotion: recovery,
-        },
-    );
+        replay: Arc::new(DaemonRemoteReplayProtocolPortV1 {
+            credentials: Arc::clone(&credentials),
+            transaction: Arc::clone(&transaction),
+        }),
+        frame_transfer: Arc::new(DaemonRemoteFrameTransferProtocolPortV1 {
+            credentials: Arc::clone(&credentials),
+        }),
+        query: Arc::new(observability::DaemonRemoteQueryProtocolPortV1::new(
+            Arc::clone(&credentials),
+            transaction,
+            invocation,
+        )),
+        backup: recovery.clone(),
+        restore: recovery.clone(),
+        promotion: recovery,
+    };
     let admission = Arc::new(RemoteCredentialAdmissionServiceV1::new(
         DaemonRemoteCredentialLookupV1::new(credentials),
     ));
     Ok(tracedecay_api::remote::remote_protocol_router(
-        owner,
+        enrollment,
+        operations,
         admission,
         tracedecay_contracts::clock::now_micros,
     ))

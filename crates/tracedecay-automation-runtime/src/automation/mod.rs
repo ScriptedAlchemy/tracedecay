@@ -9,6 +9,7 @@ pub mod artifacts;
 pub mod automatic_facts;
 pub mod backend;
 pub mod backend_identity;
+pub mod combined_effect;
 pub mod config;
 pub mod effect_recovery;
 pub mod effect_runtime;

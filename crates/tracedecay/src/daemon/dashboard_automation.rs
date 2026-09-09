@@ -85,7 +85,12 @@ impl DashboardAutomationRequestRuntime {
 
 pub(crate) fn dashboard_automation_observation_port(
     invocation_service: DaemonInvocationService,
-) -> tracedecay_dashboard_api::DashboardAutomationObservationPortV1 {
+) -> Arc<
+    dyn Fn(PathBuf) -> tracedecay_dashboard_api::DashboardAutomationObservationFuture
+        + Send
+        + Sync
+        + 'static,
+> {
     Arc::new(move |project_root| {
         let invocation_service = invocation_service.clone();
         Box::pin(async move {

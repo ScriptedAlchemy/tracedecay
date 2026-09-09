@@ -196,6 +196,10 @@ impl TraceDecay {
     }
 
     #[hotpath::skip]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Branch opening keeps configuration and profile leases distinct from graph access mode and read-only policy."
+    )]
     async fn open_branch_with_registered_configuration_access(
         project_root: &Path,
         branch_name: &str,

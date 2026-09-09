@@ -280,8 +280,6 @@ pub type DashboardAutomationObservationFuture = Pin<
             + 'static,
     >,
 >;
-pub type DashboardAutomationObservationPortV1 =
-    Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>;
 pub type DoctorReportReadFuture = Pin<
     Box<
         dyn Future<
@@ -336,7 +334,9 @@ pub struct DashboardStateCompositionV1 {
     /// managed-skill materialization capabilities. Standalone states leave it
     /// absent and automation mutation routes report typed unavailable.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
-    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
+    pub automation_observation: Option<
+        Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
+    >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
@@ -500,7 +500,9 @@ pub struct DashboardState {
     /// Daemon-selected profile and canonical automation mutation authority.
     /// HTTP handlers never reconstruct this capability from the environment.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
-    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
+    pub automation_observation: Option<
+        Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
+    >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub automation_writer: DashboardAutomationWriter,

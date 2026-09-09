@@ -152,6 +152,10 @@ fn scheduler_run_observer(
 }
 
 #[hotpath::measure(label = "daemon.scheduler.settle_retained_automation", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Settlement composes the retained run, effect guard, cancellation and project observer without transferring their authorities."
+)]
 async fn settle_scheduler_retained_automation<T, P>(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,
@@ -1107,6 +1111,10 @@ fn boxed_host_receipt_review<'a>(
     ))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The task owns its wake, generation and completion tokens until scheduler exit is committed."
+)]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,
@@ -1996,6 +2004,10 @@ async fn automation_scheduler_has_work(
 /// Ticks every schedulable user-defined job with the same lock/cooldown
 /// discipline as the fixed tasks (enforced inside the job runner).
 #[hotpath::measure(label = "daemon.scheduler.user_jobs_pass", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Job dispatch binds retained project memory and pinned configuration to the admitted backend and shared error result."
+)]
 async fn run_user_jobs_scheduler_pass(
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
