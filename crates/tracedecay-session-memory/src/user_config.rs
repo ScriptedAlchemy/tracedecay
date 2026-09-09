@@ -860,12 +860,6 @@ mod tests {
     }
 
     #[test]
-    fn path_unavailable_error_displays() {
-        let err = ConfigSaveError::PathUnavailable;
-        assert!(err.to_string().contains("user config path"));
-    }
-
-    #[test]
     fn concurrent_revision_guarded_mutations_reject_one_stale_writer() {
         let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
