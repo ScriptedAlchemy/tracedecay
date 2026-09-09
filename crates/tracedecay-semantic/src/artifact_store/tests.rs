@@ -587,6 +587,98 @@ mod tests {
     }
 
     #[test]
+    fn local_member_stream_checkpoints_only_complete_payloads() {
+        struct Interrupted;
+        impl Read for Interrupted {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("source interrupted"))
+            }
+        }
+        let bytes = vec![42; 2 * 64 * 1024 + 7];
+        let manifest = manifest_for(&bytes);
+        let member = manifest
+            .package_member(ArtifactMemberRoleV1::Model)
+            .unwrap();
+        for (input, expected) in [
+            (
+                vec![42; bytes.len() - 1],
+                ArtifactImportErrorV1::LengthMismatch,
+            ),
+            (
+                vec![42; bytes.len() + 1],
+                ArtifactImportErrorV1::SizeExpansionBeyondDeclared,
+            ),
+        ] {
+            let (_root, store) = store();
+            let mut session = store.begin_import(&manifest, NOW).unwrap();
+            assert_eq!(
+                store.stage_local_member(&mut session, member, &mut input.as_slice()),
+                Err(expected)
+            );
+            assert_eq!(session.bytes_written(), 0);
+            assert_eq!(
+                read_staging_meta(&session.staging_dir).unwrap().members[0].bytes_written,
+                0
+            );
+        }
+        let (_root, store) = store();
+        let mut session = store.begin_import(&manifest, NOW).unwrap();
+        let mut interrupted = (&bytes[..64 * 1024]).chain(Interrupted);
+        assert_eq!(
+            store.stage_local_member(&mut session, member, &mut interrupted),
+            Err(ArtifactImportErrorV1::SourceInterrupted)
+        );
+        assert_eq!(session.bytes_written(), 0);
+        assert_eq!(
+            read_staging_meta(&session.staging_dir).unwrap().members[0].bytes_written,
+            0
+        );
+        assert!(
+            !store
+                .installed_directory(&manifest.artifact_identity_digest())
+                .exists()
+        );
+        let staging_id = session.staging_id();
+        drop(session);
+        assert_eq!(
+            store
+                .resume_import(&manifest, &staging_id, NOW)
+                .unwrap_err(),
+            ArtifactImportErrorV1::ResumeIdentityMismatch
+        );
+    }
+
+    #[test]
+    fn local_import_streams_multiple_buffers_and_checks_final_digest() {
+        let model = vec![42; 2 * 64 * 1024 + 7];
+        for corrupt in [false, true] {
+            let (root, store) = store();
+            let manifest = manifest_for(&model);
+            let package = root.path().join("package");
+            write_local_package(&package, &manifest, &model);
+            if corrupt {
+                fs::write(package.join("model.onnx"), vec![43; model.len()]).unwrap();
+            }
+            let result = store.import_local_directory(&manifest, &package, NOW);
+            if corrupt {
+                assert_eq!(result.unwrap_err(), ArtifactImportErrorV1::DigestMismatch);
+                assert!(
+                    !store
+                        .installed_directory(&manifest.artifact_identity_digest())
+                        .exists()
+                );
+            } else {
+                let record = result.unwrap();
+                assert_eq!(record.state, ArtifactInventoryStateV1::Installed);
+                assert_eq!(
+                    fs::read(store.artifact_path(&record.artifact_digest)).unwrap(),
+                    model
+                );
+            }
+        }
+    }
+
+    #[test]
     fn partial_write_resumes_and_places_atomically() {
         let (_dir, store) = store();
         let bytes = model_bytes();

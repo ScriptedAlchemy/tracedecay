@@ -1,36 +1,24 @@
-import { render, waitFor } from '@testing-library/react';
+import { act, render, waitFor } from '@testing-library/react';
 import type Graph from 'graphology';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphCanvas } from './GraphCanvas.tsx';
 
-/**
- * The chunk boundary, asserted rather than assumed.
- *
- * Skipping the force pass on a measured field was never the hard part — that
- * guard has always been there. The cost that survived it was the STATIC
- * import: ForceAtlas2 was pulled into the chunk of every field, including ones
- * whose coordinates the engine must never be allowed to touch. The engine is
- * now reached through a dynamic `import()` on the emergent path only, and the
- * probe below is the module factory itself: it runs exactly once, the first
- * time anything asks for the package, so a measured render that leaves it
- * unrun is a measured render that never loaded the library.
- *
- * The two cases are order-dependent on purpose — a module registry has no
- * "unload", so the negative case has to be the one that runs first, and the
- * positive case that follows is what keeps it from passing vacuously.
- */
+/** Measured coordinates bypass the worker; emergent positions are unavailable
+ * until a bounded background layout completes. */
 
-const forceState = vi.hoisted(() => ({ requested: false }));
+const forceState = vi.hoisted(() => ({
+  requested: false,
+  signal: null as AbortSignal | null,
+  pending: null as Promise<boolean> | null,
+}));
 
-vi.mock('graphology-layout-forceatlas2', () => {
-  forceState.requested = true;
-  return {
-    default: {
-      inferSettings: () => ({ gravity: 1 }),
-      assign: () => undefined,
-    },
-  };
-});
+vi.mock('./emergentLayout.ts', () => ({
+  settleEmergentOffThread: async (_prepared: unknown, signal: AbortSignal) => {
+    forceState.requested = true;
+    forceState.signal = signal;
+    return forceState.pending ?? true;
+  },
+}));
 
 const sigmaState = vi.hoisted(() => ({
   graph: undefined as Graph | undefined,
@@ -80,6 +68,9 @@ const EDGES = [{ source: 'a', target: 'b' }];
 
 describe('GraphCanvas layout engine loading', () => {
   beforeEach(() => {
+    forceState.requested = false;
+    forceState.signal = null;
+    forceState.pending = null;
     sigmaState.graph = undefined;
     sigmaState.bbox = undefined;
     Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
@@ -121,5 +112,40 @@ describe('GraphCanvas layout engine loading', () => {
     // Nothing is drawn until the engine has answered: a seed circle on screen
     // would be a composition the reader would read meaning into.
     await waitFor(() => expect(sigmaState.graph).toBeDefined());
+  });
+
+  it('keeps positions explicitly pending and aborts layout on unmount', async () => {
+    let resolve!: (result: boolean) => void;
+    forceState.pending = new Promise<boolean>((done) => { resolve = done; });
+    const view = render(<GraphCanvas nodes={EMERGENT} edges={EDGES} cameraControls />);
+    expect(view.getByRole('status').textContent).toContain('Calculating graph positions');
+    expect((view.getByRole('button', { name: 'Zoom in graph' }) as HTMLButtonElement).disabled).toBe(true);
+    const signal = forceState.signal;
+    view.unmount();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => resolve(true));
+    expect(sigmaState.graph).toBeUndefined();
+    forceState.pending = null;
+  });
+
+  it('does not install a late layout over a newer measured topology', async () => {
+    let resolve!: (result: boolean) => void;
+    forceState.pending = new Promise<boolean>((done) => { resolve = done; });
+    const view = render(<GraphCanvas nodes={EMERGENT} edges={EDGES} />);
+    const signal = forceState.signal;
+    view.rerender(<GraphCanvas nodes={PLACED} edges={EDGES} />);
+    const measuredGraph = sigmaState.graph;
+    expect(signal?.aborted).toBe(true);
+    expect(measuredGraph?.getNodeAttribute('a', 'x')).toBe(-1);
+    await act(async () => resolve(true));
+    expect(sigmaState.graph).toBe(measuredGraph);
+  });
+
+  it('reports a failed layout instead of drawing the initial seed', async () => {
+    forceState.pending = Promise.reject(new Error('Worker unavailable'));
+    const view = render(<GraphCanvas nodes={EMERGENT} edges={EDGES} />);
+    await waitFor(() => expect(view.getByRole('status').textContent).toContain('could not be completed'));
+    expect(view.container.querySelector('[role="img"]')).toBeNull();
+    forceState.pending = null;
   });
 });

@@ -138,6 +138,7 @@ export function GraphCanvas({
   /** Bumped whenever a collapse killed a live renderer, so the mount effect can
    * rebuild even when the box it measures never appeared to change. */
   const [teardownGeneration, setTeardownGeneration] = useState(0);
+  const [layoutPendingFor, setLayoutPendingFor] = useState<readonly GraphCanvasNode[] | null>(null);
   /**
    * The topology whose layout engine failed to load, if one did.
    *
@@ -312,6 +313,7 @@ export function GraphCanvas({
     if (!hasBox) return;
 
     let cancelled = false;
+    const layoutAbort = new AbortController();
     let detach: (() => void) | null = null;
     const request: SceneRequest = {
       container,
@@ -366,22 +368,33 @@ export function GraphCanvas({
       // already the caller's measurement.
       install(buildMeasuredScene(request));
     } else {
-      // Fetches a layout engine before it can compose, so the cleanup below
-      // has to be able to reach a build that is still in flight: cancelling
-      // drops the resolved module instead of installing a scene into a
-      // container this effect no longer owns.
-      void buildEmergentScene(request, () => cancelled).then(
+      // Cancel the bounded worker when this topology loses its container;
+      // no late result may install a scene into a newer or collapsed field.
+      setLayoutPendingFor(nodes);
+      const cancelLayout = (): void => layoutAbort.abort();
+      teardownRef.current = cancelLayout;
+      void buildEmergentScene(request, layoutAbort.signal).then(
         (scene) => {
+          if (cancelled || layoutAbort.signal.aborted) {
+            scene?.teardown();
+            return;
+          }
+          setLayoutPendingFor(null);
           if (scene) install(scene);
         },
         () => {
-          if (!cancelled) setEngineFailedFor(nodes);
+          if (!cancelled && !layoutAbort.signal.aborted) {
+            setLayoutPendingFor(null);
+            setEngineFailedFor(nodes);
+          }
         },
       );
     }
 
     return () => {
       cancelled = true;
+      layoutAbort.abort();
+      if (!detach) teardownRef.current = null;
       detach?.();
     };
   }, [nodes, edges, extent, hasBox, teardownGeneration]);
@@ -441,7 +454,7 @@ export function GraphCanvas({
   if (engineFailedFor === nodes) {
     return (
       <GraphUnavailable>
-        the force layout could not be loaded, so the{' '}
+        the force layout could not be completed, so the{' '}
         {nodes.length.toLocaleString()}-symbol graph canvas has no positions to
         draw — {fallbackDescription ?? 'read the field description below'}
       </GraphUnavailable>
@@ -486,6 +499,11 @@ export function GraphCanvas({
           `Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`
         }
       />
+      {layoutPendingFor === nodes ? (
+        <p role="status" data-state="loading" className="absolute left-3 top-3 bg-surface-0/90 p-2 text-2xs text-text-secondary">
+          Calculating graph positions. The symbol list remains available.
+        </p>
+      ) : null}
       {cameraControls ? (
         <div
           role="group"
@@ -495,6 +513,7 @@ export function GraphCanvas({
           <button
             type="button"
             aria-label="Zoom in graph"
+            disabled={layoutPendingFor === nodes}
             onClick={() => sceneRef.current?.zoomIn()}
             className="td-hit border-r border-edge-subtle px-2 py-1 text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
           >
@@ -503,6 +522,7 @@ export function GraphCanvas({
           <button
             type="button"
             aria-label="Zoom out graph"
+            disabled={layoutPendingFor === nodes}
             onClick={() => sceneRef.current?.zoomOut()}
             className="td-hit border-r border-edge-subtle px-2 py-1 text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
           >
@@ -511,6 +531,7 @@ export function GraphCanvas({
           <button
             type="button"
             onClick={() => sceneRef.current?.fit()}
+            disabled={layoutPendingFor === nodes}
             className="td-hit px-2 py-1 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
           >
             Fit

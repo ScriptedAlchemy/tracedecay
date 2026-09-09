@@ -8,7 +8,7 @@ use tracedecay_store::{
     SessionRefreshStore, SessionTemporalProjectionBatchV1,
 };
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_session_runtime::session_sync::test_harness::{
     SessionTemporalRefreshPassReport, SessionTemporalRefreshWakeState, apply_refresh_effect,
 };
