@@ -844,7 +844,7 @@ struct LiveDoctorReads {
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
-    retention: crate::config::RetentionConfig,
+    retention: tracedecay_configuration::RetentionConfig,
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
