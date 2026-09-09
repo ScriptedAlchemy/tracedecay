@@ -8,9 +8,9 @@ use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-use crate::application_surface::resolve_catalog_tool_binding;
 use crate::tracedecay::TraceDecay;
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
+use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
@@ -863,7 +863,9 @@ fn dispatch_application_surface_tools_inner<'a>(
             return Err(unknown_tool_error(tool_name));
         };
         let normalized_args =
-            match crate::application_surface::adapt_application_tool_request(tool_name, args) {
+            match tracedecay_daemon_service::application_surface::adapt_application_tool_request(
+                tool_name, args,
+            ) {
                 Ok(args) => args,
                 Err(error) => {
                     return Err(TraceDecayError::Config {
@@ -1222,14 +1224,15 @@ fn dispatch_retained_application_tools_inner<'a>(
         // session's own runtime, and only the selector names the project the
         // retained owner actually opened.
         let selected_project_id = super::tool_call_support::selected_project_id_argument(&args);
-        let normalized = crate::application_surface::separate_application_tool_request(args)
-            .map_err(|error| TraceDecayError::Config {
-                message: error.to_string(),
-            })?;
+        let normalized =
+            tracedecay_daemon_service::application_surface::separate_application_tool_request(args)
+                .map_err(|error| TraceDecayError::Config {
+                    message: error.to_string(),
+                })?;
         let requested_format = normalized.requested_format;
         let request = hotpath::measure_block!(
             "mcp.retained.decode",
-            crate::application_surface::retained::decode_request(
+            tracedecay_daemon_service::application_surface::retained::decode_request(
                 retained_operation,
                 normalized.request,
             )

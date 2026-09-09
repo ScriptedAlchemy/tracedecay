@@ -1027,7 +1027,7 @@ impl DaemonInvocationState {
                 extract_work_application_payload(&outcome)
             }
             ParsedMultiRootOperationV1::Surface { operation, request } => {
-                crate::application_surface::invoke_multi_root_surface_request(
+                tracedecay_daemon_service::application_surface::invoke_multi_root_surface_request(
                     Arc::new(InProcessDaemonInvocationExecutor::with_project_admission(
                         self.clone(),
                         store_administration.clone(),

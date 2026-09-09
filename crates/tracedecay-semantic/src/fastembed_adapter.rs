@@ -38,7 +38,7 @@
 //!   build and runtime configuration return an empty list — ORT's own
 //!   default CPU EP — so behavior is byte-identical to before GPU support
 //!   existed; see that module for the opt-in CoreML/CUDA switches.
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use fastembed::{
     InitOptionsUserDefined, Pooling as FastEmbedPooling, QuantizationMode, TextEmbedding,
     TokenizerFiles, UserDefinedEmbeddingModel,
@@ -50,14 +50,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-#[cfg(any(test, feature = "semantic-fastembed"))]
+#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(test, feature = "semantic-fastembed"))]
+#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
 use std::thread;
-#[cfg(any(test, feature = "semantic-fastembed"))]
+#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
 use std::time::Duration;
 
-#[cfg(any(test, feature = "semantic-fastembed"))]
+#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
 use tracedecay_domain::EmbeddingPrecisionV1;
 #[cfg(any(test, feature = "semantic-fastembed", feature = "semantic-model2vec"))]
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -260,17 +260,17 @@ impl VerifiedEmbeddingArtifactV1 {
         self.embedding_key().normalization
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn pooling(&self) -> EmbeddingPoolingV1 {
         self.embedding_key().pooling
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn precision(&self) -> EmbeddingPrecisionV1 {
         self.embedding_key().precision
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn truncation_length(&self) -> u32 {
         self.embedding_key().truncation_length
     }
@@ -966,13 +966,13 @@ pub(crate) fn check_execution_authority(
     }
 }
 
-#[cfg(any(test, feature = "semantic-fastembed"))]
+#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
 const MODEL_LOAD_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// Bridge the request's typed interruption authority to ORT's in-progress
 /// session-load canceler. The monitor is active only while the constructor is
 /// executing and returns the exact interruption that fired.
-#[cfg(any(test, feature = "semantic-fastembed"))]
+#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
 #[hotpath::measure(label = "semantic.model.load.cancel_monitor")]
 fn monitor_model_load(
     load_finished: &AtomicBool,
@@ -1137,7 +1137,7 @@ pub(crate) fn validate_batch_limits(
 
 /// The production `FastEmbed` runtime. Its dependency feature disables model-hub
 /// support, and this adapter uses only `FastEmbed`'s local-byte constructor.
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 #[derive(Default)]
 pub struct FastEmbedEmbeddingRuntime;
 
@@ -1145,16 +1145,16 @@ pub struct FastEmbedEmbeddingRuntime;
 /// `semantic-fastembed` dependency is compiled out. Every operation fails
 /// with a typed runtime failure, so semantic retrieval degrades to its
 /// documented fallback states instead of the crate failing to build.
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 #[derive(Default)]
 pub struct FastEmbedEmbeddingRuntime;
 
 /// Uninhabited session type for the feature-disabled runtime: `open_session`
 /// always fails, so no session value can ever exist.
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 pub enum UnavailableEmbeddingSession {}
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 impl EmbeddingSession for UnavailableEmbeddingSession {
     fn authority(&self) -> &AdmittedProjectionArtifactV1 {
         match *self {}
@@ -1173,7 +1173,7 @@ impl EmbeddingSession for UnavailableEmbeddingSession {
     }
 }
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = UnavailableEmbeddingSession;
 
@@ -1187,7 +1187,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     ) -> Result<(), EmbedError> {
         Err(fastembed_failure(
             RuntimeFailureKindV1::IncompatibleRuntime,
-            "the semantic-fastembed feature is compiled out of this build",
+            "the semantic-fastembed backend is unavailable in this build",
         ))
     }
 
@@ -1198,12 +1198,12 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     ) -> Result<Self::Session, EmbedError> {
         Err(fastembed_failure(
             RuntimeFailureKindV1::IncompatibleRuntime,
-            "the semantic-fastembed feature is compiled out of this build",
+            "the semantic-fastembed backend is unavailable in this build",
         ))
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = FastEmbedEmbeddingSession;
 
@@ -1341,13 +1341,13 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 pub struct FastEmbedEmbeddingSession {
     authority: AdmittedProjectionArtifactV1,
     embedding: TextEmbedding,
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 impl EmbeddingSession for FastEmbedEmbeddingSession {
     fn authority(&self) -> &AdmittedProjectionArtifactV1 {
         &self.authority
@@ -1421,7 +1421,7 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
 /// Buffer the verified member bytes, honoring the caller's interruption
 /// authority between member reads so an abandoned load stops before the next
 /// disk read + digest recheck (the model member alone is hundreds of MB).
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn fastembed_model(
     artifact: &VerifiedEmbeddingArtifactV1,
     interruption: &dyn SemanticExecutionAuthority,
@@ -1443,7 +1443,7 @@ fn fastembed_model(
     )
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn fastembed_pooling(pooling: EmbeddingPoolingV1) -> Result<FastEmbedPooling, EmbedError> {
     match pooling {
         EmbeddingPoolingV1::Mean => Ok(FastEmbedPooling::Mean),
@@ -1457,7 +1457,7 @@ fn fastembed_pooling(pooling: EmbeddingPoolingV1) -> Result<FastEmbedPooling, Em
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn fastembed_quantization(precision: EmbeddingPrecisionV1) -> QuantizationMode {
     match precision {
         EmbeddingPrecisionV1::Int8 => QuantizationMode::Static,
@@ -1474,7 +1474,7 @@ fn fastembed_failure(kind: RuntimeFailureKindV1, detail: &str) -> EmbedError {
     })
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn fastembed_error(
     fallback_kind: RuntimeFailureKindV1,
     detail: &str,
@@ -2199,7 +2199,7 @@ mod tests {
                 .expect("model bytes"),
             b"model"
         );
-        #[cfg(feature = "semantic-fastembed")]
+        #[cfg(all(feature = "semantic-fastembed", not(windows)))]
         {
             let runtime = FastEmbedEmbeddingRuntime;
             runtime
@@ -2254,7 +2254,7 @@ mod tests {
             ),
             "the default-runtime session open also rejects digest-mismatched bytes"
         );
-        #[cfg(feature = "semantic-fastembed")]
+        #[cfg(all(feature = "semantic-fastembed", not(windows)))]
         assert!(
             matches!(
                 FastEmbedEmbeddingRuntime.open_session(&authority, &never_cancelled()),
@@ -2285,7 +2285,7 @@ mod tests {
             ),
             "cancellation must be observed before any member byte is read"
         );
-        #[cfg(feature = "semantic-fastembed")]
+        #[cfg(all(feature = "semantic-fastembed", not(windows)))]
         assert!(
             matches!(
                 FastEmbedEmbeddingRuntime.open_session(&authority, &cancelled),
@@ -2676,7 +2676,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn real_fastembed_runtime_rejects_unnormalized_projection_before_loading() {
         let runtime = FastEmbedEmbeddingRuntime;

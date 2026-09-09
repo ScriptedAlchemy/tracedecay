@@ -1218,7 +1218,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn detected_fastembed_environment_uses_process_evidence() {
         let runtime = RuntimeEnvironmentV1::detect_fastembed_process().unwrap();
@@ -1229,6 +1229,15 @@ mod tests {
         assert_eq!(runtime.build_revision, FASTEMBED_RUNTIME_BUILD_REVISION_V1);
         assert!(runtime.available_resident_bytes > 0);
         assert!(runtime.available_threads > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reports_fastembed_runtime_as_unavailable() {
+        assert_eq!(
+            RuntimeEnvironmentV1::detect_fastembed_process(),
+            Err(SemanticCapabilityDisabledV1::IncompatibleRuntime)
+        );
     }
 
     #[test]

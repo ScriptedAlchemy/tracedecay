@@ -2,22 +2,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 use tokio::time::Instant;
+pub(crate) use tracedecay_daemon_service::ShutdownStatus;
 
 type ShutdownJoin = Pin<Box<dyn Future<Output = ShutdownStatus> + Send + 'static>>;
 type ShutdownJoinFactory = Box<dyn FnOnce(Instant) -> ShutdownJoin + Send + 'static>;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ShutdownStatus {
-    Clean,
-    Failed(String),
-    TimedOut,
-}
-
-impl ShutdownStatus {
-    pub(crate) fn is_clean(&self) -> bool {
-        matches!(self, Self::Clean)
-    }
-}
 
 pub(super) struct ShutdownOwner {
     name: &'static str,

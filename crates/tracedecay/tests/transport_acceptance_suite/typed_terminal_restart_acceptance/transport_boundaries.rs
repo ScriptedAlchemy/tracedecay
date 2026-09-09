@@ -16,7 +16,8 @@
 //!   go over real TCP to `/projects/{project_id}/application/...`, which is the
 //!   production `http_application_router`. The caller's request deadline rides
 //!   in the `x-tracedecay-deadline-micros` header that
-//!   `application_http_context` (`src/application_surface.rs`) reads.
+//!   `application_http_context`
+//!   (`tracedecay-daemon-service/src/application_surface.rs`) reads.
 //!
 //! - **MCP**: a real `tracedecay serve` stdio host, spawned per call, speaking
 //!   JSON-RPC `initialize` + `tools/call` exactly as an MCP client does. The

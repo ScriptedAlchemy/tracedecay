@@ -40,16 +40,6 @@ pub(crate) async fn join_standalone_session_registry(
     Ok(registry)
 }
 
-#[cfg(test)]
-pub(crate) async fn open_project_store_runtime(
-    identity: LocalProfileIdentityAuthorityV1,
-) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {
-    crate::register_runtime_ports()?;
-    Ok(Arc::new(
-        DaemonSessionRuntimeRegistryV1::open(identity).await?,
-    ))
-}
-
 impl crate::tracedecay::TraceDecay {
     pub(crate) fn store_runtime_registry(&self) -> &Arc<DaemonSessionRuntimeRegistryV1> {
         &self.store_runtime_registry
