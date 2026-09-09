@@ -583,6 +583,136 @@ pub(crate) fn handle_active_project(
     generic_tool_result(Some(cg.project_root()), args, &output, vec![])
 }
 
+async fn attach_code_index_freshness(
+    cg: &TraceDecay,
+    output: &mut Value,
+    code_index_freshness_reader: Option<
+        &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
+    >,
+) -> CodeIndexRetrievalServingV1 {
+    let (code_index_freshness, retrieval_serving) = match code_index_freshness_reader {
+        Some(reader) => match hotpath::future!(
+            reader(cg.project_root().to_path_buf()),
+            label = "mcp.info.status.code_index_freshness"
+        )
+        .await
+        {
+            Some(freshness) => {
+                let (status, warning) = code_index_freshness_projection(&freshness);
+                if let Some(warning) = warning {
+                    output["code_index_freshness_warning"] = json!(warning);
+                }
+                // The lanes serve exactly when a sealed complete generation
+                // exists for the worktree; until the first seal every
+                // retrieval lane refuses `generation_rebuilding`.
+                let retrieval_serving = if freshness.latest_generation_id.is_some() {
+                    let (serving_freshness, condition) = match freshness.staleness_state.as_deref()
+                    {
+                        Some("fresh") => ("current", None),
+                        Some(_) if freshness.rebuild_in_flight => {
+                            ("last_complete_stale", Some("rebuilding"))
+                        }
+                        Some(_) => ("last_complete_stale", Some("stalled")),
+                        None => ("unknown", None),
+                    };
+                    CodeIndexRetrievalServingV1::Serving {
+                        freshness: serving_freshness,
+                        condition,
+                        seated_generation_age_seconds: age_seconds(freshness.sealed_at_micros),
+                        last_reconcile_age_seconds: age_seconds(freshness.last_reconcile_micros),
+                    }
+                } else {
+                    CodeIndexRetrievalServingV1::NotServing {
+                        reason: "generation_rebuilding",
+                    }
+                };
+                (
+                    json!({
+                        "status": status,
+                        "worktree": freshness,
+                    }),
+                    retrieval_serving,
+                )
+            }
+            None => (
+                json!({
+                    "status": "unavailable",
+                    "reason": "code_index_scheduler_not_mounted",
+                }),
+                CodeIndexRetrievalServingV1::NotServing {
+                    reason: "code_index_scheduler_not_mounted",
+                },
+            ),
+        },
+        None => (
+            json!({
+                "status": "unavailable",
+                "reason": "code_index_scheduler_authority_not_attached",
+            }),
+            CodeIndexRetrievalServingV1::AuthorityUnattached,
+        ),
+    };
+    output["code_index_freshness"] = code_index_freshness;
+    retrieval_serving
+}
+
+async fn attach_status_session_ingest(
+    cg: &TraceDecay,
+    output: &mut Value,
+    project_session_db: Option<&RegisteredGlobalDb>,
+) {
+    let session_db_path = cg.store_layout().sessions_db_path.clone();
+    if session_db_path.exists() {
+        match project_session_db {
+            None => {
+                // The store exists but the daemon did not retain its authority;
+                // fail closed instead of opening a second connection here.
+                output["session_ingest"] = json!({
+                    "status": "unavailable",
+                    "reason": "session_store_unavailable",
+                    "message": "daemon project session authority is unavailable",
+                });
+            }
+            Some(db) => match hotpath::future!(
+                db.cursor_session_ingest_health(),
+                label = "mcp.info.status.session_ingest"
+            )
+            .await
+            {
+                Ok(ingest) => {
+                    output["session_ingest"] =
+                        serde_json::to_value(&ingest).unwrap_or_else(|error| {
+                            json!({
+                                "status": "unavailable",
+                                "reason": "session_ingest_serialization_failed",
+                                "message": error.to_string(),
+                            })
+                        });
+                    // `session_ingest` stays cursor-scoped so it keeps matching the
+                    // doctor-owned signal. Historical catch-up is measured across
+                    // providers and remains explicitly partial while the retained
+                    // daemon authority drains its bounded backlog.
+                    if let Some(catch_up) = hotpath::future!(
+                        historical_session_catch_up(db),
+                        label = "mcp.info.status.session_history"
+                    )
+                    .await
+                    {
+                        output["session_history_catch_up"] = catch_up;
+                    }
+                }
+                Err(error) => {
+                    output["session_ingest"] = json!({
+                        "status": "unavailable",
+                        "reason": "session_ingest_query_failed",
+                        "message": error,
+                    });
+                }
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -828,135 +958,5 @@ mod tests {
         assert_eq!(state["status"], "unavailable");
         assert_eq!(state["coverage"], "partial");
         assert!(state["providers"].as_array().unwrap().is_empty());
-    }
-}
-
-async fn attach_code_index_freshness(
-    cg: &TraceDecay,
-    output: &mut Value,
-    code_index_freshness_reader: Option<
-        &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
-    >,
-) -> CodeIndexRetrievalServingV1 {
-    let (code_index_freshness, retrieval_serving) = match code_index_freshness_reader {
-        Some(reader) => match hotpath::future!(
-            reader(cg.project_root().to_path_buf()),
-            label = "mcp.info.status.code_index_freshness"
-        )
-        .await
-        {
-            Some(freshness) => {
-                let (status, warning) = code_index_freshness_projection(&freshness);
-                if let Some(warning) = warning {
-                    output["code_index_freshness_warning"] = json!(warning);
-                }
-                // The lanes serve exactly when a sealed complete generation
-                // exists for the worktree; until the first seal every
-                // retrieval lane refuses `generation_rebuilding`.
-                let retrieval_serving = if freshness.latest_generation_id.is_some() {
-                    let (serving_freshness, condition) = match freshness.staleness_state.as_deref()
-                    {
-                        Some("fresh") => ("current", None),
-                        Some(_) if freshness.rebuild_in_flight => {
-                            ("last_complete_stale", Some("rebuilding"))
-                        }
-                        Some(_) => ("last_complete_stale", Some("stalled")),
-                        None => ("unknown", None),
-                    };
-                    CodeIndexRetrievalServingV1::Serving {
-                        freshness: serving_freshness,
-                        condition,
-                        seated_generation_age_seconds: age_seconds(freshness.sealed_at_micros),
-                        last_reconcile_age_seconds: age_seconds(freshness.last_reconcile_micros),
-                    }
-                } else {
-                    CodeIndexRetrievalServingV1::NotServing {
-                        reason: "generation_rebuilding",
-                    }
-                };
-                (
-                    json!({
-                        "status": status,
-                        "worktree": freshness,
-                    }),
-                    retrieval_serving,
-                )
-            }
-            None => (
-                json!({
-                    "status": "unavailable",
-                    "reason": "code_index_scheduler_not_mounted",
-                }),
-                CodeIndexRetrievalServingV1::NotServing {
-                    reason: "code_index_scheduler_not_mounted",
-                },
-            ),
-        },
-        None => (
-            json!({
-                "status": "unavailable",
-                "reason": "code_index_scheduler_authority_not_attached",
-            }),
-            CodeIndexRetrievalServingV1::AuthorityUnattached,
-        ),
-    };
-    output["code_index_freshness"] = code_index_freshness;
-    retrieval_serving
-}
-
-async fn attach_status_session_ingest(
-    cg: &TraceDecay,
-    output: &mut Value,
-    project_session_db: Option<&RegisteredGlobalDb>,
-) {
-    let session_db_path = cg.store_layout().sessions_db_path.clone();
-    if session_db_path.exists() {
-        match project_session_db {
-            None => {
-                // The store exists but the daemon did not retain its authority;
-                // fail closed instead of opening a second connection here.
-                output["session_ingest"] = json!({
-                    "status": "unavailable",
-                    "reason": "session_store_unavailable",
-                    "message": "daemon project session authority is unavailable",
-                });
-            }
-            Some(db) => match hotpath::future!(
-                db.cursor_session_ingest_health(),
-                label = "mcp.info.status.session_ingest"
-            )
-            .await
-            {
-                Ok(ingest) => {
-                    output["session_ingest"] =
-                        serde_json::to_value(&ingest).unwrap_or_else(|error| {
-                            json!({
-                                "status": "unavailable",
-                                "reason": "session_ingest_serialization_failed",
-                                "message": error.to_string(),
-                            })
-                        });
-                    // `session_ingest` stays cursor-scoped so it keeps matching the
-                    // doctor-owned signal. Historical catch-up is measured across
-                    // providers and remains explicitly partial while the retained
-                    // daemon authority drains its bounded backlog.
-                    if let Some(catch_up) = hotpath::future!(
-                        historical_session_catch_up(db),
-                        label = "mcp.info.status.session_history"
-                    )
-                    .await
-                    {
-                        output["session_history_catch_up"] = catch_up;
-                    }
-                }
-                Err(error) => {
-                    output["session_ingest"] = json!({
-                        "status": "unavailable",
-                        "reason": "session_ingest_query_failed",
-                        "message": error,
-                    });
-                }
-            },
-        }
     }
 }
