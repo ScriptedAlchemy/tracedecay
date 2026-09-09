@@ -1,5 +1,7 @@
 //! Project-route selection, tool-dispatch assembly, and identical-read sharing.
 
+use std::sync::Weak;
+
 use super::*;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
@@ -257,26 +259,20 @@ impl McpServer {
         application_deadline: Option<tracedecay_contracts::Deadline>,
         application_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     ) -> Result<ToolResult> {
-        let engine_identity = cg.db_path();
         let read_flight = tool_allows_identical_read_coalescing(tool_name, |tool_name| {
             crate::mcp::tools::mcp_dispatch_contract(tool_name)
                 .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
         })
         .then(|| {
             self.identical_read_coalescer.claim(
-                engine_identity.to_string_lossy().as_ref(),
+                cg.db_path().to_string_lossy().as_ref(),
                 tool_name,
                 &handler_arguments,
                 self.scope_prefix(),
             )
         });
-        let session_sync_service = self
-            .session_sync_service
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade);
-        let dispatch: std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-        > = handle_tool_call_with_registry_options(
+        let session_sync_service = self.session_sync_service.as_ref().and_then(Weak::upgrade);
+        let dispatch = handle_tool_call_with_registry_options(
             cg,
             tool_name,
             handler_arguments,
@@ -358,23 +354,7 @@ impl McpServer {
                 .with_profile_session_refresh(self.profile_session_refresh_service.as_deref()),
             },
         );
-        if let Some(read_flight) = read_flight {
-            match read_flight {
-                ReadFlightClaim::Leader(leader) => match dispatch.await {
-                    Ok(result) => Ok(leader.complete(result)),
-                    Err(error) => Err(error),
-                },
-                ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                    Some(result) => Ok(hotpath::measure_block!(
-                        "mcp.server.read_coalescing.result_clone",
-                        (*result).clone()
-                    )),
-                    None => dispatch.await,
-                },
-            }
-        } else {
-            dispatch.await
-        }
+        resolve_read_flight(read_flight, dispatch).await
     }
 }
 
@@ -397,4 +377,27 @@ fn registered_project_selector_arguments(arguments: &Value) -> Value {
         }
     }
     Value::Object(snapshot)
+}
+
+async fn resolve_read_flight(
+    read_flight: Option<ReadFlightClaim>,
+    dispatch: impl std::future::Future<Output = Result<ToolResult>>,
+) -> Result<ToolResult> {
+    if let Some(read_flight) = read_flight {
+        match read_flight {
+            ReadFlightClaim::Leader(leader) => match dispatch.await {
+                Ok(result) => Ok(leader.complete(result)),
+                Err(error) => Err(error),
+            },
+            ReadFlightClaim::Follower(follower) => match follower.wait().await {
+                Some(result) => Ok(hotpath::measure_block!(
+                    "mcp.server.read_coalescing.result_clone",
+                    (*result).clone()
+                )),
+                None => dispatch.await,
+            },
+        }
+    } else {
+        dispatch.await
+    }
 }

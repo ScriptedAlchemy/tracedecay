@@ -107,113 +107,92 @@ pub(crate) fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
 fn application_surface_branch_sensitivity(
     operation: ApplicationSurfaceOperation,
 ) -> BranchSensitivity {
-    use ApplicationSurfaceOperation::{
-        AffectedTests, CallChain, CodeCallees, CodeCallers, CodeDeclaration, CodeDefinition,
-        CodeExactOccurrence, CodeFacets, CodeImplementations, CodePhraseSearch, CodeReferences,
-        CodeSignatureSearch, CodeSymbolSearch, CodeTimeline, CodeTypeDefinition, CodeTypeHierarchy,
-        ConfigurationAudit, ConfigurationBatch, ConfigurationExplain, ConfigurationGet,
-        ConfigurationList, ConfigurationObservedState, ConfigurationProtectedApply,
-        ConfigurationProtectedPreview, ConfigurationRollbackApply, ConfigurationRollbackPreview,
-        ConfigurationSet, ConfigurationUnset, ConfigurationWriteCredential, ContextScoutBudget,
-        ContextScoutCancel, ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery,
-        ContextScoutExplain, ContextScoutFeedback, ContextScoutPause, ContextScoutRecent,
-        ContextScoutResume, ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle,
-        FeedbackDiagnostics, FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList,
-        FileDependents, FileMetadata, GitApply, GitBlame, GitDiff, GitHistory,
-        GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta, HealthRead,
-        ModuleApi, NativeIntegrationApply, NativeIntegrationApprove, NativeIntegrationCancel,
-        NativeIntegrationPreflight, NativeIntegrationStackSnapshot, NativeIntegrationStatus,
-        NativeIntegrationWorktreeConfirm, NativeIntegrationWorktreeInspect,
-        NativeIntegrationWorktreeInventory, NativeIntegrationWorktreeReconcile,
-        NativeIntegrationWorktreeRemove, ObservatoryRead, QualifiedName, SessionLookup, SourceBody,
-        SourceLines, SourceOutline, StorageStatus, TestResults,
-    };
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
         // host-integration lifecycle, session identity, store identity, or
         // process observability — never the checkout, code graph, or files.
-        ConfigurationList
-        | ConfigurationExplain
-        | ConfigurationGet
-        | ConfigurationSet
-        | ConfigurationUnset
-        | ConfigurationBatch
-        | ConfigurationWriteCredential
-        | ConfigurationObservedState
-        | ConfigurationProtectedPreview
-        | ConfigurationProtectedApply
-        | ConfigurationRollbackPreview
-        | ConfigurationRollbackApply
-        | ConfigurationAudit
-        | ContextScoutStatus
-        | ContextScoutRecent
-        | ContextScoutExplain
-        | ContextScoutCapability
-        | ContextScoutBudget
-        | ContextScoutPause
-        | ContextScoutResume
-        | ContextScoutCancel
-        | ContextScoutClaim
-        | ContextScoutDelivery
-        | ContextScoutFeedback
-        | SessionLookup
-        | StorageStatus
-        | ObservatoryRead
-        | NativeIntegrationPreflight
-        | NativeIntegrationApprove
-        | NativeIntegrationApply
-        | NativeIntegrationStatus
-        | NativeIntegrationCancel => BranchSensitivity::Independent,
+        ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit
+        | ApplicationSurfaceOperation::ContextScoutStatus
+        | ApplicationSurfaceOperation::ContextScoutRecent
+        | ApplicationSurfaceOperation::ContextScoutExplain
+        | ApplicationSurfaceOperation::ContextScoutCapability
+        | ApplicationSurfaceOperation::ContextScoutBudget
+        | ApplicationSurfaceOperation::ContextScoutPause
+        | ApplicationSurfaceOperation::ContextScoutResume
+        | ApplicationSurfaceOperation::ContextScoutCancel
+        | ApplicationSurfaceOperation::ContextScoutClaim
+        | ApplicationSurfaceOperation::ContextScoutDelivery
+        | ApplicationSurfaceOperation::ContextScoutFeedback
+        | ApplicationSurfaceOperation::SessionLookup
+        | ApplicationSurfaceOperation::StorageStatus
+        | ApplicationSurfaceOperation::ObservatoryRead
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApprove
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel => BranchSensitivity::Independent,
         // Mixed ApplicationSurface group: git walks, worktree inventory, stack
         // snapshots, code-graph reads, source-file bodies, health, diagnostics,
         // and post-edit feedback all depend on the current checkout or graph.
-        GitStatus
-        | GitDiff
-        | GitHistory
-        | GitBlame
-        | GitHunks
-        | GitPreview
-        | GitApply
-        | GitHubStackSignalExpand
-        | NativeIntegrationStackSnapshot
-        | NativeIntegrationWorktreeInventory
-        | NativeIntegrationWorktreeInspect
-        | NativeIntegrationWorktreeConfirm
-        | NativeIntegrationWorktreeRemove
-        | NativeIntegrationWorktreeReconcile
-        | FeedbackDiagnostics
-        | FeedbackGet
-        | FeedbackExpand
-        | FeedbackList
-        | FeedbackImpact
-        | FeedbackAdvisoryCycle
-        | AffectedTests
-        | TestResults
-        | CodeExactOccurrence
-        | CodePhraseSearch
-        | CodeSymbolSearch
-        | CodeSignatureSearch
-        | CodeImplementations
-        | CodeTypeHierarchy
-        | CodeCallers
-        | CodeCallees
-        | CodeFacets
-        | CodeTimeline
-        | CodeDeclaration
-        | CodeDefinition
-        | CodeTypeDefinition
-        | CodeReferences
-        | QualifiedName
-        | CallChain
-        | FileDependents
-        | SourceLines
-        | SourceBody
-        | SourceOutline
-        | ModuleApi
-        | FileMetadata
-        | HealthRead
-        | HealthDelta
-        | DiagnosticsRead => BranchSensitivity::Sensitive,
+        ApplicationSurfaceOperation::GitStatus
+        | ApplicationSurfaceOperation::GitDiff
+        | ApplicationSurfaceOperation::GitHistory
+        | ApplicationSurfaceOperation::GitBlame
+        | ApplicationSurfaceOperation::GitHunks
+        | ApplicationSurfaceOperation::GitPreview
+        | ApplicationSurfaceOperation::GitApply
+        | ApplicationSurfaceOperation::GitHubStackSignalExpand
+        | ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
+        | ApplicationSurfaceOperation::FeedbackDiagnostics
+        | ApplicationSurfaceOperation::FeedbackGet
+        | ApplicationSurfaceOperation::FeedbackExpand
+        | ApplicationSurfaceOperation::FeedbackList
+        | ApplicationSurfaceOperation::FeedbackImpact
+        | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+        | ApplicationSurfaceOperation::AffectedTests
+        | ApplicationSurfaceOperation::TestResults
+        | ApplicationSurfaceOperation::CodeExactOccurrence
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences
+        | ApplicationSurfaceOperation::QualifiedName
+        | ApplicationSurfaceOperation::CallChain
+        | ApplicationSurfaceOperation::FileDependents
+        | ApplicationSurfaceOperation::SourceLines
+        | ApplicationSurfaceOperation::SourceBody
+        | ApplicationSurfaceOperation::SourceOutline
+        | ApplicationSurfaceOperation::ModuleApi
+        | ApplicationSurfaceOperation::FileMetadata
+        | ApplicationSurfaceOperation::HealthRead
+        | ApplicationSurfaceOperation::HealthDelta
+        | ApplicationSurfaceOperation::DiagnosticsRead => BranchSensitivity::Sensitive,
     }
 }
 
@@ -945,29 +924,19 @@ fn build_mcp_dispatch_catalog()
                 },
                 |binding| binding.deadline().maximum_millis(),
             ))?,
-            idempotency: multi_root_capability.as_ref().map_or_else(
-                || {
-                    executable_binding.map_or_else(
-                        || idempotency_for_tool(&binding.name, application_capability),
-                        |binding| match binding.idempotency() {
-                            tracedecay_tool_catalog::IdempotencyContract::Required => {
-                                McpIdempotencyContract::KeyRequired
-                            }
-                            tracedecay_tool_catalog::IdempotencyContract::NotRequired => {
-                                McpIdempotencyContract::NotProvided
-                            }
-                        },
-                    )
-                },
-                |capability| match capability.idempotency() {
-                    tracedecay_tool_catalog::IdempotencyContract::Required => {
-                        McpIdempotencyContract::KeyRequired
-                    }
-                    tracedecay_tool_catalog::IdempotencyContract::NotRequired => {
-                        McpIdempotencyContract::NotProvided
-                    }
-                },
-            ),
+            idempotency: match multi_root_capability
+                .as_ref()
+                .map(tracedecay_tool_catalog::CapabilityManifestV1::idempotency)
+                .or_else(|| executable_binding.map(ExecutableBindingV1::idempotency))
+            {
+                Some(tracedecay_tool_catalog::IdempotencyContract::Required) => {
+                    McpIdempotencyContract::KeyRequired
+                }
+                Some(tracedecay_tool_catalog::IdempotencyContract::NotRequired) => {
+                    McpIdempotencyContract::NotProvided
+                }
+                None => idempotency_for_tool(&binding.name, application_capability),
+            },
             inverse: inverse_for_tool(&binding.name, effect),
             cancellation,
             terminal_states,
