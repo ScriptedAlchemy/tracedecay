@@ -306,10 +306,16 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 ///
 /// This binary has no upgrade ladder: a store stamped with any other version is
 /// refused with the fresh-start remedy rather than stepped forward.
+///
+/// The schema ladder below is boxed so its future layout stays behind this
+/// phase boundary: with the `hotpath` wrappers compiled in, the un-erased chain
+/// (retrieval-anchor schema -> memory baseline -> this ladder -> store mount
+/// -> lifecycle -> project open) overflows rustc's `Send` query depth in the
+/// root crate's lib test.
 pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("ensure schema current").await?;
     let connection = writer.engine_connection();
-    ensure_schema_current_engine_connection(&connection).await
+    Box::pin(ensure_schema_current_engine_connection(&connection)).await
 }
 
 /// Applies either sanctioned writer-side repair before read-only admission:
