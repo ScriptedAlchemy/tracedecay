@@ -25,6 +25,13 @@ def require_nonnegative_integer(value: dict[str, Any], key: str, label: str) -> 
     return result
 
 
+def require_list(value: dict[str, Any], key: str, label: str) -> list[Any]:
+    result = value.get(key)
+    if not isinstance(result, list):
+        raise ValueError(f"{label} {key} must be a JSON array")
+    return result
+
+
 def validate_status(value: dict[str, Any], *, strict: bool = False) -> None:
     if not value:
         raise ValueError("status output must not be empty")
@@ -187,8 +194,20 @@ def validate_pr_context(
         impact_partial = coverage.get("impact_partial")
         if not isinstance(symbols_complete, bool) or not isinstance(impact_partial, bool):
             raise ValueError("strict pr_context requires typed bounded analysis coverage")
+        # Every returned entry is either an analyzed seed symbol or a per-file
+        # `config_summary` that folds that file's config keys (never seeds).
+        entries = [
+            *require_list(value, "added", "pr_context"),
+            *require_list(value, "modified", "pr_context"),
+        ]
+        config_summaries = sum(
+            1
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("kind") == "config_summary"
+        )
         if (
-            coverage_counts["seed_symbols_analyzed"] != returned
+            len(entries) != returned
+            or coverage_counts["seed_symbols_analyzed"] + config_summaries != returned
             or coverage_counts["symbols_returned"] != returned
             or symbols_complete != page_complete
             or coverage["complete"] != (symbols_complete and not impact_partial)
