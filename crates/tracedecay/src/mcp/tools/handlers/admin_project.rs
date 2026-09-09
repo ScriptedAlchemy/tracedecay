@@ -217,66 +217,9 @@ pub(super) async fn handle_admin_project(
             queries_toml,
             json,
             max_nodes,
-        } => {
-            #[cfg(any(test, feature = "bench", feature = "test-helpers"))]
-            {
-                let report = crate::bench::run_bench_with_toml(
-                    cg,
-                    queries_toml
-                        .as_deref()
-                        .unwrap_or(crate::bench::DEFAULT_QUERIES_TOML),
-                    crate::bench::BenchOptions {
-                        format: crate::bench::OutputFormat::Json,
-                        max_nodes,
-                    },
-                )?;
-                let output = if json {
-                    crate::bench::format_report_json(&report)
-                } else {
-                    crate::bench::format_report_console(&report)
-                };
-                json!({ "output": output })
-            }
-            #[cfg(not(any(test, feature = "bench", feature = "test-helpers")))]
-            {
-                let _ = (queries_toml, json, max_nodes);
-                return Err(TraceDecayError::ProjectRoute {
-                    reason_code: "verified-code-context-benchmark-unavailable".to_owned(),
-                    retryable: false,
-                    detail: "the benchmark is not yet mounted on an admitted code-graph authority"
-                        .to_owned(),
-                });
-            }
-        }
+        } => project_benchmark(cg, queries_toml, json, max_nodes)?,
         AdminProjectAction::AutomaticFactReceiptList { state, limit } => {
-            let db = cg.open_project_store_db()?;
-            let memory = project_memory_application(cg, &db)?;
-            let state = state
-                .as_deref()
-                .map(parse_automatic_fact_state)
-                .transpose()?;
-            let page = memory
-                .list_project_memory_automatic_fact_receipts(
-                    state,
-                    None,
-                    limit,
-                    run_control.read_control(),
-                )
-                .await
-                .map_err(memory_application_error)?;
-            let receipts = page
-                .receipts()
-                .iter()
-                .map(automatic_fact_receipt_json)
-                .collect::<Vec<_>>();
-            json!({
-                "availability": { "state": "available" },
-                "count": receipts.len(),
-                "receipts": receipts,
-                "next_after_apply_id": page
-                    .next_after_apply_id()
-                    .map(ProvenanceId::as_str),
-            })
+            automatic_fact_receipts(cg, state, limit, &run_control).await?
         }
         AdminProjectAction::AutomaticFactReceiptView { id } => {
             let apply_id = parse_automatic_fact_apply_id(id)?;
@@ -293,6 +236,74 @@ pub(super) async fn handle_admin_project(
         }
     };
     Ok(json_result(&value))
+}
+
+fn project_benchmark(
+    cg: &TraceDecay,
+    queries_toml: Option<String>,
+    json: bool,
+    max_nodes: usize,
+) -> Result<Value> {
+    #[cfg(any(test, feature = "bench", feature = "test-helpers"))]
+    {
+        let report = crate::bench::run_bench_with_toml(
+            cg,
+            queries_toml
+                .as_deref()
+                .unwrap_or(crate::bench::DEFAULT_QUERIES_TOML),
+            crate::bench::BenchOptions {
+                format: crate::bench::OutputFormat::Json,
+                max_nodes,
+            },
+        )?;
+        let output = if json {
+            crate::bench::format_report_json(&report)
+        } else {
+            crate::bench::format_report_console(&report)
+        };
+        Ok(json!({ "output": output }))
+    }
+    #[cfg(not(any(test, feature = "bench", feature = "test-helpers")))]
+    {
+        let _ = (queries_toml, json, max_nodes);
+        Err(TraceDecayError::ProjectRoute {
+            reason_code: "verified-code-context-benchmark-unavailable".to_owned(),
+            retryable: false,
+            detail: "the benchmark is not yet mounted on an admitted code-graph authority"
+                .to_owned(),
+        })
+    }
+}
+
+async fn automatic_fact_receipts(
+    cg: &TraceDecay,
+    state: Option<String>,
+    limit: usize,
+    run_control: &AutomationRunControl,
+) -> Result<Value> {
+    let db = cg.open_project_store_db()?;
+    let memory = project_memory_application(cg, &db)?;
+    let state = state
+        .as_deref()
+        .map(parse_automatic_fact_state)
+        .transpose()?;
+    let page = memory
+        .list_project_memory_automatic_fact_receipts(state, None, limit, run_control.read_control())
+        .await
+        .map_err(memory_application_error)?;
+    let receipts = page
+        .receipts()
+        .iter()
+        .map(automatic_fact_receipt_json)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "availability": { "state": "available" },
+        "count": receipts.len(),
+        "receipts": receipts,
+        "next_after_apply_id": page
+            .next_after_apply_id()
+            .map(ProvenanceId::as_str),
+    }))
 }
 
 #[cfg(test)]

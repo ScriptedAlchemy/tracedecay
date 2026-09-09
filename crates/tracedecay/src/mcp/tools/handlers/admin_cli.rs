@@ -289,20 +289,7 @@ async fn dispatch_admin_cli(
     let global_db = context.global_db;
     let value = match action {
         AdminCliAction::CostSummary { range } => {
-            let provider_scope = context.provider_usage_scope()?;
-            hotpath::future!(
-                cost_summary(
-                    context.require_accounting_db()?,
-                    context
-                        .registered_project_session_db
-                        .map(std::convert::AsRef::as_ref),
-                    provider_scope.as_ref(),
-                    context.project_root(),
-                    &range,
-                ),
-                label = "mcp.admin.cli.cost"
-            )
-            .await?
+            hotpath::future!(cost_summary(&context, &range), label = "mcp.admin.cli.cost").await?
         }
         AdminCliAction::SessionsImport => {
             execute_session_sync(
@@ -357,22 +344,7 @@ async fn dispatch_admin_cli(
             .await?
         }
         AdminCliAction::RegistryUpdate { tokens } => {
-            let cg = context.require_project()?;
-            // The previous total is informational; an unreadable ledger is
-            // reported beside the update rather than blocking the write or
-            // being shown as zero. The write itself fails closed.
-            let previous = global_db.try_get_project_tokens(cg.project_root()).await;
-            global_db
-                .try_upsert_project_tokens(cg.project_root(), tokens)
-                .await?;
-            match previous {
-                Ok(previous) => json!({ "previous": previous, "current": tokens }),
-                Err(error) => json!({
-                    "previous": Value::Null,
-                    "previous_error": error,
-                    "current": tokens,
-                }),
-            }
+            update_registry_tokens(&context, tokens).await?
         }
         AdminCliAction::RegistryList {
             limit,
@@ -396,32 +368,78 @@ async fn dispatch_admin_cli(
             registry_project_tokens(global_db, &project_args).await
         }
         AdminCliAction::RegistryGc { prefix, apply } => {
-            let profile_root = context.require_profile_root()?;
-            let report = if apply {
-                tracedecay_global_db::registry_maintenance::apply_registry_gc(
-                    global_db,
-                    profile_root,
-                    prefix,
-                )
-                .await?
-            } else {
-                tracedecay_global_db::registry_maintenance::registry_gc_report(
-                    global_db,
-                    profile_root,
-                    prefix,
-                )
-                .await?
-            };
-            serde_json::to_value(report)?
+            registry_gc(&context, prefix, apply).await?
         }
         AdminCliAction::StorageReport {
             project_id,
             project_root,
             cursor,
             limit,
-        } => {
-            let profile_root = context.require_profile_root()?;
-            let report = match (project_id, project_root) {
+        } => storage_report(&context, project_id, project_root, cursor, limit).await?,
+        AdminCliAction::GainQuery {
+            project_arg,
+            since,
+            history,
+        } => gain_query(global_db, project_arg.as_deref(), since, history).await?,
+    };
+    Ok(json_result(&value))
+}
+
+async fn update_registry_tokens(context: &AdminCliContext<'_>, tokens: u64) -> Result<Value> {
+    let global_db = context.global_db;
+    let cg = context.require_project()?;
+    // The previous total is informational; an unreadable ledger is
+    // reported beside the update rather than blocking the write or
+    // being shown as zero. The write itself fails closed.
+    let previous = global_db.try_get_project_tokens(cg.project_root()).await;
+    global_db
+        .try_upsert_project_tokens(cg.project_root(), tokens)
+        .await?;
+    Ok(match previous {
+        Ok(previous) => json!({ "previous": previous, "current": tokens }),
+        Err(error) => json!({
+            "previous": Value::Null,
+            "previous_error": error,
+            "current": tokens,
+        }),
+    })
+}
+
+async fn registry_gc(
+    context: &AdminCliContext<'_>,
+    prefix: Option<String>,
+    apply: bool,
+) -> Result<Value> {
+    let global_db = context.global_db;
+    let profile_root = context.require_profile_root()?;
+    let report = if apply {
+        tracedecay_global_db::registry_maintenance::apply_registry_gc(
+            global_db,
+            profile_root,
+            prefix,
+        )
+        .await?
+    } else {
+        tracedecay_global_db::registry_maintenance::registry_gc_report(
+            global_db,
+            profile_root,
+            prefix,
+        )
+        .await?
+    };
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn storage_report(
+    context: &AdminCliContext<'_>,
+    project_id: Option<String>,
+    project_root: Option<PathBuf>,
+    cursor: Option<String>,
+    limit: usize,
+) -> Result<Value> {
+    let global_db = context.global_db;
+    let profile_root = context.require_profile_root()?;
+    let report = match (project_id, project_root) {
                 (Some(project_id), Some(project_root)) => {
                     if cursor.is_some() {
                         return Err(TraceDecayError::Config {
@@ -453,15 +471,7 @@ async fn dispatch_admin_cli(
                     });
                 }
             };
-            serde_json::to_value(report)?
-        }
-        AdminCliAction::GainQuery {
-            project_arg,
-            since,
-            history,
-        } => gain_query(global_db, project_arg.as_deref(), since, history).await?,
-    };
-    Ok(json_result(&value))
+    Ok(serde_json::to_value(report)?)
 }
 
 async fn registry_empty(global_db: &RegisteredGlobalDb) -> Result<Value> {
@@ -600,13 +610,14 @@ async fn registry_context(
     }))
 }
 
-async fn cost_summary(
-    savings_db: &RegisteredGlobalDb,
-    provider_usage_db: Option<&RegisteredGlobalDb>,
-    provider_scope: Option<&ObservationScopeV1>,
-    project_root: Option<&Path>,
-    range: &str,
-) -> Result<Value> {
+async fn cost_summary(context: &AdminCliContext<'_>, range: &str) -> Result<Value> {
+    let provider_scope = context.provider_usage_scope()?;
+    let provider_scope = provider_scope.as_ref();
+    let savings_db = context.require_accounting_db()?;
+    let provider_usage_db = context
+        .registered_project_session_db
+        .map(std::convert::AsRef::as_ref);
+    let project_root = context.project_root();
     let accounting_error = |message| TraceDecayError::Config { message };
     let since = tracedecay_session_memory::provider_usage::provider_usage_range_start(range)
         .map_err(accounting_error)?;
