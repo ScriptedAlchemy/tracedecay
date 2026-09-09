@@ -121,4 +121,50 @@ mod identity_root_canonicalization_tests {
             default_profile_project_id(&primary),
         );
     }
+    #[test]
+    fn enrolled_roots_share_exact_identity_across_linked_paths_and_refuse_foreign_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (primary, linked) = repository(temp.path());
+        let project = tracedecay_domain::ProjectId::new("project-enrolled".to_owned()).unwrap();
+        assert!(write_repository_identity_marker(&primary, project.as_str()).unwrap());
+        let roots = enrolled_project_roots(
+            [
+                linked,
+                primary.clone(),
+                primary.join("."),
+                temp.path().join("missing"),
+            ],
+            &project,
+        )
+        .unwrap();
+        assert_eq!(roots, vec![primary.canonicalize().unwrap()]);
+        let foreign = tracedecay_domain::ProjectId::new("project-foreign".to_owned()).unwrap();
+        assert!(
+            enrolled_project_roots([primary.clone()], &foreign)
+                .unwrap()
+                .is_empty()
+        );
+        let marker = repository_identity_path(&primary).unwrap();
+        fs::write(&marker, b"invalid identity marker").unwrap();
+        assert!(enrolled_project_roots([primary], &project).is_err());
+        assert_eq!(fs::read(marker).unwrap(), b"invalid identity marker");
+    }
+
+    #[test]
+    fn enrolled_roots_allow_only_exact_path_fallback_without_creating_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let project = tracedecay_domain::ProjectId::new(default_profile_project_id(&root)).unwrap();
+        assert_eq!(
+            enrolled_project_roots([root.clone()], &project).unwrap(),
+            vec![root.clone()]
+        );
+        let foreign = tracedecay_domain::ProjectId::new("project-foreign".to_owned()).unwrap();
+        assert!(
+            enrolled_project_roots([root.clone()], &foreign)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!root.join(".git").exists());
+    }
 }

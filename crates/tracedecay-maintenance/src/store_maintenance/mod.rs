@@ -1015,8 +1015,11 @@ async fn collect_scope_root_proof_inputs(
         .collect::<Vec<_>>();
     let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
         .map_err(|_| "registered_project_identity_invalid")?;
-    let enrolled_roots = crate::lease::enrolled_project_roots(registered_candidates, &project_id)
-        .map_err(|_| "registered_enrollment_inventory_unavailable")?;
+    let enrolled_roots = tracedecay_runtime_core::storage::enrolled_project_roots(
+        registered_candidates,
+        &project_id,
+    )
+    .map_err(|_| "registered_enrollment_inventory_unavailable")?;
     if enrolled_roots.is_empty() {
         return Err("registered_enrollment_inventory_empty");
     }

@@ -146,7 +146,7 @@ async fn open_selected_project_read_only<'a>(
     if context.project.project_id.as_str() != selected_project_id.as_str() {
         return denied();
     }
-    let roots = TraceDecay::enrolled_project_roots(
+    let roots = tracedecay_runtime_core::storage::enrolled_project_roots(
         TraceDecay::registry_context_candidate_roots(&context),
         selected_project_id,
     )
