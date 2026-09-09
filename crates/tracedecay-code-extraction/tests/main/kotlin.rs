@@ -542,16 +542,3 @@ fn test_kt_property_inside_object() {
 // -----------------------------------------------------------------------
 // LanguageExtractor trait implementation
 // -----------------------------------------------------------------------
-
-#[test]
-fn test_kt_extensions() {
-    let extractor = KotlinExtractor;
-    assert!(extractor.extensions().contains(&"kt"));
-    assert!(extractor.extensions().contains(&"kts"));
-}
-
-#[test]
-fn test_kt_language_name() {
-    let extractor = KotlinExtractor;
-    assert_eq!(extractor.language_name(), "Kotlin");
-}

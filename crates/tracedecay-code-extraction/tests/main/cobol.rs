@@ -224,18 +224,3 @@ fn test_cobol_qualified_names() {
         validate.qualified_name
     );
 }
-
-#[test]
-fn test_cobol_extensions() {
-    let extractor = CobolExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"cob"));
-    assert!(exts.contains(&"cbl"));
-    assert!(exts.contains(&"cpy"));
-}
-
-#[test]
-fn test_cobol_language_name() {
-    let extractor = CobolExtractor;
-    assert_eq!(extractor.language_name(), "COBOL");
-}

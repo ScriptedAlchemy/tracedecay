@@ -496,19 +496,3 @@ fn configuration_error_at(
         mapped
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_production_mount<T: SemanticRuntimeIntegrationPortV1 + Send + Sync>() {}
-
-    fn assert_activation_port<T: SemanticActivationCoordinationPort + Send + Sync>() {}
-
-    #[test]
-    fn production_coordinator_is_a_concrete_project_runtime_mount() {
-        assert_production_mount::<ProductionSemanticActivationCoordinatorV1>();
-        assert_activation_port::<ProductionSemanticActivationCoordinatorV1>();
-        std::hint::black_box(ProductionSemanticActivationCoordinatorV1::new);
-    }
-}

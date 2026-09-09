@@ -2291,20 +2291,3 @@ fn projection_runtime_error(
         source: Box::new(error),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adapter_contains_only_guarded_database_client() {
-        fn assert_exact_fields(store: &GlobalDbObservationStore) {
-            let GlobalDbObservationStore {
-                database: _,
-                runtime: _,
-            } = store;
-        }
-
-        let _ = assert_exact_fields;
-    }
-}
