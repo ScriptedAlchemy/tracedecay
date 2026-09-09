@@ -536,11 +536,11 @@ impl MountedProjectApplicationRetrievalV1 {
         &self,
         expected_scope: &tracedecay_contracts::ResolvedScope,
         federated_authority: Arc<
-            dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
+            dyn tracedecay_application::work::WorkFederatedQueryAuthorityPortV1,
         >,
-    ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
+    ) -> Result<tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1> {
         Ok(
-            crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
+            tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1::new(
                 self.retrieval_for_scope(expected_scope)?,
             )
             .with_federated_authority(federated_authority),
@@ -1311,13 +1311,13 @@ impl McpServer {
         &self,
         expected_scope: &tracedecay_contracts::ResolvedScope,
         federated_authority: Arc<
-            dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
+            dyn tracedecay_application::work::WorkFederatedQueryAuthorityPortV1,
         >,
-    ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
+    ) -> Result<tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1> {
         match self.project_application_retrieval.as_ref() {
             Some(mounted) => mounted.work_evidence_retrieval(expected_scope, federated_authority),
             None => Ok(
-                crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
+                tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1::new(
                     self.project_session_retrieval_for_scope(expected_scope)?,
                 )
                 .with_federated_authority(federated_authority),
