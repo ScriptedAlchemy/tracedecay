@@ -27,8 +27,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
-#[cfg(test)]
-use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
@@ -391,21 +389,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     pub fn session_registry_for_test(&self) -> Arc<DaemonSessionRuntimeRegistryV1> {
         Arc::clone(&self.session_registry)
-    }
-
-    #[cfg(test)]
-    #[hotpath::skip]
-    pub(crate) async fn read_snapshot(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> Result<DatabaseEngineReadSnapshot> {
-        self.registered_database(scope)
-            .ok_or_else(|| TraceDecayError::Database {
-                operation: "open registered session test snapshot".to_owned(),
-                message: "registered session test runtime unavailable".to_owned(),
-            })?
-            .read_snapshot()
-            .await
     }
 
     #[doc(hidden)]

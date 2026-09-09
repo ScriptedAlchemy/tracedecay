@@ -951,7 +951,7 @@ pub(super) fn status_output_is_dirty(output: &[u8]) -> bool {
 }
 
 /// The product package directory. `HARNESS_SOURCES` records paths relative to
-/// the package (`src/sessions/...`), which is a different anchor from the
+/// the package (`tests/claude_observation_benchmark/...`), a different anchor from the
 /// workspace-level fixtures and benchmark data below.
 pub(super) fn package_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))

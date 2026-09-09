@@ -71,9 +71,6 @@ pub mod profile_registry_maintenance;
 mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports};
-#[cfg(test)]
-#[path = "sessions/claude_observation_benchmark.rs"]
-mod claude_observation_benchmark;
 pub mod runtime_telemetry;
 pub mod serve;
 // Benchmark harness, not product surface: the shipped library must not carry
