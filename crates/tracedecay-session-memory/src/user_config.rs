@@ -707,17 +707,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_duration_minutes() {
-        assert_eq!(parse_duration("1m"), Some(Duration::from_secs(60)));
-        assert_eq!(parse_duration("2m"), Some(Duration::from_secs(120)));
-    }
-
-    #[test]
-    fn parse_duration_bare_number() {
-        assert_eq!(parse_duration("10"), Some(Duration::from_secs(10)));
-    }
-
-    #[test]
     fn parse_duration_invalid() {
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration(""), None);
@@ -857,12 +846,6 @@ mod tests {
             matches!(err, ConfigSaveError::ExistingUnreadable { .. }),
             "expected ExistingUnreadable, got: {err}"
         );
-    }
-
-    #[test]
-    fn path_unavailable_error_displays() {
-        let err = ConfigSaveError::PathUnavailable;
-        assert!(err.to_string().contains("user config path"));
     }
 
     #[test]

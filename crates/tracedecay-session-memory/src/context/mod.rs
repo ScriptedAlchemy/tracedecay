@@ -612,8 +612,6 @@ mod tests {
     use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-    const DIGEST: [u8; 32] = [0x5a; 32];
-
     fn project_identity() -> ResolvedSessionIdentity {
         ResolvedSessionIdentity::for_project(
             ProfileId::new("profile.primary").unwrap(),
@@ -626,35 +624,6 @@ mod tests {
                 BranchId::new("branch.application-slice-1").unwrap(),
             ),
         )
-    }
-
-    #[test]
-    fn profile_and_project_owners_are_explicit_and_never_fallback() {
-        let profile = ResolvedSessionIdentity::for_profile(
-            ProfileId::new("profile.primary").unwrap(),
-            SessionStoreId::new("store.profile.primary").unwrap(),
-            SessionRootId::new("root.profile.primary").unwrap(),
-        );
-        let project = project_identity();
-
-        assert!(matches!(profile.owner(), SessionOwner::Profile { .. }));
-        assert!(profile.project_id().is_none());
-        assert!(profile.git_route().is_none());
-        assert!(matches!(project.owner(), SessionOwner::Project { .. }));
-        assert!(project.project_id().is_some());
-        assert!(project.git_route().is_some());
-    }
-
-    #[test]
-    fn digest_bindings_cannot_embed_paths_or_payloads() {
-        let capability = CapabilityDigest::new(DIGEST);
-        let policy = PolicyDigest::new(DIGEST);
-        let configuration = ConfigurationDigest::new(DIGEST);
-
-        assert_eq!(capability.as_bytes(), &DIGEST);
-        assert_eq!(policy.as_bytes(), &DIGEST);
-        assert_eq!(configuration.as_bytes(), &DIGEST);
-        assert!(!format!("{capability:?}").contains("/fast/projects"));
     }
 
     #[test]

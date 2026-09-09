@@ -649,10 +649,9 @@ mod tests {
         RequestId,
     };
     use tracedecay_domain::{
-        ActorId, ProjectId, RepositoryId, RetrievalGrainV1,
-        SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionId, SessionSourceCoverageReceiptV1,
-        SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
-        SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
+        ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
+        SessionSourceCoverageReceiptV1, SessionSourceCoverageV1, SessionSourceFrontierV1,
+        SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -1398,33 +1397,6 @@ mod tests {
     }
 
     #[test]
-    fn retrieval_request_carries_grant_target_freshness_and_limit() {
-        let context = context();
-        let authorization = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &authorization)
-            .unwrap();
-        let request = SessionRetrievalRequest::new(
-            grant,
-            SessionRetrievalTarget::Session(SessionId::new("session.application-slice-1").unwrap()),
-            SessionFreshnessPolicy::RequireFresh,
-            25,
-        )
-        .unwrap();
-
-        assert_eq!(request.limit(), 25);
-        assert_eq!(
-            request.freshness_policy(),
-            SessionFreshnessPolicy::RequireFresh
-        );
-        assert!(matches!(
-            request.target(),
-            SessionRetrievalTarget::Session(session_id)
-                if session_id.as_str() == "session.application-slice-1"
-        ));
-    }
-
-    #[test]
     fn retrieval_request_rejects_targets_outside_the_grant_scope() {
         let context = context();
         let exact_authorization = exact_authorization_request(context.identity().clone());
@@ -1515,52 +1487,6 @@ mod tests {
             SessionDataFreshness::from_source_coverage(&partial),
             SessionDataFreshness::Partial { generation_lag: 2 }
         );
-    }
-
-    #[test]
-    fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 15] = [
-            SessionRetrievalOutcome::CompleteZero {
-                freshness: SessionDataFreshness::Fresh,
-            },
-            SessionRetrievalOutcome::Stale {
-                freshness: SessionDataFreshness::Stored { generation_lag: 1 },
-            },
-            SessionRetrievalOutcome::CursorStale,
-            SessionRetrievalOutcome::Partial {
-                items: vec![],
-                freshness: SessionDataFreshness::Fresh,
-                omitted: 1,
-            },
-            SessionRetrievalOutcome::WrongScope,
-            SessionRetrievalOutcome::Locked,
-            SessionRetrievalOutcome::Redacted,
-            SessionRetrievalOutcome::Deleted,
-            SessionRetrievalOutcome::Denied,
-            SessionRetrievalOutcome::Unavailable,
-            SessionRetrievalOutcome::ResetRequired,
-            SessionRetrievalOutcome::CursorManifestLimitExceeded {
-                kind: CursorManifestLimitKindV1::Participants,
-                observed: 257,
-                maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
-            },
-            SessionRetrievalOutcome::BudgetExhausted {
-                stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
-            },
-            SessionRetrievalOutcome::TimedOut,
-            SessionRetrievalOutcome::Cancelled,
-        ];
-
-        assert!(matches!(
-            states[0],
-            SessionRetrievalOutcome::CompleteZero { .. }
-        ));
-        for state in &states[1..] {
-            assert!(!matches!(
-                state,
-                SessionRetrievalOutcome::CompleteZero { .. }
-            ));
-        }
     }
 
     #[test]

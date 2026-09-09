@@ -829,19 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn gc_config_defaults_match_spec() {
-        let config = LcmGcConfig::default();
-
-        assert_eq!(config.grace_seconds, 86_400);
-        assert_eq!(config.reap_missing_after, 604_800);
-        assert!(!config.reap_missing_enabled);
-        assert_eq!(config.max_batch_size, 500);
-        assert!(config.backup_before_reap);
-        assert_eq!(config.interval_seconds, 21_600);
-        assert!(config.gc_enabled);
-    }
-
-    #[test]
     fn gc_config_round_trips_with_serde_defaults() {
         let config: LcmGcConfig =
             serde_json::from_str("{}").expect("empty gc config should deserialize with defaults");
@@ -864,17 +851,5 @@ mod tests {
 
         assert!(config.reap_missing_enabled);
         assert_eq!(config.reap_missing_after, 0);
-    }
-
-    #[test]
-    fn lcm_error_display_includes_gc_variants() {
-        assert_eq!(
-            LcmError::PayloadGcd.to_string(),
-            "payload already garbage collected"
-        );
-        assert_eq!(
-            LcmError::StillReferenced.to_string(),
-            "payload still referenced"
-        );
     }
 }

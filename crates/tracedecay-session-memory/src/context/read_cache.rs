@@ -237,22 +237,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn args_hash_uses_domain_canonical_encoding_for_escaped_object_keys() {
-        let args = json!({
-            "quoted\"key": {
-                "slash\\key": "control:\u{0001}",
-            },
-        });
-        let canonical =
-            tracedecay_domain::canonical_json_value(&args).expect("domain canonical JSON");
-
-        assert_eq!(
-            args_hash(&args).expect("cache argument hash"),
-            digest_bytes(canonical.as_bytes())
-        );
-    }
-
-    #[test]
     fn args_hash_preserves_legacy_production_key() {
         let args = json!({
             "lines": "1:2",

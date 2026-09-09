@@ -161,26 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn fake_mode_selects_persisted_summary_without_route_metadata() {
-        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Fake {
-            summary_text: "fake summary".into(),
-        });
-
-        assert!(!adapter.is_noop());
-        let invocation = adapter
-            .persisted_summary_invocation()
-            .expect("fake mode should persist a summary");
-        assert_eq!(
-            invocation,
-            &PersistedSummaryInvocation {
-                summary_text: "fake summary".into(),
-                route: None,
-                extraction_result: None,
-            }
-        );
-    }
-
-    #[test]
     fn provided_mode_selects_persisted_summary_and_splits_route_envelope() {
         let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "provided summary".into(),

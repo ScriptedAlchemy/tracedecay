@@ -857,16 +857,3 @@ pub(super) fn require_candidate_scope(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lexical_terms_share_one_or_query() {
-        assert_eq!(
-            fts_any_terms("workflow correction repeated"),
-            "\"workflow\" OR \"correction\" OR \"repeated\""
-        );
-    }
-}

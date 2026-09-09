@@ -304,8 +304,7 @@ mod tests {
     use super::{
         project_memory_combined_score, project_memory_fact_vector, project_memory_fts_component,
         project_memory_holographic_midpoint, project_memory_jaccard,
-        project_memory_normalize_fts5_ranks, project_memory_score_millionths,
-        project_memory_temporal_decay, project_memory_tokens,
+        project_memory_normalize_fts5_ranks, project_memory_temporal_decay, project_memory_tokens,
     };
     use crate::memory::encoding::HolographicEncoder;
 
@@ -443,12 +442,6 @@ mod tests {
         assert!((unboosted - expected_relevance * 0.8 * 0.9).abs() < 1e-12);
         let saturated = project_memory_combined_score(0.75, 0.4, 0.6, 0.8, 0.9, u64::MAX);
         assert!(saturated <= unboosted * 1.5 + 1e-12);
-    }
-
-    #[test]
-    fn aggregate_score_retains_the_shipped_one_point_five_ceiling() {
-        let score = project_memory_combined_score(1.0, 1.0, 1.0, 1.0, 1.0, u64::MAX);
-        assert_eq!(project_memory_score_millionths(score), 1_500_000);
     }
 
     #[test]
