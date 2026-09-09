@@ -1227,6 +1227,17 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
              '{\"payload\":{\"facts\":[{\"kind\":\"message\",\"role\":\"user\",\"content\":{\"text\":\"common\"},\"timestamp\":42},{\"kind\":\"tool_result\",\"content\":{\"text\":\"common\"}}]}}',
              '{}'
          );
+         INSERT INTO session_messages (
+             provider, message_id, session_id, role, timestamp, ordinal, text, kind
+         ) VALUES
+             (
+                 'claude', 'message-common-tool', 'session-plan-inside',
+                 'user', 42, 321, 'common', 'message'
+             ),
+             (
+                 'claude', 'message-common-user', 'session-plan-inside',
+                 'user', 42, 322, 'common', 'message'
+             );
          INSERT INTO retrieval_anchors (
              anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('anchor-common-tool', '{}', '{\"kind\":\"profile\"}', 'fixture');
@@ -1236,24 +1247,26 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
          INSERT INTO session_occurrences (
              session_id, generation, occurrence_id, source_observation_id,
              source_provider, projection_output_ordinal, retrieval_anchor_id,
-             role, knowledge_at, valid_time_json, evidence_json,
+             message_id, role, knowledge_at, valid_time_json, evidence_json,
              sanitized_content_digest, sanitized_content_bytes, snippet_text, index_text
          )
          SELECT 'session-plan-inside', 1, printf('occurrence-common-tool-%03d', n),
                 'observation-common-tool', 'claude', n, 'anchor-common-tool',
-                'user', 1000 + n, '{\"kind\":\"known\",\"valid_at\":42}', '{}',
+                'message-common-tool', 'user', 1000 + n,
+                '{\"kind\":\"known\",\"valid_at\":42}', '{}',
                 '0000000000000000000000000000000000000000000000000000000000000000',
                 6, 'common', 'common'
          FROM excluded;
          INSERT INTO session_occurrences (
              session_id, generation, occurrence_id, source_observation_id,
              source_provider, projection_output_ordinal, retrieval_anchor_id,
-             role, knowledge_at, valid_time_json, evidence_json,
+             message_id, role, knowledge_at, valid_time_json, evidence_json,
              sanitized_content_digest, sanitized_content_bytes, snippet_text, index_text
          ) VALUES (
              'session-plan-inside', 1, 'occurrence-common-user',
              'observation-plan-inside', 'claude', 321, 'anchor-plan-inside',
-             'user', 20, '{\"kind\":\"known\",\"valid_at\":42}', '{}',
+             'message-common-user', 'user', 20,
+             '{\"kind\":\"known\",\"valid_at\":42}', '{}',
              '0000000000000000000000000000000000000000000000000000000000000000',
              6, 'common', 'common'
          );",
