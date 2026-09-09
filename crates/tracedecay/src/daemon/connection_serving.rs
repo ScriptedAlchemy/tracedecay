@@ -45,7 +45,40 @@ impl BrokerSelectedResponseAuthority for crate::mcp::server::RmcpSelectedProject
                     Box::new(lease) as Box<dyn tracedecay_mcp::BrokerSelectedResponseLease>
                 })
             })
-            .map_err(|error| std::io::Error::other(error.to_string()))
+            .map_err(selected_response_io_error)
+    }
+}
+
+fn selected_response_io_error(error: TraceDecayError) -> std::io::Error {
+    std::io::Error::other(error)
+}
+
+#[cfg(test)]
+mod selected_response_error_tests {
+    use super::*;
+
+    #[test]
+    fn io_boundary_retains_typed_project_route_classification() {
+        let error = TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            "selected response authority is warming",
+        );
+
+        let error = selected_response_io_error(error);
+        let source = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<TraceDecayError>())
+            .expect("I/O error must retain the typed TraceDecay source");
+
+        assert_eq!(
+            source.project_route_context(),
+            Some((
+                "project_route_unavailable",
+                true,
+                "selected response authority is warming",
+            ))
+        );
     }
 }
 
