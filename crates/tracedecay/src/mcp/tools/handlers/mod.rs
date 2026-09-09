@@ -67,7 +67,15 @@ mod dispatch_test_support;
 )]
 mod dispatch_tests;
 pub mod edit;
-pub mod graph;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod graph_search_dispatch_tests;
 pub mod health;
 pub mod hook_runtime;
 pub mod info;

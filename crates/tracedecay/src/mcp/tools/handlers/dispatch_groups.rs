@@ -14,6 +14,7 @@ use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
+use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::ast_grep as portable_ast_grep;
 use tracedecay_mcp::handlers::git;
@@ -32,7 +33,7 @@ use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
     admin_cli, admin_project, application_surface, automation_runs, dashboard, dispatch_controls,
-    edit, graph, hook_runtime, info, skills, workflow,
+    edit, hook_runtime, info, skills, workflow,
 };
 
 mod health_dispatch;
@@ -499,16 +500,16 @@ fn dispatch_graph_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let project = admitted_project_authorities(cg, &options)?;
+        let freshness = admitted_freshness_payload(cg, &options).await;
+        let ctx = admitted_tool_context(cg, &options, project.as_ref(), freshness.as_ref())?;
         match tool_name {
             "tracedecay_search" => {
-                graph::handle_search(
-                    cg,
+                portable_graph::handle_search(
+                    &ctx,
                     admitted_graph_query(cg, &options, "code_symbol_search"),
                     args,
                     selected_scope_prefix,
                     options.code_index_ignored_dependency_admission.as_deref(),
-                    options.code_index_freshness_reader.as_ref(),
-                    &admitted_tool_context(cg, &options, project.as_ref())?,
                 )
                 .await
             }
@@ -536,13 +537,11 @@ fn dispatch_graph_tools_inner<'a>(
             }
             "tracedecay_retrieve" => handle_retrieve(cg, &args).await,
             "tracedecay_context" => {
-                graph::handle_context(
-                    cg,
+                portable_graph::handle_context(
+                    &ctx,
                     admitted_graph_query(cg, &options, "context"),
                     args,
                     selected_scope_prefix,
-                    options.code_index_freshness_reader.as_ref(),
-                    &admitted_tool_context(cg, &options, project.as_ref())?,
                 )
                 .await
             }
@@ -564,20 +563,11 @@ fn dispatch_graph_tools_inner<'a>(
             }
             "tracedecay_similar" => {
                 let graph_query = admitted_graph_query(cg, &options, "similar").await?;
-                graph::handle_similar(
-                    cg,
-                    &graph_query,
-                    args,
-                    options.code_index_search_executor.as_ref(),
-                    options.code_index_search_authority.as_ref(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
-                )
-                .await
+                portable_graph::handle_similar(&ctx, &graph_query, args).await
             }
             "tracedecay_rename_preview" => {
                 let graph_query = admitted_graph_query(cg, &options, "rename_preview").await?;
-                graph::handle_rename_preview(cg, &graph_query, args).await
+                portable_graph::handle_rename_preview(&ctx, &graph_query, args).await
             }
             "tracedecay_implementations" => {
                 let graph_query =
@@ -591,13 +581,12 @@ fn dispatch_graph_tools_inner<'a>(
             }
             "tracedecay_find_exact_symbol" => {
                 let graph_query = admitted_graph_query(cg, &options, "qualified_name").await?;
-                graph::handle_find_exact_symbol(
-                    cg,
+                portable_graph::handle_find_exact_symbol(
+                    &ctx,
                     &graph_query,
                     args,
                     selected_scope_prefix,
                     options.code_index_ignored_dependency_admission.as_deref(),
-                    &admitted_tool_context(cg, &options, project.as_ref())?,
                 )
                 .await
             }
@@ -1029,7 +1018,7 @@ fn dispatch_git_tools_inner<'a>(
         let carried_deadline = options.application_deadline.as_ref();
         let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
         let project = admitted_project_authorities(cg, &options)?;
-        let ctx = admitted_tool_context(cg, &options, project.as_ref())?;
+        let ctx = admitted_tool_context(cg, &options, project.as_ref(), None)?;
 
         let handler = async {
             match tool_name {
@@ -1121,10 +1110,23 @@ fn admitted_project_authorities(
 /// admitted for. An authority the daemon did not admit stays absent and the
 /// handler reports its own typed unavailable state; an authority that
 /// contradicts the admitted checkout refuses the whole call.
+async fn admitted_freshness_payload(
+    cg: &TraceDecay,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<CodeIndexFreshnessPayloadV1> {
+    let reader = options.code_index_freshness_reader.as_ref()?;
+    let worktree = reader(cg.project_root().to_path_buf()).await;
+    Some(CodeIndexFreshnessPayloadV1 {
+        worktrees: worktree.into_iter().collect(),
+        note: "last daemon scheduler execution state; generation and scope come from the durable sealed generation".to_owned(),
+    })
+}
+
 fn admitted_tool_context<'a>(
     cg: &'a TraceDecay,
     options: &'a ToolCallRegistryOptions<'a>,
     project: Option<&'a McpProjectAuthoritiesV1>,
+    freshness: Option<&'a CodeIndexFreshnessPayloadV1>,
 ) -> Result<McpToolContext<'a>> {
     // Project open resolves one checkout per served route and publishes it
     // alongside the authorities that mount behind it, so this is the checkout
@@ -1166,6 +1168,7 @@ fn admitted_tool_context<'a>(
                 cancellation: options.application_cancellation.as_ref(),
             },
             code_index,
+            freshness,
             ..McpRequestAuthoritiesV1::default()
         },
         project_root: cg.project_root(),
