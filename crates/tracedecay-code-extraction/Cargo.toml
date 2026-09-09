@@ -12,6 +12,8 @@ include = [
     "/fixtures/**",
     "/tests/**",
     "/vendor/tree-sitter-wgsl/src/**",
+    "/vendor/tree-sitter-wgsl/LICENSE",
+    "/vendor/tree-sitter-wgsl/PROVENANCE.md",
     "/build.rs",
 ]
 
