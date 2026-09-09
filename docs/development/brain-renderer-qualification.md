@@ -191,3 +191,45 @@ not erase the 401 ms outlier. These measure first response, not completion of
 the camera animation. A browser CPU sample also attributes roughly 796 ms to
 injected accessibility/role lookup, so no renderer change is justified solely
 by the original automation end-to-end number.
+
+
+## Worker verification on the same production fixture
+
+The final controlled run compares production `7b5dd30f3` with `cfc6477ee`, in the
+same Chromium 149 browser configuration and 5,000-symbol/4,999-relation fixture.
+Source, iteration count, and geometry are unchanged. The actual module worker
+loads from the built bundle. Artifacts: `hermetic-worker/measurements.json`,
+`hermetic-worker/worker-pending.png`, and the two settled screenshots.
+
+| Observation | Synchronous baseline | Worker |
+| --- | ---: | ---: |
+| Usable DOM, responsiveness probe | 896 ms | 915 ms |
+| Completed canvas, same probe | 7,988 ms | 8,140 ms |
+| Main-thread force calculation task | 6,260 ms | Absent |
+| Frame intervals while calculating | 2 samples; 7,066 ms gap | 371 samples; median/p95 16.7 ms |
+| Final main-thread installation task | 822 ms | 836 ms |
+
+The improvement is removal of the multi-second UI freeze, not faster final
+geometry. The worker run still records a maximum 967 ms frame gap around final
+installation and smaller 83/143 ms tasks. That installation cost and the dense
+5,000-symbol overview remain limitations; they are not hidden by the frame p95.
+
+The pending screenshot visibly identifies calculation and leaves the exact
+symbol list available. Camera controls are disabled until the scene is ready.
+A trusted navigation click terminated the pending worker in 107 ms; the worker
+closed and no stale canvas appeared after leaving the view. The test inspected
+actual worker lifetime, not only a mocked abort callback.
+
+Both baseline and worker test connections received all 20,000 SSE envelopes.
+The scoped graph stays static because aggregate project activity cannot invent
+symbol activity. Their burst frame p95 values were 16.8/16.7 ms; no long task was
+observed during either burst. Three CPU-profiled trusted zoom samples were
+23.7/24.7/29.3 ms before and 37.7/32.4/27.1 ms after; the earlier 401 ms outlier did
+not recur. This does not prove absence of outliers outside the sample, and the
+measurement remains first response rather than completed camera animation.
+
+The worker slice's typecheck and focused behavior tests passed, including real
+ForceAtlas2 exact-coordinate parity, measured-field bypass, malformed results,
+worker failure, unmount cancellation, and late results after a topology change.
+The built-browser check supplies the separate evidence that the real worker
+bundle and cancellation path operate correctly.
