@@ -81,6 +81,9 @@ pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> 
 }
 
 /// Consecutive project-open failures after which one scheduler loop exits.
+///
+/// The next scheduler reconcile respawns the loop, so this bounds one futile
+/// retry streak rather than retiring the automation lane.
 pub const PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
 
 /// Longest delay between retries after a project-open failure.

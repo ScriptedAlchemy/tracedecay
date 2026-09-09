@@ -20,8 +20,9 @@ pub use input::{
     user_job_run_request,
 };
 pub use recovery_index::{
-    AutomationEffectRecoveryReport, add_pending_blocking, effect_authority_digest,
-    reconcile_reserved_automation_effects_for_project, recovered_partial_terminal,
-    remove_pending_blocking,
+    AutomationEffectRecoveryPreparation, AutomationEffectRecoveryReport,
+    PreparedAutomationEffectRecovery, add_pending_blocking, effect_authority_digest,
+    prepare_reserved_automation_effect_recovery, reconcile_prepared_automation_effects_for_project,
+    recovered_partial_terminal, remove_pending_blocking,
 };
 pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal};

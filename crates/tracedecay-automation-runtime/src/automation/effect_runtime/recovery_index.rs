@@ -42,13 +42,77 @@ pub struct AutomationEffectRecoveryReport {
     pub deferred: usize,
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.reconcile", future = true)]
-pub async fn reconcile_reserved_automation_effects_for_project<A: ProjectMemoryFactStore>(
-    memory: &MemoryApplication<A>,
+pub enum AutomationEffectRecoveryPreparation {
+    Complete(AutomationEffectRecoveryReport),
+    Pending(PreparedAutomationEffectRecovery),
+}
+
+pub struct PreparedAutomationEffectRecovery {
+    dashboard_root: PathBuf,
+    transitions: Vec<IndexedRetirementTransition>,
+    indexed: Vec<IndexedJournal>,
+}
+
+#[hotpath::measure(label = "daemon.automation.effect.prepare_recovery", future = true)]
+pub async fn prepare_reserved_automation_effect_recovery(
     dashboard_root: &Path,
+    cancellation: &CancellationSignal,
+) -> Result<AutomationEffectRecoveryPreparation> {
+    let repair_root = dashboard_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        run_ledger::repair_corrupt_run_ledger_append_intent_blocking(&repair_root)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!(
+            "automation run append-intent repair failed to join: {error}"
+        ))
+    })??;
+    let recovery_root = dashboard_root.to_path_buf();
+    let (transitions, indexed) =
+        tokio::task::spawn_blocking(move || indexed_recovery_blocking(&recovery_root))
+            .await
+            .map_err(|error| {
+                contract_error(format!("automation recovery index reader failed: {error}"))
+            })??;
+    if transitions.is_empty() && indexed.is_empty() {
+        if !cancellation.is_cancelled() {
+            let retirement_root = dashboard_root.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                reject_unbound_retirement_witness_if_index_empty(&retirement_root)
+            })
+            .await
+            .map_err(|error| {
+                contract_error(format!(
+                    "automation retirement witness audit failed to join: {error}"
+                ))
+            })??;
+        }
+        let report = AutomationEffectRecoveryReport::default();
+        observe_recovery_report(&report);
+        return Ok(AutomationEffectRecoveryPreparation::Complete(report));
+    }
+    Ok(AutomationEffectRecoveryPreparation::Pending(
+        PreparedAutomationEffectRecovery {
+            dashboard_root: dashboard_root.to_path_buf(),
+            transitions,
+            indexed,
+        },
+    ))
+}
+
+#[hotpath::measure(label = "daemon.automation.effect.reconcile", future = true)]
+pub async fn reconcile_prepared_automation_effects_for_project<A: ProjectMemoryFactStore>(
+    preparation: PreparedAutomationEffectRecovery,
+    memory: &MemoryApplication<A>,
     cancellation: &CancellationSignal,
     scope: &ResolvedScope,
 ) -> Result<AutomationEffectRecoveryReport> {
+    let PreparedAutomationEffectRecovery {
+        dashboard_root,
+        transitions,
+        indexed,
+    } = preparation;
     let owner = memory.owner().clone();
     let tracedecay_domain::FactOwnerV1::Project { project_id } = &owner else {
         return Err(contract_error(
@@ -61,40 +125,19 @@ pub async fn reconcile_reserved_automation_effects_for_project<A: ProjectMemoryF
         ));
     }
     let scope = scope.clone();
-    let repair_root = dashboard_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        run_ledger::repair_corrupt_run_ledger_append_intent_blocking(&repair_root)
-    })
-    .await
-    .map_err(|error| {
-        contract_error(format!(
-            "automation run append-intent repair failed to join: {error}"
-        ))
-    })??;
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .map_err(contract_error)?;
     let mut report = AutomationEffectRecoveryReport::default();
-    let transition_root = dashboard_root.to_path_buf();
-    let transitions = tokio::task::spawn_blocking(move || {
-        indexed_retirement_transitions_blocking(&transition_root)
-    })
-    .await
-    .map_err(|error| {
-        contract_error(format!(
-            "automation retirement transition reader failed: {error}"
-        ))
-    })??;
     for transition in transitions {
         if cancellation.is_cancelled() {
             break;
         }
         report.inspected += 1;
         match reconcile_indexed_retirement_transition(
-            dashboard_root,
+            &dashboard_root,
             &owner,
             &scope,
-            project_id,
             &operation,
             &transition,
         )
@@ -111,26 +154,19 @@ pub async fn reconcile_reserved_automation_effects_for_project<A: ProjectMemoryF
             }
         }
     }
-    let root = dashboard_root.to_path_buf();
-    let indexed_scope = scope.clone();
-    let indexed =
-        tokio::task::spawn_blocking(move || indexed_journals_blocking(&root, &indexed_scope))
-            .await
-            .map_err(|error| {
-                contract_error(format!("automation recovery index reader failed: {error}"))
-            })??;
-    for indexed in indexed {
+    for indexed in indexed.into_iter().filter(|indexed| {
+        indexed.project_id == scope.project_id && indexed.scope_digest == scope.scope_digest
+    }) {
         if cancellation.is_cancelled() {
             break;
         }
         report.inspected += 1;
         match reconcile_indexed_automation_effect(
             memory,
-            dashboard_root,
+            &dashboard_root,
             cancellation,
             &owner,
             &scope,
-            project_id,
             &operation,
             &indexed,
         )
@@ -155,7 +191,7 @@ pub async fn reconcile_reserved_automation_effects_for_project<A: ProjectMemoryF
         }
     }
     if !cancellation.is_cancelled() {
-        let retirement_root = dashboard_root.to_path_buf();
+        let retirement_root = dashboard_root;
         tokio::task::spawn_blocking(move || {
             reject_unbound_retirement_witness_if_index_empty(&retirement_root)
         })
@@ -166,6 +202,11 @@ pub async fn reconcile_reserved_automation_effects_for_project<A: ProjectMemoryF
             ))
         })??;
     }
+    observe_recovery_report(&report);
+    Ok(report)
+}
+
+fn observe_recovery_report(report: &AutomationEffectRecoveryReport) {
     hotpath::gauge!("daemon.automation.effect.reconcile.inspected_total").inc(report.inspected);
     hotpath::gauge!("daemon.automation.effect.reconcile.terminal_total")
         .inc(report.already_terminal);
@@ -174,7 +215,6 @@ pub async fn reconcile_reserved_automation_effects_for_project<A: ProjectMemoryF
     hotpath::gauge!("daemon.automation.effect.reconcile.indeterminate_total")
         .inc(report.indeterminate);
     hotpath::gauge!("daemon.automation.effect.reconcile.deferred_total").inc(report.deferred);
-    Ok(report)
 }
 
 pub fn reject_unbound_retirement_witness_if_index_empty(dashboard_root: &Path) -> Result<()> {
@@ -199,17 +239,15 @@ enum EntryRecoveryOutcome {
     Cancelled,
 }
 
-#[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "daemon.automation.effect.retire.reconcile", future = true)]
 async fn reconcile_indexed_retirement_transition(
     dashboard_root: &Path,
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
-    project_id: &ProjectId,
     operation: &tracedecay_contracts::ApplicationOperation,
     indexed: &IndexedRetirementTransition,
 ) -> Result<()> {
-    if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
+    if indexed.project_id != scope.project_id || indexed.scope_digest != scope.scope_digest {
         return Err(contract_error(
             "automation retirement transition escaped its exact project scope",
         ));
@@ -280,18 +318,16 @@ async fn reconcile_indexed_retirement_transition(
     })?
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn reconcile_indexed_automation_effect<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     cancellation: &CancellationSignal,
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
-    project_id: &ProjectId,
     operation: &tracedecay_contracts::ApplicationOperation,
     indexed: &IndexedJournal,
 ) -> Result<EntryRecoveryOutcome> {
-    if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
+    if indexed.project_id != scope.project_id || indexed.scope_digest != scope.scope_digest {
         return Ok(EntryRecoveryOutcome::Deferred);
     }
     let path = indexed.path.clone();
@@ -1004,37 +1040,35 @@ fn encode_pending_index(index: &PendingIndex) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn indexed_journals_blocking(
     dashboard_root: &Path,
     scope: &ResolvedScope,
 ) -> Result<Vec<IndexedJournal>> {
-    let index_path = index_path(dashboard_root);
-    with_index_lock(&index_path, || {
-        let index = read_index(&index_path)?;
-        let automation_root = automation_root(dashboard_root);
-        Ok(index
-            .entries
-            .into_iter()
-            .filter(|entry| {
-                entry.project_id == scope.project_id && entry.scope_digest == scope.scope_digest
-            })
-            .map(|entry| IndexedJournal {
-                path: automation_root.join(&entry.journal_file),
-                project_id: entry.project_id,
-                scope_digest: entry.scope_digest,
-            })
-            .collect())
-    })
+    Ok(indexed_recovery_blocking(dashboard_root)?
+        .1
+        .into_iter()
+        .filter(|entry| {
+            entry.project_id == scope.project_id && entry.scope_digest == scope.scope_digest
+        })
+        .collect())
 }
 
+#[cfg(test)]
 fn indexed_retirement_transitions_blocking(
     dashboard_root: &Path,
 ) -> Result<Vec<IndexedRetirementTransition>> {
+    Ok(indexed_recovery_blocking(dashboard_root)?.0)
+}
+
+fn indexed_recovery_blocking(
+    dashboard_root: &Path,
+) -> Result<(Vec<IndexedRetirementTransition>, Vec<IndexedJournal>)> {
     let index_path = index_path(dashboard_root);
     with_index_lock(&index_path, || {
         let index = read_index(&index_path)?;
         let automation_root = automation_root(dashboard_root);
-        Ok(index
+        let transitions = index
             .retirement_transitions
             .into_iter()
             .map(|transition| IndexedRetirementTransition {
@@ -1044,7 +1078,17 @@ fn indexed_retirement_transitions_blocking(
                 source_digest: transition.source_digest,
                 capture_expected: transition.capture_expected,
             })
-            .collect())
+            .collect();
+        let indexed = index
+            .entries
+            .into_iter()
+            .map(|entry| IndexedJournal {
+                path: automation_root.join(&entry.journal_file),
+                project_id: entry.project_id,
+                scope_digest: entry.scope_digest,
+            })
+            .collect();
+        Ok((transitions, indexed))
     })
 }
 
@@ -1311,6 +1355,101 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+    use tracedecay_domain::{FactOwnerV1, RepositoryId, WorktreeId};
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
+
+    fn recovery_scope(project_id: &str) -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new(project_id).expect("project id"),
+            RepositoryId::new("repository.recovery-guard").expect("repository id"),
+            WorktreeId::new("worktree.recovery-guard").expect("worktree id"),
+            None,
+        )
+        .expect("recovery scope")
+    }
+
+    fn prepared_recovery(dashboard_root: &Path) -> PreparedAutomationEffectRecovery {
+        PreparedAutomationEffectRecovery {
+            dashboard_root: dashboard_root.to_path_buf(),
+            transitions: Vec::new(),
+            indexed: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_recovery_rejects_non_project_memory_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let database_path = temp.path().join("memory.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&database_path, "automation recovery owner guard")
+                .expect("database authority");
+        let (database, _runtime) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("memory database");
+        let memory =
+            MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
+                .expect("profile memory");
+
+        let error = reconcile_prepared_automation_effects_for_project(
+            prepared_recovery(temp.path()),
+            &memory,
+            &CancellationSignal::active("cancellation.non-project-owner").expect("cancellation"),
+            &recovery_scope("project.recovery-guard"),
+        )
+        .await
+        .expect_err("profile memory must not authorize project recovery");
+
+        assert!(
+            error
+                .to_string()
+                .contains("automation recovery requires a project owner")
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_recovery_rejects_memory_owner_scope_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let database_path = temp.path().join("memory.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&database_path, "automation recovery scope guard")
+                .expect("database authority");
+        let (database, _runtime) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("memory database");
+        let memory = MemoryApplication::new(
+            FactOwnerV1::Project {
+                project_id: ProjectId::new("project.other").expect("other project"),
+            },
+            DatabaseFactStore::new(&database),
+        )
+        .expect("project memory");
+
+        let error = reconcile_prepared_automation_effects_for_project(
+            prepared_recovery(temp.path()),
+            &memory,
+            &CancellationSignal::active("cancellation.owner-scope-mismatch").expect("cancellation"),
+            &recovery_scope("project.recovery-guard"),
+        )
+        .await
+        .expect_err("memory owner must match the recovered scope");
+
+        assert!(
+            error
+                .to_string()
+                .contains("automation recovery scope does not match its project memory owner")
+        );
+    }
 
     #[test]
     fn journal_filename_is_exact_digest_only() {

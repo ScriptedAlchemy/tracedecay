@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
 use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, ExactRunPublication, ExactRunPublishOutcome,
+    self, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, ExactRunPublication,
+    ExactRunPublishOutcome, ExactRunUnboundDiscardOutcome,
 };
 use tracedecay_automation_runtime::automation::runner::{
     AutomationRunSettlementGuard, CombinedReviewDispatch, RetainedAutomationRun,
@@ -50,17 +51,15 @@ use tracedecay_automation_runtime::automation::effect_runtime::projection::{
     project_skip_reason,
 };
 use tracedecay_automation_runtime::automation::effect_runtime::{
-    AutomationSettledProblem, AutomationSettledTerminal, contract_error, digest, journal,
+    AutomationSettledProblem, AutomationSettledTerminal, add_pending_blocking, contract_error,
+    digest, effect_authority_digest as calculate_effect_authority_digest,
+    finalize_terminal_housekeeping, journal, recovered_partial_terminal, remove_pending_blocking,
     retirement,
-};
-use tracedecay_automation_runtime::automation::effect_runtime::{
-    add_pending_blocking, effect_authority_digest as calculate_effect_authority_digest,
-    finalize_terminal_housekeeping, recovered_partial_terminal, remove_pending_blocking,
 };
 use tracedecay_daemon_service::{DaemonInvocationService, RegisteredRetainedRequestContextError};
 use tracedecay_domain::errors::Result;
 
-pub(crate) mod recovery_index;
+pub(crate) mod recovery_composition;
 
 #[cfg(test)]
 #[path = "automation_effect/journal/tests.rs"]
@@ -80,7 +79,7 @@ mod journal_tests;
 /// settlement surfaces as an error instead of a hung request. On
 /// exhaustion the journal state is left exactly as it was
 /// (Reserved/Prepared); that is the durable recovery path and
-/// `reconcile_reserved_automation_effects_for_project` picks it up later.
+/// runtime-owned project recovery picks it up later.
 const RETAINED_SETTLEMENT_RETRY_BUDGET: Duration = Duration::from_mins(2);
 
 pub(crate) struct AutomationEffectAuthority {
@@ -1245,15 +1244,13 @@ impl AutomationEffectAuthority {
             } => {
                 validate_retirement_binding(&admission, retirement.as_ref())?;
                 if let Some(publication) = publication.as_ref() {
-                    let published = tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
+                    let published = run_ledger::publish_staged_run_record_exact(
                         dashboard_root,
                         admission.request.run_id.as_str(),
                         publication,
                     )
                     .await?;
-                    if published
-                        == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
-                    {
+                    if published == ExactRunPublishOutcome::MissingPayload {
                         return Err(contract_error(
                             "durable automation replay has neither its exact ledger row nor bound spool",
                         ));
@@ -1262,7 +1259,7 @@ impl AutomationEffectAuthority {
                     let cleanup_admission = admission.clone();
                     let cleanup_terminal = terminal.clone();
                     let cleanup_publication = publication.clone();
-                    tracedecay_automation_runtime::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+                    run_ledger::discard_stale_staged_run_record_exact_after_terminal(
                         dashboard_root,
                         admission.request.run_id.as_str(),
                         publication,
@@ -1726,8 +1723,7 @@ impl AutomationEffectAuthority {
             || reused.prior_record.task != admitted_task
             || reused.task_key != expected_task_key
             || prior_task_key != reused.task_key
-            || reused.prior_record.trigger
-                != tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler
+            || reused.prior_record.trigger != AutomationTrigger::Scheduler
             || reused.prior_record.status != AutomationRunStatus::Skipped
             || reused.prior_record.error != reused.prior_record.fallback_status
             || reused.prior_record.error.as_deref() != Some(reused.reason.as_str())
@@ -1837,18 +1833,15 @@ impl AutomationEffectAuthority {
     async fn promote_prepared_terminal(
         &self,
         terminal: AutomationSettledTerminal,
-        publication: tracedecay_automation_runtime::automation::run_ledger::ExactRunPublication,
+        publication: ExactRunPublication,
     ) -> Result<AutomationSettledTerminal> {
-        let published =
-            tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
-                &self.dashboard_root,
-                self.admission.request.run_id.as_str(),
-                &publication,
-            )
-            .await?;
-        if published
-            == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
-        {
+        let published = run_ledger::publish_staged_run_record_exact(
+            &self.dashboard_root,
+            self.admission.request.run_id.as_str(),
+            &publication,
+        )
+        .await?;
+        if published == ExactRunPublishOutcome::MissingPayload {
             return Err(contract_error(
                 "prepared automation terminal has neither its spool nor exact ledger row",
             ));
@@ -1865,7 +1858,7 @@ impl AutomationEffectAuthority {
                 "automation prepared-terminal promotion failed: {error}"
             ))
         })??;
-        tracedecay_automation_runtime::automation::run_ledger::discard_staged_run_record_exact(
+        run_ledger::discard_staged_run_record_exact(
             &self.dashboard_root,
             self.admission.request.run_id.as_str(),
             &publication,
@@ -1968,34 +1961,33 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
     if state.publication.is_none() {
         #[cfg(test)]
         let prepared_write_hook = state.prepared_write_hook.clone();
-        let bound =
-            tracedecay_automation_runtime::automation::run_ledger::bind_staged_run_record_exact(
-                &state.authority.dashboard_root,
-                &state.ledger,
-                |publication| {
-                    #[cfg(test)]
-                    if let Some(hook) = prepared_write_hook.as_ref() {
-                        hook.before_write(publication)?;
-                    }
-                    let first = persist_prepared_terminal_blocking(
+        let bound = run_ledger::bind_staged_run_record_exact(
+            &state.authority.dashboard_root,
+            &state.ledger,
+            |publication| {
+                #[cfg(test)]
+                if let Some(hook) = prepared_write_hook.as_ref() {
+                    hook.before_write(publication)?;
+                }
+                let first = persist_prepared_terminal_blocking(
+                    &state.authority.journal_path,
+                    &state.authority.admission,
+                    &state.terminal,
+                    publication.clone(),
+                );
+                match first {
+                    Ok(()) => Ok(()),
+                    Err(first_error) => replay_exact_binding_after_error_blocking(
                         &state.authority.journal_path,
                         &state.authority.admission,
                         &state.terminal,
-                        publication.clone(),
-                    );
-                    match first {
-                        Ok(()) => Ok(()),
-                        Err(first_error) => replay_exact_binding_after_error_blocking(
-                            &state.authority.journal_path,
-                            &state.authority.admission,
-                            &state.terminal,
-                            publication,
-                        )?
-                        .map(|_| ())
-                        .ok_or(first_error),
-                    }
-                },
-            );
+                        publication,
+                    )?
+                    .map(|_| ())
+                    .ok_or(first_error),
+                }
+            },
+        );
         match bound {
             Ok((publication, ())) => {
                 state.publication = Some(publication);
@@ -2024,7 +2016,7 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
         .as_ref()
         .ok_or_else(|| contract_error("prepared settlement lost its exact publication"))?;
     let published = hotpath::measure_block!("daemon.automation.effect.publish", {
-        tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact_blocking(
+        run_ledger::publish_staged_run_record_exact_blocking(
             &state.authority.dashboard_root,
             state.authority.admission.request.run_id.as_str(),
             publication,
@@ -2064,12 +2056,11 @@ fn classify_bound_settlement(
 
 fn cleanup_bound_terminal(state: &RetainedBoundSettlement) {
     if let Some(publication) = state.publication.as_ref()
-        && let Err(error) =
-            tracedecay_automation_runtime::automation::run_ledger::discard_staged_run_record_exact_blocking(
-                &state.authority.dashboard_root,
-                state.authority.admission.request.run_id.as_str(),
-                publication,
-            )
+        && let Err(error) = run_ledger::discard_staged_run_record_exact_blocking(
+            &state.authority.dashboard_root,
+            state.authority.admission.request.run_id.as_str(),
+            publication,
+        )
     {
         tracing::warn!(
             run_id = %state.ledger.run_id,
@@ -2330,27 +2321,19 @@ async fn discard_direct_recovery_unbound_spools(
 ) -> Result<()> {
     let cleanup_path = journal_path.to_path_buf();
     let cleanup_admission = admission.clone();
-    let outcome =
-        tracedecay_automation_runtime::automation::run_ledger::discard_unbound_staged_run_records_if(
-            dashboard_root,
-            admission.request.run_id.as_str(),
-            move || {
-                journal::unbound_reserved_cleanup_is_safe_blocking(
-                    &cleanup_path,
-                    &cleanup_admission,
-                )
-            },
-        )
-        .await?;
+    let outcome = run_ledger::discard_unbound_staged_run_records_if(
+        dashboard_root,
+        admission.request.run_id.as_str(),
+        move || {
+            journal::unbound_reserved_cleanup_is_safe_blocking(&cleanup_path, &cleanup_admission)
+        },
+    )
+    .await?;
     match outcome {
-        tracedecay_automation_runtime::automation::run_ledger::ExactRunUnboundDiscardOutcome::Discarded => {
-            Ok(())
-        }
-        tracedecay_automation_runtime::automation::run_ledger::ExactRunUnboundDiscardOutcome::Retained => {
-            Err(contract_error(
-                "direct automation recovery changed state before unbound spool cleanup",
-            ))
-        }
+        ExactRunUnboundDiscardOutcome::Discarded => Ok(()),
+        ExactRunUnboundDiscardOutcome::Retained => Err(contract_error(
+            "direct automation recovery changed state before unbound spool cleanup",
+        )),
     }
 }
 

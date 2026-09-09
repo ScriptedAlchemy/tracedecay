@@ -25,7 +25,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use crate::daemon::automation_effect::recovery_index as recovery_composition;
+use crate::daemon::automation_effect::recovery_composition;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 use tracedecay_automation_runtime::automation::effect_runtime::journal::*;
 use tracedecay_automation_runtime::automation::effect_runtime::recovery_index;
@@ -236,6 +236,30 @@ fn external_admission_for_recovery_project(
     admission.effect_receipt_template.scope = recovery_scope.clone();
     admission.recovery = AutomationRecoveryBinding::External {
         recovery_problem: reset_problem(&admission.request_id, &recovery_scope, &admission.request),
+    };
+    seal_effect_authority(admission)
+}
+
+fn admission_for_recovery_project(
+    cg: &crate::tracedecay::TraceDecay,
+    run_id: &str,
+    request_id: &str,
+) -> DurableAutomationAdmission {
+    let owner = cg.project_memory_owner().expect("project memory owner");
+    let FactOwnerV1::Project { project_id } = owner.clone() else {
+        panic!("automation recovery fixture requires a project owner")
+    };
+    let recovery_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+            .expect("recovery scope");
+    let mut admission = admission(run_id, request_id);
+    admission.scope = recovery_scope.clone();
+    admission.effect_receipt_template.scope = recovery_scope.clone();
+    admission.recovery = AutomationRecoveryBinding::Memory {
+        owner,
+        recovery_problem: reset_problem(&admission.request_id, &recovery_scope, &admission.request),
+        retirement: None,
+        reset_source_digest: None,
     };
     seal_effect_authority(admission)
 }
@@ -2948,6 +2972,96 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
         )
         .expect("empty pending index")
         .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn corrupt_append_intent_is_repaired_before_project_memory_open_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture_name = "corrupt-intent-before-memory-open";
+    let project_root = temp.path().join(format!("{fixture_name}-project"));
+    let profile_root = temp.path().join(format!("{fixture_name}-profile"));
+    let cg = retained_recovery_project(&temp, fixture_name).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let admission = admission_for_recovery_project(
+        &cg,
+        "run.corrupt-intent-before-memory-open",
+        "request.corrupt-intent-before-memory-open",
+    );
+    let journal_path = canonical_journal_path(&dashboard_root, &admission.request.run_id);
+    recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
+        .expect("pending memory recovery");
+    reserve_or_replay_blocking(&journal_path, admission).expect("reserved memory recovery");
+    let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
+    let corrupt = b"corrupt-before-memory-open";
+    write_private_test_file(&intent_path, corrupt);
+    cg.close();
+
+    let read_only = crate::tracedecay::TraceDecay::open_read_only_with_options(
+        &project_root,
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .expect("open read-only recovery project");
+    let error = recovery_composition::reconcile_reserved_automation_effects_for_project(
+        &read_only,
+        &dashboard_root,
+        &tracedecay_contracts::CancellationSignal::active(
+            "cancellation.corrupt-intent-before-memory-open",
+        )
+        .expect("recovery cancellation"),
+    )
+    .await
+    .expect_err("project memory open must fail after append-intent repair");
+
+    assert!(error.to_string().contains("open read-only"));
+    assert!(!intent_path.exists());
+    assert_eq!(
+        std::fs::read_dir(dashboard_root.join("automation_run_append_intent_quarantine"))
+            .expect("corrupt-intent quarantine")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| std::fs::read(entry.path()).expect("quarantined intent"))
+            .collect::<Vec<_>>(),
+        vec![corrupt.to_vec()]
+    );
+}
+
+#[tokio::test]
+async fn empty_pending_index_does_not_open_project_memory() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture_name = "empty-index-with-unavailable-memory";
+    let project_root = temp.path().join(format!("{fixture_name}-project"));
+    let profile_root = temp.path().join(format!("{fixture_name}-profile"));
+    let cg = retained_recovery_project(&temp, fixture_name).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    cg.close();
+
+    let read_only = crate::tracedecay::TraceDecay::open_read_only_with_options(
+        &project_root,
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .expect("open read-only recovery project");
+    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
+        &read_only,
+        &dashboard_root,
+        &tracedecay_contracts::CancellationSignal::active(
+            "cancellation.empty-index-with-unavailable-memory",
+        )
+        .expect("recovery cancellation"),
+    )
+    .await
+    .expect("empty recovery must not open project memory");
+
+    assert_eq!(
+        report,
+        recovery_index::AutomationEffectRecoveryReport::default()
     );
 }
 
