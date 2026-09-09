@@ -15,7 +15,7 @@ use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
 use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
 
 #[cfg(unix)]
-fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {
+fn git_watch_sync_config(config: &tracedecay_configuration::SyncConfig) -> GitWatchSyncConfigV1 {
     GitWatchSyncConfigV1 {
         auto_watch: config.auto_watch,
         watch_linked_worktrees: config.watch_linked_worktrees,

@@ -469,7 +469,7 @@ async fn handle_status_command_within(
         }
     }
 
-    if !tracedecay::config::is_in_gitignore(&project_path) {
+    if !tracedecay_configuration::is_in_gitignore(&project_path) {
         let dir_name = tracedecay::config::active_data_dir_name(&project_path);
         if stderr_is_terminal {
             eprintln!(

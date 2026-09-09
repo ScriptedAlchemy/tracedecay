@@ -6027,6 +6027,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-configuration",
  "tracedecay-contracts",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
@@ -6158,6 +6159,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-configuration",
  "tracedecay-contracts",
  "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
@@ -6310,8 +6312,10 @@ dependencies = [
 name = "tracedecay-configuration"
 version = "0.1.0"
 dependencies = [
+ "glob",
  "hex",
  "hotpath",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
@@ -6321,6 +6325,7 @@ dependencies = [
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-lcm",
  "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-semantic-contracts",

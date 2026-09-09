@@ -510,7 +510,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 // initialize-roots repos unable to open at all.
                 let allow_init = crate::config::cached_sync_config(&identity.worktree_root)
                     .map_or_else(
-                        |_| crate::config::SyncConfig::default().auto_init,
+                        |_| tracedecay_configuration::SyncConfig::default().auto_init,
                         |config| config.auto_init,
                     );
                 return Ok(Some(InitializeRouteMetadata {
