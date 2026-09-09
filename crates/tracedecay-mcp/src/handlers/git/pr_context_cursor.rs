@@ -414,7 +414,7 @@ mod tests {
     use std::os::unix::ffi::OsStrExt as _;
 
     use super::*;
-    use crate::tool_context::{AdmittedProjectStore, McpToolBinding, RequestControls};
+    use crate::tool_context::{AdmittedProjectStore, McpRequestAuthoritiesV1, McpToolBinding};
     use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
@@ -747,12 +747,12 @@ mod tests {
         };
         let context_for = |authorization| {
             McpToolContext::bind(McpToolBinding {
+                project: None,
+                request: McpRequestAuthoritiesV1::default(),
                 project_root: home.path(),
                 active_branch: None,
-                controls: RequestControls::default(),
                 scope: Some(&scope),
                 project_session_store: Some(AdmittedProjectStore::new(&lease, authorization)),
-                code_index: None,
             })
             .expect("a real lease for the admitted project binds")
         };

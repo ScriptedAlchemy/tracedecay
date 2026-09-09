@@ -21,8 +21,8 @@ use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::{
-    AdmittedCodeIndex, AdmittedProjectStore, McpToolBinding, McpToolContext, RequestControls,
-    ToolResult,
+    AdmittedCodeIndex, AdmittedProjectStore, McpProjectAuthoritiesV1, McpProjectIdentityV1,
+    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
@@ -498,6 +498,7 @@ fn dispatch_graph_tools_inner<'a>(
     // Erase the deeply nested match-arm futures before they reach the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
+        let project = admitted_project_authorities(cg, &options)?;
         match tool_name {
             "tracedecay_search" => {
                 graph::handle_search(
@@ -507,7 +508,7 @@ fn dispatch_graph_tools_inner<'a>(
                     selected_scope_prefix,
                     options.code_index_ignored_dependency_admission.as_deref(),
                     options.code_index_freshness_reader.as_ref(),
-                    &admitted_tool_context(cg, &options)?,
+                    &admitted_tool_context(cg, &options, project.as_ref())?,
                 )
                 .await
             }
@@ -541,7 +542,7 @@ fn dispatch_graph_tools_inner<'a>(
                     args,
                     selected_scope_prefix,
                     options.code_index_freshness_reader.as_ref(),
-                    &admitted_tool_context(cg, &options)?,
+                    &admitted_tool_context(cg, &options, project.as_ref())?,
                 )
                 .await
             }
@@ -596,7 +597,7 @@ fn dispatch_graph_tools_inner<'a>(
                     args,
                     selected_scope_prefix,
                     options.code_index_ignored_dependency_admission.as_deref(),
-                    &admitted_tool_context(cg, &options)?,
+                    &admitted_tool_context(cg, &options, project.as_ref())?,
                 )
                 .await
             }
@@ -1027,7 +1028,8 @@ fn dispatch_git_tools_inner<'a>(
         // also tells the underlying operation to stop at its next checkpoint.
         let carried_deadline = options.application_deadline.as_ref();
         let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
-        let ctx = admitted_tool_context(cg, &options)?;
+        let project = admitted_project_authorities(cg, &options)?;
+        let ctx = admitted_tool_context(cg, &options, project.as_ref())?;
 
         let handler = async {
             match tool_name {
@@ -1082,6 +1084,33 @@ fn dispatch_git_tools_inner<'a>(
     })
 }
 
+/// Builds the project-lifetime authority bundle from the retained project
+/// server. `None` when the request never resolved a checkout: scoped
+/// authorities cannot be admitted without one.
+fn admitted_project_authorities(
+    cg: &TraceDecay,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<Option<McpProjectAuthoritiesV1>> {
+    let Some(scope) = options.admitted_project_scope.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(McpProjectAuthoritiesV1::new(
+        McpProjectIdentityV1 {
+            project_root: cg.project_root().to_path_buf(),
+            scope,
+            active_branch: cg.active_branch().map(str::to_owned),
+            serving_branch: cg.serving_branch().map(str::to_owned),
+            fallback_warning: cg.fallback_warning().map(str::to_owned),
+        },
+        cg.store_layout().clone(),
+        Some(cg.db().clone()),
+        cg.db_path(),
+        Some(cg.store_runtime_registry.clone()),
+        Some(cg.configuration_runtime().clone()),
+        options.registered_project_session_db.clone(),
+    )?))
+}
+
 /// Binds the admitted authorities a moved handler family reads.
 ///
 /// Everything the family may touch — the resolved project scope, the caller's
@@ -1095,6 +1124,7 @@ fn dispatch_git_tools_inner<'a>(
 fn admitted_tool_context<'a>(
     cg: &'a TraceDecay,
     options: &'a ToolCallRegistryOptions<'a>,
+    project: Option<&'a McpProjectAuthoritiesV1>,
 ) -> Result<McpToolContext<'a>> {
     // Project open resolves one checkout per served route and publishes it
     // alongside the authorities that mount behind it, so this is the checkout
@@ -1129,15 +1159,19 @@ fn admitted_tool_context<'a>(
         .and(options.registered_project_session_db.as_ref())
         .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
     Ok(McpToolContext::bind(McpToolBinding {
+        project,
+        request: McpRequestAuthoritiesV1 {
+            controls: RequestControls {
+                deadline: options.application_deadline.as_ref(),
+                cancellation: options.application_cancellation.as_ref(),
+            },
+            code_index,
+            ..McpRequestAuthoritiesV1::default()
+        },
         project_root: cg.project_root(),
         active_branch: cg.active_branch(),
-        controls: RequestControls {
-            deadline: options.application_deadline.as_ref(),
-            cancellation: options.application_cancellation.as_ref(),
-        },
         scope,
         project_session_store,
-        code_index,
     })?)
 }
 
