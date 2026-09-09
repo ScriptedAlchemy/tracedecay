@@ -65,6 +65,7 @@ pub mod project_owner_registration;
 pub mod project_runtime;
 pub mod query_authority_provider;
 pub mod query_mcp_admission;
+pub mod remote_http_transport;
 pub mod remote_protocol;
 pub mod request_cancellation;
 mod shutdown_coordination;

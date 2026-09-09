@@ -258,6 +258,10 @@ struct ProjectOpenInputs<'a> {
 /// wrapper (and every instrumented caller) a few words wide instead of
 /// inlining the whole open.
 #[hotpath::measure(label = "daemon.project.compose.server", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "This composition entry binds route admission, store lifetime, invocation and HTTP owners before publishing a server."
+)]
 pub(super) async fn production_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,

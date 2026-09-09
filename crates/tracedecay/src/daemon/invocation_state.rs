@@ -480,6 +480,10 @@ impl DaemonInvocationState {
     }
 
     #[hotpath::measure(label = "daemon.invocation_state.code_index_mount", future = true)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Mount composition binds project identity, store, semantic lifetime and graph publication owners explicitly."
+    )]
     pub(super) async fn mount_code_index(
         &self,
         project_id: tracedecay_domain::ProjectId,

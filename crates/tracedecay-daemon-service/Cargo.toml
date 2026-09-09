@@ -22,6 +22,14 @@ test-helpers = []
 hotpath = ["hotpath/hotpath", "hotpath/axum-0-8"]
 
 [dependencies]
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["util"] }
+tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 axum = "0.8"
 futures-util = "0.3.33"
 getrandom = "0.2"
@@ -70,7 +78,6 @@ url = "2"
 [dev-dependencies]
 tempfile = "3"
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
-tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers"] }

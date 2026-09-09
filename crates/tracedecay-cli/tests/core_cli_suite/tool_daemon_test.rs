@@ -2541,3 +2541,79 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         "stock Hermes regression: temporal store must stay attached, got {payload}"
     );
 }
+
+#[tokio::test]
+async fn daemon_upgrades_retained_receipts_and_reopens_without_reset() {
+    let home = TempDir::new().unwrap();
+    let db_path = home.path().join(".tracedecay/global.db");
+    common::write_empty_global_db_schema(&db_path).await;
+    {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("DROP TABLE session_relation_receipts;")
+            .unwrap();
+        db.execute_batch(include_str!(
+            "../../../tracedecay-global-db/tests/fixtures/session-relation-receipts-before-recovery.sql"
+        )).unwrap();
+        db.execute_batch(
+            "INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES ('retained-upgrade', 1, 'building', '{}', 100);
+             INSERT INTO session_relation_receipts (
+                session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                state, graph_watermark, created_at, applied_at
+             ) VALUES ('retained-upgrade', 1, 'project_sessions', 'project-a',
+                       'watermark-1', 'applied', 'watermark-1', 101, 102);
+             INSERT INTO session_relation_effect_journal (
+                session_id, generation, projection_json, created_at
+             ) VALUES ('retained-upgrade', 1, '{\"effects\":1}', 102);",
+        )
+        .unwrap();
+        let version: i64 = db.query_row(
+            "SELECT version FROM session_temporal_schema_migrations WHERE name = 'session-temporal'",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(version, 4);
+    }
+    for _ in 0..2 {
+        let daemon = spawn_tracedecay_daemon(home.path());
+        let db = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let retained: (String, String, i64, i64, Option<String>, i64, i64) = db
+            .query_row(
+                "SELECT state, recovery_state, created_at, applied_at, recovery_failure_code,
+                    recovery_failure_count, recovery_next_attempt_at
+             FROM session_relation_receipts WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            retained,
+            ("applied".into(), "pending".into(), 101, 102, None, 0, 0)
+        );
+        let journal: String = db
+            .query_row(
+                "SELECT projection_json FROM session_relation_effect_journal
+             WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(journal, r#"{"effects":1}"#);
+        drop(db);
+        drop(daemon);
+    }
+}

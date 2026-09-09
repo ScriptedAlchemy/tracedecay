@@ -1049,4 +1049,13 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     assert_eq!(started, 2);
     assert_eq!(cancellation_observed, started);
     assert_eq!(completed, started);
+
+    // The replacement route leaves the original server owned by the fixture.
+    // Drain both owners before Tokio drops its runtime and the profile is removed.
+    fixture.server.shutdown().await;
+    let shutdown = fixture.engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "cancelled route owners must shut down cleanly: {shutdown:?}"
+    );
 }

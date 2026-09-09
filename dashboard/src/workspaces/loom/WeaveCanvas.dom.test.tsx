@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import { WeaveCanvas } from './WeaveCanvas.tsx';
+import { MemoryRouter } from 'react-router';
+import { describe, expect, it, vi } from 'vitest';
+import { WeaveCanvas, LoadedEventCanvas, eventPositions } from './WeaveCanvas.tsx';
 import { composeWeave, type WeaveSession } from './weave.ts';
 
 /**
@@ -80,4 +81,34 @@ describe('WeaveCanvas time window', () => {
     expect(marks()).toBe(before);
     expect(screen.getByText('whole extent')).toBeTruthy();
   });
+});
+
+it('shares stable source coordinates across viewport and reveal changes', () => {
+  const frames = [10, 20, null].map((timestamp, index) => ({
+    id: `event-${index}`, ordinal: index, timestamp, role: 'assistant', tool: null,
+    content: null, excerpt: '', summaryNodeIds: [],
+  }));
+  const first = eventPositions(frames);
+  expect(eventPositions([...frames])).toEqual(first);
+  expect(first.points.map(({ x, y }) => [x, y])).toEqual([[0, 200], [1, 200], [1, 350]]);
+  expect(frames[2]!.timestamp).toBeNull();
+});
+
+
+it('keeps dense event hit regions from covering adjacent event centers', () => {
+  const frames = Array.from({ length: 200 }, (_, index) => ({
+    id: `event-${index}`, ordinal: index, timestamp: BASE + index,
+    role: 'assistant', tool: null, content: null, excerpt: '', summaryNodeIds: [],
+  }));
+  const onSelect = vi.fn();
+  render(<MemoryRouter><LoadedEventCanvas frames={frames} visible={frames} activeId="event-199" onSelect={onSelect} onInspect={() => {}} toolbar={null} scrubber={null} /></MemoryRouter>);
+  const target = screen.getByRole('button', { name: 'Select stored event event-100' });
+  const next = screen.getByRole('button', { name: 'Select stored event event-101' });
+  const targetRect = target.querySelector('rect')!;
+  const targetCenter = Number(target.querySelector('circle')!.getAttribute('cx'));
+  const nextRect = next.querySelector('rect')!;
+  expect(Number(nextRect.getAttribute('x'))).toBeGreaterThan(targetCenter);
+  expect(Number(targetRect.getAttribute('x')) + Number(targetRect.getAttribute('width'))).toBeLessThan(Number(next.querySelector('circle')!.getAttribute('cx')));
+  fireEvent.click(targetRect);
+  expect(onSelect).toHaveBeenCalledWith('event-100');
 });

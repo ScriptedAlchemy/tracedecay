@@ -70,6 +70,8 @@ pub use dto::{
 };
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) use dto::{GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1, RestReviewV1};
+#[cfg(test)]
+pub(crate) use network::ci_fixture_client;
 pub use network::{
     GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
     GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,

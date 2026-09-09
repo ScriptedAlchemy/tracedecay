@@ -132,6 +132,10 @@ fn default_exclude_patterns() -> Vec<String> {
 /// opens; serializing this type is retained solely for migration fixtures and
 /// backwards-compatible legacy input decoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent legacy configuration switches retain their serialized migration shape"
+)]
 pub struct TraceDecayConfig {
     /// Schema version of the configuration.
     pub version: u32,
@@ -393,6 +397,10 @@ impl Default for TelemetryConfig {
 /// object (only some keys present) still deserializes, and a missing `sync`
 /// key entirely falls back to [`SyncConfig::default`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent sync admission switches are configuration choices, not mutually exclusive states"
+)]
 pub struct SyncConfig {
     /// Enable the daemon git-metadata watcher.
     #[serde(default = "default_sync_auto_watch")]

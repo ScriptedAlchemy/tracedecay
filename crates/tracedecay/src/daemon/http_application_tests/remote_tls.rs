@@ -22,9 +22,9 @@ use tracedecay_domain::{
 use super::{AUTH_TOKEN, current_micros};
 use crate::daemon::http_application::{
     DaemonHttpApplicationRegistry, DaemonHttpApplicationService,
-    validate_remote_brain_tls_identity_at,
 };
 use tracedecay_daemon_service::DaemonInvocationService;
+use tracedecay_daemon_service::remote_http_transport::validate_remote_brain_tls_identity_at;
 
 const REMOTE_TLS_CERTIFICATE: &[u8] =
     include_bytes!("../../../../../tests/fixtures/remote_tls/localhost.crt.pem");
