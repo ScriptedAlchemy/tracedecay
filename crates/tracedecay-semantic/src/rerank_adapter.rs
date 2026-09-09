@@ -35,6 +35,14 @@ pub const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str = "tracedecay.rerank-runtime-com
 const CODE_CHUNK_ANCHOR_PREFIX: &str = "code-chunk:";
 const CODE_SYMBOL_ANCHOR_PREFIX: &str = "code-symbol:";
 
+#[derive(Clone, Copy)]
+enum SupportedRerankerModelV1 {
+    BgeBase,
+    BgeV2M3,
+    JinaV1TurboEn,
+    JinaV2BaseMultilingual,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RerankArtifactAdmissionErrorV1 {
     IncompatiblePins,
@@ -128,8 +136,7 @@ pub fn validate_reranker_manifest_pins(
     {
         return Err(RerankArtifactAdmissionErrorV1::IncompatiblePins);
     }
-    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
-    supported_reranker_model(&payload.upstream.name, &payload.artifact_id)
+    supported_reranker_identity(&payload.upstream.name, &payload.artifact_id)
         .ok_or(RerankArtifactAdmissionErrorV1::IncompatibleArtifact)?;
     Ok(payload.resource_ceiling)
 }
@@ -350,18 +357,32 @@ fn run_session(
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn supported_reranker_model(upstream: &str, artifact_id: &str) -> Option<RerankerModel> {
+    Some(match supported_reranker_identity(upstream, artifact_id)? {
+        SupportedRerankerModelV1::BgeBase => RerankerModel::BGERerankerBase,
+        SupportedRerankerModelV1::BgeV2M3 => RerankerModel::BGERerankerV2M3,
+        SupportedRerankerModelV1::JinaV1TurboEn => RerankerModel::JINARerankerV1TurboEn,
+        SupportedRerankerModelV1::JinaV2BaseMultilingual => {
+            RerankerModel::JINARerankerV2BaseMultiligual
+        }
+    })
+}
+
+fn supported_reranker_identity(
+    upstream: &str,
+    artifact_id: &str,
+) -> Option<SupportedRerankerModelV1> {
     match [upstream, artifact_id] {
         values if values.contains(&"BAAI/bge-reranker-base") => {
-            Some(RerankerModel::BGERerankerBase)
+            Some(SupportedRerankerModelV1::BgeBase)
         }
         values if values.contains(&"rozgo/bge-reranker-v2-m3") => {
-            Some(RerankerModel::BGERerankerV2M3)
+            Some(SupportedRerankerModelV1::BgeV2M3)
         }
         values if values.contains(&"jinaai/jina-reranker-v1-turbo-en") => {
-            Some(RerankerModel::JINARerankerV1TurboEn)
+            Some(SupportedRerankerModelV1::JinaV1TurboEn)
         }
         values if values.contains(&"jinaai/jina-reranker-v2-base-multilingual") => {
-            Some(RerankerModel::JINARerankerV2BaseMultiligual)
+            Some(SupportedRerankerModelV1::JinaV2BaseMultilingual)
         }
         _ => None,
     }

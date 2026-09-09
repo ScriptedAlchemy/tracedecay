@@ -290,7 +290,18 @@ impl SemanticModelLifecycleOwnerV1 {
                 grace_seconds: 7 * 24 * 60 * 60,
             },
         )?);
-        let durable = load_or_default_durable(&root, &catalog)?;
+        let mut durable = load_or_default_durable(&root, &catalog)?;
+        if let Some(model) = durable
+            .selected_model
+            .as_deref()
+            .and_then(|model_id| catalog.get(model_id))
+            && let Some(unavailable) = unavailable_runtime_state(model)
+            && (durable.state.as_ref() != Some(&unavailable) || durable.previous_ready.is_some())
+        {
+            durable.state = Some(unavailable);
+            durable.previous_ready = None;
+            persist_durable(&root, &durable)?;
+        }
         let initial_ready = SemanticLifecycleVerifiedReadyEventV1 {
             epoch: 0,
             artifact_digest: durable
@@ -656,9 +667,12 @@ impl SemanticModelLifecycleOwnerV1 {
                         return Err(CatalogErrorV1::UnknownModel.into());
                     }
                 };
-                let installed = match self.re_admit_durable_selection(model)? {
+                let installed = match unavailable_runtime_state(model) {
                     Some(state) => Some(state),
-                    None => self.discover_shared_selection(model)?,
+                    None => match self.re_admit_durable_selection(model)? {
+                        Some(state) => Some(state),
+                        None => self.discover_shared_selection(model)?,
+                    },
                 };
                 Some((model, installed))
             }
@@ -1236,14 +1250,6 @@ impl SemanticModelLifecycleOwnerV1 {
         let Some(model_id) = selected else {
             return false;
         };
-        if cfg!(windows)
-            && catalog.get(&model_id).is_some_and(|model| {
-                model.backend.runtime_family()
-                    == crate::embedding_backend::EmbeddingRuntimeFamilyV1::FastEmbedOrt
-            })
-        {
-            return false;
-        }
         let worker_root = root.clone();
         let worker_catalog = catalog.clone();
         let worker_model_id = model_id.clone();
@@ -1323,6 +1329,23 @@ impl SemanticModelLifecycleOwnerV1 {
                 .as_ref()
                 .map(|(store, active, rollback)| (*store, active.as_str(), rollback.as_str())),
         )
+    }
+}
+
+fn unavailable_runtime_state(
+    model: &CatalogedFastEmbedModelV1,
+) -> Option<SemanticModelLifecycleStateV1> {
+    match RuntimeEnvironmentV1::detect_embedding_process(model.backend.runtime_family()) {
+        Err(error @ SemanticCapabilityDisabledV1::IncompatibleRuntime) => {
+            Some(SemanticModelLifecycleStateV1::Failed {
+                model_id: model.model_id.clone(),
+                revision: model.source.revision.clone(),
+                artifact_digest: catalog_package_digest(model),
+                detail: error.to_string(),
+                retryable: false,
+            })
+        }
+        Ok(_) | Err(_) => None,
     }
 }
 

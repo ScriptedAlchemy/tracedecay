@@ -36,7 +36,7 @@ use super::artifact_store::{
     ArtifactImportErrorV1, ArtifactInventoryRecordV1, ArtifactInventoryStateV1,
     ArtifactLeaseKindV1, ArtifactLeaseV1, ConfiguredHttpsArtifactSourceV1,
     ExplicitHttpsArtifactTransportV1, GcReceiptV1, ModelArtifactStore, RetentionPolicyV1,
-    RuntimeEnvironmentV1,
+    RuntimeEnvironmentV1, SemanticCapabilityDisabledV1,
 };
 use super::model_catalog::{
     CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
