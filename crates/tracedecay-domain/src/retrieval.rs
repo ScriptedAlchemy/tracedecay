@@ -491,11 +491,24 @@ pub struct SanitizedBudgetUsage {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "failure", content = "detail", rename_all = "snake_case")]
 pub enum RetrievalFailure {
-    AuthorityUnavailable { detail: String },
-    IncompatibleProjection { detail: String },
+    /// Ranked results omit documents matching only these lexical term sources.
+    CandidateSourcesPruned {
+        term_sources: Vec<(String, u64)>,
+        document_frequency_budget: u64,
+    },
+    AuthorityUnavailable {
+        detail: String,
+    },
+    IncompatibleProjection {
+        detail: String,
+    },
     StaleSource,
-    InvalidRequest { detail: String },
-    Internal { detail: String },
+    InvalidRequest {
+        detail: String,
+    },
+    Internal {
+        detail: String,
+    },
 }
 
 /// Fatal request-level error (distinct from per-lane typed outcomes).

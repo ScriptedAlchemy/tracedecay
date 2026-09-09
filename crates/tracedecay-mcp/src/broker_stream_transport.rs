@@ -16,6 +16,10 @@ use tracedecay_framing::{
 };
 use tracedecay_session_memory::context::CancellationToken;
 
+use crate::lifecycle::ProjectServerResponseLifecycle;
+use crate::server::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
+use tracedecay_domain::errors::TraceDecayError;
+
 use crate::{ErrorCode, JsonRpcDecodeError, JsonRpcResponse, McpTransport};
 
 /// Response-revocation authority retained for one selected project server.
@@ -49,6 +53,47 @@ pub trait BrokerWorkDeliverySettlement: Send + Sync {
         outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
         drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
     );
+}
+
+impl BrokerResponseLifecycle for ProjectServerResponseLifecycle {
+    fn response_revoked(&self) -> &CancellationToken {
+        ProjectServerResponseLifecycle::response_revoked(self)
+    }
+}
+
+impl<L: BrokerSelectedResponseLease + 'static> BrokerSelectedResponseAuthority
+    for RmcpSelectedProjectResponseAuthority<L>
+{
+    fn take_response(
+        &self,
+        id: Option<&serde_json::Value>,
+    ) -> std::io::Result<Option<Box<dyn BrokerSelectedResponseLease>>> {
+        self.take(id)
+            .map(|lease| lease.map(|lease| Box::new(lease) as Box<dyn BrokerSelectedResponseLease>))
+            .map_err(selected_response_io_error)
+    }
+}
+
+fn selected_response_io_error(error: TraceDecayError) -> std::io::Error {
+    std::io::Error::other(error)
+}
+
+impl BrokerWorkDeliverySettlement for RmcpWorkDeliverySettlement {
+    fn attempt_for_request(
+        &self,
+        request: &serde_json::Value,
+    ) -> Option<tracedecay_domain::DeliverySettlementAttemptV1> {
+        RmcpWorkDeliverySettlement::attempt_for_request(self, request)
+    }
+
+    fn settle(
+        &self,
+        attempt: tracedecay_domain::DeliverySettlementAttemptV1,
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+        drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) {
+        RmcpWorkDeliverySettlement::settle(self, attempt, outcome, drop_reason);
+    }
 }
 
 pub struct BrokerStreamTransport {
@@ -547,5 +592,34 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
     async fn close(&mut self) -> std::result::Result<(), Self::Error> {
         self.writer.lock().await.take();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod selected_response_error_tests {
+    use super::*;
+
+    #[test]
+    fn io_boundary_retains_typed_project_route_classification() {
+        let error = TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            "selected response authority is warming",
+        );
+
+        let error = selected_response_io_error(error);
+        let source = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<TraceDecayError>())
+            .expect("I/O error must retain the typed TraceDecay source");
+
+        assert_eq!(
+            source.project_route_context(),
+            Some((
+                "project_route_unavailable",
+                true,
+                "selected response authority is warming",
+            ))
+        );
     }
 }

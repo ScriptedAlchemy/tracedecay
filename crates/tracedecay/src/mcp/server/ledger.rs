@@ -564,7 +564,9 @@ impl McpServer {
 fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
     let mut config = tracedecay_session_memory::user_config::UserConfig::load();
     config.pending_upload = config.pending_upload.saturating_add(delta);
-    if upload_enabled && crate::cloud::flush_pending(config.pending_upload).is_some() {
+    if upload_enabled
+        && tracedecay_dashboard_api::cloud::flush_pending(config.pending_upload).is_some()
+    {
         config.pending_upload = 0;
         config.last_upload_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

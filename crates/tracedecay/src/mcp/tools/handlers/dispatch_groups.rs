@@ -14,12 +14,17 @@ use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
-use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::ast_grep as portable_ast_grep;
+use tracedecay_mcp::handlers::git;
 use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
+use tracedecay_mcp::{
+    AdmittedCodeIndex, AdmittedProjectStore, McpToolBinding, McpToolContext, RequestControls,
+    ToolResult,
+};
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 use super::ToolCallRegistryOptions;
 use super::support::{effective_path, generic_tool_result, unique_file_paths};
@@ -27,7 +32,7 @@ use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
     admin_cli, admin_project, application_surface, automation_runs, dashboard, dispatch_controls,
-    edit, git, graph, hook_runtime, info, skills, workflow,
+    edit, graph, hook_runtime, info, skills, workflow,
 };
 
 mod health_dispatch;
@@ -504,8 +509,7 @@ fn dispatch_graph_tools_inner<'a>(
                     options.code_index_search_authority.as_ref(),
                     options.code_index_ignored_dependency_admission.as_deref(),
                     options.code_index_freshness_reader.as_ref(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
+                    &admitted_tool_context(cg, &options)?,
                 )
                 .await
             }
@@ -541,8 +545,7 @@ fn dispatch_graph_tools_inner<'a>(
                     options.code_index_search_executor.as_ref(),
                     options.code_index_search_authority.as_ref(),
                     options.code_index_freshness_reader.as_ref(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
+                    &admitted_tool_context(cg, &options)?,
                 )
                 .await
             }
@@ -597,8 +600,7 @@ fn dispatch_graph_tools_inner<'a>(
                     args,
                     selected_scope_prefix,
                     options.code_index_ignored_dependency_admission.as_deref(),
-                    options.application_deadline.as_ref(),
-                    options.application_cancellation.as_ref(),
+                    &admitted_tool_context(cg, &options)?,
                 )
                 .await
             }
@@ -1027,20 +1029,21 @@ fn dispatch_git_tools_inner<'a>(
         // also tells the underlying operation to stop at its next checkpoint.
         let carried_deadline = options.application_deadline.as_ref();
         let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
+        let ctx = admitted_tool_context(cg, &options)?;
 
         let handler = async {
             match tool_name {
                 "tracedecay_affected" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_affected(cg, &graph, args).await
+                    git::handle_affected(&ctx, &graph, args).await
                 }
                 "tracedecay_diff_context" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_diff_context(cg, &graph, args).await
+                    git::handle_diff_context(&ctx, &graph, args).await
                 }
                 "tracedecay_changelog" => {
                     git::handle_changelog(
-                        cg,
+                        &ctx,
                         admitted_graph_query(cg, &options, "file_dependents"),
                         args,
                     )
@@ -1048,54 +1051,19 @@ fn dispatch_git_tools_inner<'a>(
                 }
                 "tracedecay_commit_context" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_commit_context(cg, &graph, args).await
+                    git::handle_commit_context(&ctx, &graph, args).await
                 }
                 "tracedecay_pr_context" => {
-                    let deadline = options.application_deadline.clone();
-                    let cancellation = options.application_cancellation.clone();
-                    let registered_project_session_db =
-                        options.registered_project_session_db.clone();
                     git::handle_pr_context(
-                        cg,
+                        &ctx,
                         admitted_graph_query(cg, &options, "file_dependents"),
                         args,
-                        deadline,
-                        cancellation,
-                        registered_project_session_db,
                     )
                     .await
                 }
-                "tracedecay_branch_search" => {
-                    git::handle_branch_search(
-                        cg,
-                        args,
-                        options.code_index_search_executor.as_ref(),
-                        options.code_index_search_authority.as_ref(),
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
-                    )
-                    .await
-                }
-                "tracedecay_branch_diff" => {
-                    git::handle_branch_diff(
-                        cg,
-                        args,
-                        options.code_index_branch_diff_executor.as_ref(),
-                        options.code_index_search_authority.as_ref(),
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
-                    )
-                    .await
-                }
-                "tracedecay_branch_list" => {
-                    git::handle_branch_list(
-                        cg,
-                        args,
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
-                    )
-                    .await
-                }
+                "tracedecay_branch_search" => git::handle_branch_search(&ctx, args).await,
+                "tracedecay_branch_diff" => git::handle_branch_diff(&ctx, args).await,
+                "tracedecay_branch_list" => git::handle_branch_list(&ctx, args).await,
                 _ => Err(unknown_tool_error(tool_name)),
             }
         };
@@ -1103,17 +1071,76 @@ fn dispatch_git_tools_inner<'a>(
         match (carried_deadline.is_some(), remaining) {
             (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
                 Ok(result) => result,
-                Err(_elapsed) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
+                Err(_elapsed) => Ok(git::git_dispatch_deadline_result(&ctx, tool_name)),
             },
             // `deadline_remaining` yields `None` for a non-positive budget, so a
             // carried deadline that already elapsed must be rejected rather than
             // dispatched unbounded.
-            (true, None) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
+            (true, None) => Ok(git::git_dispatch_deadline_result(&ctx, tool_name)),
             // Standalone / non-admission callers carry no deadline and stay
             // unbounded.
             (false, None) => handler.await,
         }
     })
+}
+
+/// Binds the admitted authorities a moved handler family reads.
+///
+/// Everything the family may touch — the resolved project scope, the caller's
+/// deadline and cancellation, the registered project session store that
+/// authenticates PR-context cursors, and the daemon-owned code-index executors
+/// with the authorization proved for them — crosses into `tracedecay-mcp` as
+/// one validated binding, under the single checkout the serving route was
+/// admitted for. An authority the daemon did not admit stays absent and the
+/// handler reports its own typed unavailable state; an authority that
+/// contradicts the admitted checkout refuses the whole call.
+fn admitted_tool_context<'a>(
+    cg: &'a TraceDecay,
+    options: &'a ToolCallRegistryOptions<'a>,
+) -> Result<McpToolContext<'a>> {
+    // Project open resolves one checkout per served route and publishes it
+    // alongside the authorities that mount behind it, so this is the checkout
+    // every scoped authority below belongs to. Absent, the request never
+    // resolved a project: a scoped authority offered without it is dropped
+    // here rather than read against whatever project it happens to hold.
+    let scope = options.admitted_project_scope.as_ref();
+    // Executors and their admission envelope are published together by the
+    // route. Presenting executors without the envelope is a wiring fault, not
+    // a capability to report: they would authenticate nothing.
+    let code_index = match (
+        scope.and(options.code_index_search_authority.as_ref()),
+        options.code_index_search_executor.as_ref(),
+        options.code_index_branch_diff_executor.as_ref(),
+    ) {
+        (Some(authority), search, branch_diff) => {
+            Some(AdmittedCodeIndex::new(authority, search, branch_diff)?)
+        }
+        (None, None, None) => None,
+        (None, _, _) => {
+            return Err(TraceDecayError::project_route(
+                "mcp_tool_binding_code_index_without_authority",
+                false,
+                "code-index executors were admitted without the admitted scope and read admission envelope they authenticate against",
+            ));
+        }
+    };
+    // The daemon opened this store for the route it admitted, which is the
+    // authorization this request carries. `bind` proves independently that the
+    // lease's own logical shard names that project before any handler reads it.
+    let project_session_store = scope
+        .and(options.registered_project_session_db.as_ref())
+        .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
+    Ok(McpToolContext::bind(McpToolBinding {
+        project_root: cg.project_root(),
+        active_branch: cg.active_branch(),
+        controls: RequestControls {
+            deadline: options.application_deadline.as_ref(),
+            cancellation: options.application_cancellation.as_ref(),
+        },
+        scope,
+        project_session_store,
+        code_index,
+    })?)
 }
 
 /// Dispatch source-editing tools (`tracedecay_str_replace`,

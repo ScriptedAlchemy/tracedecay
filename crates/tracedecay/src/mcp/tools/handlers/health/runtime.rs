@@ -141,6 +141,68 @@ async fn attach_doctor_report(
     };
 }
 
+pub(crate) async fn collect_database_snapshot(
+    cg: &TraceDecay,
+    include_integrity: bool,
+    generation_census_reader: Option<
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    >,
+) -> Result<tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot> {
+    let db_path = cg.db_path();
+    let collected = tracedecay_runtime_core::store_telemetry::collect_store_telemetry(
+        cg.db(),
+        cg.project_root().to_path_buf(),
+        db_path.clone(),
+        include_integrity,
+    )
+    .await?;
+    let generation_census = match generation_census_reader {
+        Some(reader) => {
+            hotpath::future!(reader(), label = "runtime_ports.generation_census").await
+        }
+        None => {
+            tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+            }
+        }
+    };
+    Ok(
+        tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot::from_collected(
+            collected,
+            tracedecay_session_memory::runtime_telemetry::read_dirty_marker(
+                &tracedecay_session_memory::runtime_telemetry::with_suffix(&db_path, ".dirty"),
+            ),
+            generation_census,
+            tracedecay_session_memory::runtime_telemetry::RuntimeRegistrySnapshot::from_projection(
+                cg.store_runtime_registry().runtime_telemetry(),
+            ),
+        ),
+    )
+}
+
+async fn collect_runtime_snapshot(
+    cg: &TraceDecay,
+    include_integrity: bool,
+    generation_census_reader: Option<
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    >,
+) -> Result<tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot> {
+    tracedecay_session_memory::runtime_telemetry::read_cached_process_sample();
+    let database =
+        collect_database_snapshot(cg, include_integrity, generation_census_reader).await?;
+    let process = tracedecay_session_memory::runtime_telemetry::read_cached_process_sample_at_response_boundary()
+        .await;
+    Ok(
+        tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot {
+            captured_at: tracedecay_session_memory::runtime_telemetry::unix_epoch_secs()?,
+            tracedecay_version: crate::version::build_version()?.to_owned(),
+            host_os: std::env::consts::OS.to_owned(),
+            process,
+            database,
+        },
+    )
+}
+
 /// Surfaces process and database telemetry so users hitting unexpected
 /// CPU/RAM pressure can attach a structured snapshot to a bug report.
 #[hotpath::measure(label = "mcp.health.runtime.total")]
@@ -159,11 +221,7 @@ pub(crate) async fn handle_runtime(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let snap = hotpath::future!(
-        crate::runtime_telemetry::collect_with_integrity_and_generation_census(
-            cg,
-            authority_audit,
-            generation_census_reader
-        ),
+        collect_runtime_snapshot(cg, authority_audit, generation_census_reader),
         label = "mcp.health.runtime.telemetry"
     )
     .await?;

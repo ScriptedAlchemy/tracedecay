@@ -917,14 +917,34 @@ impl ProductionProjectCompositionHarnessV1 {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "production-composition harness is shut down".to_owned(),
             })?;
-        super::branch_add::track_exact_worktree_branch(
-            &graph,
-            &resources.invocation.code_index_schedulers,
-            &canonical_project_root,
-            worktree_root.as_ref(),
-            branch,
-        )
-        .await
+        let administration = resources.store_administration.clone();
+        let schedulers = resources.invocation.code_index_schedulers.clone();
+        let worktree_root = worktree_root.as_ref().to_path_buf();
+        let branch = branch.to_owned();
+        administration
+            .run_manual_branch_publication(|cancellation| async move {
+                let _lifecycle = super::pr_autotrack::try_acquire_manual_branch_lifecycle(
+                    &graph.store_layout().data_root,
+                    &branch,
+                )
+                .map_err(|error| {
+                    TraceDecayError::project_route(
+                        error.reason_code(),
+                        error.retryable(),
+                        error.detail(),
+                    )
+                })?;
+                super::branch_add::branch_publication_context(&graph)?
+                    .track_exact_worktree_branch(
+                        &schedulers,
+                        &canonical_project_root,
+                        &worktree_root,
+                        &branch,
+                        &cancellation,
+                    )
+                    .await
+            })
+            .await
     }
 
     #[hotpath::measure(label = "daemon.harness.call_tool", future = true)]
@@ -1101,6 +1121,20 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 
 #[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
+    #[cfg(unix)]
+    if let Err(reason) = resources
+        .store_administration
+        .shutdown_manual_branch_publications()
+        .await
+    {
+        super::log_daemon_event(
+            "manual_branch_publication",
+            &[
+                ("outcome", "harness_shutdown_failed".to_owned()),
+                ("reason", reason),
+            ],
+        );
+    }
     resources
         .store_administration
         .join_project_server_retirements()
@@ -1195,6 +1229,7 @@ mod code_index_activation_test {
     use std::sync::Arc;
 
     use tempfile::TempDir;
+    use tracedecay_runtime_core::cancellation::CancellationToken;
 
     use super::*;
 
@@ -1442,6 +1477,77 @@ mod code_index_activation_test {
             json!("linked_worktree_disabled"),
             "{payload}"
         );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[hotpath::skip]
+    async fn branch_publication_respects_lifecycle_contention_until_owner_cancellation() {
+        let isolation = TempDir::new().expect("production harness isolation");
+        let project = isolation.path().join("project");
+        std::fs::create_dir_all(&project).expect("project root");
+        std::fs::write(project.join("lib.rs"), "pub fn indexed_symbol() {}\n")
+            .expect("project source");
+        for arguments in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-qm",
+                "seed project",
+            ],
+        ] {
+            let status = Command::new(
+                tracedecay_runtime_core::git::try_git_program()
+                    .expect("absolute git executable should resolve"),
+            )
+            .args(&arguments)
+            .current_dir(&project)
+            .status()
+            .expect("git fixture command");
+            assert!(status.success(), "git {arguments:?}");
+        }
+
+        let harness =
+            ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+                .await
+                .expect("production harness");
+        let data_root = harness
+            .project_data_root(&project)
+            .await
+            .expect("project data root");
+        let cancellation = CancellationToken::new();
+        let owner_cancellation = cancellation.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let _lease = crate::daemon::pr_autotrack::try_acquire_manual_branch_lifecycle(
+                &data_root, "main",
+            )
+            .expect("lifecycle owner");
+            ready_tx.send(()).expect("publish owner readiness");
+            owner_cancellation.cancelled().await;
+        });
+        ready_rx.await.expect("lifecycle owner started");
+
+        let error = harness
+            .track_worktree_branch(&project, &project, "main")
+            .await
+            .expect_err("harness publication must not bypass the lifecycle owner");
+        assert!(
+            error.to_string().contains("lifecycle is already active"),
+            "{error}"
+        );
+
+        cancellation.cancel();
+        owner.await.expect("cancelled lifecycle owner");
+        harness
+            .track_worktree_branch(&project, &project, "main")
+            .await
+            .expect("publication proceeds after lifecycle owner cancellation");
         harness.shutdown().await;
     }
 }

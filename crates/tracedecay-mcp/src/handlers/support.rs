@@ -15,6 +15,28 @@ use crate::tools::render;
 /// back out, so no handler has to remember to strip it.
 pub const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
 
+/// Decodes a paginated read's continuation from the transport arguments.
+///
+/// The cursor is caller-supplied, so it is bounded before parsing and then
+/// validated: a continuation that does not authenticate is rejected rather
+/// than treated as "start from the beginning", which would silently restart
+/// a page walk instead of reporting the tampered envelope.
+pub fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
+    let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if encoded.len() > 4_096 {
+        return Err(TraceDecayError::Config {
+            message: "cursor exceeds its bounded authenticated envelope".to_owned(),
+        });
+    }
+    let cursor: tracedecay_domain::RetrievalCursor = serde_json::from_str(encoded)?;
+    cursor.validate().map_err(|_| TraceDecayError::Config {
+        message: "cursor is not a valid authenticated retrieval continuation".to_owned(),
+    })?;
+    Ok(Some(cursor))
+}
+
 /// The single wrapper every MCP tool handler returns through.
 ///
 /// Lifts internal analytics out of `value` so they travel beside the result
