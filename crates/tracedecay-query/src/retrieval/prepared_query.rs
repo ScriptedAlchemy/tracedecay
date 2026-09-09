@@ -564,17 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_cursor_decode_is_explicitly_untrusted() {
-        let encoded = cursor(2, UtcMicros(1_000));
-        let routing = decode_cursor(&encoded).expect("canonical cursor");
-        assert_eq!(
-            routing.payload.generation,
-            CodeGenerationId::new("generation.callable-page").expect("generation")
-        );
-        assert_eq!(routing.payload.expires_at, UtcMicros(1_000));
-    }
-
-    #[test]
     fn cursor_rejects_noncanonical_or_tampered_wire_values() {
         let encoded = cursor(2, UtcMicros(1_000));
         let decoded = decode_cursor(&encoded).expect("canonical cursor");

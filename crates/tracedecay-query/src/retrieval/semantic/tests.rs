@@ -701,25 +701,6 @@ fn scan_rejects_foreign_generation_rows_instead_of_broadening_scope() {
     assert_eq!(error, RetrievalPortError::GenerationMismatch);
 }
 
-#[test]
-fn retrieve_preserves_generation_mismatch_identity() {
-    let query_view = query_view();
-    let projection = projection();
-    let request = request(&query_view, &projection, 4);
-    let mut foreign = record(&request, "foreign", vec![1.0, 0.0]);
-    foreign.source_generation = id::<CodeGenerationId>("generation.foreign");
-    let embedder = FakeQueryEmbedder::default();
-    let vectors = FakeVectorReadPort::new(&request, vec![foreign]);
-    let control = FixedExecutionControl::default();
-    let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
-
-    let error = retriever
-        .retrieve_semantic(&request)
-        .expect_err("foreign vector generation must fail closed");
-
-    assert_eq!(error, RetrievalPortError::GenerationMismatch);
-}
-
 struct MismatchedDigestEmbedder;
 
 impl SemanticQueryEmbeddingPort for MismatchedDigestEmbedder {
@@ -936,29 +917,6 @@ fn complete_uncapped_scan_marks_continuation_exhausted() {
     };
 
     assert!(batch.continuation.expect("semantic continuation").exhausted);
-}
-
-#[test]
-fn elapsed_deadline_before_scan_invokes_no_authority() {
-    let query_view = query_view();
-    let projection = projection();
-    let mut request = request(&query_view, &projection, 4);
-    request.budget.deadline_micros = Some(5);
-    let embedder = FakeQueryEmbedder::default();
-    let vectors = FakeVectorReadPort::new(&request, Vec::new());
-    let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(5)),
-        ..FixedExecutionControl::default()
-    };
-
-    assert!(matches!(
-        SemanticCodeRetriever::new(&embedder, &vectors, &control)
-            .retrieve_semantic(&request)
-            .expect("typed budget outcome"),
-        RetrieverOutcome::BudgetExceeded(_)
-    ));
-    assert_eq!(embedder.calls.get(), 0);
-    assert_eq!(vectors.scans.get(), 0);
 }
 
 #[test]

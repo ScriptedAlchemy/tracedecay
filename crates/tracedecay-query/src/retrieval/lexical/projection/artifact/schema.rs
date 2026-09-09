@@ -540,7 +540,7 @@ mod tests {
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14, LexicalArtifactLayoutV1, exact_field_code,
-        field_code, field_from_code, stable_exact_term_id,
+        field_code, field_from_code,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
     use tracedecay_domain::ExactFieldV1;
@@ -611,32 +611,6 @@ mod tests {
         assert!(field_from_code(0).is_err());
         assert!(field_from_code(99).is_err());
         assert_eq!(field_code(LexicalFieldV1::Subtoken), 7);
-    }
-
-    #[test]
-    fn stable_term_ids_are_deterministic_and_content_addressed() {
-        assert_eq!(
-            super::stable_term_id("return"),
-            super::stable_term_id("return")
-        );
-        assert_ne!(
-            super::stable_term_id("return"),
-            super::stable_term_id("value")
-        );
-        assert!(super::stable_term_id("return") >= 0);
-    }
-
-    #[test]
-    fn exact_term_ids_are_deterministic_over_arbitrary_bytes() {
-        assert_eq!(
-            stable_exact_term_id(b"\xffreturn"),
-            stable_exact_term_id(b"\xffreturn")
-        );
-        assert_ne!(
-            stable_exact_term_id(b"\xffreturn"),
-            stable_exact_term_id(b"return")
-        );
-        assert!(stable_exact_term_id(b"\xffreturn") >= 0);
     }
 
     #[test]

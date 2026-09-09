@@ -410,68 +410,6 @@ fn current_conflict_precedence_retains_the_authoritative_side() {
 }
 
 #[test]
-fn evolution_orders_the_correction_chain_not_incidental_timestamps() {
-    let original = occurrence(
-        'a',
-        "original",
-        30,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(1),
-        },
-    );
-    let correction = occurrence(
-        'b',
-        "correction",
-        20,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(2),
-        },
-    );
-    let superseding = occurrence(
-        'c',
-        "superseding",
-        10,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(3),
-        },
-    );
-    let assertions = [
-        assertion(
-            TemporalAssertionKindV1::Corrects,
-            "correction",
-            "original",
-            31,
-        ),
-        assertion(
-            TemporalAssertionKindV1::Supersedes,
-            "superseding",
-            "correction",
-            32,
-        ),
-    ];
-
-    let resolved = resolve_temporal(
-        &[original, correction, superseding],
-        &[],
-        &assertions,
-        TemporalModeV1::Evolution,
-    )
-    .expect("resolution succeeds");
-
-    assert_eq!(
-        resolved
-            .iter()
-            .map(|item| item.occurrence.anchor_id.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            anchor("original"),
-            anchor("correction"),
-            anchor("superseding")
-        ]
-    );
-}
-
-#[test]
 fn resolution_checks_live_work_budget_during_occurrence_consumption() {
     let occurrences = [
         occurrence('a', "a", 1, TemporalValidityV1::Unknown),

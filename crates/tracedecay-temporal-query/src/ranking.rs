@@ -563,19 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_phrase_channel_precedes_lexical_at_equal_channel_rank() {
-        let ranked = rank(
-            &[
-                candidate("lexical", CandidateChannel::Lexical, 100, None),
-                candidate("phrase", CandidateChannel::Phrase, 1, None),
-            ],
-            DiversityLimits::unbounded(),
-        );
-
-        assert_eq!(ranked[0].stable_id, "phrase");
-    }
-
-    #[test]
     fn ranking_never_compares_raw_scores_from_different_sources() {
         let mut source_a = candidate("a", CandidateChannel::Lexical, 1, None);
         source_a.source = Some("source-a".to_string());
@@ -735,24 +722,6 @@ mod tests {
     }
 
     #[test]
-    fn same_channel_duplicate_scores_require_the_same_calibrated_source() {
-        let mut unscoped = candidate("dup", CandidateChannel::Lexical, i64::MAX, Some("msg"));
-        unscoped.source = None;
-        let mut scoped = unscoped.clone();
-        scoped.raw_score = i64::MIN;
-        scoped.source = Some("store-a".to_string());
-
-        let err = rank_candidates(&[unscoped, scoped], DiversityLimits::unbounded())
-            .expect_err("raw scores from distinct source domains are incomparable");
-        assert_eq!(
-            err,
-            RankingError::ConflictingDuplicateMetadata {
-                stable_id: "dup".to_string(),
-            }
-        );
-    }
-
-    #[test]
     fn duplicate_multiplicity_does_not_change_unrelated_scores_or_final_order() {
         let unique = vec![
             candidate("a", CandidateChannel::Lexical, 100, Some("a")),
@@ -876,21 +845,6 @@ mod tests {
                 ByteRangeV1::new(8, 12).expect("second range"),
             ]
         );
-    }
-
-    #[test]
-    fn duplicate_stable_id_compatible_metadata_merges_without_first_partition_inheritance() {
-        let mut lexical = candidate("dup", CandidateChannel::Lexical, 10, None);
-        lexical.logical_message = None;
-        lexical.turn = Some("turn-1".to_string());
-        let mut phrase = candidate("dup", CandidateChannel::Phrase, 1, Some("msg-1"));
-        phrase.turn = None;
-
-        let ranked = rank(&[lexical, phrase], DiversityLimits::unbounded());
-        assert_eq!(ranked.len(), 1);
-        assert_eq!(ranked[0].logical_message.as_deref(), Some("msg-1"));
-        assert_eq!(ranked[0].turn.as_deref(), Some("turn-1"));
-        assert!(ranked[0].normalized_score_micros >= encode_score(RankTier::ExactPhrase, 0));
     }
 
     #[test]

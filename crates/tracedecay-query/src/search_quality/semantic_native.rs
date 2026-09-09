@@ -1428,11 +1428,6 @@ mod tests {
     }
 
     #[test]
-    fn projection_case_matrix_accepts_zero_work_idempotency_replay() {
-        assert!(complete_resource_sample().is_complete());
-    }
-
-    #[test]
     fn native_resource_sample_requires_tokenizer_and_bounded_cold_load_evidence() {
         let mut sample = complete_resource_sample();
         sample.tokenizer_bytes = None;

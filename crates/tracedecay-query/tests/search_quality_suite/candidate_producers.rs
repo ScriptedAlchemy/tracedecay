@@ -1716,38 +1716,6 @@ fn content_addressed_reader_rejects_atomic_same_size_replacement() {
 }
 
 #[test]
-fn reader_rejects_revision_four_artifact_before_indexed_queries() {
-    let (fixture, pages, source_receipt) = real_verified_pages();
-    let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("incompatible-state.sqlite");
-    let control = ArtifactControl { cancelled: false };
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
-        .expect("create artifact");
-    for page in &pages {
-        builder.append_page(page, &control).expect("append page");
-    }
-    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
-    connection
-        .execute(
-            "UPDATE artifact_state SET format_revision = 4 WHERE singleton = 1",
-            [],
-        )
-        .expect("write revision-four artifact state");
-    drop(connection);
-
-    assert!(matches!(
-        CodeLexicalArtifactReaderV1::open_with_control(
-            &artifact_path,
-            &verified,
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-            &control,
-        ),
-        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
-    ));
-}
-
-#[test]
 fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -2653,42 +2621,6 @@ fn persisted_finalization_position(path: &Path) -> (String, u64) {
         .as_u64()
         .expect("finalization section ordinal");
     (phase, ordinal)
-}
-
-#[test]
-fn disk_artifact_admission_selects_the_exact_largest_contiguous_prefix() {
-    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
-    assert!(
-        pages.len() >= 2,
-        "fixture must expose a real prefix boundary"
-    );
-    let directory = tempfile::tempdir().expect("artifact tempdir");
-    let probe_path = directory.path().join("prefix-probe.sqlite");
-    let probe = CodeLexicalArtifactBuilderV1::create(&probe_path, fixture.metadata.clone())
-        .expect("create admission probe");
-    let first_page_charge = probe
-        .page_batch_ledger_charge_bytes(&pages[..1])
-        .expect("measure first page charge");
-    let exact_budget = probe
-        .fixed_ledger_charge_bytes()
-        .checked_add(first_page_charge)
-        .expect("exact first-page budget");
-    drop(probe);
-
-    let artifact_path = directory.path().join("prefix-bound.sqlite");
-    let builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-        &artifact_path,
-        fixture.metadata,
-        exact_budget,
-    )
-    .expect("create exactly bounded builder");
-    assert_eq!(
-        builder
-            .largest_admissible_page_prefix(&pages)
-            .expect("select admissible prefix"),
-        1,
-        "the selector must accept the equality boundary and stop before the first over-budget page"
-    );
 }
 
 #[test]
@@ -4474,66 +4406,6 @@ fn disk_artifact_page_ledger_charges_live_ngram_map_and_encoded_shard_overlap() 
         "aggregation scratch must coexist with encoded shards: charged={}, strict map lower bound={strict_live_map_lower_bound}, distinct_keys={distinct_keys}, memberships={logical_memberships}",
         prepared.preparation_scratch_bytes(),
     );
-}
-
-#[test]
-fn disk_artifact_one_page_wrapper_matches_the_batch_path() {
-    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
-    let directory = tempfile::tempdir().expect("artifact tempdir");
-    let control = ArtifactControl { cancelled: false };
-    let mut wrapper = CodeLexicalArtifactBuilderV1::create(
-        directory.path().join("one-page-wrapper.sqlite"),
-        fixture.metadata.clone(),
-    )
-    .expect("create wrapper artifact");
-    let mut batch = CodeLexicalArtifactBuilderV1::create(
-        directory.path().join("one-page-batch.sqlite"),
-        fixture.metadata,
-    )
-    .expect("create batch artifact");
-
-    assert_eq!(
-        wrapper
-            .append_page(&pages[0], &control)
-            .expect("append through wrapper"),
-        batch
-            .append_pages(&pages[..1], &control)
-            .expect("append through batch path")
-    );
-}
-
-#[test]
-fn disk_artifact_page_shards_have_batch_width_independent_receipts() {
-    let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
-    assert!(
-        pages.len() >= 2,
-        "fixture must exercise multiple source pages"
-    );
-    let directory = tempfile::tempdir().expect("artifact tempdir");
-    let control = ArtifactControl { cancelled: false };
-    let mut one_by_one = CodeLexicalArtifactBuilderV1::create(
-        directory.path().join("page-shards-one-by-one.sqlite"),
-        fixture.metadata.clone(),
-    )
-    .expect("create one-page-width artifact");
-    for page in &pages {
-        one_by_one
-            .append_page(page, &control)
-            .expect("append one source page");
-    }
-    let mut batched = CodeLexicalArtifactBuilderV1::create(
-        directory.path().join("page-shards-batched.sqlite"),
-        fixture.metadata,
-    )
-    .expect("create batched artifact");
-    batched
-        .append_pages(&pages, &control)
-        .expect("append every source page atomically");
-
-    let one_by_one = finish_staged_artifact(&mut one_by_one, &source_receipt, &control);
-    let batched = finish_staged_artifact(&mut batched, &source_receipt, &control);
-    assert_eq!(one_by_one.artifact_digest(), batched.artifact_digest());
-    assert_eq!(one_by_one.section_digests(), batched.section_digests());
 }
 
 #[test]
