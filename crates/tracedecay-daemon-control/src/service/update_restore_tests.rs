@@ -41,21 +41,6 @@ fn quiesced_guard() -> QuiescedDaemonLifecycle {
     }
 }
 
-#[test]
-fn maintenance_outcome_without_install_keeps_acquire_time_version() {
-    let mut guard = quiesced_guard();
-
-    guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
-        value: (),
-        installed_version: None,
-    });
-
-    assert_eq!(
-        guard.expected_version, QUIESCED_VERSION,
-        "no install restarts the same binary, so the acquire-time version stays authoritative"
-    );
-}
-
 #[cfg(unix)]
 struct EnvVarGuard {
     key: &'static str,

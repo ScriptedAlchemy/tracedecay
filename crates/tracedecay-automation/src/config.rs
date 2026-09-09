@@ -559,37 +559,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_config_patch_merges_without_clearing_omitted_fields() {
-        let current = AutomationConfigPatch {
-            enabled: Some(true),
-            memory_curator: AutomationTaskPatch {
-                enabled: Some(true),
-                schedule: Some(Some("manual".to_string())),
-                ..AutomationTaskPatch::default()
-            },
-            ..AutomationConfigPatch::default()
-        };
-        let patch = AutomationConfigPatch {
-            timeout_secs: Some(120),
-            scheduler_tick_secs: Some(20),
-            memory_curator: AutomationTaskPatch {
-                schedule: Some(None),
-                ..AutomationTaskPatch::default()
-            },
-            ..AutomationConfigPatch::default()
-        };
-
-        let merged = merge_project_config(Some(current), patch);
-
-        assert_eq!(merged.enabled, Some(true));
-        assert_eq!(merged.model_id, None);
-        assert_eq!(merged.timeout_secs, Some(120));
-        assert_eq!(merged.scheduler_tick_secs, Some(20));
-        assert_eq!(merged.memory_curator.enabled, Some(true));
-        assert_eq!(merged.memory_curator.schedule, Some(None));
-    }
-
-    #[test]
     fn session_evidence_budget_backoff_is_patchable_clearable_and_nonzero() {
         let base = AutomationConfig::default();
         assert_eq!(

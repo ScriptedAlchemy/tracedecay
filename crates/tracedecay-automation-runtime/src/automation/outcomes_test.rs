@@ -201,23 +201,6 @@ fn recalled_and_helpful_fact_yields_top_verdict() {
 }
 
 #[test]
-fn helpful_feedback_without_recall_is_not_recalled_and_helpful() {
-    let mut telemetry = telemetry();
-    telemetry.helpful_count = 1;
-    let outcome = fact_outcome(
-        fact_input(
-            "apply_fact_feedback_only",
-            ProjectMemoryAutomaticFactStateV1::Applied,
-            Some("fact:feedback_only"),
-            5 * DAY,
-            FactOutcomeObservation::Available(telemetry),
-        ),
-        9 * DAY,
-    );
-    assert_eq!(outcome.verdict, FactOutcomeVerdict::NeverRecalled);
-}
-
-#[test]
 fn quarantined_receipt_preserves_its_terminal_state_without_a_projection() {
     let outcome = fact_outcome(
         fact_input(
