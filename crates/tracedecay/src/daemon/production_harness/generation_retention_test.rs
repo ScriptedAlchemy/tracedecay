@@ -21,9 +21,7 @@ use tracedecay_graph_db::{
     VerifiedGenerationBeginV1, VerifiedGraphSnapshot,
 };
 use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
-use tracedecay_semantic_contracts::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticResourceCeilings,
-};
+use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
 
 use super::journey_test_support::git;
 use super::*;

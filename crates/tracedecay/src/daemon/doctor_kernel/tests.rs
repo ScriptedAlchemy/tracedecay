@@ -5,8 +5,8 @@
 //! owned here at the composition root.
 
 use tracedecay_contracts::doctor::{
-    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, LanguageServerReadV1,
-    LanguageServerStateV1, ObservabilityReadV1, ObservabilityStateV1,
+    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, IngestRefusalCountV1,
+    LanguageServerReadV1, LanguageServerStateV1, ObservabilityReadV1, ObservabilityStateV1,
 };
 use tracedecay_contracts::{
     ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
