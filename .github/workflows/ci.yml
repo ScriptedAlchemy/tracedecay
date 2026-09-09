@@ -9,16 +9,18 @@ on:
 permissions:
   contents: read
 
-# One run per pull request (or per pushed ref). A newer push to a
-# feature-branch pull request supersedes the run in flight: its verdict is for
-# a head nobody can merge any more, and letting it finish only holds runners
-# the current head is waiting for. Pull requests into `master` (the integration
-# delivery and release PRs) keep every run to completion: their heads move
-# often as child work lands, and a verdict for a slightly older tip is still
-# the evidence those merges are judged by. `push` runs are never cancelled.
+# One run per pull request (or per pushed ref). A newer push to a pull
+# request supersedes the run in flight: its verdict is for a head nobody can
+# merge any more, and letting it finish only holds runners the current head is
+# waiting for. Keeping master-bound runs to completion did not buy a verdict
+# per tip either: GitHub holds one pending run per group, so while a 100-min
+# run finished, every intermediate push was queued and then cancelled by the
+# next (runs 34311300344, 34312118984, 34313237349 never scheduled a job) and
+# only the head at the moment the old run ended got a verdict, ~100 min late.
+# `push` runs are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref != 'master' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,14 +41,16 @@ jobs:
     outputs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       linux-partitions: ${{ steps.linux-partitions.outputs.matrix }}
+      macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
       - name: Decide whether guarded jobs run
         id: decide
         run: echo "run-heavy=${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}" >> "$GITHUB_OUTPUT"
 
-      # The Linux test matrix comes from the same manifest the partition jobs
-      # select their targets from, so a partition cannot exist without a job
-      # or a job without a partition. This needs the checkout and nothing else.
+      # The Linux and macOS test matrices come from the same manifest the
+      # partition jobs select their targets from, so a partition cannot exist
+      # without a job or a job without a partition. This needs the checkout
+      # and nothing else.
       - uses: actions/checkout@v7
         with:
           sparse-checkout: |
@@ -57,6 +61,10 @@ jobs:
       - name: Derive the Linux test matrix
         id: linux-partitions
         run: echo "matrix=$(python3 scripts/linux-test-partitions.py matrix)" >> "$GITHUB_OUTPUT"
+
+      - name: Derive the macOS test matrix
+        id: macos-groups
+        run: echo "matrix=$(python3 scripts/linux-test-partitions.py macos-matrix)" >> "$GITHUB_OUTPUT"
 
   # Exercises the checked-out PR head through the CLI against an isolated
   # daemon (scripts/ci-pr-dogfood-smoke.sh). The binary is the one `debug-cli`
@@ -235,21 +243,49 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  # macOS compiles and runs the suite in one job. Linux runs as the
-  # `linux-test-partition` jobs, one per partition of the test targets.
-  test:
-    name: Test ${{ matrix.name }}
+  # macOS compiles and runs the suite as groups of the Linux partitions
+  # (`macos_groups` in .github/linux-test-partitions.json), one hosted 3-vCPU
+  # `macos-14` job per group, so the lane's wall time is the slowest group
+  # instead of the whole workspace. The single job this replaces built
+  # `--workspace --bins --tests` in 80.2 min and ran the suite in 19.9 min
+  # (run 34303181887; run 34309279328 built for 74.9 min and was cancelled in
+  # its tests at 85 min), about 80 min after every other lane had reported,
+  # so it was the critical path of every pull request run. rust-cache carries
+  # the dependency graph only; the workspace crates compile fresh every run,
+  # and on three cores with ld64 that build is the whole cost.
+  #
+  # A group runs each of its partitions in turn against one target directory
+  # with the selection `linux-test-partition` resolves for it, so
+  # `root-sessions` and `root-journeys`, which select the same packages with
+  # the same feature, compile the chain beneath the root crate once and the
+  # second adds only its own suites. The grouping balances the warm Linux
+  # measurements (run 34309279328, compile + tests in minutes): root-lib
+  # 14.7 + 7.5 alone, since its root chain, library test target and 1675
+  # tests are the floor no split lowers; root-sessions 15.3 + 3.1 with
+  # root-journeys, which adds 2.7 + 2.7 on the shared resolution; runtime
+  # 15.6 + 2.4 with core-storage 10.4 + 1.9; core-contracts 13.9 + 0.6 with
+  # root-dashboard-api 12.7 + 0.8. Every pairing that puts a second partition
+  # beside a root group is heavier than the heaviest of these, and no two of
+  # the other four share a feature resolution, so grouping them differently
+  # saves no compile. At the 3-vCPU floor (compile × 4/3, tests as measured)
+  # the groups come to 28, 31, 40 and 38 min; at the 2× the one macOS
+  # measurement showed (the chain beneath the root crate compiled in 19.0
+  # min against 9.3 on Arm in the runs above) to 38, 43, 57 and 56. The
+  # budgets in the manifest take the 2×, plus the cold-dependency allowance
+  # and headroom the Linux budgets carry, until a hosted run measures the
+  # groups. The account admits five concurrent macOS jobs; a run takes at
+  # most four (`MACOS_GROUP_CAP`) so another run's macOS jobs can start.
+  macos-test-partition:
+    name: Test macOS ${{ matrix.group }}
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
-    timeout-minutes: 180
+    runs-on: macos-14
+    # Each group's budget is set in the manifest beside the group, with the
+    # measurement it rests on.
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: macOS
-            runner: '"macos-14"'
-
+      matrix: ${{ fromJSON(needs.scope-gate.outputs.macos-groups) }}
     steps:
       # Full history: the search-quality workload fixture pins a
       # `source_repository_commit`, and `validate_source_bindings` resolves that
@@ -275,8 +311,6 @@ jobs:
         with:
           components: rust-analyzer
 
-      - uses: ./.github/actions/setup-linux-mold
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -294,91 +328,114 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       # rust-cache carries the dependency graph, keyed by toolchain and
-      # lockfile; the workspace crates are compiled fresh every run. No
-      # per-run compiler store: the perf-profile test graph writes 15.7 GB
-      # (macOS) / 17.8 GB (Linux) of outputs per build, which no store inside
-      # the repository's 10 GB cache budget can hold, so a per-run store only
-      # ever kept the root crate's test binaries — the outputs every push
-      # changes — while its 2-3 GB save per push evicted the dependency caches
-      # this lane does restore.
+      # lockfile; the workspace crates compile fresh every run. No per-run
+      # compiler store: the perf-profile test graph wrote 15.7 GB of outputs
+      # per build on macOS, which no store inside the repository's 10 GB
+      # cache budget can hold. One writer keeps the lane at one entry:
+      # `root-suites` resolves the widest graph (the root crate with its
+      # dev-dependencies, the CLI and the evaluator), so its save covers
+      # `root-lib` exactly; the other groups unify dependency features
+      # differently and recompile a few small dependency units against it
+      # every run, as the lower Linux partitions do. Restored before the first
+      # `cargo metadata` below so the registry index comes from the cache too.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test-full-${{ runner.os }}
+          save-if: ${{ matrix.group == 'root-suites' }}
           cache-on-failure: true
 
-      # Every `crates/tracedecay` integration target declares
-      # `required-features = ["test-helpers"]`, because the fixture surface it
-      # gates is used by `tests/common/mod.rs`. Those targets are selected here
-      # today only as a side effect of dev-dependency feature unification
-      # (`tracedecay-cli` dev-depends on `tracedecay` with that feature), which
-      # is not a property this lane should depend on: it would evaporate the
-      # moment that dev-dependency changes, and nextest would then silently
-      # select zero of them and report green having run nothing. Asking for the
-      # feature explicitly makes the selection independent of that accident.
-      # `tracedecay-search-eval` ships two binaries and has no test target of
-      # its own, and cargo only links a package's bins for a test build when
-      # that same package has a test or bench selected. `cargo nextest run`
-      # therefore never produced them, and the acceptance tests that execute
-      # them out of the profile directory
-      # (`runtime_acceptance_suite::search_eval_cli_test`,
-      # `product_surface_suite::packaged_semantic_evaluator`) failed closed.
-      #
-      # The package selection and features must match the test lane below
-      # exactly. `tracedecay-search-eval` depends on `tracedecay-code-index`
-      # with `default-features = false`, so a `-p tracedecay-search-eval` build
-      # resolves without the language tiers and produces an evaluator that
-      # cannot parse Rust ("no bundled Tree-sitter grammar is available for
-      # language rust", exit 2 where the contract is exit 1). Only the same
-      # `--workspace --features tracedecay/test-helpers` resolution turns the
-      # tiers back on, and it makes these artifacts a cache hit for the run
-      # that follows rather than a second, differently-featured build.
-      #
-      # Every build in this lane uses the `perf` cargo profile that
-      # `cargo test-ci` (the test step below) compiles the suites with; see
-      # [profile.perf] in Cargo.toml. A default-profile build here would be a
-      # second, unshared dependency graph.
-      #
-      # Every cargo invocation in this lane also selects `--workspace` with
-      # the same root feature, and every one of them includes dev-dependencies
-      # in the resolution. Both decide feature unification: `-p tracedecay-cli`
-      # resolves `tracedecay-code-index` without its grammar tier,
-      # `-p tracedecay-search-eval` resolves 52 dependencies differently from
-      # the workspace, and a plain `--bins` build (no dev-dependencies) gives
-      # 60 dependencies — tokio and serde_json among them — a different feature
-      # set from the one every test, example and nextest build uses. Each such
-      # invocation compiled its own copy of the heaviest crates (run
-      # 34138693824, cold cache, Linux: 33 min for the bins, 20 min for the
-      # fixture example, 7 min for one isolated unit test) before the suites
-      # themselves compiled. `--tests` here puts
-      # the binaries in the test graph, so this step compiles that graph once
-      # and everything below it is a cache hit.
-      - name: Build workspace binaries and tests for the test lane
-        id: build-test-graph
-        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
+      # Every group job re-proves the cover and the grouping before it
+      # compiles anything: a gap found here fails the lane rather than passing
+      # it with a target nobody ran.
+      - name: Check the partitions cover every test target
+        run: |
+          python3 scripts/test-linux-test-partitions.py
+          python3 scripts/linux-test-partitions.py check
 
-      - name: Build host-CLI test fixture
-        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
+      # Each partition in turn, as `linux-test-partition` runs it: the
+      # executables its suites spawn are built into the same resolution first
+      # (`build-args`; nothing for a partition whose tests spawn nothing),
+      # then nextest under the `ci` policy and the perf cargo profile with
+      # `--no-tests=fail`. One target directory for the group, so a later
+      # partition's shared units are fingerprint hits. Every partition runs
+      # even after an earlier one fails — as nextest's `ci` policy runs every
+      # test — and the step fails if any did. Every nextest run rewrites the
+      # `ci` profile's junit.xml, so each partition's report is moved under
+      # its own name before the next runs. The per-partition wall times this
+      # prints are the measurements the manifest's macOS budgets wait for.
+      - name: Run the group's partitions
+        env:
+          PARTITIONS: ${{ matrix.partitions }}
+        run: |
+          set -uo pipefail
+          run_partition() {
+            local partition="$1" build selection
+            build="$(python3 scripts/linux-test-partitions.py build-args "$partition")" || return 1
+            selection="$(python3 scripts/linux-test-partitions.py cargo-args "$partition")" || return 1
+            if [ -n "$build" ]; then
+              eval cargo build --locked --profile perf "$build" || return 1
+            fi
+            eval cargo nextest run --profile ci --cargo-profile perf --locked "$selection" --no-tests=fail
+          }
+          read -ra partitions <<< "$PARTITIONS"
+          mkdir -p target/nextest/macos
+          failed=""
+          for partition in "${partitions[@]}"; do
+            echo "::group::Test partition ${partition}"
+            started=$SECONDS
+            if run_partition "$partition"; then
+              echo "${partition}: passed in $(( SECONDS - started )) s"
+            else
+              failed="${failed} ${partition}"
+              echo "${partition}: failed after $(( SECONDS - started )) s"
+            fi
+            [ ! -f target/nextest/ci/junit.xml ] || mv target/nextest/ci/junit.xml "target/nextest/macos/${partition}.xml"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::Failed partitions:${failed}"
+            exit 1
+          fi
 
-      # The `test-ci` alias (.cargo/config.toml) is the one maintained
-      # definition of the hosted selection — workspace, nextest `ci` policy,
-      # root fixture feature, perf cargo profile — so a local `cargo test-ci`
-      # reproduces exactly this run. It compiles the whole test graph, so it
-      # runs first: on a cold cache the suite's verdict is the evidence this
-      # lane exists for and must land before anything optional can exhaust the
-      # budget. Every later nextest run rewrites the `ci` profile's junit.xml,
-      # so the report is uploaded immediately after this step.
-      - name: Run tests
-        run: cargo test-ci --locked
-
-      - name: Upload ${{ matrix.name }} nextest report
+      # `macos-test` folds the group reports back into one report.
+      - name: Upload macOS group nextest report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nextest-junit-${{ matrix.name }}
-          path: target/nextest/ci/junit.xml
+          name: nextest-junit-macOS-${{ matrix.group }}
+          path: target/nextest/macos/
           if-no-files-found: ignore
+          retention-days: 1
+
+  # The one `Test macOS` verdict, as when a single job carried the suite:
+  # every group must pass. It also folds the group reports back into the
+  # `nextest-junit-macOS` artifact the single job published, one directory
+  # per group holding a junit.xml per partition.
+  macos-test:
+    name: Test macOS
+    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: [macos-test-partition, scope-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Merge the group reports into the macOS nextest report
+        if: ${{ needs.macos-test-partition.result != 'skipped' }}
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: nextest-junit-macOS
+          pattern: nextest-junit-macOS-*
+          separate-directories: true
           retention-days: 7
+
+      - name: Check macOS groups
+        if: ${{ !cancelled() }}
+        run: |
+          if [ "${{ needs.macos-test-partition.result }}" != "success" ]; then
+            echo "macOS group result: ${{ needs.macos-test-partition.result }}"
+            exit 1
+          fi
+          echo "All macOS groups passed."
 
   # Linux compiles and runs the suite as parallel partitions of the test
   # targets (.github/linux-test-partitions.json), one hosted 4-vCPU job each,
@@ -781,9 +838,9 @@ jobs:
       matrix:
         partition: [1, 2, 3, 4, 5]
     steps:
-      # Full history for the same reason as the Linux/macOS test job: the
-      # shards run the workspace suite remapped onto this checkout, so the
-      # pinned search-quality fixture commit must be resolvable here too.
+      # Full history for the same reason as the Linux and macOS partition
+      # jobs: the shards run the workspace suite remapped onto this checkout,
+      # so the pinned search-quality fixture commit must be resolvable here too.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
