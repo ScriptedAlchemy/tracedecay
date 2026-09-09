@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 
 use tracedecay_domain::{
-    ExactClass, FreshnessCompatibilityV1, FusedCandidate, RankingDecision, SourceOccurrenceId,
+    ExactClass, FreshnessCompatibilityV1, FusedCandidate, RankingDecision, RetrievalAnchorId,
+    SourceOccurrenceId,
 };
 
 use super::stage_counters;
@@ -35,9 +36,27 @@ pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Or
         .cmp(&exact_class_rank(right.exact_class))
         .then_with(|| right.utility_micros.cmp(&left.utility_micros))
         .then_with(|| source_validity_rank(right).cmp(&source_validity_rank(left)))
-        .then_with(|| left.anchor_id.cmp(&right.anchor_id))
-        .then_with(|| left.logical_evidence_id.cmp(&right.logical_evidence_id))
+        .then_with(|| {
+            ordered_retriever_evidence_anchors(left).cmp(&ordered_retriever_evidence_anchors(right))
+        })
         .then_with(|| ordered_occurrence_id_refs(left).cmp(&ordered_occurrence_id_refs(right)))
+}
+
+/// Lexical/exact candidate() already stamps `code-lexical:{lane}:{chunk_id}`
+/// here. `CodeSearchChunkId` is generation-free, so this is the stable
+/// tie-break among equal utilities. Generation-scoped occurrence ids stay
+/// last.
+pub(super) fn ordered_retriever_evidence_anchors(
+    candidate: &FusedCandidate,
+) -> Vec<&RetrievalAnchorId> {
+    let mut anchors = candidate
+        .occurrences
+        .iter()
+        .map(|occurrence| &occurrence.retriever_evidence_anchor)
+        .collect::<Vec<_>>();
+    anchors.sort();
+    anchors.dedup();
+    anchors
 }
 
 pub(super) fn decision_cmp(left: &RankingDecision, right: &RankingDecision) -> Ordering {
