@@ -184,6 +184,50 @@ macro_rules! root_occurrence_cursor_bound {
     };
 }
 
+// A direct-user search can otherwise walk every common-term FTS hit and only
+// reject tool/assistant observations after one SQL round-trip per candidate.
+// This is a necessary prefilter; the typed Rust filter remains the authority.
+macro_rules! root_direct_user_prefilter {
+    ($enabled:literal, $start:literal, $end:literal) => {
+        concat!(
+            "AND (",
+            $enabled,
+            " = 0 OR EXISTS (
+          SELECT 1
+          FROM observations AS filter_observation
+          JOIN json_each(
+              filter_observation.observation_json,
+              '$.payload.facts'
+          ) AS filter_fact
+          WHERE filter_observation.observation_id = o.source_observation_id
+          GROUP BY filter_observation.observation_id
+          HAVING MIN(CASE
+                     WHEN json_extract(filter_fact.value, '$.kind') = 'message'
+                     THEN CAST(filter_fact.key AS INTEGER)
+                 END) = MIN(CASE
+                     WHEN json_extract(filter_fact.value, '$.kind') = 'message'
+                      AND json_extract(filter_fact.value, '$.role') = 'user'
+                      AND (",
+            $start,
+            " IS NULL OR json_extract(filter_fact.value, '$.timestamp') >= ",
+            $start,
+            ")
+                      AND (",
+            $end,
+            " IS NULL OR json_extract(filter_fact.value, '$.timestamp') <= ",
+            $end,
+            ")
+                     THEN CAST(filter_fact.key AS INTEGER)
+                 END)
+             AND SUM(CASE
+                         WHEN json_extract(filter_fact.value, '$.kind') = 'tool_result'
+                         THEN 1 ELSE 0
+                     END) = 0
+      ))"
+        )
+    };
+}
+
 macro_rules! summary_keyset {
     ($time:literal, $id:literal) => {
         concat!(
@@ -559,6 +603,9 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
       AND session_occurrences_fts MATCH ?4
       AND instr(o.snippet_text, ?3) > 0
       ",
+    root_direct_user_prefilter!("?15", "?16", "?17"),
+    "
+      ",
     occurrence_root_keyset!("?5", "?6", "?7"),
     "
       ",
@@ -594,6 +641,9 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR o.source_provider = ?2)
       AND session_occurrences_fts MATCH ?3
+      ",
+    root_direct_user_prefilter!("?13", "?14", "?15"),
+    "
       ",
     occurrence_root_keyset!("?4", "?5", "?6"),
     "
