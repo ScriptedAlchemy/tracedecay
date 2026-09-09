@@ -338,6 +338,7 @@ fn run_automation_scheduler_tick_inner<'a>(
             );
             return Ok(());
         }
+        let automation_context = cg.automation_project_context()?;
         if let Ok(profile_database) = engine
             .store_administration
             .registered_profile_database()
@@ -351,24 +352,12 @@ fn run_automation_scheduler_tick_inner<'a>(
             .await;
         }
         let backend = CodexAppServerBackend::from_automation_config(config);
-        let authoritative_project_id = cg
-            .store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "automation scheduler requires an authoritative project identity"
-                    .to_string(),
-            })?;
-        let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "automation scheduler has an invalid authoritative project identity: {error}"
-                ),
-            })?;
         let session_database = engine
             .store_administration
-            .registered_project_session_database(project_path, cg.store_layout())
+            .registered_project_session_database(
+                automation_context.project_root(),
+                cg.store_layout(),
+            )
             .await?;
         let schedule_activity =
             tracedecay_automation_runtime::automation::scheduler::load_session_activity(
@@ -404,7 +393,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let retrieval = registered_project_automation_retrieval(
             session_database,
             &profile_identity,
-            &project_id,
+            automation_context.project_id(),
         )
         .await?;
         let mut first_error: Option<TraceDecayError> = None;
@@ -421,8 +410,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                 engine,
                 cg,
                 run_control,
-                project_path,
-                &cg.store_layout().dashboard_root,
+                automation_context.project_root(),
+                &automation_context.dashboard_root,
                 None,
                 configuration.configuration_digest.clone(),
                 |run_id| {
@@ -457,7 +446,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                         let mut options = memory_curator_options;
                         options.run_id = Some(run_id);
                         let retained_run = run_memory_curator_with_backend_for_retained_settlement(
-                            cg,
+                            &automation_context,
                             config,
                             &configuration.configuration_revision_id,
                             &backend,
@@ -467,8 +456,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                         .await;
                         if let Some(error) = settle_scheduler_retained_automation(
                             engine,
-                            &project_id,
-                            project_path,
+                            automation_context.project_id(),
+                            automation_context.project_root(),
                             AgentTaskKind::MemoryCurator,
                             &effect_run_control,
                             *effect,
@@ -508,8 +497,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                 engine,
                 cg,
                 run_control,
-                project_path,
-                &cg.store_layout().dashboard_root,
+                automation_context.project_root(),
+                &automation_context.dashboard_root,
                 None,
                 configuration.configuration_digest.clone(),
                 &combined_options,
@@ -520,9 +509,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     combined_handled = super::combined_effect::run_combined_scheduler_effect(
                         admission,
                         engine,
-                        cg,
-                        &project_id,
-                        project_path,
+                        &automation_context,
                         config,
                         &configuration.configuration_revision_id,
                         &backend,
@@ -552,8 +539,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                     engine,
                     cg,
                     run_control,
-                    project_path,
-                    &cg.store_layout().dashboard_root,
+                    automation_context.project_root(),
+                    &automation_context.dashboard_root,
                     None,
                     configuration.configuration_digest.clone(),
                     |run_id| {
@@ -600,7 +587,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     )) => {
                         let retained_run =
                             run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                                cg,
+                                &automation_context,
                                 config,
                                 &effect_run_control,
                                 &configuration.configuration_revision_id,
@@ -614,8 +601,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                             .await;
                         if let Some(error) = settle_scheduler_retained_automation(
                             engine,
-                            &project_id,
-                            project_path,
+                            automation_context.project_id(),
+                            automation_context.project_root(),
                             AgentTaskKind::SessionReflector,
                             &effect_run_control,
                             *effect,
@@ -642,8 +629,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                     engine,
                     cg,
                     run_control,
-                    project_path,
-                    &cg.store_layout().dashboard_root,
+                    automation_context.project_root(),
+                    &automation_context.dashboard_root,
                     None,
                     configuration.configuration_digest.clone(),
                     |run_id| {
@@ -681,7 +668,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                         options.run_id = Some(run_id);
                         let retained_run =
                             run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-                                cg,
+                                &automation_context,
                                 config,
                                 &configuration.configuration_revision_id,
                                 &backend,
@@ -691,8 +678,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                             .await;
                         if let Some(error) = settle_scheduler_retained_automation(
                             engine,
-                            &project_id,
-                            project_path,
+                            automation_context.project_id(),
+                            automation_context.project_root(),
                             AgentTaskKind::SkillWriter,
                             &effect_run_control,
                             *effect,
@@ -710,8 +697,8 @@ fn run_automation_scheduler_tick_inner<'a>(
         run_user_jobs_scheduler_pass(
             engine,
             run_control,
-            &project_id,
-            project_path,
+            automation_context.project_id(),
+            automation_context.project_root(),
             &handshake.client_identity.profile_root,
             cg,
             configuration.configuration_digest.clone(),
