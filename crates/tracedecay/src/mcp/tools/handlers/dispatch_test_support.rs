@@ -228,7 +228,7 @@ fn verified_graph_options_with_freshness<'a>(
     options.admitted_project_scope = Some(scope.clone());
     options.code_graph_read_admission_port = Some(Arc::new(FixtureCodeGraphAdmission { scope }));
     options.verified_graph_query_port = Some(
-        crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
+        tracedecay_graph_query::admitted_verified_graph_query_port_with_source(
             options
                 .code_graph_read_admission_port
                 .clone()
@@ -256,8 +256,8 @@ pub(super) fn verified_graph_error_options<'a>(
     let mut options = verified_graph_options(cg, options);
     options.code_graph_projection_read_port =
         Some(Arc::new(FailingFixtureCodeGraphProjection { error }));
-    options.verified_graph_query_port = Some(
-        crate::tracedecay::queries::graph::admitted_verified_graph_query_port(
+    options.verified_graph_query_port =
+        Some(tracedecay_graph_query::admitted_verified_graph_query_port(
             options
                 .code_graph_read_admission_port
                 .clone()
@@ -266,8 +266,7 @@ pub(super) fn verified_graph_error_options<'a>(
                 .code_graph_projection_read_port
                 .clone()
                 .expect("graph fixture projection"),
-        ),
-    );
+        ));
     options
 }
 
@@ -277,12 +276,12 @@ pub(super) fn verified_graph_error_options<'a>(
 /// runtime's daemon session registry instead of constructing another runtime
 /// on the same profile.
 pub(super) async fn init_sibling_registered_fixture(
-    runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
+    runtime: &crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     project_root: &Path,
     project_id: &str,
 ) -> (
     TraceDecay,
-    Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
+    Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
 ) {
     let profile_root =
         tracedecay_runtime_core::storage::default_profile_root().expect("sibling profile root");

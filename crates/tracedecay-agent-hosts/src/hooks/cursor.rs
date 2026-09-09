@@ -220,7 +220,7 @@ fn deduped_cursor_hint(
     hint: ToolHint,
 ) -> Option<ToolHint> {
     let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
-    if !runtime.is_project_initialized(&root) {
+    if !(runtime.project_initialization_gate)(&root) {
         record_hint_analytics(
             Some(&root),
             "suppressed_uninitialized",
@@ -270,13 +270,13 @@ async fn cursor_project_root_from_parsed_event_with_identity(
 ) -> Option<PathBuf> {
     let mut resolved = None;
     for candidate in cursor_hook_root_candidates(parsed) {
-        if let Some(root) = runtime.resolve_project_root_with_identity(&candidate).await {
+        if let Some(root) = (runtime.project_root_resolver)(&candidate).await {
             resolved = Some(root);
             break;
         }
     }
     let cwd_root = match cursor_hook_cwd(parsed) {
-        Some(cwd) => runtime.resolve_project_root_with_identity(&cwd).await,
+        Some(cwd) => (runtime.project_root_resolver)(&cwd).await,
         None => None,
     };
     match (cwd_root, resolved) {

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::LcmLineageFaultForTest;
+use tracedecay::test_support::host_admission::LcmLineageFaultForTest;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]

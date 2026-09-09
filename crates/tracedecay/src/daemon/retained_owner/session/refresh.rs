@@ -20,7 +20,7 @@ pub(super) fn status_result(
     let (outcome, progress, receipt, error) = match outcome {
         SessionRefreshServiceOutcome::Running(progress) => (
             RetainedOutcomeStatusV1::Running,
-            progress.map(refresh_progress).transpose()?,
+            progress.map(session_refresh_progress_from_view),
             None,
             None,
         ),
@@ -286,12 +286,6 @@ fn refresh_error(code: &str, message: &str) -> RetainedErrorV1 {
         reason: None,
         retryable: None,
     }
-}
-
-fn refresh_progress(
-    value: SessionRefreshProgressView,
-) -> Result<SessionRefreshProgressV1, RetainedSurfaceExecutionErrorV1> {
-    Ok(session_refresh_progress_from_view(value))
 }
 
 fn refresh_receipt(

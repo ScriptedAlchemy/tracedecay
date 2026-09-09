@@ -922,7 +922,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     let target_server = crate::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
         target,
         None,
-        crate::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
+        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
             .expect("target project-scoped runtime"),
     )
     .await
@@ -930,7 +930,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     let server = crate::mcp::McpServer::new_with_retained_test_servers_for_test(
         active,
         None,
-        crate::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
+        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
             .expect("active project-scoped runtime"),
         vec![target_server],
     )

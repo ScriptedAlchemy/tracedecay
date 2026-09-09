@@ -75,7 +75,7 @@ mod temporal_kernel_behavior {
 
 mod lcm_payload_behavior {
     use tempfile::TempDir;
-    use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_lcm::{LcmExpandRequest, LcmExpandTarget};
     use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -128,7 +128,7 @@ mod lcm_payload_behavior {
 
 mod lcm_query_behavior {
     use tempfile::TempDir;
-    use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     use super::common::{lcm_payload_message, lcm_payload_session};
@@ -173,7 +173,7 @@ mod lcm_query_behavior {
 
 mod lcm_schema_durability {
     use tempfile::TempDir;
-    use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     use super::common::{lcm_payload_message, lcm_payload_session};

@@ -1,36 +1,16 @@
 //! Session-memory (holographic fact store) surface of [`TraceDecay`].
 
-use tracedecay_session_memory::memory::MemoryApplication;
-// The shared resolvers live in `tracedecay_session_memory::memory` (the crate that
-// owns `MemoryApplication`/`MemoryApplicationError`) rather than in
-// `tracedecay-runtime-core` — that crate is a *dependency* of
-// `tracedecay-application`, so hosting these there would require a circular
-// crate dependency. Both this module and
-// `tracedecay-dashboard-api::tracedecay::facts` delegate to the same
-// functions instead of keeping independent copies.
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_application::tracedecay::project_memory_owner_from_layout_id;
+use tracedecay_domain::FactOwnerV1;
+use tracedecay_domain::errors::Result;
 use tracedecay_session_memory::fact_store::{ProjectFactStore, ProjectMemoryDbHandle};
+use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_session_memory::memory::memory_application_error;
 
 use super::TraceDecay;
 
-fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactOwnerV1> {
-    let project_id = project_id.ok_or_else(|| TraceDecayError::Config {
-        message: "active project has no authoritative project_id for memory".to_string(),
-    })?;
-    let project_id =
-        ProjectId::new(project_id.to_owned()).map_err(|error| TraceDecayError::Config {
-            message: format!("invalid authoritative project_id for memory: {error}"),
-        })?;
-    Ok(FactOwnerV1::Project { project_id })
-}
-
 impl TraceDecay {
     /// Returns the only project-memory owner accepted by core routes.
-    ///
-    /// The ID is supplied by the resolved store layout, never reconstructed
-    /// from a filesystem path or a caller-provided display label.
     pub(crate) fn project_memory_owner(&self) -> Result<FactOwnerV1> {
         project_memory_owner_from_layout_id(self.store_layout.identity.project_id.as_deref())
     }
@@ -64,17 +44,5 @@ impl TraceDecay {
         let owner = self.project_memory_owner()?;
         let store = self.project_memory_db().await?.into_fact_store();
         MemoryApplication::new(owner, store).map_err(memory_application_error)
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn project_memory_owner_requires_a_valid_authoritative_layout_id() {
-        assert!(project_memory_owner_from_layout_id(None).is_err());
-        assert!(project_memory_owner_from_layout_id(Some("")).is_err());
     }
 }

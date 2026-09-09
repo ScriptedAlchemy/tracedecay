@@ -37,6 +37,7 @@ impl_future_size!(A, B, C, D, E, F);
 impl_future_size!(A, B, C, D, E, F, G);
 impl_future_size!(A, B, C, D, E, F, G, H);
 impl_future_size!(A, B, C, D, E, F, G, H, I);
+impl_future_size!(A, B, C, D, E, F, G, H, I, J);
 
 /// Size in bytes of the future an `async fn` returns, without constructing it.
 fn future_size<Args, Fun: FutureSize<Args>>(function: Fun) -> usize {
@@ -186,5 +187,20 @@ fn project_open_future_sizes() {
             *size <= PHASE_CEILING,
             "{name} future is {size} B; ceiling {PHASE_CEILING} B"
         );
+    }
+}
+
+#[test]
+fn shared_owner_futures_stay_below_large_future_threshold() {
+    let owners = [
+        ("automation admission", future_size(crate::daemon::automation_effect::AutomationEffectAuthority::prepare)),
+        ("invocation admission", future_size(tracedecay_daemon_service::DaemonInvocationService::invoke_with_project_admission)),
+        ("Work dispatch", future_size(tracedecay_daemon_service::invocation::execute_work_application)),
+        ("observation persistence", future_size(<tracedecay_global_db::GlobalDbObservationStore as tracedecay_store::ObservationStore>::persist_observation)),
+        ("vector retirement", future_size(tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation)),
+    ];
+    for (name, size) in owners {
+        eprintln!("{size:>10} B  {name}");
+        assert!(size <= 16 * 1024, "{name} retains a {size} B future");
     }
 }

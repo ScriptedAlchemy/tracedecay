@@ -196,7 +196,6 @@ use bootstrap_route::{
 };
 mod branch_add;
 mod branch_admin;
-mod callable_code_authorization;
 use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
 use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 #[cfg(test)]
@@ -248,6 +247,7 @@ mod database_owner_registry;
 use database_owner_registry::DatabaseOwnerRegistry;
 pub(crate) mod dashboard_automation;
 #[cfg(feature = "test-transport")]
+#[path = "../tests/common/dashboard_configuration_test_runtime.rs"]
 mod dashboard_configuration_test_runtime;
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay_consumer;
@@ -256,7 +256,6 @@ pub(crate) mod project_open_owners;
 pub(crate) use dashboard_configuration_test_runtime::{
     dashboard_configuration_authorities_for_test, register_dashboard_test_retained_runtime,
 };
-pub(crate) mod query_authority_provider;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) mod retained_test_support;
 mod shutdown_coordination;
@@ -280,7 +279,6 @@ use graph_resolution::retained_project_server_resolver;
 mod http_application;
 pub use http_application::live_remote_operational_status;
 mod http_application_router;
-pub(crate) mod remote_protocol;
 pub(crate) mod retained_owner;
 use http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,
@@ -391,7 +389,6 @@ use project_server_lifecycle::{
     schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
     shutdown_project_servers,
 };
-mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
 #[cfg(test)]

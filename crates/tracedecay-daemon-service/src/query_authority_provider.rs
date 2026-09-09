@@ -16,7 +16,7 @@ use tracedecay_domain::{
     configuration::UserProfileId,
 };
 
-use crate::config::retrieval::{
+use tracedecay_application::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
 };
 use tracedecay_application::semantic_runtime::{
@@ -36,7 +36,7 @@ use tracedecay_query::retrieval::QueryAuthorityV1;
 const SUPERSEDED_COMMITTED_ACTIVATION: &str = "superseded_committed_activation";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum QueryAuthorityUnavailableReasonV1 {
+pub enum QueryAuthorityUnavailableReasonV1 {
     ActivationUnavailable,
     ActivationNotCurrent,
     #[cfg(test)]
@@ -63,7 +63,7 @@ impl QueryAuthorityUnavailableReasonV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum QueryAuthorityProviderStatusV1 {
+pub enum QueryAuthorityProviderStatusV1 {
     Available {
         scope_digest: ManifestDigest,
         profile_id: tracedecay_domain::FusionProfileId,
@@ -75,7 +75,7 @@ pub(crate) enum QueryAuthorityProviderStatusV1 {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum QueryAuthorityUpdateErrorV1 {
+pub enum QueryAuthorityUpdateErrorV1 {
     #[error("query activated scope is invalid")]
     InvalidScope,
     #[error("query initial profile state is not the exact evaluated fallback")]
@@ -110,7 +110,7 @@ struct QueryAuthorityKeyV1 {
     scope_digest: ManifestDigest,
 }
 
-pub(crate) struct PreparedQueryActivationV1 {
+pub struct PreparedQueryActivationV1 {
     profile_id: UserProfileId,
     scope: ResolvedScope,
     activated: RetrievalProfileStateV1,
@@ -120,17 +120,17 @@ pub(crate) struct PreparedQueryActivationV1 {
 }
 
 impl PreparedQueryActivationV1 {
-    pub(crate) fn scope(&self) -> &ResolvedScope {
+    pub fn scope(&self) -> &ResolvedScope {
         &self.scope
     }
 
-    pub(crate) fn configuration_revision(
+    pub fn configuration_revision(
         &self,
     ) -> &tracedecay_domain::configuration::ConfigurationRevisionId {
         self.activated.configuration_revision()
     }
 
-    pub(crate) fn query_authority(&self) -> &Arc<QueryAuthorityV1> {
+    pub fn query_authority(&self) -> &Arc<QueryAuthorityV1> {
         &self.query_authority
     }
 }
@@ -138,17 +138,17 @@ impl PreparedQueryActivationV1 {
 /// Daemon owner for the current accepted query profile and the
 /// durable project cursor-key authority loaded from its registered store.
 #[derive(Clone)]
-pub(crate) struct DaemonQueryAuthorityProviderV1 {
+pub struct DaemonQueryAuthorityProviderV1 {
     activated: Arc<RwLock<BTreeMap<QueryAuthorityKeyV1, ActivatedQueryStateV1>>>,
 }
 
-pub(super) struct DaemonProfileQueryAuthorityProviderV1 {
+pub struct DaemonProfileQueryAuthorityProviderV1 {
     provider: DaemonQueryAuthorityProviderV1,
     profile_id: UserProfileId,
 }
 
 #[derive(Clone)]
-pub(crate) struct DaemonQueryActivationRegistrarV1 {
+pub struct DaemonQueryActivationRegistrarV1 {
     provider: DaemonQueryAuthorityProviderV1,
     registry: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: std::path::PathBuf,
@@ -156,7 +156,7 @@ pub(crate) struct DaemonQueryActivationRegistrarV1 {
 }
 
 impl DaemonQueryActivationRegistrarV1 {
-    pub(crate) fn new(
+    pub fn new(
         provider: DaemonQueryAuthorityProviderV1,
         registry: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: std::path::PathBuf,
@@ -526,17 +526,14 @@ impl DaemonQueryAuthorityProviderV1 {
         }
     }
 
-    pub(super) fn for_profile(
-        &self,
-        profile_id: UserProfileId,
-    ) -> DaemonProfileQueryAuthorityProviderV1 {
+    pub fn for_profile(&self, profile_id: UserProfileId) -> DaemonProfileQueryAuthorityProviderV1 {
         DaemonProfileQueryAuthorityProviderV1 {
             provider: self.clone(),
             profile_id,
         }
     }
 
-    pub(crate) fn retire_project(
+    pub fn retire_project(
         &self,
         profile_id: &UserProfileId,
         project_id: &tracedecay_domain::ProjectId,
@@ -551,7 +548,7 @@ impl DaemonQueryAuthorityProviderV1 {
     }
 
     #[hotpath::measure(label = "daemon.query.prepare_activation")]
-    pub(crate) fn prepare_after_successful_activation(
+    pub fn prepare_after_successful_activation(
         &self,
         profile_id: UserProfileId,
         scope: ResolvedScope,
@@ -611,7 +608,7 @@ impl DaemonQueryAuthorityProviderV1 {
     }
 
     #[hotpath::measure(label = "daemon.query.commit_activation")]
-    pub(crate) fn commit_prepared_activation(
+    pub fn commit_prepared_activation(
         &self,
         prepared: &PreparedQueryActivationV1,
     ) -> Result<(), QueryAuthorityUpdateErrorV1> {
@@ -651,7 +648,7 @@ impl DaemonQueryAuthorityProviderV1 {
     /// is admitted only while the exact query profile is active with no rollback
     /// slot or audit history.
     #[hotpath::measure(label = "daemon.query.install_initial")]
-    pub(crate) fn install_evaluated_initial_state(
+    pub fn install_evaluated_initial_state(
         &self,
         profile_id: UserProfileId,
         scope: ResolvedScope,
@@ -711,7 +708,7 @@ impl DaemonQueryAuthorityProviderV1 {
     }
 
     #[cfg(test)]
-    pub(crate) fn status(&self, scope: Option<&ResolvedScope>) -> QueryAuthorityProviderStatusV1 {
+    pub fn status(&self, scope: Option<&ResolvedScope>) -> QueryAuthorityProviderStatusV1 {
         let current = self
             .activated
             .read()
@@ -813,7 +810,7 @@ impl DaemonQueryAuthorityProviderV1 {
     }
 
     #[hotpath::measure(label = "daemon.query.federated_authority")]
-    pub(crate) fn federated_authority_for(
+    pub fn federated_authority_for(
         &self,
         scope: &ResolvedScope,
         privacy_domain: &PrivacyDomainId,
@@ -1012,7 +1009,7 @@ impl QueryAuthorityProviderV1 for DaemonProfileQueryAuthorityProviderV1 {
 
 fn current_transition(
     state: &RetrievalProfileStateV1,
-) -> Option<&crate::config::retrieval::RetrievalProfileAuditEventV1> {
+) -> Option<&tracedecay_application::config::retrieval::RetrievalProfileAuditEventV1> {
     let event = state.audit().last()?;
     if !matches!(
         &event.operation,
@@ -1120,4 +1117,4 @@ fn map_update_observer_error(
 
 #[cfg(test)]
 #[path = "query_authority_provider_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
