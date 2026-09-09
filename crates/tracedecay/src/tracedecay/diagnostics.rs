@@ -128,7 +128,7 @@ impl TraceDecay {
     }
 
     #[hotpath::skip]
-    pub async fn open_project_store_db(&self) -> Result<Database> {
+    pub fn open_project_store_db(&self) -> Result<Database> {
         if self.read_only {
             return Err(TraceDecayError::Config {
                 message: "cannot open project store for writing: active TraceDecay store is open read-only"
@@ -139,7 +139,7 @@ impl TraceDecay {
     }
 
     #[hotpath::skip]
-    pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
+    pub fn open_project_store_db_read_only(&self) -> Result<Database> {
         let database = self.retained_project_store_db()?;
         if database.is_writable() {
             return Err(TraceDecayError::Config {

@@ -1735,7 +1735,7 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
     retirement.wait().await;
 
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         0,
         "shutdown must leave no automation reaper ownership record"
     );
@@ -1839,7 +1839,7 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
         .lock()
         .await
         .len();
-    let reapers_after_join = engine.store_administration.retirement_reaper_count().await;
+    let reapers_after_join = engine.store_administration.retirement_reaper_count();
     engine.shutdown_all().await;
 
     assert_eq!(

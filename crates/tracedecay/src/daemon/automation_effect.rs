@@ -1322,8 +1322,7 @@ impl AutomationEffectAuthority {
                 let read_control =
                     FactReadControl::new(Arc::new(move || recovery_cancellation.is_cancelled()));
                 let recovered = memory
-                    .project_memory_application()
-                    .await?
+                    .project_memory_application()?
                     .project_memory_automation_run_receipts(
                         authority.admission.request.run_id.clone(),
                         &read_control,
@@ -1403,7 +1402,7 @@ impl AutomationEffectAuthority {
                 Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
             ReservationResult::Conflict { terminal } => {
-                reservation_conflict_admission(dashboard_root, &journal_path, terminal).await
+                reservation_conflict_admission(dashboard_root, &journal_path, terminal)
             }
         }?;
         observe_admission_decision(&admission);
@@ -2009,7 +2008,7 @@ async fn discard_direct_recovery_unbound_spools(
     }
 }
 
-async fn reservation_conflict_admission(
+fn reservation_conflict_admission(
     _dashboard_root: &Path,
     _journal_path: &Path,
     _terminal: bool,

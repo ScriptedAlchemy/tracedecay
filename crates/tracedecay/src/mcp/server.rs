@@ -642,8 +642,7 @@ impl McpServer {
             .then(tracedecay_runtime_core::storage::default_profile_root)
             .and_then(std::result::Result::ok);
         let context =
-            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
-                .await;
+            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db);
         Self::new_with_context(context).await
     }
 
@@ -858,7 +857,7 @@ impl McpServer {
 
     #[cfg(test)]
     #[hotpath::skip]
-    async fn direct_context_with_dbs(
+    fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
         profile_root: Option<PathBuf>,

@@ -129,8 +129,8 @@ impl<'a> SearchGraphEvidence<'a> {
         self.unavailable.as_ref()
     }
 
-    #[hotpath::measure(future = true, label = "mcp.graph.import_hint")]
-    pub(super) async fn external_import_hint(
+    #[hotpath::measure(label = "mcp.graph.import_hint")]
+    pub(super) fn external_import_hint(
         &self,
         ctx: &McpToolContext<'_>,
         query: &str,

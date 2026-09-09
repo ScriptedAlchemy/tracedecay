@@ -38,8 +38,7 @@ pub(super) async fn user_review(
         session_id,
         run_id,
         AutomationTrigger::HostReceipt,
-    )
-    .await?;
+    )?;
     Ok(json!({
         "action": "user_review",
         "status": "completed",
@@ -49,7 +48,7 @@ pub(super) async fn user_review(
     }))
 }
 
-async fn run_user_review(
+fn run_user_review(
     _profile_root: &std::path::Path,
     _session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     _provider: &str,
@@ -272,8 +271,7 @@ async fn continue_projectless_hermes_review(
         session_id,
         Some(format!("user_host_receipt_{}", ready.pending.generation)),
         tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::HostReceipt,
-    )
-    .await?;
+    )?;
     if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
         && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
         && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
