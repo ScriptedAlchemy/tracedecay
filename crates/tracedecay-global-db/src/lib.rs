@@ -68,6 +68,7 @@ pub use observation_projection::{project_observation_with_engine, rebuild_projec
 pub use tracedecay_domain::CoverageStateV1;
 pub use workflow_adapter::GlobalDbWorkflowStore;
 mod observation_store;
+pub mod profile_registry_maintenance;
 mod project_registry;
 mod registered;
 mod registered_accounting;

@@ -2,24 +2,20 @@ use tracedecay_code_extraction::incremental::{ParseCompleteness, ParseDocumentId
 use tracedecay_code_extraction::{
     ExtractionArtifactV1, LanguageExtractor as ParserLanguageExtractor,
 };
-use tracedecay_domain::{SanitizedCodeFileV1, SanitizedCodeSnapshotV1};
+use tracedecay_domain::SanitizedCodeFileV1;
 
 use crate::retained_parse::SharedRetainedParsePool;
 
-use super::{
-    CodeIndexCapturedFileV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
-    CodeIndexRepositoryParseIdentityV1,
-};
+use super::{CodeIndexCapturedFileV1, CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 
 #[hotpath::measure(label = "code_index.extract.parser_artifact")]
 pub(super) fn parse_for_indexing(
     retained_parses: &SharedRetainedParsePool,
-    config: &CodeIndexProductionConfigV1,
-    snapshot: &SanitizedCodeSnapshotV1,
-    repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
+    identity: ParseDocumentIdentity,
     file: &SanitizedCodeFileV1,
     captured: &CodeIndexCapturedFileV1,
     parser: &dyn ParserLanguageExtractor,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(ExtractionArtifactV1, usize), CodeIndexProductionErrorV1> {
     let language = file.language.as_ref().ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract(
@@ -37,20 +33,13 @@ pub(super) fn parse_for_indexing(
             .len()
             .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES),
     );
-    let (report, mut extraction) = retained_parses.parse_and_extract_artifact(
-        ParseDocumentIdentity::Repository {
-            project_id: config.project_id.clone(),
-            repository_id: snapshot.repository.clone(),
-            worktree_id: snapshot.worktree.clone(),
-            reference: snapshot.reference.clone(),
-            commit: snapshot.source_revision.clone(),
-            tree: repository_parse_identity.tree.clone(),
-            dirty: repository_parse_identity.dirty,
-            logical_path: file.logical_path.clone(),
-        },
+    let admitted = || !control.is_cancelled() && !control.is_deadline_exceeded();
+    let (report, mut extraction) = retained_parses.parse_and_extract_artifact_with_control(
+        identity,
         language.as_str(),
         &source[..parsed_len],
         parser,
+        Some(&admitted),
     )?;
     if let ParseCompleteness::Partial { reasons } = report.completeness {
         extraction

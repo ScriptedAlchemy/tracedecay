@@ -17,6 +17,7 @@ mod assessment;
 mod detect;
 pub mod detector_kernel;
 mod lcm;
+mod privacy_remediation;
 mod rules;
 mod sanitize;
 mod structural_id;
@@ -57,6 +58,12 @@ pub use detect::{
 };
 pub use lcm::{
     LcmSensitiveRedactionPolicyV1, LcmSensitiveRedactionV1, redact_lcm_sensitive_payload,
+};
+pub use privacy_remediation::{
+    AdmittedPrivacyProjectV1, PrivacyLcmRemediationOutcomeV1, PrivacyMemoryRemediationOutcomeV1,
+    PrivacyRemediationDeniedV1, PrivacyRemediationGrantV1, granted_remediation_read_control,
+    granted_remediation_write_control, remediation_read_control, remediation_write_control,
+    run_at_rest_privacy_remediation, spawn_at_rest_privacy_remediation,
 };
 pub use sanitize::{
     ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,

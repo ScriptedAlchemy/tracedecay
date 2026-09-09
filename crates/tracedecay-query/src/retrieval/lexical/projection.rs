@@ -17,7 +17,7 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    admit_candidate_sources, lexical_checkpoint,
+    admit_candidate_sources, candidate_admission_outcome, lexical_checkpoint,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
@@ -810,25 +810,33 @@ impl LexicalGenerationPostingsV1 {
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_candidates: &BTreeMap<String, RoaringBitmap>,
+        pruned: &mut Vec<(String, u64)>,
     ) -> RoaringBitmap {
         let mut sources = Vec::new();
         for term in &request.whole_terms {
-            sources.push(self.whole_term_documents(&normalize_lexical(term)));
+            let (frequency, documents) = self.whole_term_documents(&normalize_lexical(term));
+            sources.push((frequency, (term.clone(), documents)));
             if let Some(expansions) = fuzzy.by_query.get(term) {
                 for expansion in expansions {
-                    sources.push(self.whole_term_documents(expansion));
+                    let (frequency, documents) = self.whole_term_documents(expansion);
+                    sources.push((frequency, (expansion.clone(), documents)));
                 }
             }
         }
         if let Some(postings) = self.term_documents.get(&LexicalFieldV1::Subtoken) {
             for subtoken in &request.subtokens {
                 if let Some(posting) = postings.get(&normalize_lexical(subtoken)) {
-                    sources.push((posting.documents.len() as usize, posting.documents.clone()));
+                    sources.push((
+                        posting.documents.len() as usize,
+                        (subtoken.clone(), posting.documents.clone()),
+                    ));
                 }
             }
         }
         let mut documents = RoaringBitmap::new();
-        for source in admit_candidate_sources(sources) {
+        for (_, source) in admit_candidate_sources(sources, |frequency, (term, _)| {
+            pruned.push((term.clone(), frequency as u64));
+        }) {
             documents |= source;
         }
         // Reuse the per-phrase n-gram candidate sets computed once by the
@@ -1067,7 +1075,7 @@ impl CodeLexicalProjectionAdapterV1 {
     fn lexical_batch(
         &self,
         request: &LexicalLaneRequest<'_>,
-    ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
+    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
         let prepared = PreparedLexicalQueryV1::new(request);
         // Intersect the n-gram postings for each normalized phrase exactly once,
@@ -1091,9 +1099,10 @@ impl CodeLexicalProjectionAdapterV1 {
                 (phrase.clone(), frequency)
             })
             .collect::<BTreeMap<_, _>>();
-        let documents = self
-            .postings
-            .lexical_documents(request, &fuzzy, &phrase_candidates);
+        let mut pruned = Vec::new();
+        let documents =
+            self.postings
+                .lexical_documents(request, &fuzzy, &phrase_candidates, &mut pruned);
         let mut pairs = Vec::new();
         let mut excluded = self.rows.len() as u64 - documents.len();
         for document in documents {
@@ -1142,18 +1151,21 @@ impl CodeLexicalProjectionAdapterV1 {
         }
         hotpath::gauge!("query.lane.lexical.candidates").set(candidates.len());
         hotpath::gauge!("query.lane.lexical.examined").set(self.rows.len());
-        Ok(RetrieverBatch {
-            coverage: RetrieverCoverage {
-                examined: self.rows.len() as u64,
-                eligible: candidates.len() as u64,
-                excluded,
-                capped: 0,
-                unknown: 0,
+        Ok(candidate_admission_outcome(
+            RetrieverBatch {
+                coverage: RetrieverCoverage {
+                    examined: self.rows.len() as u64,
+                    eligible: candidates.len() as u64,
+                    excluded,
+                    capped: 0,
+                    unknown: 0,
+                },
+                candidates,
+                evidence_by_occurrence,
+                continuation: None,
             },
-            candidates,
-            evidence_by_occurrence,
-            continuation: None,
-        })
+            pruned,
+        ))
     }
 
     #[hotpath::measure(label = "query.lane.fuzzy.expand")]
@@ -1452,7 +1464,7 @@ impl LexicalPostingReadPort for CodeLexicalProjectionAdapterV1 {
         if let Some(outcome) = self.stale_outcome() {
             return Ok(outcome);
         }
-        Ok(RetrieverOutcome::Complete(self.lexical_batch(request)?))
+        self.lexical_batch(request)
     }
 }
 

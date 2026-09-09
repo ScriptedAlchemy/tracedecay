@@ -170,6 +170,10 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_ignored_dependency_admission:
         Option<CodeIndexIgnoredDependencyAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
+    /// The one checkout this server answers for, resolved once by project open
+    /// through the daemon code-index authority. `None` on a direct server and
+    /// on the core server that answers before project-open publication.
+    pub(crate) admitted_project_scope: Option<tracedecay_contracts::ResolvedScope>,
     pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
@@ -285,6 +289,7 @@ impl McpServerConstructionContext {
             verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
+            admitted_project_scope: None,
             retained_project_server_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
@@ -391,6 +396,7 @@ impl McpServerConstructionContext {
             verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
+            admitted_project_scope: None,
             retained_project_server_resolver: None,
             project_routes,
             application_invocation_executor: None,
@@ -458,6 +464,7 @@ impl McpServerConstructionContext {
             verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
+            admitted_project_scope: None,
             retained_project_server_resolver: None,
             project_routes,
             application_invocation_executor: None,
@@ -554,6 +561,17 @@ impl McpServerConstructionContext {
         authority: super::CodeIndexSearchAuthorityV1,
     ) -> Self {
         self.code_index_search_authority = Some(authority);
+        self
+    }
+
+    /// Records the checkout project open resolved for this route, so handler
+    /// dispatch can bind every scoped authority to one admitted scope instead
+    /// of re-deriving identity from the request path.
+    pub(crate) fn with_admitted_project_scope(
+        mut self,
+        scope: tracedecay_contracts::ResolvedScope,
+    ) -> Self {
+        self.admitted_project_scope = Some(scope);
         self
     }
 

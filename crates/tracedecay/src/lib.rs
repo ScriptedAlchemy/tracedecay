@@ -45,7 +45,6 @@
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
 pub mod bench;
-pub mod cloud;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod host_admission;
 pub use tracedecay_code_index as code_index;
@@ -64,11 +63,9 @@ pub use product_runtime::{
     ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance, product_runtime,
     register_product_runtime,
 };
-pub mod profile_registry_maintenance;
 mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports};
-mod runtime_telemetry;
 pub mod serve;
 // Benchmark harness, not product surface: the shipped library must not carry
 // its fixture provisioning or process-environment mutation. The `session_temporal`
