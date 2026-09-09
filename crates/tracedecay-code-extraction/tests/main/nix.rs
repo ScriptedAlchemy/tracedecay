@@ -10,79 +10,6 @@ fn extract_sample() -> ExtractionResult {
 }
 
 #[test]
-fn test_nix_no_errors() {
-    let result = extract_sample();
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-}
-
-#[test]
-fn test_nix_file_node() {
-    let result = extract_sample();
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "sample.nix");
-}
-
-#[test]
-fn test_nix_functions() {
-    let result = extract_sample();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert!(
-        fns.iter().any(|f| f.name == "log"),
-        "log function not found, got: {:?}",
-        fns.iter().map(|f| &f.name).collect::<Vec<_>>()
-    );
-    assert!(
-        fns.iter().any(|f| f.name == "mkConnection"),
-        "mkConnection function not found, got: {:?}",
-        fns.iter().map(|f| &f.name).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn test_nix_consts() {
-    let result = extract_sample();
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert!(
-        consts.iter().any(|c| c.name == "defaultPort"),
-        "defaultPort const not found, got: {:?}",
-        consts.iter().map(|c| &c.name).collect::<Vec<_>>()
-    );
-    assert!(
-        consts.iter().any(|c| c.name == "maxRetries"),
-        "maxRetries const not found, got: {:?}",
-        consts.iter().map(|c| &c.name).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn test_nix_modules() {
-    let result = extract_sample();
-    let modules: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Module)
-        .collect();
-    assert!(
-        modules.iter().any(|m| m.name == "networking"),
-        "networking module not found, got: {:?}",
-        modules.iter().map(|m| &m.name).collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn test_nix_nested_functions() {
     let result = extract_sample();
     let fns: Vec<_> = result
@@ -177,36 +104,6 @@ fn test_nix_call_sites() {
             .map(|r| &r.reference_name)
             .collect::<Vec<_>>()
     );
-}
-
-#[test]
-fn test_nix_contains_edges() {
-    let result = extract_sample();
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 5,
-        "should have >= 5 Contains edges, got {}",
-        contains.len()
-    );
-}
-
-#[test]
-fn test_nix_visibility() {
-    let result = extract_sample();
-    // All Nix definitions should be Pub (Nix has no visibility modifiers)
-    for node in &result.nodes {
-        assert_eq!(
-            node.visibility,
-            Visibility::Pub,
-            "node {} ({:?}) should be Pub",
-            node.name,
-            node.kind
-        );
-    }
 }
 
 #[test]

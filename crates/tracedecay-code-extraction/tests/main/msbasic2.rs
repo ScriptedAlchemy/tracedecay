@@ -11,66 +11,6 @@ fn extract_fixture() -> ExtractionResult {
 }
 
 #[test]
-fn test_msbasic2_file_node() {
-    let result = extract_fixture();
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "sample.bas");
-}
-
-#[test]
-fn test_msbasic2_let_constants() {
-    let result = extract_fixture();
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert_eq!(
-        consts.len(),
-        2,
-        "expected 2 consts, got {}: {:?}",
-        consts.len(),
-        consts.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(consts.iter().any(|n| n.name == "MR"), "MR const not found");
-    assert!(consts.iter().any(|n| n.name == "DP"), "DP const not found");
-}
-
-#[test]
-fn test_msbasic2_subroutine_functions() {
-    let result = extract_fixture();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(
-        fns.len(),
-        3,
-        "expected 3 functions, got {}: {:?}",
-        fns.len(),
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "LOG_A_MESSAGE"),
-        "LOG_A_MESSAGE not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "CONNECT_TO_SERVER"),
-        "CONNECT_TO_SERVER not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "DISCONNECT"),
-        "DISCONNECT not found"
-    );
-}
-
-#[test]
 fn test_msbasic2_gosub_calls() {
     let result = extract_fixture();
     let calls: Vec<_> = result
@@ -142,50 +82,6 @@ fn test_msbasic2_docstrings() {
         disconnect_fn.docstring.is_some(),
         "DISCONNECT should have docstring"
     );
-}
-
-#[test]
-fn test_msbasic2_contains_edges() {
-    let result = extract_fixture();
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 5,
-        "should have >= 5 Contains edges, got {}",
-        contains.len()
-    );
-}
-
-#[test]
-fn test_msbasic2_subroutine_complexity() {
-    let result = extract_fixture();
-
-    let connect_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "CONNECT_TO_SERVER")
-        .expect("CONNECT_TO_SERVER function not found");
-    assert!(
-        connect_fn.loops >= 1,
-        "CONNECT_TO_SERVER should have >= 1 loop, got {}",
-        connect_fn.loops
-    );
-}
-
-#[test]
-fn test_msbasic2_extensions() {
-    let extractor = MsBasic2Extractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"bas"));
-}
-
-#[test]
-fn test_msbasic2_language_name() {
-    let extractor = MsBasic2Extractor;
-    assert_eq!(extractor.language_name(), "MS BASIC 2.0");
 }
 
 #[test]

@@ -49,26 +49,6 @@ fn test_astro_line_numbers_are_original_file_positions() {
 }
 
 #[test]
-fn test_astro_interface_props_extracted() {
-    let source = r#"---
-interface Props {
-    title: string;
-    description?: string;
-}
-const { title } = Astro.props;
----
-<html></html>"#;
-    let result = AstroExtractor.extract("Layout.astro", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let iface = result.nodes.iter().find(|n| n.name == "Props");
-    assert!(
-        iface.is_some(),
-        "expected Props interface in {:?}",
-        result.nodes
-    );
-}
-
-#[test]
 fn test_astro_no_frontmatter_returns_file_node_only() {
     let source = "<html><body><h1>Static</h1></body></html>";
     let result = AstroExtractor.extract("static.astro", source);

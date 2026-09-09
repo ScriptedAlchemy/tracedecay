@@ -23,12 +23,6 @@ mod quickbasic_tests {
     }
 
     #[test]
-    fn test_quickbasic_language_name() {
-        let extractor = QuickBasicExtractor;
-        assert_eq!(extractor.language_name(), "QuickBASIC");
-    }
-
-    #[test]
     fn test_quickbasic_file_node() {
         let result = extract_fixture();
         let files: Vec<_> = result

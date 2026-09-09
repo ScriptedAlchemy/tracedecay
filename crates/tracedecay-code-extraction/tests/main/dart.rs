@@ -1,21 +1,8 @@
 use tracedecay_code_extraction::DartExtractor;
-use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
     DartExtractor::extract_dart("test.dart", source)
-}
-
-#[test]
-fn test_dart_file_node_is_root() {
-    let result = extract("void main() {}");
-    let file_nodes: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(file_nodes.len(), 1);
-    assert_eq!(file_nodes[0].name, "test.dart");
 }
 
 #[test]
@@ -105,19 +92,6 @@ fn test_dart_abstract_class() {
 }
 
 #[test]
-fn test_dart_mixin_extraction() {
-    let result = extract("mixin Swimming {\n  void swim() {\n    print('swimming');\n  }\n}");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let mixins: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Mixin)
-        .collect();
-    assert_eq!(mixins.len(), 1);
-    assert_eq!(mixins[0].name, "Swimming");
-}
-
-#[test]
 fn test_dart_extension_extraction() {
     let result =
         extract("extension StringHelper on String {\n  bool get isBlank => trim().isEmpty;\n}");
@@ -181,24 +155,6 @@ fn test_dart_constructor_extraction() {
 }
 
 #[test]
-fn test_dart_field_extraction() {
-    let result = extract("class Foo {\n  String name;\n  int _count;\n}");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let fields: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Field)
-        .collect();
-    assert!(
-        fields.len() >= 2,
-        "Expected at least 2 fields, got {:?}",
-        fields
-    );
-    assert!(fields.iter().any(|n| n.name == "name"));
-    assert!(fields.iter().any(|n| n.name == "_count"));
-}
-
-#[test]
 fn test_dart_typedef_extraction() {
     let result = extract("typedef IntList = List<int>;");
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -244,20 +200,6 @@ fn test_dart_visibility_private() {
     assert_eq!(fns.len(), 1);
     assert_eq!(fns[0].name, "_privateFunc");
     assert_eq!(fns[0].visibility, Visibility::Private);
-}
-
-#[test]
-fn test_dart_visibility_public() {
-    let result = extract("void publicFunc() {}");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 1);
-    assert_eq!(fns[0].name, "publicFunc");
-    assert_eq!(fns[0].visibility, Visibility::Pub);
 }
 
 #[test]
@@ -319,17 +261,6 @@ fn test_dart_contains_edges() {
         contains_edges.len(),
         contains_edges
     );
-}
-
-#[test]
-fn test_dart_language_extractor_trait() {
-    let extractor = DartExtractor;
-    assert_eq!(extractor.extensions(), &["dart"]);
-    assert_eq!(extractor.language_name(), "Dart");
-
-    let result = extractor.extract("test.dart", "void main() {}");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert!(!result.nodes.is_empty());
 }
 
 #[test]

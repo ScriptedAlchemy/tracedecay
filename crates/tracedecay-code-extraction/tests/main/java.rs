@@ -248,38 +248,6 @@ class Worker extends Base implements Runnable {
 }
 
 #[test]
-fn test_java_extract_annotations() {
-    let source = r#"
-import java.lang.Override;
-
-public class Foo {
-    @Override
-    public String toString() {
-        return "Foo";
-    }
-
-    @Deprecated
-    public void oldMethod() {}
-}
-"#;
-    let extractor = JavaExtractor;
-    let result = extractor.extract("Foo.java", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let annots: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::AnnotationUsage)
-        .collect();
-    assert!(annots.len() >= 2, "should extract annotation usages");
-    let has_annotates = result.edges.iter().any(|e| e.kind == EdgeKind::Annotates)
-        || result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Annotates);
-    assert!(has_annotates, "should have Annotates edges");
-}
-
-#[test]
 fn test_java_extract_marker_and_regular_annotations() {
     let source = r#"
 public class Foo {

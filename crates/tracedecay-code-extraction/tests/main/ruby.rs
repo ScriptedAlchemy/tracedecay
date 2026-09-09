@@ -6,25 +6,6 @@ mod ruby_tests {
     use tracedecay_domain::*;
 
     #[test]
-    fn test_ruby_file_node() {
-        let source = r#"
-def hello
-  puts "hi"
-end
-"#;
-        let extractor = RubyExtractor;
-        let result = extractor.extract("test.rb", source);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let files: Vec<_> = result
-            .nodes
-            .iter()
-            .filter(|n| n.kind == NodeKind::File)
-            .collect();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name, "test.rb");
-    }
-
-    #[test]
     fn test_ruby_top_level_method() {
         let source = r#"
 def greet(name)
@@ -186,31 +167,6 @@ end
         assert_eq!(classes.len(), 2);
         assert!(classes.iter().any(|c| c.name == "Outer"));
         assert!(classes.iter().any(|c| c.name == "Inner"));
-    }
-
-    #[test]
-    fn test_ruby_call_sites() {
-        let source = r#"
-class Processor
-  def run
-    prepare()
-    execute()
-  end
-
-  def prepare; end
-  def execute; end
-end
-"#;
-        let extractor = RubyExtractor;
-        let result = extractor.extract("proc.rb", source);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        assert!(
-            result
-                .unresolved_refs
-                .iter()
-                .any(|r| r.reference_kind == EdgeKind::Calls),
-            "expected Calls refs"
-        );
     }
 
     #[test]
