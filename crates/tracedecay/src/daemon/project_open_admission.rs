@@ -559,7 +559,7 @@ impl ProjectOpenTasks {
 
     #[cfg(test)]
     #[hotpath::skip]
-    pub(super) async fn start<OpenFuture>(
+    pub(super) fn start<OpenFuture>(
         &self,
         route: ProjectRouteKey,
         open: OpenFuture,
@@ -567,11 +567,11 @@ impl ProjectOpenTasks {
     where
         OpenFuture: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        self.start_cancellable(route, |_| open).await
+        self.start_cancellable(route, |_| open)
     }
 
     #[hotpath::skip]
-    pub(super) async fn start_cancellable<OpenOperation, OpenFuture>(
+    pub(super) fn start_cancellable<OpenOperation, OpenFuture>(
         &self,
         route: ProjectRouteKey,
         open: OpenOperation,
@@ -679,10 +679,7 @@ impl ProjectOpenTasks {
     }
 
     #[hotpath::skip]
-    pub(super) async fn cached_failure(
-        &self,
-        route: &ProjectRouteKey,
-    ) -> Option<ProjectOpenFailure> {
+    pub(super) fn cached_failure(&self, route: &ProjectRouteKey) -> Option<ProjectOpenFailure> {
         let now = Instant::now();
         let mut registry = self.lock_registry();
         registry.prune(now);
@@ -964,7 +961,7 @@ impl ProjectOpenTasks {
 
     #[cfg(test)]
     #[hotpath::skip]
-    pub(super) async fn tracked_task_count(&self) -> usize {
+    pub(super) fn tracked_task_count(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune(Instant::now());
         let active = registry
@@ -982,7 +979,7 @@ impl ProjectOpenTasks {
 
     #[cfg(test)]
     #[hotpath::skip]
-    pub(super) async fn tracked_route_count(&self) -> usize {
+    pub(super) fn tracked_route_count(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune(Instant::now());
         registry.routes.len() + registry.retiring.len()
@@ -1133,14 +1130,12 @@ mod refused_store_invalidation_tests {
     }
 
     async fn record_reset_required_failure(tasks: &ProjectOpenTasks, route: ProjectRouteKey) {
-        let claim = tasks
-            .start_cancellable(route, |_| async {
-                Err(TraceDecayError::reset_required(
-                    "graph",
-                    "unsupported schema version 18",
-                ))
-            })
-            .await;
+        let claim = tasks.start_cancellable(route, |_| async {
+            Err(TraceDecayError::reset_required(
+                "graph",
+                "unsupported schema version 18",
+            ))
+        });
         let ProjectOpenTaskClaim::InFlight(state) = claim else {
             panic!("the first open must start a tracked task");
         };
@@ -1150,7 +1145,7 @@ mod refused_store_invalidation_tests {
         );
         // The watch publishes `Failed` just before the task itself finishes,
         // and staleness eviction only acts on finished tasks.
-        while tasks.tracked_task_count().await > 0 {
+        while tasks.tracked_task_count() > 0 {
             tokio::task::yield_now().await;
         }
     }
@@ -1172,10 +1167,8 @@ mod refused_store_invalidation_tests {
         record_reset_required_failure(&tasks, route.clone()).await;
 
         // Unchanged store: the refusal stays cached and backed off.
-        assert!(tasks.cached_failure(&route).await.is_some());
-        let claim = tasks
-            .start_cancellable(route.clone(), |_| async { Ok(()) })
-            .await;
+        assert!(tasks.cached_failure(&route).is_some());
+        let claim = tasks.start_cancellable(route.clone(), |_| async { Ok(()) });
         assert!(
             matches!(claim, ProjectOpenTaskClaim::Failed(_)),
             "an unchanged refused store must keep declining reopen"
@@ -1185,12 +1178,10 @@ mod refused_store_invalidation_tests {
         std::fs::remove_file(&db_path).unwrap();
 
         assert!(
-            tasks.cached_failure(&route).await.is_none(),
+            tasks.cached_failure(&route).is_none(),
             "a refusal recorded against deleted files must not be served"
         );
-        let claim = tasks
-            .start_cancellable(route.clone(), |_| async { Ok(()) })
-            .await;
+        let claim = tasks.start_cancellable(route.clone(), |_| async { Ok(()) });
         let ProjectOpenTaskClaim::InFlight(state) = claim else {
             panic!("the reset store must admit a fresh open without a daemon restart");
         };
@@ -1213,12 +1204,12 @@ mod refused_store_invalidation_tests {
         let route = route_for(&profile_root, &project_root);
         let tasks = ProjectOpenTasks::default();
         record_reset_required_failure(&tasks, route.clone()).await;
-        assert!(tasks.cached_failure(&route).await.is_some());
+        assert!(tasks.cached_failure(&route).is_some());
 
         std::fs::remove_file(&branch_db).unwrap();
 
         assert!(
-            tasks.cached_failure(&route).await.is_none(),
+            tasks.cached_failure(&route).is_none(),
             "a branch graph DB reset must invalidate the cached refusal"
         );
     }
@@ -1235,14 +1226,12 @@ mod refused_store_invalidation_tests {
         let db_path = seed_refused_store(&profile_root, &project_root);
         let route = route_for(&profile_root, &project_root);
         let tasks = ProjectOpenTasks::default();
-        let claim = tasks
-            .start_cancellable(route.clone(), |_| async {
-                Err(TraceDecayError::Database {
-                    operation: "ensure global database authority invariants".to_string(),
-                    message: "persisted row violates an invariant".to_string(),
-                })
+        let claim = tasks.start_cancellable(route.clone(), |_| async {
+            Err(TraceDecayError::Database {
+                operation: "ensure global database authority invariants".to_string(),
+                message: "persisted row violates an invariant".to_string(),
             })
-            .await;
+        });
         let ProjectOpenTaskClaim::InFlight(state) = claim else {
             panic!("the first open must start a tracked task");
         };
@@ -1251,7 +1240,7 @@ mod refused_store_invalidation_tests {
         std::fs::remove_file(&db_path).unwrap();
 
         assert!(
-            tasks.cached_failure(&route).await.is_some(),
+            tasks.cached_failure(&route).is_some(),
             "non-ResetRequired backoffs are time-based and must survive file churn"
         );
     }

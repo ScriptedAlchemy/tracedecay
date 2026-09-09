@@ -357,87 +357,91 @@ impl ProjectSourceEditOwnerV1 {
         deadline: Deadline,
         cancellation: CancellationSignal,
     ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
-        if !edit.dry_run() {
-            self.mutation.authorize_mutation("mutation")?;
-        }
-        let observed_at = now_micros();
-        let operation = tracedecay_contracts::source_edit_operation(edit.kind())
-            .map_err(source_edit_contract_error)?;
-        let access = self
-            .authorization
-            .current_access(observed_at)
-            .await
-            .map_err(|_| source_edit_authority_error())?;
-        let context = source_edit_request_context(
-            &access,
-            request_id,
-            &operation,
-            observed_at,
-            deadline,
-            cancellation.context(),
-        )?;
-        let effect_control = SourceEditEffectControlV1::for_request(&context, cancellation);
-        let current = self
-            .authorization
-            .current_authority(&context, &operation, observed_at)
-            .await
-            .map_err(|_| source_edit_authority_error())?;
-        let dry_run = edit.dry_run();
-        let idempotency_key = match idempotency_key {
-            Some(key) => key,
-            None if dry_run => {
-                let preview_identity = derive_preview_identity(
-                    PreviewIdentityDomain::SourceEdit,
+        // Retain the admitted owner state once across its asynchronous phases.
+        Box::pin(async move {
+            if !edit.dry_run() {
+                self.mutation.authorize_mutation("mutation")?;
+            }
+            let observed_at = now_micros();
+            let operation = tracedecay_contracts::source_edit_operation(edit.kind())
+                .map_err(source_edit_contract_error)?;
+            let access = self
+                .authorization
+                .current_access(observed_at)
+                .await
+                .map_err(|_| source_edit_authority_error())?;
+            let context = source_edit_request_context(
+                &access,
+                request_id,
+                &operation,
+                observed_at,
+                deadline,
+                cancellation.context(),
+            )?;
+            let effect_control = SourceEditEffectControlV1::for_request(&context, cancellation);
+            let current = self
+                .authorization
+                .current_authority(&context, &operation, observed_at)
+                .await
+                .map_err(|_| source_edit_authority_error())?;
+            let dry_run = edit.dry_run();
+            let idempotency_key = match idempotency_key {
+                Some(key) => key,
+                None if dry_run => {
+                    let preview_identity = derive_preview_identity(
+                        PreviewIdentityDomain::SourceEdit,
+                        context.request_id(),
+                        &edit,
+                    )
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("source edit preview identity failed: {error}"),
+                    })?;
+                    IdempotencyKey::new(format!("preview.{preview_identity}"))
+                        .map_err(source_edit_contract_error)?
+                }
+                None => {
+                    return Err(TraceDecayError::Config {
+                        message: "source edit apply requires an idempotency key".to_owned(),
+                    });
+                }
+            };
+            let expected_state = match expected_state {
+                Some(state) => state,
+                None if dry_run => canonical_sha256(&(
+                    "tracedecay.source-edit-preview-unbound-state.v1",
                     context.request_id(),
                     &edit,
-                )
+                ))
                 .map_err(|error| TraceDecayError::Config {
-                    message: format!("source edit preview identity failed: {error}"),
-                })?;
-                IdempotencyKey::new(format!("preview.{preview_identity}"))
-                    .map_err(source_edit_contract_error)?
-            }
-            None => {
-                return Err(TraceDecayError::Config {
-                    message: "source edit apply requires an idempotency key".to_owned(),
-                });
-            }
-        };
-        let expected_state = match expected_state {
-            Some(state) => state,
-            None if dry_run => canonical_sha256(&(
-                "tracedecay.source-edit-preview-unbound-state.v1",
-                context.request_id(),
-                &edit,
-            ))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("source edit preview state identity failed: {error}"),
-            })?,
-            None => {
-                return Err(TraceDecayError::Config {
-                    message: "source edit apply requires an expected state".to_owned(),
-                });
-            }
-        };
-        let request = tracedecay_contracts::SourceEditEffectRequestV1 {
-            context,
-            authority: current.receipt.clone(),
-            edit,
-            idempotency_key,
-            expected_state,
-            proof: current.proof,
-            observed_at,
-        };
-        tracedecay_source_edit::execute_source_edit_with_control(
-            self.runtime.as_ref(),
-            self.code_graph.as_ref(),
-            &operation,
-            request,
-            &self.authorization,
-            &effect_control,
-        )
+                    message: format!("source edit preview state identity failed: {error}"),
+                })?,
+                None => {
+                    return Err(TraceDecayError::Config {
+                        message: "source edit apply requires an expected state".to_owned(),
+                    });
+                }
+            };
+            let request = tracedecay_contracts::SourceEditEffectRequestV1 {
+                context,
+                authority: current.receipt.clone(),
+                edit,
+                idempotency_key,
+                expected_state,
+                proof: current.proof,
+                observed_at,
+            };
+            tracedecay_source_edit::execute_source_edit_with_control(
+                self.runtime.as_ref(),
+                self.code_graph.as_ref(),
+                &operation,
+                request,
+                &self.authorization,
+                &effect_control,
+            )
+            .await
+            .and_then(source_edit_surface_result)
+        })
         .await
-        .and_then(source_edit_surface_result)
     }
 
     #[allow(clippy::too_many_arguments)]

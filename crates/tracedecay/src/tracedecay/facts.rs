@@ -18,7 +18,7 @@ impl TraceDecay {
     /// Opens the sole project fact authority selected by the retained project
     /// layout. Code-index routing never changes this database identity.
     #[hotpath::skip]
-    pub(crate) async fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
+    pub(crate) fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
         if tracedecay_runtime_core::path_safety::same_canonical_path(
             &self.db_path(),
             &self.store_layout.graph_db_path,
@@ -26,9 +26,9 @@ impl TraceDecay {
             Ok(ProjectMemoryDbHandle::Active(&self.db))
         } else {
             let database = if self.read_only {
-                self.open_project_store_db_read_only().await?
+                self.open_project_store_db_read_only()?
             } else {
-                self.open_project_store_db().await?
+                self.open_project_store_db()?
             };
             Ok(ProjectMemoryDbHandle::Owned(Box::new(database)))
         }
@@ -38,11 +38,11 @@ impl TraceDecay {
     /// application over a fact store that owns its resolved handle. Every
     /// project-memory route builds its application through this accessor.
     #[hotpath::skip]
-    pub(crate) async fn project_memory_application(
+    pub(crate) fn project_memory_application(
         &self,
     ) -> Result<MemoryApplication<ProjectFactStore<'_>>> {
         let owner = self.project_memory_owner()?;
-        let store = self.project_memory_db().await?.into_fact_store();
+        let store = self.project_memory_db()?.into_fact_store();
         MemoryApplication::new(owner, store).map_err(memory_application_error)
     }
 }

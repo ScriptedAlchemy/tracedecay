@@ -435,7 +435,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
         );
         assert_eq!(
             project_scoped.project_path,
-            Some(tracedecay::config::resolve_path(Some(
+            Some(tracedecay_configuration::resolve_path(Some(
                 "/explicit/project".to_owned()
             ))),
             "{tool_name}"
@@ -450,7 +450,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
     );
     assert_eq!(
         dispatch.project_path,
-        Some(tracedecay::config::resolve_path(Some(
+        Some(tracedecay_configuration::resolve_path(Some(
             "/explicit/project".to_owned()
         )))
     );

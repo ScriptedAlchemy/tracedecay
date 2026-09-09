@@ -4150,10 +4150,13 @@ fn derive_statistics_step(
             )
         }),
         2 => hotpath::measure_block!("query.artifact.finalization.derive_vocabulary", {
+            // The preceding statistics step already grouped every posting
+            // by (term_id, field). Reuse that frozen membership instead of
+            // scanning the larger posting table again.
             let subtoken = field_code(LexicalFieldV1::Subtoken);
             transaction
                 .execute(
-                    "UPDATE vocabulary SET in_fuzzy = 1 WHERE term_id IN (SELECT DISTINCT term_id FROM term_postings WHERE field != ?1)",
+                    "UPDATE vocabulary SET in_fuzzy = 1 WHERE term_id IN (SELECT DISTINCT term_id FROM term_stats WHERE field != ?1)",
                     [subtoken],
                 )
                 .and_then(|_| {
@@ -5669,6 +5672,42 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn fuzzy_vocabulary_requires_a_non_subtoken_posting() {
+        let mut connection = Connection::open_in_memory().expect("vocabulary database");
+        let _authority = create_mutable_test_schema(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES
+                 (1, 'subtoken_only', 0), (2, 'body_only', 0),
+                 (3, 'both_fields', 0), (4, 'unreferenced', 0);
+                 INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES
+                 (1, 7, 1, 3), (1, 7, 2, 5),
+                 (2, 4, 1, 2), (2, 4, 2, 7),
+                 (3, 7, 1, 1), (3, 4, 2, 1);",
+            )
+            .expect("vocabulary fixture");
+        let transaction = connection.transaction().expect("statistics transaction");
+        derive_statistics_step(&transaction, 1).expect("derive term statistics");
+        derive_statistics_step(&transaction, 2).expect("derive fuzzy vocabulary");
+        let actual = transaction
+            .prepare("SELECT term_id, in_fuzzy FROM vocabulary ORDER BY term_id")
+            .expect("fuzzy membership")
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+            })
+            .expect("vocabulary rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("vocabulary membership");
+        assert_eq!(actual, [(1, false), (2, true), (3, true), (4, false)]);
+        assert!(
+            transaction
+                .execute("UPDATE vocabulary SET in_fuzzy = 0 WHERE term_id = 2", [])
+                .is_err(),
+            "derived membership must remain frozen"
+        );
     }
 
     #[test]

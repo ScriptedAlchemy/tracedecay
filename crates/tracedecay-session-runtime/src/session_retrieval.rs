@@ -132,6 +132,7 @@ impl SessionRetrievalServingIdentityV1 {
     pub async fn resolve_project(
         project_id: &str,
         serving_db: &Path,
+        serving_branch: Option<&str>,
         project_root: &Path,
         profile_id: &tracedecay_domain::UserProfileId,
         expected_runtime_shard: &StoreShardIdV1,
@@ -139,7 +140,8 @@ impl SessionRetrievalServingIdentityV1 {
     ) -> Option<Self> {
         let project_id = ProjectId::new(project_id.to_owned()).ok()?;
         let profile_id = ProfileId::new(profile_id.as_str().to_owned()).ok()?;
-        let (store_id, root_id) = project_store_and_root(registry, &project_id, serving_db).await?;
+        let (store_id, root_id) =
+            project_store_and_root(registry, &project_id, serving_db, serving_branch).await?;
         let serving = Self {
             project_id: Some(project_id),
             profile_id,
@@ -285,6 +287,8 @@ impl DaemonSessionRetrievalRoot {
                 if scope.writable
                     && scope.project_id == context.project.project_id
                     && scope.store_id == store.store.store_id
+                    && scope.store_id == serving.store_id.as_str()
+                    && scope.graph_scope_id == serving.root_id.as_str()
                     && profile_root.join(&scope.db_relpath) == serving.serving_db
                 {
                     if selected.is_some() {
@@ -391,6 +395,7 @@ async fn project_store_and_root(
     registry: &RegisteredGlobalDb,
     project_id: &ProjectId,
     serving_db: &Path,
+    serving_branch: Option<&str>,
 ) -> Option<(SessionStoreId, SessionRootId)> {
     let context = registry
         .project_registry_context_by_id(project_id.as_str())
@@ -403,6 +408,8 @@ async fn project_store_and_root(
             if scope.writable
                 && scope.project_id == context.project.project_id
                 && scope.store_id == store.store.store_id
+                // Branches share a physical graph; the serving branch owns the root.
+                && serving_branch.is_none_or(|branch| scope.branch_name == branch)
                 && profile_root.join(&scope.db_relpath) == serving_db
             {
                 if selected.is_some() {

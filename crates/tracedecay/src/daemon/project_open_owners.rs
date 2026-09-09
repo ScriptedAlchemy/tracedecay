@@ -176,6 +176,8 @@ pub(super) async fn register_project_open_production_owners(
     server: &McpServer,
     source_edit_mutation: Arc<SourceEditMutationGate>,
 ) -> Result<ProjectOpenDependentOwnerState> {
+    // Retain the admitted owner state once across its asynchronous phases.
+    Box::pin(async move {
     let owner_registration_started = Instant::now();
     let mut owner_phase_started = owner_registration_started;
     let project_id =
@@ -349,11 +351,13 @@ pub(super) async fn register_project_open_production_owners(
                 message: format!("project-open retained grant is invalid: {error}"),
             }
         })?;
-    let retained_ports = server.retained_surface_ports(
-        project_root,
-        scope.project_id.clone(),
-        access.configuration_digest.clone(),
-    );
+    let retained_ports = server
+        .retained_surface_ports(
+            project_root,
+            scope.project_id.clone(),
+            access.configuration_digest.clone(),
+        )
+        .await;
     hotpath::future!(
         invocation.retained_runtime_registrar().register(
             project_root.to_path_buf(),
@@ -726,8 +730,7 @@ pub(super) async fn register_project_open_production_owners(
         privacy_grant,
         async move {
             privacy_graph
-                .project_memory_application()
-                .await?
+                .project_memory_application()?
                 .privacy_remediation_rescan(
                     tracedecay_session_memory::memory::PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
                     &privacy_read,
@@ -784,6 +787,7 @@ pub(super) async fn register_project_open_production_owners(
         diagnostic_broker,
         lsp_session_factory,
     })
+        }).await
 }
 
 #[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]

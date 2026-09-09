@@ -28,7 +28,7 @@ use tracedecay_session_memory::context::{
 use tracedecay_session_memory::session::{SessionRefreshTarget, SessionRequestBinding};
 use tracedecay_store::SessionRefreshFrontierV1;
 
-pub(crate) use tracedecay_session_memory::session::SessionRefreshServicePort as RetainedSessionRefreshPortV1;
+pub use tracedecay_session_memory::session::SessionRefreshServicePort as RetainedSessionRefreshPortV1;
 use tracedecay_session_memory::session::{SessionRefreshAction, SessionRefreshCommand};
 
 const REQUEST_MAX_RESULTS: u64 = 64;
@@ -44,17 +44,17 @@ const SESSION_REFRESH_LIFECYCLE_CAPABILITY: &[u8] =
 /// bound to: the project-open capability grant for a project owner, and the
 /// connection configuration digest for a profile owner, whose per-request
 /// grants would otherwise rebind every `status`/`cancel` to a fresh join key.
-pub(super) struct MountedSessionRefreshAuthorityV1<'a> {
-    pub(super) profile_id: &'a UserProfileId,
-    pub(super) session_store_id: &'a SessionStoreId,
-    pub(super) session_root_id: &'a SessionRootId,
-    pub(super) configuration_digest: &'a ManifestDigest,
-    pub(super) policy_digest: &'a ManifestDigest,
-    pub(super) refresh: &'a dyn RetainedSessionRefreshPortV1,
+pub struct MountedSessionRefreshAuthorityV1<'a> {
+    pub profile_id: &'a UserProfileId,
+    pub session_store_id: &'a SessionStoreId,
+    pub session_root_id: &'a SessionRootId,
+    pub configuration_digest: &'a ManifestDigest,
+    pub policy_digest: &'a ManifestDigest,
+    pub refresh: &'a dyn RetainedSessionRefreshPortV1,
 }
 
 #[hotpath::measure(label = "daemon.retained.session.refresh_admit")]
-pub(super) fn admitted_session_refresh_command(
+pub fn admitted_session_refresh_command(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
     cancellation_signal: &CancellationSignal,

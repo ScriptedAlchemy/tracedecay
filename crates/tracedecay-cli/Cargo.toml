@@ -163,6 +163,7 @@ tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }

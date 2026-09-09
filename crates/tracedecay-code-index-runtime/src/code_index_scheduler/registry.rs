@@ -6680,6 +6680,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| Arc::clone(&worktree.build_publication_lock))
     }
 
+    #[hotpath::measure(label = "daemon.code_index.shutdown", future = true)]
     pub async fn shutdown(&self) {
         self.cancel();
         let cold_mount_completions = self.cold_mount_reservation_completions();
@@ -6696,11 +6697,24 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree.serving_generation_changed.send_replace(());
             worktree.wake.notify_one();
         }
-        for (_, worktree) in mounted {
-            let _ = worktree.task.await;
+        for (_, mut worktree) in mounted {
+            let _ = hotpath::future!(
+                &mut worktree.task,
+                label = "daemon.code_index.shutdown.mounted_join"
+            )
+            .await;
+            hotpath::measure_block!("daemon.code_index.shutdown.mounted_release", drop(worktree));
         }
-        for (_, worktree) in retiring {
-            let _ = worktree.task.await;
+        for (_, mut worktree) in retiring {
+            let _ = hotpath::future!(
+                &mut worktree.task,
+                label = "daemon.code_index.shutdown.retiring_join"
+            )
+            .await;
+            hotpath::measure_block!(
+                "daemon.code_index.shutdown.retiring_release",
+                drop(worktree)
+            );
         }
         for mut completion in cold_mount_completions {
             let _ = completion.changed().await;

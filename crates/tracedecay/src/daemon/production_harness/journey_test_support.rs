@@ -450,3 +450,25 @@ impl Drop for StageLedgerReportV1 {
         stage_ledger::disarm();
     }
 }
+
+#[test]
+fn stage_ledger_releases_after_failed_journey() {
+    let failed = std::panic::catch_unwind(|| {
+        let _report = StageLedgerReportV1::arm("rejected qualification");
+        record_stage(
+            "evaluation.dispatch",
+            std::time::Duration::from_millis(25),
+            1,
+            "dispatch attempt",
+        );
+        assert_eq!(stage_ledger::lock_rows().len(), 1);
+        panic!("qualification refused");
+    });
+    assert!(failed.is_err());
+    assert!(!stage_ledger::armed());
+    assert!(stage_ledger::lock_rows().is_empty());
+
+    let _next_report = StageLedgerReportV1::arm("next isolated journey");
+    assert!(stage_ledger::armed());
+    assert!(stage_ledger::lock_rows().is_empty());
+}

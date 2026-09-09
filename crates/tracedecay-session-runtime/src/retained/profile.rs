@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::session_retrieval::SessionRetrievalServingIdentityV1;
 #[cfg(test)]
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_contracts::retained_surfaces::{RetainedSurfaceRequestV1, RetainedSurfaceResultV1};
@@ -18,27 +19,27 @@ use tracedecay_domain::{
 use tracedecay_session_memory::context::{
     ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
-use tracedecay_session_runtime::session_retrieval::SessionRetrievalServingIdentityV1;
 use tracedecay_store::StoreShardIdV1;
 
+use tracedecay_contracts::RetainedMemoryExecutionPortV1;
+
 use super::lcm::DirectRetainedLcmPortV1;
-use super::memory::DirectRetainedMemoryPortV1;
-use super::session::DirectProfileRetainedSessionPortV1;
+use super::session::DirectRetainedSessionPortV1;
 use super::session_refresh::RetainedSessionRefreshPortV1;
+use crate::lcm_authority::MountedLcmAuthorityPort;
 use tracedecay_domain::errors::TraceDecayError;
 
 /// Exact mounted authorities for a profile-retained request.
 #[derive(Clone)]
-pub(crate) struct ProfileRetainedAuthoritiesV1<'a> {
-    pub(crate) runtime_registry:
-        Option<&'a tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
-    pub(crate) session_identity: ResolvedSessionIdentity,
-    pub(crate) configuration_digest: ManifestDigest,
-    pub(crate) lcm_authority:
-        Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+pub struct ProfileRetainedAuthoritiesV1<'a> {
+    pub profile_sessions: Option<super::ProfileSessionDatabaseSource<'a>>,
+    pub session_identity: ResolvedSessionIdentity,
+    pub configuration_digest: ManifestDigest,
+    pub lcm_authority: Option<&'a dyn MountedLcmAuthorityPort>,
     /// Daemon-wide profile session refresh service; refresh handles it issues
     /// stay valid across every connection that reaches the same profile store.
-    pub(crate) session_refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+    pub session_refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+    pub memory: Option<Arc<dyn RetainedMemoryExecutionPortV1 + 'a>>,
 }
 
 const PROFILE_RETAINED_REQUEST_GRANT_REVISION_V1: u64 = 1;
@@ -47,7 +48,7 @@ const PROFILE_RETAINED_ACTOR_DOMAIN_V1: &str =
 const PROFILE_RETAINED_REQUEST_GRANT_DOMAIN_V1: &str =
     "tracedecay.daemon.profile-retained.request-grant.v1";
 
-pub(crate) fn profile_session_retrieval_serving_identity(
+pub fn profile_session_retrieval_serving_identity(
     identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
     expected_runtime_shard: &StoreShardIdV1,
     serving_db: &std::path::Path,
@@ -75,7 +76,7 @@ pub(crate) fn profile_session_retrieval_serving_identity(
 /// connection. Grants are deliberately absent: each request is admitted for
 /// one operation under its exact controls.
 #[derive(Clone)]
-pub(crate) struct ProfileRetainedConnectionAuthorityV1 {
+pub struct ProfileRetainedConnectionAuthorityV1 {
     brain_id: BrainId,
     user_profile_id: UserProfileId,
     actor: ActorId,
@@ -84,11 +85,11 @@ pub(crate) struct ProfileRetainedConnectionAuthorityV1 {
 }
 
 impl ProfileRetainedConnectionAuthorityV1 {
-    pub(crate) fn session_identity(&self) -> &ResolvedSessionIdentity {
+    pub fn session_identity(&self) -> &ResolvedSessionIdentity {
         &self.session_identity
     }
 
-    pub(crate) fn configuration_digest(&self) -> &ManifestDigest {
+    pub fn configuration_digest(&self) -> &ManifestDigest {
         &self.configuration_digest
     }
 }
@@ -188,7 +189,7 @@ fn profile_retained_configuration_digest(
     })
 }
 
-pub(crate) fn profile_retained_connection_authority(
+pub fn profile_retained_connection_authority(
     identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
     session_identity: &ResolvedSessionIdentity,
 ) -> Result<ProfileRetainedConnectionAuthorityV1, TraceDecayError> {
@@ -244,7 +245,7 @@ fn profile_retained_connection_authority_from_persisted_identity(
 /// Execute one profile-scoped retained request through canonical admission and
 /// render the typed application result only after execution has completed.
 #[hotpath::measure(label = "daemon.retained.profile.execute", future = true)]
-pub(crate) async fn execute_profile_retained_application(
+pub async fn execute_profile_retained_application(
     authorities: ProfileRetainedAuthoritiesV1<'_>,
     connection: &ProfileRetainedConnectionAuthorityV1,
     request: RetainedSurfaceRequestV1,
@@ -336,7 +337,7 @@ fn application_problem_envelope(
 }
 
 fn profile_retained_surface_ports<'a>(
-    authorities: &'a ProfileRetainedAuthoritiesV1<'a>,
+    authorities: &ProfileRetainedAuthoritiesV1<'a>,
 ) -> Result<RetainedSurfacePortsV1<'a>, TraceDecayError> {
     authorities
         .session_identity
@@ -345,18 +346,17 @@ fn profile_retained_surface_ports<'a>(
             message: format!("profile retained runtime identity is invalid: {error}"),
         })?;
     let mut ports = RetainedSurfacePortsV1::default();
-    if let Some(runtime_registry) = authorities.runtime_registry {
-        ports = ports.with_memory(Arc::new(DirectRetainedMemoryPortV1::profile(
-            runtime_registry,
-            authorities.configuration_digest.clone(),
-        )));
+    if let Some(memory) = authorities.memory.clone() {
+        ports = ports.with_memory(memory);
+    }
+    if let Some(session_database) = authorities.profile_sessions.clone() {
         ports = ports.with_lcm(Arc::new(DirectRetainedLcmPortV1::profile(
-            runtime_registry,
+            session_database.clone(),
             authorities.session_identity.clone(),
             authorities.lcm_authority,
         )));
-        ports = ports.with_session(Arc::new(DirectProfileRetainedSessionPortV1::profile(
-            runtime_registry,
+        ports = ports.with_session(Arc::new(DirectRetainedSessionPortV1::profile(
+            session_database,
             authorities.session_identity.clone(),
             authorities.configuration_digest.clone(),
             authorities.session_refresh,
@@ -367,13 +367,11 @@ fn profile_retained_surface_ports<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crate::session_retrieval::DaemonSessionRetrievalRoot;
     use serde_json::json;
     use tracedecay_contracts::retained_surfaces::{
         MemoryScopeV1, MemoryStatusRequestV1, MessageSearchRequestV1, RetainedOutcomeStatusV1,
-        SessionGitRefV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
-        SessionRefreshFrontierV1, SessionRefreshGrainV1, SessionRefreshRequestV1,
-        SessionRefreshScopeV1, SessionRefreshSessionV1, SessionRefreshSourceV1,
-        SessionRefreshTargetV1, SessionRefreshTemporalModeV1, SessionsForRequestV1,
+        SessionGitRefV1, SessionsForRequestV1,
     };
     use tracedecay_contracts::{
         ApplicationOutcome, ApplicationProblemKind, CancellationSignal, Deadline, RequestId,
@@ -393,8 +391,6 @@ mod tests {
     use tracedecay_session_memory::context::{
         ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     };
-    use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
-    use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
@@ -403,8 +399,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::mcp::server::DaemonSessionRefreshService;
-
     fn identity(profile: &str) -> ResolvedSessionIdentity {
         ResolvedSessionIdentity::for_profile(
             ProfileId::new(profile).expect("profile id"),
@@ -644,6 +638,112 @@ mod tests {
         .kind
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn profile_memory_does_not_acquire_unrelated_session_storage() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let profile_identity = profile_identity::load_or_create(&profile_root).unwrap();
+        let _scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "retained memory independent session storage",
+        )
+        .unwrap();
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity.clone(),
+        )
+        .await
+        .unwrap();
+        let identity = profile_retrieval_root(&profile_identity).identity().clone();
+        let connection =
+            profile_retained_connection_authority(&profile_identity, &identity).unwrap();
+        // A directory at the canonical database locator makes only session
+        // storage unusable; the independently mounted profile memory remains valid.
+        let session_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        std::fs::create_dir_all(&session_path).unwrap();
+        assert!(registry.profile_sessions().await.is_err());
+        let acquisitions = AtomicUsize::new(0);
+        let authorities = ProfileRetainedAuthoritiesV1 {
+            profile_sessions: Some(Arc::new(|| {
+                acquisitions.fetch_add(1, Ordering::SeqCst);
+                Box::pin(registry.profile_sessions())
+            })),
+            session_identity: identity,
+            configuration_digest: connection.configuration_digest().clone(),
+            lcm_authority: None,
+            session_refresh: None,
+            memory: Some(Arc::new(
+                tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::profile(
+                    &registry,
+                    connection.configuration_digest().clone(),
+                ),
+            )),
+        };
+        for (label, expired, cancelled) in [
+            ("healthy", false, false),
+            ("expired", true, false),
+            ("cancelled", false, true),
+        ] {
+            let now = now_micros();
+            let signal = CancellationSignal::active(format!("cancel.{label}")).unwrap();
+            if cancelled {
+                signal.cancel(now);
+            }
+            let result = execute_profile_retained_application(
+                authorities.clone(),
+                &connection,
+                request(),
+                RequestId::new(format!("request.{label}")).unwrap(),
+                Deadline::new(UtcMicros(if expired {
+                    now.0 - 1
+                } else {
+                    now.0 + 30_000_000
+                }))
+                .unwrap(),
+                signal,
+            )
+            .await
+            .unwrap();
+            if expired {
+                assert_eq!(
+                    result.unwrap_err().problem.kind,
+                    ApplicationProblemKind::TimedOut
+                );
+            } else if cancelled {
+                assert_eq!(
+                    result.unwrap_err().problem.kind,
+                    ApplicationProblemKind::Cancelled
+                );
+            } else {
+                assert!(matches!(
+                    result.unwrap().outcome,
+                    ApplicationOutcome::Evidence(_)
+                ));
+            }
+            assert_eq!(acquisitions.load(Ordering::SeqCst), 0, "{label}");
+        }
+        // The unavailable source is real to its consumer: a session search
+        // reaches it, preserves its typed refusal, and does not fabricate data.
+        let result = execute_profile_retained_application(
+            authorities,
+            &connection,
+            RetainedSurfaceRequestV1::MessageSearch(MessageSearchRequestV1 {
+                query: Some("beacon".to_owned()),
+                ..MessageSearchRequestV1::default()
+            }),
+            RequestId::new("request.sessions-unavailable").unwrap(),
+            Deadline::new(UtcMicros(now_micros().0 + 30_000_000)).unwrap(),
+            CancellationSignal::active("cancel.sessions-unavailable").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(result.problem.kind, ApplicationProblemKind::Unavailable);
+        assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn connection_admission_denies_a_different_profile_scope() {
         let admitted_identity = identity("profile.retained-admitted");
@@ -651,7 +751,8 @@ mod tests {
         let connection = connection(&admitted_identity);
         let kind = denied_kind(
             ProfileRetainedAuthoritiesV1 {
-                runtime_registry: None,
+                profile_sessions: None,
+                memory: None,
                 session_identity: requested_identity,
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
@@ -670,7 +771,8 @@ mod tests {
         let connection = connection(&session_identity);
         let kind = denied_kind(
             ProfileRetainedAuthoritiesV1 {
-                runtime_registry: None,
+                profile_sessions: None,
+                memory: None,
                 session_identity,
                 configuration_digest: digest('c'),
                 lcm_authority: None,
@@ -746,11 +848,12 @@ mod tests {
 
         let result = execute_profile_retained_application(
             ProfileRetainedAuthoritiesV1 {
-                runtime_registry: Some(&runtime_registry),
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity,
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
                 session_refresh: None,
+                memory: None,
             },
             &connection,
             RetainedSurfaceRequestV1::MessageSearch(MessageSearchRequestV1 {
@@ -813,11 +916,12 @@ mod tests {
 
         let problem = execute_profile_retained_application(
             ProfileRetainedAuthoritiesV1 {
-                runtime_registry: Some(&runtime_registry),
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity,
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
                 session_refresh: None,
+                memory: None,
             },
             &connection,
             RetainedSurfaceRequestV1::MessageSearch(MessageSearchRequestV1 {
@@ -846,320 +950,6 @@ mod tests {
         );
     }
 
-    fn refresh_request(
-        action: SessionRefreshActionV1,
-        scope: SessionRefreshScopeV1,
-        identity: &ResolvedSessionIdentity,
-        handle: Option<String>,
-    ) -> RetainedSurfaceRequestV1 {
-        RetainedSurfaceRequestV1::SessionRefresh(SessionRefreshRequestV1::with_action(
-            action,
-            SessionRefreshActionRequestV1 {
-                scope,
-                session: SessionRefreshSessionV1 {
-                    id: "session.profile-refresh".to_owned(),
-                    store_id: identity.store_id().as_str().to_owned(),
-                    root_id: identity.root_id().as_str().to_owned(),
-                },
-                source: SessionRefreshSourceV1 {
-                    scope: "codex".to_owned(),
-                },
-                target: SessionRefreshTargetV1 {
-                    temporal_mode: SessionRefreshTemporalModeV1::Current,
-                    grain: SessionRefreshGrainV1::LogicalMessage,
-                    frontier: SessionRefreshFrontierV1 {
-                        observed_through: 0,
-                        committed_through: 0,
-                    },
-                },
-                handle,
-                format: None,
-            },
-        ))
-    }
-
-    fn profile_scope(identity: &ResolvedSessionIdentity) -> SessionRefreshScopeV1 {
-        SessionRefreshScopeV1::Profile {
-            profile_id: identity.profile_id().as_str().to_owned(),
-        }
-    }
-
-    async fn execute_refresh(
-        runtime_registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-        session_identity: &ResolvedSessionIdentity,
-        connection: &ProfileRetainedConnectionAuthorityV1,
-        refresh: Option<&dyn RetainedSessionRefreshPortV1>,
-        request: RetainedSurfaceRequestV1,
-        label: &str,
-    ) -> ApplicationResult<RetainedSurfaceResultV1> {
-        execute_profile_retained_application(
-            ProfileRetainedAuthoritiesV1 {
-                runtime_registry: Some(runtime_registry),
-                session_identity: session_identity.clone(),
-                configuration_digest: connection.configuration_digest().clone(),
-                lcm_authority: None,
-                session_refresh: refresh,
-            },
-            connection,
-            request,
-            RequestId::new(format!("request.profile-refresh.{label}")).expect("request identity"),
-            Deadline::new(UtcMicros(now_micros().0.saturating_add(30_000_000))).expect("deadline"),
-            CancellationSignal::active(format!("cancellation.profile-refresh.{label}"))
-                .expect("cancellation"),
-        )
-        .await
-        .expect("profile refresh transport")
-    }
-
-    /// The profile session authority owns profile-scoped refreshes end to end:
-    /// begin issues an opaque handle bound to the profile store, status reads
-    /// it back, and cancel settles a receipt — all through one canonical
-    /// request shape and without any project.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn profile_retained_session_refresh_begins_reads_and_cancels_in_the_profile_store() {
-        let temporary = tempfile::tempdir().expect("temporary profile parent");
-        let profile_root = temporary.path().join("profile");
-        let profile_identity =
-            profile_identity::load_or_create(&profile_root).expect("durable profile identity");
-        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            &profile_root,
-            1,
-            "profile retained session refresh",
-        )
-        .expect("daemon database scope");
-        let runtime_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            profile_identity.clone(),
-        )
-        .await
-        .expect("profile session runtime registry");
-        let profile_database = runtime_registry
-            .profile_sessions()
-            .await
-            .expect("profile session database");
-        let schedulers = SessionTemporalRefreshSchedulerRegistry::default();
-        let wake = schedulers
-            .ensure_profile(
-                profile_database.db_path().to_path_buf(),
-                profile_database.clone(),
-            )
-            .await;
-        let refresh = DaemonSessionRefreshService::new(profile_database, Arc::new(wake), None);
-        let session_identity = profile_retrieval_root(&profile_identity).identity().clone();
-        let connection =
-            profile_retained_connection_authority(&profile_identity, &session_identity)
-                .expect("profile retained connection authority");
-
-        let begun = execute_refresh(
-            &runtime_registry,
-            &session_identity,
-            &connection,
-            Some(&refresh),
-            refresh_request(
-                SessionRefreshActionV1::Begin,
-                profile_scope(&session_identity),
-                &session_identity,
-                None,
-            ),
-            "begin",
-        )
-        .await
-        .expect("profile refresh begin must be mounted");
-        let ApplicationOutcome::Effect(effect) = begun.outcome else {
-            panic!("begin must be an effect")
-        };
-        let Some(RetainedSurfaceResultV1::SessionRefreshBegin(begin)) = effect.payload else {
-            panic!("begin must return its typed payload")
-        };
-        assert!(matches!(
-            begin.outcome,
-            RetainedOutcomeStatusV1::Started | RetainedOutcomeStatusV1::Joined
-        ));
-        assert_eq!(begin.scope, "profile");
-        assert_eq!(begin.tool, "tracedecay_session_refresh_begin");
-        let handle = begin.handle.expect("opaque refresh handle");
-        assert!(handle.starts_with("srh_"), "{handle}");
-        let operation_id = begin.operation_id.expect("durable operation id");
-        assert_ne!(handle, operation_id);
-
-        let status = execute_refresh(
-            &runtime_registry,
-            &session_identity,
-            &connection,
-            Some(&refresh),
-            refresh_request(
-                SessionRefreshActionV1::Status,
-                profile_scope(&session_identity),
-                &session_identity,
-                Some(handle.clone()),
-            ),
-            "status",
-        )
-        .await
-        .expect("profile refresh status must be mounted");
-        let ApplicationOutcome::Evidence(packet) = status.outcome else {
-            panic!("status must be evidence")
-        };
-        let Some(RetainedSurfaceResultV1::SessionRefreshStatus(status)) = packet.payload else {
-            panic!("status must return its typed payload")
-        };
-        assert!(
-            matches!(
-                status.outcome,
-                RetainedOutcomeStatusV1::Running | RetainedOutcomeStatusV1::Complete
-            ),
-            "{status:?}"
-        );
-        assert_eq!(status.scope, "profile");
-        assert_eq!(status.tool, "tracedecay_session_refresh_status");
-
-        let cancelled = execute_refresh(
-            &runtime_registry,
-            &session_identity,
-            &connection,
-            Some(&refresh),
-            refresh_request(
-                SessionRefreshActionV1::Cancel,
-                profile_scope(&session_identity),
-                &session_identity,
-                Some(handle.clone()),
-            ),
-            "cancel",
-        )
-        .await
-        .expect("profile refresh cancel must be mounted");
-        let ApplicationOutcome::Effect(effect) = cancelled.outcome else {
-            panic!("cancel must be an effect")
-        };
-        let Some(RetainedSurfaceResultV1::SessionRefreshCancel(cancel)) = effect.payload else {
-            panic!("cancel must return its typed payload")
-        };
-        assert!(
-            matches!(
-                cancel.outcome,
-                RetainedOutcomeStatusV1::Cancelled | RetainedOutcomeStatusV1::Complete
-            ),
-            "{cancel:?}"
-        );
-        let receipt = cancel.receipt.expect("terminal receipt");
-        assert_eq!(receipt.operation_id, operation_id);
-        assert_eq!(cancel.scope, "profile");
-        assert_eq!(cancel.tool, "tracedecay_session_refresh_cancel");
-        schedulers.shutdown().await;
-    }
-
-    /// The profile authority never serves a project-scoped refresh, a foreign
-    /// profile's refresh, or a refresh without a mounted refresh service.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn profile_retained_session_refresh_refuses_foreign_owners_and_unmounted_service() {
-        let temporary = tempfile::tempdir().expect("temporary profile parent");
-        let profile_root = temporary.path().join("profile");
-        let profile_identity =
-            profile_identity::load_or_create(&profile_root).expect("durable profile identity");
-        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            &profile_root,
-            1,
-            "profile retained session refresh refusals",
-        )
-        .expect("daemon database scope");
-        let runtime_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            profile_identity.clone(),
-        )
-        .await
-        .expect("profile session runtime registry");
-        let profile_database = runtime_registry
-            .profile_sessions()
-            .await
-            .expect("profile session database");
-        let schedulers = SessionTemporalRefreshSchedulerRegistry::default();
-        let wake = schedulers
-            .ensure_profile(
-                profile_database.db_path().to_path_buf(),
-                profile_database.clone(),
-            )
-            .await;
-        let refresh = DaemonSessionRefreshService::new(profile_database, Arc::new(wake), None);
-        let session_identity = profile_retrieval_root(&profile_identity).identity().clone();
-        let connection =
-            profile_retained_connection_authority(&profile_identity, &session_identity)
-                .expect("profile retained connection authority");
-
-        let project_scoped = execute_refresh(
-            &runtime_registry,
-            &session_identity,
-            &connection,
-            Some(&refresh),
-            refresh_request(
-                SessionRefreshActionV1::Begin,
-                SessionRefreshScopeV1::Project {
-                    project: tracedecay_contracts::retained_surfaces::SessionRefreshProjectV1 {
-                        id: "project.foreign".to_owned(),
-                        profile_id: session_identity.profile_id().as_str().to_owned(),
-                        repository_id: "repository.foreign".to_owned(),
-                        worktree_id: "worktree.foreign".to_owned(),
-                        branch_id: "branch.foreign".to_owned(),
-                    },
-                },
-                &session_identity,
-                None,
-            ),
-            "project-scoped",
-        )
-        .await
-        .expect_err("a project-scoped refresh must not reach the profile store");
-        assert_eq!(
-            project_scoped.problem.kind,
-            ApplicationProblemKind::NotFoundOrNotAuthorized
-        );
-
-        let foreign_profile = execute_refresh(
-            &runtime_registry,
-            &session_identity,
-            &connection,
-            Some(&refresh),
-            refresh_request(
-                SessionRefreshActionV1::Begin,
-                SessionRefreshScopeV1::Profile {
-                    profile_id: "profile.someone-else".to_owned(),
-                },
-                &session_identity,
-                None,
-            ),
-            "foreign-profile",
-        )
-        .await
-        .expect_err("another profile's refresh must be refused");
-        assert_eq!(
-            foreign_profile.problem.kind,
-            ApplicationProblemKind::NotFoundOrNotAuthorized
-        );
-
-        let unmounted = execute_refresh(
-            &runtime_registry,
-            &session_identity,
-            &connection,
-            None,
-            refresh_request(
-                SessionRefreshActionV1::Begin,
-                profile_scope(&session_identity),
-                &session_identity,
-                None,
-            ),
-            "unmounted",
-        )
-        .await
-        .expect_err("an unmounted refresh service is a typed unavailable terminal");
-        assert_eq!(unmounted.problem.kind, ApplicationProblemKind::Unavailable);
-        assert!(
-            unmounted
-                .problem
-                .message
-                .contains("profile session refresh authority is not mounted"),
-            "{}",
-            unmounted.problem.message
-        );
-        schedulers.shutdown().await;
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn profile_retained_sessions_for_remains_unsupported() {
         let temporary = tempfile::tempdir().expect("temporary profile parent");
@@ -1185,11 +975,12 @@ mod tests {
 
         let problem = execute_profile_retained_application(
             ProfileRetainedAuthoritiesV1 {
-                runtime_registry: Some(&runtime_registry),
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity,
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
                 session_refresh: None,
+                memory: None,
             },
             &connection,
             RetainedSurfaceRequestV1::SessionsFor(SessionsForRequestV1 {

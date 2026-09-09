@@ -10958,6 +10958,62 @@ async fn busy_worktree_serves_last_complete_generation_without_waiting() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_releases_indexed_generation_and_scheduler_owners() {
+    #[cfg(feature = "hotpath")]
+    let _measurement = hotpath::HotpathGuardBuilder::new("indexed-registry-shutdown").build();
+    let sources = (0..128)
+        .map(|file| {
+            let source = (0..16)
+                .map(|symbol| format!("pub fn item_{file}_{symbol}() -> u32 {{ {symbol} }}\n"))
+                .collect::<String>();
+            (format!("src/module_{file}.rs"), source)
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    assert!(latest.generation.symbols().symbols.len() >= 128 * 16);
+    let generation = Arc::downgrade(&latest.generation);
+    drop(latest);
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let scheduler_owner = Arc::downgrade(&scheduler);
+    drop(scheduler);
+
+    let started = Instant::now();
+    registry.shutdown().await;
+    println!(
+        "indexed_registry_shutdown_elapsed_us={}",
+        started.elapsed().as_micros()
+    );
+    assert!(
+        scheduler_owner.upgrade().is_none(),
+        "scheduler was not released"
+    );
+    assert!(
+        generation.upgrade().is_none(),
+        "decoded generation was not released"
+    );
+    assert!(registry.scheduler_handle(fixture.path()).await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn busy() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");

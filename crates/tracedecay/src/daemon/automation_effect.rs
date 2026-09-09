@@ -88,7 +88,6 @@ pub(crate) async fn prepare(
         |run_id, read_control| async move {
             memory
                 .project_memory_application()
-                .await
                 .map_err(|error| {
                     contract_error(format!(
                         "canonical memory automation receipt recovery failed: {error}"

@@ -36,17 +36,17 @@ use tracedecay_sessions::serving::{
     SessionProjectionWorkerRetryClass,
 };
 
-use super::receipts::evidence_outcome;
-use tracedecay_runtime_core::timeutil::SearchTimeBound;
-use tracedecay_session_memory::context::ResolvedSessionIdentity;
-use tracedecay_session_memory::session::SessionTemporalQuery;
-use tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort;
-use tracedecay_session_runtime::session_retrieval::{
+use super::ProfileSessionDatabaseSource;
+use crate::lcm_authority::MountedLcmAuthorityPort;
+use crate::session_retrieval::{
     DaemonSessionRetrievalService, LcmDescribeServiceCommand, LcmDescribeServiceFuture,
     LcmExpandServiceCommand, LcmExpandServiceFuture, SessionApplicationRetrievalFutureV1,
     SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
 };
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
+use tracedecay_contracts::retained_receipts::evidence_outcome;
+use tracedecay_runtime_core::timeutil::SearchTimeBound;
+use tracedecay_session_memory::context::ResolvedSessionIdentity;
+use tracedecay_session_memory::session::SessionTemporalQuery;
 
 mod output;
 mod retrieval;
@@ -59,16 +59,16 @@ enum DirectRetainedLcmAuthority<'a> {
         authority: Arc<dyn MountedLcmAuthorityPort>,
         retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
     },
-    /// Profile retained calls borrow the daemon-wide registry and resolve the
-    /// already-registered profile shard through its canonical runtime port.
+    /// Profile retained calls use the selected profile session lease passed
+    /// upward by the root assembler.
     Profile {
         authority: Option<&'a dyn MountedLcmAuthorityPort>,
-        registry: &'a DaemonSessionRuntimeRegistryV1,
+        session_database: ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
     },
 }
 
-pub(super) struct DirectRetainedLcmPortV1<'a> {
+pub struct DirectRetainedLcmPortV1<'a> {
     authority: DirectRetainedLcmAuthority<'a>,
 }
 
@@ -294,15 +294,15 @@ impl RetainedLcmRetrieval<'_> {
 }
 
 impl<'a> DirectRetainedLcmPortV1<'a> {
-    pub(super) fn profile(
-        registry: &'a DaemonSessionRuntimeRegistryV1,
+    pub fn profile(
+        session_database: ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         authority: Option<&'a dyn MountedLcmAuthorityPort>,
     ) -> Self {
         Self {
             authority: DirectRetainedLcmAuthority::Profile {
                 authority,
-                registry,
+                session_database,
                 identity,
             },
         }
@@ -312,7 +312,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
     /// must pass the exact `project_lcm_authority` and
     /// `project_session_application_retrieval_service` from the project
     /// server; no path, registry, or database is accepted here.
-    pub(super) fn project(
+    pub fn project(
         authority: Arc<dyn MountedLcmAuthorityPort>,
         retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
     ) -> Self {
@@ -339,19 +339,13 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
             } => Ok(ResolvedRetainedLcmAuthority::Borrowed(*authority)),
             DirectRetainedLcmAuthority::Profile {
                 authority: None,
-                registry,
+                session_database,
                 identity,
             } => {
-                let database = super::bounded_execution(
-                    context,
-                    hotpath::future!(
-                        registry.profile_sessions(),
-                        label = "daemon.retained.lcm.open_authority"
-                    ),
-                )
-                .await?;
+                let database =
+                    super::bounded_execution(context, async { session_database().await }).await?;
                 let expected_shard = database.binding().shard_id.clone();
-                tracedecay_session_runtime::lcm_authority::mount_registered_lcm_authority(
+                crate::lcm_authority::mount_registered_lcm_authority(
                     database,
                     identity.clone(),
                     &expected_shard,
@@ -380,16 +374,12 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 )))
             }
             DirectRetainedLcmAuthority::Profile {
-                registry, identity, ..
+                session_database,
+                identity,
+                ..
             } => {
-                let database = super::bounded_execution(
-                    context,
-                    hotpath::future!(
-                        registry.profile_sessions(),
-                        label = "daemon.retained.lcm.open_retrieval"
-                    ),
-                )
-                .await?;
+                let database =
+                    super::bounded_execution(context, async { session_database().await }).await?;
                 let service =
                     DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
                         .ok_or_else(|| {
@@ -893,7 +883,7 @@ const fn lcm_doctor_finding_kind(
     }
 }
 
-fn required(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn required(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
     let value = value.trim();
     if value.is_empty() {
         Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
@@ -902,11 +892,13 @@ fn required(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
     }
 }
 
-fn trimmed(value: Option<&str>) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn trimmed(
+    value: Option<&str>,
+) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
     value.map(required).transpose()
 }
 
-fn specific_provider(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn specific_provider(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
     let value = required(value)?;
     if value == "all" {
         Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
@@ -915,36 +907,44 @@ fn specific_provider(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV
     }
 }
 
-fn optional_provider(value: Option<&str>) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn optional_provider(
+    value: Option<&str>,
+) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
     Ok(match trimmed(value)? {
         Some("all") | None => None,
         value => value,
     })
 }
 
-fn session_id(value: &str) -> Result<SessionId, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn session_id(value: &str) -> Result<SessionId, RetainedSurfaceExecutionErrorV1> {
     SessionId::new(required(value)?).map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
-fn cursor(value: Option<&str>) -> Result<Option<String>, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn cursor(
+    value: Option<&str>,
+) -> Result<Option<String>, RetainedSurfaceExecutionErrorV1> {
     Ok(trimmed(value)?.map(str::to_owned))
 }
 
-fn optional_usize(value: Option<u64>) -> Result<Option<usize>, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn optional_usize(
+    value: Option<u64>,
+) -> Result<Option<usize>, RetainedSurfaceExecutionErrorV1> {
     value
         .map(usize::try_from)
         .transpose()
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
-fn unsigned_i64(value: Option<u64>) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
+pub(super) fn unsigned_i64(
+    value: Option<u64>,
+) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
     value
         .map(i64::try_from)
         .transpose()
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
-fn temporal_mode(
+pub(super) fn temporal_mode(
     mode: Option<LcmTemporalModeV1>,
     as_of: Option<u64>,
     default: TemporalModeV1,
@@ -963,7 +963,7 @@ fn temporal_mode(
     }
 }
 
-fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearchScope {
+pub(super) fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearchScope {
     match value.unwrap_or(MessageRelationshipScopeV1::All) {
         MessageRelationshipScopeV1::All => SessionSearchScope::All,
         MessageRelationshipScopeV1::ParentsOnly => SessionSearchScope::ParentsOnly,
@@ -971,7 +971,7 @@ fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearc
     }
 }
 
-fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {
+pub(super) fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {
     match value.unwrap_or(MessageTypeFilterV1::All) {
         MessageTypeFilterV1::All => SessionMessageType::All,
         MessageTypeFilterV1::DirectUser => SessionMessageType::DirectUser,
@@ -979,7 +979,7 @@ fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {
     }
 }
 
-const fn role_name(value: LcmRoleV1) -> &'static str {
+pub(super) const fn role_name(value: LcmRoleV1) -> &'static str {
     match value {
         LcmRoleV1::System => "system",
         LcmRoleV1::User => "user",
@@ -989,7 +989,7 @@ const fn role_name(value: LcmRoleV1) -> &'static str {
     }
 }
 
-fn time_filter(
+pub(super) fn time_filter(
     value: Option<&RetainedTimeFilterV1>,
     bound: SearchTimeBound,
 ) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
@@ -1007,7 +1007,7 @@ fn time_filter(
                 .or_else(|| {
                     tracedecay_runtime_core::timeutil::parse_search_time_filter_bound(
                         value,
-                        crate::tracedecay::current_timestamp(),
+                        tracedecay_runtime_core::tracedecay::current_timestamp(),
                         bound,
                     )
                 })
