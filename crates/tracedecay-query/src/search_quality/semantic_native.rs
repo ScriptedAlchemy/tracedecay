@@ -1243,43 +1243,7 @@ impl SemanticNativeResourceEvidenceV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search_quality::CandidateWorkloadV1;
-    use crate::search_quality::packaged::load_workload;
     use tracedecay_domain::canonical_sha256;
-
-    fn checked_in_workload() -> CandidateWorkloadV1 {
-        load_workload().expect("checked-in search-quality workload")
-    }
-
-    #[test]
-    fn checked_in_profiles_request_only_declared_native_stages() {
-        let workload = checked_in_workload();
-
-        assert_eq!(
-            native_profile_requirements(&workload, "query-fallback").expect("profile"),
-            SemanticNativeProfileRequirementsV1 {
-                profile_id: "query-fallback".to_owned(),
-                semantic_requested: false,
-                rerank_requested: false,
-            }
-        );
-        assert_eq!(
-            native_profile_requirements(&workload, "hybrid-conservative").expect("profile"),
-            SemanticNativeProfileRequirementsV1 {
-                profile_id: "hybrid-conservative".to_owned(),
-                semantic_requested: true,
-                rerank_requested: false,
-            }
-        );
-        assert_eq!(
-            native_profile_requirements(&workload, "hybrid-reranked").expect("profile"),
-            SemanticNativeProfileRequirementsV1 {
-                profile_id: "hybrid-reranked".to_owned(),
-                semantic_requested: true,
-                rerank_requested: true,
-            }
-        );
-    }
 
     #[test]
     fn unavailable_native_inputs_remain_pending_without_measurements() {

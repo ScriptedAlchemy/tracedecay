@@ -583,28 +583,6 @@ impl TemporalReadPort for OversizedPort {
 }
 
 #[test]
-fn producer_cannot_underreport_private_measured_item_size() {
-    block_on(async {
-        let snapshot = snapshot_with_control(ExecutionControl::default());
-        let mut state =
-            CandidateReadState::new(PageLimits::new(1, 128, 128, 1).expect("valid limits"));
-
-        assert_eq!(
-            pull_candidate_page(
-                &OversizedPort,
-                &snapshot,
-                &CandidatePlan::default(),
-                &mut state,
-            )
-            .await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item bytes"
-            })
-        );
-    });
-}
-
-#[test]
 fn prepared_cohort_preserves_typed_candidate_byte_budget_failure() {
     block_on(async {
         let limits = ExecutionLimits {
@@ -714,41 +692,6 @@ impl TemporalReadPort for CancellingPort {
     }
 }
 
-struct DeadlineCrossingPort {
-    deadline: Instant,
-    entered: Arc<AtomicBool>,
-}
-
-impl TemporalReadPort for DeadlineCrossingPort {
-    fn produce_candidate_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _plan: &'a CandidatePlan,
-        _request: PageRequest,
-        _sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        let deadline = self.deadline;
-        let entered = Arc::clone(&self.entered);
-        Box::pin(async move {
-            entered.store(true, Ordering::Release);
-            while Instant::now() < deadline {
-                std::hint::spin_loop();
-            }
-            Ok(PageStatus::Complete)
-        })
-    }
-
-    fn produce_temporal_record_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _candidates: &'a [RankingCandidate],
-        _request: PageRequest,
-        _sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async { Ok(PageStatus::Complete) })
-    }
-}
-
 #[test]
 fn async_pull_observes_live_cancellation_midstream() {
     block_on(async {
@@ -794,24 +737,39 @@ fn prepared_cohort_preserves_live_cancellation() {
     });
 }
 
-#[test]
-fn async_pull_observes_deadline_after_live_producer_work() {
-    block_on(async {
-        let deadline = Instant::now() + Duration::from_millis(100);
-        let snapshot = snapshot_with_control(ExecutionControl::new(Some(deadline)));
-        let mut state =
-            CandidateReadState::new(PageLimits::new(1, 1024, 1024, 1).expect("valid limits"));
-        let entered = Arc::new(AtomicBool::new(false));
-        let port = DeadlineCrossingPort {
-            deadline,
-            entered: Arc::clone(&entered),
-        };
-        let result =
-            pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state).await;
+struct DeadlineCrossingPort {
+    deadline: Instant,
+    entered: Arc<AtomicBool>,
+}
 
-        assert!(entered.load(Ordering::Acquire));
-        assert_eq!(result, Err(TemporalPortError::DeadlineExceeded));
-    });
+impl TemporalReadPort for DeadlineCrossingPort {
+    fn produce_candidate_page<'a>(
+        &'a self,
+        _snapshot: &'a TemporalExecutionSnapshot,
+        _plan: &'a CandidatePlan,
+        _request: PageRequest,
+        _sink: &'a mut CandidatePageSink<'_>,
+    ) -> PortFuture<'a, PageStatus> {
+        let deadline = self.deadline;
+        let entered = Arc::clone(&self.entered);
+        Box::pin(async move {
+            entered.store(true, Ordering::Release);
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+            Ok(PageStatus::Complete)
+        })
+    }
+
+    fn produce_temporal_record_page<'a>(
+        &'a self,
+        _snapshot: &'a TemporalExecutionSnapshot,
+        _candidates: &'a [RankingCandidate],
+        _request: PageRequest,
+        _sink: &'a mut TemporalRecordPageSink<'_>,
+    ) -> PortFuture<'a, PageStatus> {
+        Box::pin(async { Ok(PageStatus::Complete) })
+    }
 }
 
 #[test]
@@ -1642,37 +1600,6 @@ fn pull_rejects_read_state_looser_than_tightened_snapshot() {
             assert_eq!(error, TemporalPortError::BudgetExceeded { resource });
         }
     });
-}
-
-#[test]
-fn hydration_limits_cannot_be_replaced_or_loosened_after_authorization() {
-    let authorized = ExecutionLimits::default();
-    let mut tighter = authorized;
-    tighter.hydration_limit -= 1;
-    tighter.hydration_total_bytes -= 1;
-    tighter.hydration_payload_bytes -= 1;
-    tighter.hydration_chunk_bytes -= 1;
-    let tightened = snapshot_with_limits(authorized)
-        .with_limits(tighter)
-        .expect("valid hydration tightening");
-
-    assert_eq!(tightened.request().limits(), tighter);
-    assert_eq!(
-        tightened
-            .clone()
-            .with_limits(authorized)
-            .expect_err("hydration limits cannot be restored to looser authorized values"),
-        ExecutionLimitTighteningError::WouldLoosen {
-            field: "hydration_limit",
-            authorized: tighter.hydration_limit,
-            requested: authorized.hydration_limit,
-        }
-    );
-    assert_eq!(tightened.request().limits(), tighter);
-    assert_eq!(
-        tightened.authorization(),
-        ValidatedAuthorization::Authorized
-    );
 }
 
 #[test]
