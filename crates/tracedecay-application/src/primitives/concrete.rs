@@ -547,15 +547,7 @@ mod tests {
             true,
             scope.project_id.as_str().to_owned(),
         ));
-        assert!(
-            SourceReadAdapter::new_bound(
-                matching,
-                projection,
-                scope,
-                &admitted_root,
-            )
-            .is_ok()
-        );
+        assert!(SourceReadAdapter::new_bound(matching, projection, scope, &admitted_root,).is_ok());
     }
 
     struct FixedSnapshotAuthority {

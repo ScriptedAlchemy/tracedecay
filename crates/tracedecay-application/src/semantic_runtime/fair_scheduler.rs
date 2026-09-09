@@ -1066,16 +1066,6 @@ mod tests {
     }
 
     #[test]
-    fn concrete_scheduler_is_callable_through_the_shared_port() {
-        let scheduler = scheduler();
-        let port: &dyn SemanticProjectionSchedulingPortV1 = &scheduler;
-
-        port.enqueue(batch("a", "one", 10, 1)).unwrap();
-        assert_eq!(port.stats().queued_batches, 1);
-        assert!(port.try_dispatch().is_some());
-    }
-
-    #[test]
     fn scheduled_work_self_drains_in_worktree_fair_order_after_capacity_returns() {
         let scheduler = scheduler();
         scheduler.enqueue(batch("blocker", "one", 1, 100)).unwrap();

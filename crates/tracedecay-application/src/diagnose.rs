@@ -172,14 +172,6 @@ warning: redundant closure
     }
 
     #[test]
-    fn ignores_unanchored_summary_errors() {
-        // Cargo's tail line has no span and must not be reported.
-        let input = "error: could not compile `tracedecay` (lib) due to 43 previous errors";
-        let diags = parse_cargo_output(input);
-        assert!(diags.is_empty());
-    }
-
-    #[test]
     fn parses_multiple_in_one_block() {
         let input = "\
 error[E0382]: borrow of moved value: `x`

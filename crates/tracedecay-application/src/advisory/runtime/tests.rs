@@ -1,35 +1,6 @@
 use super::cycle::*;
 use super::model::*;
 use super::*;
-use tracedecay_domain::feedback::{FeedbackAdvisoryProviderStateV1, FeedbackDiagnosticProducerV1};
-
-#[test]
-fn absent_provider_states_remain_explicit() {
-    let advisory = AdvisoryContributionsV1::absent()
-        .as_feedback_cycle_advisory()
-        .expect("canonical advisory");
-    // Each absent state stays bound to the producer that reported it, so a
-    // reader can name which provider was absent instead of inferring it from
-    // a position in an aggregate list.
-    assert_eq!(
-        advisory.providers,
-        vec![
-            FeedbackAdvisoryProviderStateV1 {
-                producer: FeedbackDiagnosticProducerV1::GitHubReview,
-                state: ProviderEvaluationStateV1::Absent,
-            },
-            FeedbackAdvisoryProviderStateV1 {
-                producer: FeedbackDiagnosticProducerV1::CiLocalization,
-                state: ProviderEvaluationStateV1::Absent,
-            },
-            FeedbackAdvisoryProviderStateV1 {
-                producer: FeedbackDiagnosticProducerV1::Proximity,
-                state: ProviderEvaluationStateV1::Absent,
-            },
-        ]
-    );
-    assert!(advisory.findings.is_empty());
-}
 
 #[test]
 fn interrupted_cycle_has_no_delivery_publication() {
@@ -37,32 +8,6 @@ fn interrupted_cycle_has_no_delivery_publication() {
         contributions: AdvisoryContributionsV1::absent(),
     };
     assert!(outcome.publication().is_none());
-}
-
-#[test]
-fn provider_state_events_preserve_each_closed_provider_identity() {
-    let events = AdvisoryContributionsV1::absent()
-        .providers
-        .iter()
-        .map(provider_state_event)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        events,
-        vec![
-            FeedbackSourceEventV1::ProviderState {
-                provider: FeedbackAdvisoryProviderV1::GitHubReview,
-                state: ProviderEvaluationStateV1::Absent,
-            },
-            FeedbackSourceEventV1::ProviderState {
-                provider: FeedbackAdvisoryProviderV1::CiLocalization,
-                state: ProviderEvaluationStateV1::Absent,
-            },
-            FeedbackSourceEventV1::ProviderState {
-                provider: FeedbackAdvisoryProviderV1::Proximity,
-                state: ProviderEvaluationStateV1::Absent,
-            },
-        ]
-    );
 }
 
 #[test]

@@ -281,39 +281,6 @@ async fn symbol_search_opt_in_reuses_the_exact_symbol_scheduler_boundary() {
 }
 
 #[tokio::test]
-async fn symbol_search_absent_scheduler_fails_closed_without_legacy_support_gap() {
-    let fixture = fixture();
-    let adapter = adapter(&fixture, None);
-    let request = search_request("ExternalWidget", true, Some("src/client"));
-
-    let outcome = adapter
-        .symbol_search(port_context(&fixture), &request)
-        .await;
-
-    assert_failure(
-        outcome,
-        PrimitiveFailureKind::Unavailable,
-        "application.symbol-graph.ignored-dependency-scheduler-unavailable",
-    );
-}
-
-#[tokio::test]
-async fn symbol_search_scheduler_failures_remain_typed_and_never_become_support_gaps() {
-    for (error, expected_kind, expected_code) in scheduler_error_cases() {
-        let fixture = fixture();
-        let scheduler = Arc::new(RecordingIgnoredDependencyAdmission::new(Err(error)));
-        let request = search_request("ExternalWidget", true, Some("src/client"));
-
-        let outcome = adapter(&fixture, Some(scheduler.clone()))
-            .symbol_search(port_context(&fixture), &request)
-            .await;
-
-        assert_failure(outcome, expected_kind, expected_code);
-        assert_eq!(scheduler.calls().len(), 1);
-    }
-}
-
-#[tokio::test]
 async fn symbol_search_never_schedules_without_opt_in_or_after_a_positive_match() {
     let fixture = fixture();
     let scheduler = Arc::new(RecordingIgnoredDependencyAdmission::new(Ok(

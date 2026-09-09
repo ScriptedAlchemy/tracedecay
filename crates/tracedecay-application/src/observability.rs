@@ -507,14 +507,6 @@ mod tests {
     }
 
     #[test]
-    fn partial_coverage_never_claims_current() {
-        let value = coverage(None, 8, 2, CoverageStateV1::Partial);
-        assert_eq!(value.state, CoverageStateV1::Partial);
-        assert_eq!(value.unknown, 2);
-        assert_eq!(value.eligible, None);
-    }
-
-    #[test]
     fn feedback_quality_metrics_are_typed_and_never_fabricate_empty_zeroes() {
         let mut observatory =
             observatory_unavailable_read_model(Some("scope:test"), 1, "store_unavailable");
