@@ -406,9 +406,16 @@ impl StdioLspClient {
                     }]
                 }
             }),
-            timeouts.message_io,
+            timeouts.initialize_response,
         )
         .await;
+        // Initialize is a start-phase write. Binding it to `message_io` (the
+        // document-write budget, 350ms in hang tests) reports a starved
+        // python spawn as StartupFailed before the fake can answer, so hang
+        // and partial-frame tests never reach the transport they assert.
+        // The initialize *response* already has its own budget; the request
+        // write uses that same start budget.
+        //
         // A server that dies immediately can fail the initialize *request*
         // write (broken pipe — on Windows this races the spawn under load)
         // just as easily as the initialize *response* wait. Route both
@@ -444,7 +451,7 @@ impl StdioLspClient {
                 "method": "initialized",
                 "params": {}
             }),
-            timeouts.message_io,
+            timeouts.initialize_response,
         )
         .await?;
 
