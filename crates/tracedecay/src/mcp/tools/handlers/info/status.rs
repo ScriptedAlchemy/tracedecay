@@ -214,6 +214,10 @@ pub(crate) async fn graph_statistics_value(
 }
 
 #[hotpath::measure(label = "mcp.info.status.total")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Status combines independent index, session, generation, and daemon readers without making any one reader authoritative for another"
+)]
 pub(crate) async fn handle_status(
     cg: &TraceDecay,
     args: Value,
@@ -489,7 +493,7 @@ fn code_index_freshness_projection(
 /// the ordinary catch-up threshold, so partial recall is never read as current.
 async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
     match db.session_ingest_health_for_provider(None).await {
-        Ok(ingest) => historical_session_catch_up_state(&ingest),
+        Ok(ingest) => Some(historical_session_catch_up_state(&ingest)),
         Err(error) => Some(json!({
             "status": "unavailable",
             "coverage": "unknown",
@@ -500,7 +504,7 @@ async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
     }
 }
 
-fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
+fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Value {
     use std::collections::BTreeSet;
 
     const THRESHOLD: u64 =
@@ -538,7 +542,7 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Val
         coverage.state != tracedecay_global_db::SessionProviderCoverageState::Unavailable
     });
     let source_unavailable = observed.is_empty() && !any_provider_available;
-    Some(json!({
+    json!({
         "status": if source_unavailable {
             "unavailable"
         } else if warming || coverage_incomplete {
@@ -574,7 +578,7 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Val
         } else {
             "Historical session recall catch-up is current."
         },
-    }))
+    })
 }
 
 fn render_status_md(value: &Value) -> String {
@@ -849,8 +853,7 @@ mod tests {
             max_transcript_pending_bytes:
                 tracedecay_sessions::runtime::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1,
             ..SessionIngestHealth::default()
-        })
-        .expect("backlog exceeds threshold");
+        });
 
         assert_eq!(state["status"], "warming");
         assert_eq!(state["coverage"], "partial");
@@ -863,8 +866,7 @@ mod tests {
         let state = historical_session_catch_up_state(&SessionIngestHealth {
             observed_providers: vec!["kimi".into(), "opencode".into()],
             ..SessionIngestHealth::default()
-        })
-        .expect("incomplete historical coverage remains visible");
+        });
         let providers = state["providers"].as_array().unwrap();
 
         assert!(providers.iter().any(|provider| provider == "kimi"));
@@ -879,8 +881,7 @@ mod tests {
         let state = historical_session_catch_up_state(&SessionIngestHealth {
             observed_providers: vec!["cursor".into()],
             ..SessionIngestHealth::default()
-        })
-        .expect("legacy provider backlog authority remains visible");
+        });
 
         assert_eq!(state["status"], "current");
         assert_eq!(state["coverage"], "complete");
@@ -900,8 +901,7 @@ mod tests {
             observed_providers: vec!["kimi".into()],
             provider_coverage,
             ..SessionIngestHealth::default()
-        })
-        .expect("complete provider coverage remains visible");
+        });
 
         assert_eq!(state["status"], "current");
         assert_eq!(state["coverage"], "complete");
@@ -925,8 +925,7 @@ mod tests {
             observed_providers: vec!["opencode".into()],
             provider_coverage,
             ..SessionIngestHealth::default()
-        })
-        .expect("partial provider coverage remains visible");
+        });
 
         assert_eq!(state["status"], "warming");
         assert_eq!(state["coverage"], "partial");
@@ -934,8 +933,7 @@ mod tests {
 
     #[test]
     fn historical_status_does_not_fabricate_provider_readiness() {
-        let state = historical_session_catch_up_state(&SessionIngestHealth::default())
-            .expect("missing historical authority remains visible");
+        let state = historical_session_catch_up_state(&SessionIngestHealth::default());
 
         assert_eq!(state["status"], "unavailable");
         assert_eq!(state["coverage"], "partial");

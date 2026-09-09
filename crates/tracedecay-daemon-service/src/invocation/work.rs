@@ -101,39 +101,43 @@ pub async fn execute_work_application(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    let activity_database = registered.database.clone();
-    let activity_root = project_root.clone();
-    let mutates = work_invocation_mutates(&request);
-    let response = request_dispatch::dispatch_work_application(
-        registered,
-        attempt_processes,
-        observability_producer,
-        project_root,
-        request_id,
-        request,
-        observed_at,
-        deadline,
-        cancellation,
-    )
-    .await;
-    if mutates
-        && matches!(
-            response.outcome,
-            DaemonInvocationOutcome::WorkApplication { .. }
-        )
-        && let Some(project_root) = activity_root.as_deref()
-    {
-        tracedecay_session_memory::event_lane::publish(
-            &activity_database,
-            tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
+    // Keep the Work dispatch and activity-publication frame out of invocation callers.
+    Box::pin(async move {
+        let activity_database = registered.database.clone();
+        let activity_root = project_root.clone();
+        let mutates = work_invocation_mutates(&request);
+        let response = request_dispatch::dispatch_work_application(
+            registered,
+            attempt_processes,
+            observability_producer,
             project_root,
-            None,
-            1,
-            work_activity_detail(&response.outcome),
+            request_id,
+            request,
+            observed_at,
+            deadline,
+            cancellation,
         )
         .await;
-    }
-    response
+        if mutates
+            && matches!(
+                response.outcome,
+                DaemonInvocationOutcome::WorkApplication { .. }
+            )
+            && let Some(project_root) = activity_root.as_deref()
+        {
+            tracedecay_session_memory::event_lane::publish(
+                &activity_database,
+                tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
+                project_root,
+                None,
+                1,
+                work_activity_detail(&response.outcome),
+            )
+            .await;
+        }
+        response
+    })
+    .await
 }
 
 fn publish_committed_task_activity_in_background(

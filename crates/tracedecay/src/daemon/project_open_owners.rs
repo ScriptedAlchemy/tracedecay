@@ -19,7 +19,6 @@ use tracedecay_domain::feedback::GitHubPullRequestIdV1;
 use tracedecay_domain::{ActorId, ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
-use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::mcp::McpServer;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::primitives::admitted_root_uri_for_project;
@@ -31,6 +30,7 @@ use tracedecay_application::source_authorization::{
     ProjectSourceAccessSnapshot, ProjectSourceAccessSnapshotPort,
 };
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_daemon_service::DaemonCallableCodeAuthorizationSource;
 use tracedecay_daemon_service::{
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
     DaemonNativeIntegrationRuntimeRegistrar, DaemonWorkProposalRoutingAuthorityV1,
@@ -494,7 +494,7 @@ pub(super) async fn register_project_open_production_owners(
     // Project-open has no authenticated GitHub response or persisted source
     // record. It mounts policy and delivery only; the review refresh owner is
     // the sole producer of canonical provider observations and anchors.
-    if crate::tracedecay::git_remote_url(project_root)
+    if tracedecay_runtime_core::git::git_remote_url(project_root)
         .as_deref()
         .and_then(github_repository_from_remote)
         .is_some()
@@ -591,6 +591,7 @@ pub(super) async fn register_project_open_production_owners(
                 project_root.to_path_buf(),
                 scope.clone(),
                 Arc::clone(graph.configuration_runtime()),
+                crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
             )),
         ),
         label = "daemon.project.open.owners.feedback"
@@ -617,10 +618,16 @@ pub(super) async fn register_project_open_production_owners(
         admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
             message: format!("project-open admitted root URI denied: {error}"),
         })?;
+    let source = graph
+        .source_read_context()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open primitive runtime requires an exact registered source identity"
+                .to_owned(),
+        })?;
     open_and_register_project_primitive_runtime(
         invocation,
         project_root,
-        graph.clone(),
+        source,
         server,
         session_db.clone(),
         access.clone(),
@@ -839,6 +846,8 @@ async fn register_semantic_configuration_owners(
     scope: ResolvedScope,
     configuration: &tracedecay_configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
+    // Registration joins configuration and activation state; callers retain only its pending handle.
+    Box::pin(async move {
     let configuration_pin =
         tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
             configuration,
@@ -1136,6 +1145,7 @@ async fn register_semantic_configuration_owners(
         );
     }
     Ok(())
+    }).await
 }
 
 pub(super) struct SemanticOwnerInstallFailureV1 {
@@ -1232,6 +1242,10 @@ pub(super) async fn install_semantic_activation_runtime_owner(
 }
 
 #[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Composition supplies distinct capability, database, analyzer and diagnostic owners without merging their authority."
+)]
 async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1304,7 +1318,7 @@ fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
         .then_some((target.owner, target.repository))
 }
 
-pub(super) fn daemon_owned_project_source_access_at(
+pub(crate) fn daemon_owned_project_source_access_at(
     scope: &ResolvedScope,
     project_root: &Path,
     configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,

@@ -1313,10 +1313,12 @@ impl McpServer {
         analytics_arguments: Value,
         analytics_session_id: Option<String>,
         dispatch: DispatchedToolCall,
-        connection_client_name: Option<&str>,
-        connection_instance_id: Option<&str>,
-        connection_notifications: &std::sync::Mutex<Vec<Value>>,
+        connection_server: &Self,
     ) -> JsonRpcResponse {
+        let client_name = connection_server.client_name();
+        let connection_client_name = client_name.as_deref();
+        let connection_instance_id = connection_server.connection_identity.instance_id();
+        let connection_notifications = &connection_server.pending_notifications;
         let DispatchedToolCall {
             cg,
             selected_owner,
@@ -1712,8 +1714,6 @@ impl McpServer {
         if fast_unavailable {
             return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
         }
-        let connection_client_name = self.client_name();
-        let connection_instance_id = self.connection_identity.instance_id();
         let response = dispatch_server
             .complete_tool_call(
                 id.clone(),
@@ -1721,9 +1721,7 @@ impl McpServer {
                 analytics_arguments,
                 analytics_session_id,
                 dispatch,
-                connection_client_name.as_deref(),
-                connection_instance_id,
-                &self.pending_notifications,
+                self,
             )
             .await;
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {

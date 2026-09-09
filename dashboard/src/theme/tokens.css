@@ -332,6 +332,12 @@
   :root {
     forced-color-adjust: auto;
   }
+
+  /* WebGL labels cannot sample system colors. Preserve the authored dark
+   * aperture with its matching light labels; surrounding DOM stays native. */
+  .td-graph-field {
+    forced-color-adjust: none;
+  }
 }
 
 /* ---------------------------------------------------------------------------

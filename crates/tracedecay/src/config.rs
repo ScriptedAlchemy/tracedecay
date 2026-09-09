@@ -132,6 +132,10 @@ fn default_exclude_patterns() -> Vec<String> {
 /// opens; serializing this type is retained solely for migration fixtures and
 /// backwards-compatible legacy input decoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent legacy configuration switches retain their serialized migration shape"
+)]
 pub struct TraceDecayConfig {
     /// Schema version of the configuration.
     pub version: u32,
@@ -242,14 +246,26 @@ fn default_retention_interval_hours() -> u64 {
     24
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the optional field type; explicit None disables maintenance"
+)]
 fn default_orphan_store_gc_days() -> Option<u64> {
     Some(30)
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the optional field type; explicit None disables maintenance"
+)]
 fn default_incident_debris_retention_days() -> Option<u64> {
     Some(30)
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the optional field type; explicit None disables maintenance"
+)]
 fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
     Some(CompactionThresholdConfig::default())
 }
@@ -393,6 +409,10 @@ impl Default for TelemetryConfig {
 /// object (only some keys present) still deserializes, and a missing `sync`
 /// key entirely falls back to [`SyncConfig::default`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent sync admission switches are configuration choices, not mutually exclusive states"
+)]
 pub struct SyncConfig {
     /// Enable the daemon git-metadata watcher.
     #[serde(default = "default_sync_auto_watch")]
@@ -636,6 +656,7 @@ impl PinnedRuntimeConfiguration {
 
     /// Layers the daemon-only settings over an already validated runtime pin.
     /// Shared settings are taken from the pin, never decoded a second time.
+    #[hotpath::measure(label = "daemon.config.materialize")]
     pub fn from_runtime(
         runtime: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     ) -> Result<Self> {

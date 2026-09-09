@@ -1081,7 +1081,19 @@ fn cancellation_does_not_suppress_an_already_durable_terminal_replay() {
             Some(&cancellation),
         )
         .expect("durable replay"),
-        Some(terminal)
+        Some(terminal.clone())
+    );
+    assert_eq!(
+        settlement::settle_direct(
+            temp.path(),
+            &path,
+            &admission,
+            &cancellation,
+            terminal.clone(),
+            Duration::ZERO,
+        )
+        .expect("direct terminal replay outranks cancellation"),
+        terminal,
     );
 }
 
@@ -4354,16 +4366,70 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
 }
 
 #[test]
+fn unbound_settlement_cancellation_and_budget_preserve_foreign_reservations() {
+    for cancelled in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("foreign.json");
+        let existing = admission("run.existing", "request.existing");
+        let _claim = reserve_or_replay_blocking(&path, existing).expect("reserve");
+        let before = std::fs::read(&path).expect("reserved bytes");
+        let requested = admission("run.requested", "request.requested");
+        let terminal = success_terminal(&requested, "run.requested");
+        let cancellation = CancellationSignal::active("settlement.cancel").expect("signal");
+        if cancelled {
+            assert!(cancellation.cancel(UtcMicros(20)));
+        }
+        let direct_error = settlement::settle_direct(
+            temp.path(),
+            &path,
+            &requested,
+            &cancellation,
+            terminal,
+            Duration::ZERO,
+        )
+        .expect_err("foreign reservation cannot settle");
+        let abandon_error = settlement::abandon(
+            temp.path(),
+            &path,
+            &requested,
+            &cancellation,
+            Duration::ZERO,
+        )
+        .expect_err("foreign reservation cannot be abandoned");
+        for error in [direct_error, abandon_error] {
+            assert!(
+                error.to_string().contains(if cancelled {
+                    "was cancelled"
+                } else {
+                    "exceeded its retry budget"
+                }),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read(&path).expect("retained bytes"), before);
+    }
+}
+
+#[test]
 fn durable_abandonment_is_idempotent_after_parent_sync() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("automation_effects").join("abandon.json");
     let admission = external_admission("run.abandon-idempotent", "request.abandon-idempotent");
+    let path = canonical_journal_path(temp.path(), &admission.request.run_id);
     let claim = match reserve_or_replay_blocking(&path, admission.clone()).expect("reserve") {
         ReservationResult::Execute { claim, .. } => claim,
         _ => panic!("fresh admission must execute"),
     };
-    abandon_reservation_blocking(&path, &admission).expect("first durable abandon");
-    abandon_reservation_blocking(&path, &admission).expect("idempotent durable abandon");
+    let cancellation = CancellationSignal::active("abandon.cancel").expect("signal");
+    for _ in 0..2 {
+        settlement::abandon(
+            temp.path(),
+            &path,
+            &admission,
+            &cancellation,
+            Duration::ZERO,
+        )
+        .expect("durable abandonment and replay");
+    }
     assert!(!path.exists());
     drop(claim);
 }

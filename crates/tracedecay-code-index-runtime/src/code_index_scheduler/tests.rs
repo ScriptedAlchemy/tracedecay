@@ -5420,14 +5420,10 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
             .take_preopened_source_or_open(&sealed_identity, &control)
             .expect("verified source");
         let mut metadata = latest.text_projection_metadata().expect("current metadata");
-        // Any revision other than `QUERY_LEXICAL_RETRIEVER_REVISION_V1` stands in
-        // for an artifact built by an earlier retriever. `8ecc5da76` meant to
-        // retire `retriever.lexical.daemon.v1` itself when it published the
-        // qualified-name fields, but that bump also re-pins the search-quality
-        // workload and the packaged native qualification (#1070), so the
-        // current constant still carries that label.
+        // Pre-qualified-name artifacts must be withdrawn before serving even
+        // when the source generation itself has not changed.
         metadata.lexical_retriever_revision =
-            ComponentRevision::new("retriever.lexical.daemon.v0").expect("previous revision");
+            ComponentRevision::new("retriever.lexical.daemon.v1").expect("previous revision");
         assert_ne!(
             metadata.lexical_retriever_revision.as_str(),
             tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
@@ -15718,7 +15714,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         "an explicit overflow keeps the currently served text generation stale until reconcile settles"
     );
     let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
+    let dashboard = loop {
         let overflow_settled = {
             let scheduler = scheduler
                 .lock()
@@ -15730,15 +15726,19 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             && !registry
                 .reconcile_in_progress_for_test(fixture.path())
                 .await
+            && let Some(freshness) = registry.dashboard_freshness(fixture.path()).await
+            && freshness.staleness_state.as_deref() == Some("fresh")
         {
-            break;
+            // A completed owner pass can have another queued wake. Capture the
+            // settled public snapshot instead of racing a later status read.
+            break freshness;
         }
         assert!(
             std::time::Instant::now() <= overflow_deadline,
             "graph-off overflow did not settle through a real no-op reconcile"
         );
         tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    };
     let (owner_epoch_after_overflow, progress_after_overflow, decode_count) = {
         let scheduler = scheduler
             .lock()
@@ -15825,10 +15825,6 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         Some(&PublicRetrieverStatus::Unavailable)
     );
 
-    let dashboard = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("graph-off dashboard freshness");
     assert_eq!(dashboard.staleness_state.as_deref(), Some("fresh"));
     assert_eq!(dashboard.coverage, "complete");
     assert_eq!(

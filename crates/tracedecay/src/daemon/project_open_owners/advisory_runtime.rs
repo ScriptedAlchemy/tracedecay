@@ -1501,7 +1501,7 @@ fn resolve_production_github_provider_access(
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
 ) -> std::result::Result<ProductionGitHubProviderAccessV1, ProjectDeliveryProviderMountGateV1> {
-    let Some(remote_url) = crate::tracedecay::git_remote_url(project_root) else {
+    let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
         return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
     };
     let Some((owner, repository)) = super::github_repository_from_remote(&remote_url) else {
