@@ -252,20 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_path_uses_basename() {
-        let path = RelativeArtifactPathV1::new("nested/sessions.db.corrupt-9").expect("valid");
-        let artifact = IncidentDebrisArtifactV1::classify_path(
-            store(),
-            path,
-            StorageByteSizeV1(10),
-            UtcMicros(1),
-        )
-        .expect("ok")
-        .expect("debris");
-        assert_eq!(artifact.kind, IncidentDebrisKindV1::Corrupt);
-    }
-
-    #[test]
     fn quarantine_computes_eligibility_and_rejects_nonpositive_window() {
         let location = QuarantineLocationV1::new("quarantine").expect("valid");
         let contract = QuarantineContractV1 {

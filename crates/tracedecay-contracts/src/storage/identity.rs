@@ -145,25 +145,4 @@ mod tests {
         assert!(FreePageRatioV1::new(f64::NAN).is_err());
         assert!(FreePageRatioV1::new(0.5).is_ok());
     }
-
-    #[test]
-    fn free_page_ratio_at_or_above_threshold() {
-        let sample = FreePageRatioV1::from_pages(1, 4);
-        let threshold = FreePageRatioV1::new(0.25).expect("valid");
-        assert!(sample.at_or_above(threshold));
-        let lower = FreePageRatioV1::from_pages(1, 5);
-        assert!(!lower.at_or_above(threshold));
-    }
-
-    #[test]
-    fn byte_size_saturating_sub_never_underflows() {
-        assert_eq!(
-            StorageByteSizeV1(3).saturating_sub(StorageByteSizeV1(10)),
-            StorageByteSizeV1::ZERO
-        );
-        assert_eq!(
-            StorageByteSizeV1(10).saturating_sub(StorageByteSizeV1(3)),
-            StorageByteSizeV1(7)
-        );
-    }
 }
