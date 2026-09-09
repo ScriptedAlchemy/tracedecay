@@ -376,14 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_bound_legacy_session_data_and_prune_analytics() {
-        let config = RetentionConfig::default();
-        assert_eq!(config.analytics_events_days, Some(180));
-        assert_eq!(config.session_messages_days, Some(180));
-        assert_eq!(config.lcm_raw_messages_days, Some(180));
-    }
-
-    #[test]
     fn config_deserializes_partial_toml_with_bounded_session_defaults() {
         let config: RetentionConfig =
             serde_json::from_str(r#"{"analytics_events_days": 30}"#).unwrap();

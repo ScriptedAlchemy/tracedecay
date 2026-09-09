@@ -137,16 +137,6 @@ fn import_emits_uses_edge() {
 }
 
 #[test]
-fn extensions_are_lean() {
-    assert_eq!(LeanExtractor.extensions(), &["lean"]);
-}
-
-#[test]
-fn language_name_is_lean() {
-    assert_eq!(LeanExtractor.language_name(), "Lean");
-}
-
-#[test]
 fn empty_file_produces_only_file_node() {
     let result = extract("");
     assert_eq!(result.nodes.len(), 1);

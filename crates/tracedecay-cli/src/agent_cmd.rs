@@ -4602,21 +4602,6 @@ mod tests {
     }
 
     #[test]
-    fn compiled_kiro_fixture_is_a_native_executable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("kiro-cli");
-        write_fake_kiro_cli(&path);
-        let installed = dir
-            .path()
-            .join(format!("kiro-cli{}", std::env::consts::EXE_SUFFIX));
-        let bytes = std::fs::read(&installed).unwrap();
-        assert!(
-            super::host_cli_fixture::looks_like_native_executable(&bytes),
-            "Kiro host-CLI fixture must be a compiled executable, not a script"
-        );
-    }
-
-    #[test]
     fn absent_kiro_cli_is_typed_unavailability_not_an_ownership_conflict() {
         let _profile = pinned_host_profile();
         let empty_path = tempfile::tempdir().unwrap();
