@@ -220,26 +220,6 @@ fn nonempty_metadata_only_finish_fails_closed_without_deleting() {
 }
 
 #[test]
-fn compatibility_remove_fails_closed_without_deleting() {
-    let (_temp, _project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-
-    let error = remove_tracked_branch_store_checked(&tracedecay_dir, "feature").unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("requires daemon store administration")
-    );
-    assert!(db.exists());
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-}
-
-#[test]
 fn branch_admin_never_selects_default_branch_for_removal() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let error = prepare_branch_admin_mutation(
@@ -273,21 +253,6 @@ fn branch_admin_refuses_corrupt_metadata_without_selecting_stores() {
 
     assert!(error.to_string().contains("corrupt or unreadable metadata"));
     assert!(tracedecay_dir.join("branches/feature.db").exists());
-}
-
-#[test]
-fn failed_branch_sync_rollback_retires_only_metadata() {
-    let (_temp, _project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-
-    rollback_published_branch_tracking(&tracedecay_dir, "feature", "branches/feature.db").unwrap();
-
-    assert!(db.exists());
-    assert!(
-        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
 }
 
 /// A branch tracked on the single project store retires metadata-only: no

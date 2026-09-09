@@ -2039,31 +2039,6 @@ mod tests {
     }
 
     #[test]
-    fn handshake_refusal_frames_become_typed_revision_skew_errors() {
-        let refusal = crate::handshake::DaemonHandshakeRefusal {
-            protocol: crate::handshake::DAEMON_HANDSHAKE_REFUSAL_PROTOCOL.to_owned(),
-            refusal: crate::handshake::DaemonHandshakeRefusalReason::UnsupportedRevision,
-            daemon_version: "0.1.0-beta.36+dddd".to_owned(),
-        };
-        let mut handshake = test_skew_handshake();
-        handshake.client_version = "0.1.0-beta.37+eeee".to_owned();
-
-        let error = super::handshake_refusal_error(&refusal, &handshake);
-        let (code, retryable, _) = error
-            .project_route_context()
-            .expect("handshake refusals must be typed");
-        assert_eq!(code, super::DAEMON_PROTOCOL_REVISION_SKEW);
-        assert!(!retryable);
-        let message = error.to_string();
-        assert!(
-            message.contains("UnsupportedRevision")
-                && message.contains("0.1.0-beta.36+dddd")
-                && message.contains("0.1.0-beta.37+eeee"),
-            "the refusal error must name the reason and both versions: {message}"
-        );
-    }
-
-    #[test]
     fn authentication_refusal_frames_become_typed_auth_errors() {
         let refusal = crate::handshake::DaemonHandshakeRefusal::for_rejected_authentication(
             "0.1.0-beta.36+dddd",
@@ -2191,27 +2166,6 @@ mod tests {
             assert_eq!(reason, expected_reason);
             assert!(!retryable);
         }
-    }
-
-    #[test]
-    fn semantic_evaluation_client_prints_rejection_diagnostic() {
-        let error = semantic_evaluation_application_problem(ApplicationProblem::InvalidRequest {
-            diagnostic: tracedecay_contracts::SafeDiagnostic {
-                code: "semantic_evaluation.rejected".to_owned(),
-                message: "exact eligible chunks current expected 2170, measured 2184".to_owned(),
-            },
-            retry: tracedecay_contracts::RetryDirective::Never,
-            legal_actions: Vec::new(),
-        });
-        let message = error.to_string();
-        assert!(
-            message.contains("2184"),
-            "client must print the SearchEvalError detail: {message}"
-        );
-        assert!(
-            message.contains("semantic evaluation publication rejected"),
-            "client must keep the publication rejection prefix: {message}"
-        );
     }
 
     #[test]

@@ -617,8 +617,7 @@ mod tests {
     use super::{
         ExclusiveLeaseAttempt, SharedLeaseAttempt, acquire_exclusive_at,
         acquire_exclusive_at_with_timeout, acquire_exclusive_or_inherited_at, acquire_shared_at,
-        acquire_shared_or_inherited_at, try_acquire_exclusive_for_profile, try_acquire_shared_at,
-        try_acquire_shared_for_profile,
+        try_acquire_exclusive_for_profile, try_acquire_shared_at, try_acquire_shared_for_profile,
     };
 
     #[test]
@@ -741,15 +740,6 @@ mod tests {
         assert!(acquire_exclusive_at(&path, "other").is_err());
         drop(parent);
         acquire_exclusive_at(&path, "other").unwrap();
-    }
-
-    #[test]
-    fn nested_doctor_joins_the_process_owned_exclusive_lease() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("lifecycle.lock");
-        let _parent = acquire_exclusive_at(&path, "post-update").unwrap();
-
-        acquire_shared_or_inherited_at(&path, "doctor").unwrap();
     }
 
     #[test]

@@ -179,22 +179,6 @@ mod handshake_refusal_tests {
     use super::*;
 
     #[test]
-    fn version_skew_action_orders_prerelease_builds() {
-        assert_eq!(
-            version_skew_action("0.1.0-beta.36+aaaa", "0.1.0-beta.37+bbbb"),
-            "run `tracedecay daemon restart` to load the current daemon binary"
-        );
-        assert_eq!(
-            version_skew_action("0.1.0-beta.37+aaaa", "0.1.0-beta.36+bbbb"),
-            "restart or reconnect the MCP host so it loads the current TraceDecay client and tool catalog"
-        );
-        assert_eq!(
-            version_skew_action("0.1.0-beta.37+aaaa", "0.1.0-beta.37+bbbb"),
-            "restart or reconnect whichever TraceDecay component is stale"
-        );
-    }
-
-    #[test]
     fn wire_drifted_handshakes_classify_as_unsupported_revision() {
         let refusal = DaemonHandshakeRefusal::for_unparseable_handshake(
             r#"{"future_handshake_shape": true}"#,

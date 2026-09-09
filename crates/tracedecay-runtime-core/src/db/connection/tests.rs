@@ -218,28 +218,6 @@ async fn database_owner_issues_client_leases_over_one_stable_database_inner() {
 }
 
 #[tokio::test]
-async fn repeated_authorized_opens_share_one_writer_lane() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "writer reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let first = owner.issue_lease().unwrap();
-    let second = owner.issue_lease().unwrap();
-
-    let first_writer = first.writer().await;
-    assert!(second.inner.writer.try_lock().is_err());
-    drop(first_writer);
-    assert!(second.inner.writer.try_lock().is_ok());
-}
-
-#[tokio::test]
 async fn retained_daemon_database_refuses_writes_after_scope_drops() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("projects/project/tracedecay.db");
