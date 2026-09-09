@@ -26,7 +26,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
     match tool_name {
         "tracedecay_test_map" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_test_map(cg, &graph, args, scope_prefix).await
+            portable_health::handle_test_map(&graph, args, scope_prefix).await
         }
         "tracedecay_gini" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
@@ -61,7 +61,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
         }
         "tracedecay_test_risk" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_test_risk(cg, &graph, args, scope_prefix).await
+            portable_health::handle_test_risk(&graph, args, scope_prefix).await
         }
         _ => Err(super::super::unknown_tool_error(tool_name)),
     }
