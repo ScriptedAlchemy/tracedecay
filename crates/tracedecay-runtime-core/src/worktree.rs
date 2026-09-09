@@ -283,6 +283,14 @@ fn git_command() -> std::process::Command {
     if let Ok(path) = std::env::join_paths(paths) {
         command.env("PATH", path);
     }
+    // Parallel libtests and CI runners can inherit GIT_DIR / GIT_WORK_TREE.
+    // `git -C` is not used here; those overrides would retarget every fixture
+    // command at a foreign repo and make `worktree add` fail closed.
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    command.env_remove("GIT_COMMON_DIR");
+    command.env_remove("GIT_INDEX_FILE");
+    command.env_remove("GIT_OBJECT_DIRECTORY");
     command
 }
 
@@ -294,12 +302,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let status = git_command()
+        let output = git_command()
             .args(args)
             .current_dir(cwd)
-            .status()
+            .output()
             .expect("git not on PATH — required for worktree tests");
-        assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+        assert!(
+            output.status.success(),
+            "git {args:?} failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
