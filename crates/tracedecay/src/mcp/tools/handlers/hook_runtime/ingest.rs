@@ -631,6 +631,39 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         label = "mcp.hook_runtime.capture"
     )
     .await?;
+    let mut output = ingest_capture_response(provider, user_scope, admission, capture);
+    // Project-scope ingest is the production moment new post-hint session
+    // activity becomes durable, so settle emitted hook hints into
+    // `hint_outcome` analytics events here. Best-effort: unavailable or
+    // failed settlement is a typed field on the output, never an ingest
+    // failure.
+    if let Some(cg) = cg
+        && !user_scope
+    {
+        let settlement = hotpath::future!(
+            tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
+                accounting_db,
+                session_authorities.project.map(std::convert::AsRef::as_ref),
+                tracedecay_application::analytics_bridge::hook_import_sources(Some(
+                    cg.project_root()
+                )),
+                cg.project_root(),
+                crate::tracedecay::current_timestamp()
+            ),
+            label = "mcp.hook_runtime.hint_settle"
+        )
+        .await;
+        output["hint_outcomes"] = settlement.as_json();
+    }
+    Ok(output)
+}
+
+fn ingest_capture_response(
+    provider: &str,
+    user_scope: bool,
+    admission: HostAdmissionOutcome,
+    capture: TranscriptCaptureOutcome,
+) -> Value {
     let TranscriptCaptureOutcome {
         messages_upserted,
         snapshot: snapshot_capture,
@@ -683,29 +716,6 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         output["authority_outcome"] = json!(receipt.outcome);
         output["committed_state"] = json!(receipt.receipt.committed_state);
     }
-    // Project-scope ingest is the production moment new post-hint session
-    // activity becomes durable, so settle emitted hook hints into
-    // `hint_outcome` analytics events here. Best-effort: unavailable or
-    // failed settlement is a typed field on the output, never an ingest
-    // failure.
-    if let Some(cg) = cg
-        && !user_scope
-    {
-        let settlement = hotpath::future!(
-            tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
-                accounting_db,
-                session_authorities.project.map(std::convert::AsRef::as_ref),
-                tracedecay_application::analytics_bridge::hook_import_sources(Some(
-                    cg.project_root()
-                )),
-                cg.project_root(),
-                crate::tracedecay::current_timestamp()
-            ),
-            label = "mcp.hook_runtime.hint_settle"
-        )
-        .await;
-        output["hint_outcomes"] = settlement.as_json();
-    }
     if let Some(capture) = snapshot_capture {
         output["observations_committed"] = json!(capture.stats.messages_upserted);
         output["bytes_consumed"] = json!(capture.bytes_consumed);
@@ -724,7 +734,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         output["deferred_sources"] = json!(stats.deferred_sources);
         output["source_bytes_scanned"] = json!(stats.source_bytes_scanned);
     }
-    Ok(output)
+    output
 }
 
 pub(super) fn complete_ingest_admission(

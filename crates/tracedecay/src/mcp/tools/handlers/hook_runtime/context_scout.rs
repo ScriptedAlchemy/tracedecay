@@ -83,39 +83,11 @@ pub(super) async fn admit_native_context_scout_lifecycle(
         Ok(raw) => raw,
         Err(_) => return false,
     };
-    let session_id = lifecycle.session_id.clone();
-    let call_id = lifecycle.call_id.clone();
-    let canonical_provider = provider.clone();
     let parsed = match parse_normalized_observation_record_v1(
         &raw,
         range,
         ObservationOrderingDomainV1::DaemonSequence,
-        move |_| {
-            CanonicalObservationEnvelopeV1::new(
-                canonical_provider,
-                "hook_tool_after",
-                call_id.clone(),
-                CanonicalObservationRelationsV1::new(session_id.clone())
-                    .with_thread_id(
-                        ObservationId::new(session_id.as_str().to_owned())
-                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
-                    )
-                    .with_turn_id(call_id.clone())
-                    .with_agent_id(
-                        ObservationId::new(session_id.as_str().to_owned())
-                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
-                    )
-                    .with_message_id(call_id.clone()),
-                vec![CanonicalObservationFactV1::Boundary {
-                    boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
-                }],
-                CanonicalObservationEvidenceV1::new(
-                    ObservationOrderingDomainV1::DaemonSequence,
-                    range,
-                ),
-            )
-            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-        },
+        |_| native_context_scout_observation(lifecycle, provider.clone(), range),
     ) {
         Ok(parsed) => parsed,
         Err(_) => return false,
@@ -200,6 +172,36 @@ pub(super) async fn admit_native_context_scout_lifecycle(
         )
         | Err(_) => false,
     }
+}
+
+fn native_context_scout_observation(
+    lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
+    canonical_provider: ProviderId,
+    range: ObservationSourceRangeV1,
+) -> std::result::Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    let session_id = lifecycle.session_id.clone();
+    let call_id = lifecycle.call_id.clone();
+    CanonicalObservationEnvelopeV1::new(
+        canonical_provider,
+        "hook_tool_after",
+        call_id.clone(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_thread_id(
+                ObservationId::new(session_id.as_str().to_owned())
+                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+            )
+            .with_turn_id(call_id.clone())
+            .with_agent_id(
+                ObservationId::new(session_id.as_str().to_owned())
+                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+            )
+            .with_message_id(call_id.clone()),
+        vec![CanonicalObservationFactV1::Boundary {
+            boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::DaemonSequence, range),
+    )
+    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
 const MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS: usize = 256;

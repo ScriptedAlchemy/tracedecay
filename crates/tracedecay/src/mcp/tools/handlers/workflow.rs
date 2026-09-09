@@ -203,35 +203,8 @@ pub(super) async fn handle_diagnose(
                 touched.insert(file.to_string());
             }
         }
-        let callers_json = if include_callers {
-            match &node {
-                Some(n) => {
-                    let callers = graph.callers(
-                        std::slice::from_ref(&n.occurrence),
-                        &[RelationEdgeKindV1::Calls],
-                        5,
-                    )?;
-                    let trimmed: Vec<Value> = callers
-                        .into_iter()
-                        .next()
-                        .into_iter()
-                        .flatten()
-                        .take(5)
-                        .map(|edge| {
-                            diagnostic_symbol_json(&edge.neighbor).inspect(|caller| {
-                                if let Some(file) = caller.get("file").and_then(Value::as_str) {
-                                    touched.insert(file.to_owned());
-                                }
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    Value::Array(trimmed)
-                }
-                None => Value::Array(vec![]),
-            }
-        } else {
-            Value::Null
-        };
+        let callers_json =
+            diagnostic_callers_json(graph, node.as_ref(), include_callers, &mut touched)?;
 
         items.push(json!({
             "severity": severity_string(d.severity),
@@ -271,6 +244,43 @@ pub(super) async fn handle_diagnose(
         touched.into_iter().collect(),
         || render::diagnostics_md(&body),
     ))
+}
+
+fn diagnostic_callers_json(
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    node: Option<&CodeGraphSymbolSummaryV1>,
+    include_callers: bool,
+    touched: &mut HashSet<String>,
+) -> Result<Value> {
+    Ok(if include_callers {
+        match node {
+            Some(n) => {
+                let callers = graph.callers(
+                    std::slice::from_ref(&n.occurrence),
+                    &[RelationEdgeKindV1::Calls],
+                    5,
+                )?;
+                let trimmed: Vec<Value> = callers
+                    .into_iter()
+                    .next()
+                    .into_iter()
+                    .flatten()
+                    .take(5)
+                    .map(|edge| {
+                        diagnostic_symbol_json(&edge.neighbor).inspect(|caller| {
+                            if let Some(file) = caller.get("file").and_then(Value::as_str) {
+                                touched.insert(file.to_owned());
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Value::Array(trimmed)
+            }
+            None => Value::Array(vec![]),
+        }
+    } else {
+        Value::Null
+    })
 }
 
 /// The graph-lookup form of one compiler-reported path: forward slashes,
@@ -630,26 +640,18 @@ where
     // 3) Execute each selected libtest identity exactly once. The runner
     // retains one deadline, cancellation control, and output budget across
     // the whole selected set.
-    let control = TestRunControl::default();
-    let run = runner(
-        project_root.clone(),
+    let (output, results) = match execute_selected_tests(
+        project_root,
         run_args.profile,
-        test_names.clone(),
-        Duration::from_secs(run_args.timeout_secs),
-        control.clone(),
-    );
-    tokio::pin!(run);
-    let cancellation = wait_for_test_run_cancellation(emitter.clone(), cancellation);
-    tokio::pin!(cancellation);
-    let run_result = tokio::select! {
-        result = &mut run => result,
-        () = &mut cancellation => {
-            control.cancel();
-            (&mut run).await
-        }
-    };
-    let output = match run_result {
-        Ok(output) => output,
+        &test_names,
+        run_args.timeout_secs,
+        emitter.clone(),
+        cancellation,
+        runner,
+    )
+    .await
+    {
+        Ok(observed) => observed,
         Err(failure) => {
             return affected_test_failure::terminal_failure(
                 &emitter,
@@ -665,41 +667,6 @@ where
             .await;
         }
     };
-
-    let results = hotpath::measure_block!(
-        "mcp.workflow.affected_tests.parse",
-        parse_libtest_output(&output.stdout)
-    );
-    if let Some(test_name) = missing_requested_test(&test_names, &results) {
-        let any_requested_result = results
-            .iter()
-            .any(|(observed, _)| test_names.iter().any(|requested| requested == observed));
-        let failure = if !any_requested_result && output.exit_code != Some(0) {
-            TestRunFailure::Harness {
-                exit_code: output.exit_code,
-                output_bytes: output.output_bytes,
-                partial: Some(output),
-            }
-        } else {
-            TestRunFailure::NoMatch {
-                test_identity: test_name.to_owned(),
-                output_bytes: output.output_bytes,
-                partial: Some(output),
-            }
-        };
-        return affected_test_failure::terminal_failure(
-            &emitter,
-            &args,
-            started_at,
-            &effective_deadline,
-            run_args.timeout_secs,
-            failure,
-            &test_names,
-            truncated,
-            &selected_targets,
-        )
-        .await;
-    }
     emit_observed_test_results(&emitter, &results, test_names.len()).await?;
     let receipt = finish_test_run(
         &emitter,
@@ -729,6 +696,64 @@ where
         &body,
         touched_files,
     ))
+}
+
+async fn execute_selected_tests<Runner, RunFuture>(
+    project_root: PathBuf,
+    profile: TestProfile,
+    test_names: &[String],
+    timeout_secs: u64,
+    emitter: OperationEmitter,
+    cancellation: Option<CancellationSignal>,
+    runner: Runner,
+) -> std::result::Result<(TestRunOutput, Vec<(String, bool)>), TestRunFailure>
+where
+    Runner: FnOnce(PathBuf, TestProfile, Vec<String>, Duration, TestRunControl) -> RunFuture,
+    RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
+{
+    let control = TestRunControl::default();
+    let run = runner(
+        project_root,
+        profile,
+        test_names.to_vec(),
+        Duration::from_secs(timeout_secs),
+        control.clone(),
+    );
+    tokio::pin!(run);
+    let cancellation = wait_for_test_run_cancellation(emitter.clone(), cancellation);
+    tokio::pin!(cancellation);
+    let run_result = tokio::select! {
+        result = &mut run => result,
+        () = &mut cancellation => {
+            control.cancel();
+            (&mut run).await
+        }
+    };
+    let output = run_result?;
+    let results = hotpath::measure_block!(
+        "mcp.workflow.affected_tests.parse",
+        parse_libtest_output(&output.stdout)
+    );
+    if let Some(test_name) = missing_requested_test(test_names, &results) {
+        let any_requested_result = results
+            .iter()
+            .any(|(observed, _)| test_names.iter().any(|requested| requested == observed));
+        let failure = if !any_requested_result && output.exit_code != Some(0) {
+            TestRunFailure::Harness {
+                exit_code: output.exit_code,
+                output_bytes: output.output_bytes,
+                partial: Some(output),
+            }
+        } else {
+            TestRunFailure::NoMatch {
+                test_identity: test_name.to_owned(),
+                output_bytes: output.output_bytes,
+                partial: Some(output),
+            }
+        };
+        return Err(failure);
+    }
+    Ok((output, results))
 }
 
 async fn wait_for_test_run_cancellation(

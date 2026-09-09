@@ -6,7 +6,7 @@ use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_host_admission::{SharedHostAdmissionBroker, TerminalReason};
+use tracedecay_host_admission::{HostAdmissionReplay, SharedHostAdmissionBroker, TerminalReason};
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
@@ -201,6 +201,25 @@ async fn replay_projectless_hermes_receipts(
             target_outcome = Some(outcome);
         }
     }
+    settle_projectless_hermes_replay(
+        &replay,
+        retained_leases,
+        target_seq,
+        target_outcome,
+        terminal_outcome,
+        retained_outcome,
+    )
+    .await
+}
+
+async fn settle_projectless_hermes_replay(
+    replay: &HostAdmissionReplay<'_>,
+    retained_leases: Vec<u64>,
+    target_seq: Option<u64>,
+    mut target_outcome: Option<HostAdmissionOutcome>,
+    terminal_outcome: Option<HostAdmissionOutcome>,
+    retained_outcome: Option<HostAdmissionOutcome>,
+) -> std::result::Result<HostAdmissionOutcome, HostAdmissionOutcome> {
     for seq in retained_leases.into_iter().rev() {
         replay.defer(seq).await?;
     }

@@ -381,6 +381,44 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         )
         .await;
     }
+    let (lifecycle, ready_guidance) = claim_hook_v2_guidance(
+        cg,
+        envelope,
+        &snapshot,
+        native_session_id,
+        first_admission,
+        now,
+    )
+    .await;
+    let orchestration = tracedecay_daemon_service::admit_registered_hook_orchestration(
+        envelope.clone(),
+        snapshot.binding.clone(),
+        lifecycle,
+        snapshot.revision,
+        false,
+        completion,
+    );
+    let (feedback_notice, github_stack_signal_available) =
+        hook_v2_feedback_signals(envelope, first_admission).await;
+    HookV2AdmissionOutcomeV1::Admitted {
+        orchestration,
+        ready_guidance,
+        feedback_notice,
+        github_stack_signal_available,
+    }
+}
+
+async fn claim_hook_v2_guidance(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    snapshot: &tracedecay_hooks::HookConfigurationSnapshotV1,
+    native_session_id: Option<SessionId>,
+    first_admission: bool,
+    now: UtcMicros,
+) -> (
+    Option<tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1>,
+    Value,
+) {
     let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
     let claim_authority = match (
         tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
@@ -425,14 +463,13 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         },
         _ => Value::Null,
     };
-    let orchestration = tracedecay_daemon_service::admit_registered_hook_orchestration(
-        envelope.clone(),
-        snapshot.binding.clone(),
-        lifecycle,
-        snapshot.revision,
-        false,
-        completion,
-    );
+    (lifecycle, ready_guidance)
+}
+
+async fn hook_v2_feedback_signals(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    first_admission: bool,
+) -> (Value, bool) {
     let feedback_notice = if first_admission {
         tracedecay_application::advisory::peek_advisory_hook_notice(
             envelope.project_id,
@@ -466,12 +503,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         } else {
             false
         };
-    HookV2AdmissionOutcomeV1::Admitted {
-        orchestration,
-        ready_guidance,
-        feedback_notice,
-        github_stack_signal_available,
-    }
+    (feedback_notice, github_stack_signal_available)
 }
 
 pub(super) async fn hook_v2_admit(
