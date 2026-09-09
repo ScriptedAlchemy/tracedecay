@@ -32,7 +32,6 @@
 #![allow(clippy::unused_async)]
 #![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::if_not_else)]
-#![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
