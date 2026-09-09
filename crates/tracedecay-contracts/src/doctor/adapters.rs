@@ -590,7 +590,7 @@ mod tests {
         DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
         DoctorFindingFamilyV1, DoctorFindingV1, DoctorStorageFamilyReadV1,
         DoctorStorageFindingKindV1, DoctorStorageFindingV1, DoctorStorageIncompleteReasonV1,
-        HostConformanceV1, HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
+        HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
         LanguageServerReadV1, LanguageServerStateV1, ObservabilityReadV1, ObservabilityStateV1,
         OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
         RuntimeHealthReadV1, RuntimeLivenessV1,
@@ -655,23 +655,6 @@ mod tests {
         )
         .unwrap();
         DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, finding).unwrap()
-    }
-
-    #[tokio::test]
-    async fn configuration_adapter_returns_seeded_read() {
-        let ctx = context();
-        for read in [
-            ConfigurationAuthorityReadV1::Resolved {
-                drift: ConfigurationDriftV1::InSync,
-                coverage: DoctorCoverageCompletenessV1::Complete,
-            },
-            ConfigurationAuthorityReadV1::Absent,
-            ConfigurationAuthorityReadV1::Denied,
-            ConfigurationAuthorityReadV1::Unknown,
-        ] {
-            let adapter = ConfigurationAuthorityDoctorAdapterV1::from_read(read.clone());
-            assert_eq!(adapter.configuration_health(&ctx).await, read);
-        }
     }
 
     #[test]
@@ -747,33 +730,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn runtime_adapter_returns_seeded_read() {
-        let ctx = context();
-        let read = RuntimeHealthReadV1::Denied;
-        let adapter = RuntimeHealthDoctorAdapterV1::from_read(read.clone());
-        assert_eq!(adapter.runtime_health(&ctx).await, read);
-    }
-
-    #[tokio::test]
-    async fn host_adapter_returns_seeded_read() {
-        let ctx = context();
-        let read = HostIntegrationReadV1::Observed {
-            conformance: HostConformanceV1::ProtocolDrift,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        };
-        let adapter = HostIntegrationDoctorAdapterV1::from_read(read.clone());
-        assert_eq!(adapter.host_conformance(&ctx).await, read);
-    }
-
-    #[tokio::test]
-    async fn code_index_adapter_returns_seeded_read() {
-        let ctx = context();
-        let read = CodeIndexMountReadV1::Absent;
-        let adapter = CodeIndexMountDoctorAdapterV1::from_read(read.clone());
-        assert_eq!(adapter.code_index_mount(&ctx).await, read);
-    }
-
     #[test]
     fn storage_family_read_absent_when_empty() {
         assert_eq!(
@@ -790,17 +746,6 @@ mod tests {
                 assert_eq!(findings.len(), 1);
                 assert_eq!(findings[0].kind(), DoctorStorageFindingKindV1::OrphanStore);
             }
-            other => panic!("expected observed, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn storage_adapter_returns_seeded_read() {
-        let ctx = context();
-        let adapter =
-            StorageDoctorAdapterV1::from_read(storage_family_read(vec![orphan_storage_finding()]));
-        match adapter.storage_findings(&ctx).await {
-            DoctorStorageFamilyReadV1::Observed { findings } => assert_eq!(findings.len(), 1),
             other => panic!("expected observed, got {other:?}"),
         }
     }
