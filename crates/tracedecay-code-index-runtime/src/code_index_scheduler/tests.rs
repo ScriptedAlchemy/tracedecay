@@ -5748,6 +5748,50 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
     assert!(latest.text_serving_needs_work());
 }
 
+#[test]
+fn overlapping_text_builds_share_one_admission_watermark_headroom() {
+    let limit_bytes = 1_000_u64;
+    let watermark_headroom = 100_u64;
+    let requested = NonZeroU64::new(200).expect("nonzero build request");
+    let mut used_bytes = 0_u64;
+
+    for observed_bytes in [300_u64, 500, 700] {
+        let unmodeled_live_bytes = observed_bytes.saturating_sub(used_bytes);
+        let (accounted, retained) = super::text_artifact_resident_memory_charges(
+            requested,
+            unmodeled_live_bytes,
+            watermark_headroom,
+        )
+        .expect("bounded admission accounting");
+        assert!(
+            used_bytes + accounted.get() <= limit_bytes,
+            "each overlapping build fits beneath the same 900-byte high watermark"
+        );
+        used_bytes += retained.get();
+    }
+
+    assert_eq!(
+        used_bytes, 900,
+        "the retained ledger owns one observed baseline plus three build ceilings"
+    );
+    for overflow in [
+        super::text_artifact_resident_memory_charges(
+            NonZeroU64::new(u64::MAX).expect("maximum nonzero request"),
+            1,
+            0,
+        ),
+        super::text_artifact_resident_memory_charges(requested, 0, u64::MAX),
+    ] {
+        assert!(
+            matches!(
+                overflow,
+                Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
+            ),
+            "overflow must remain a typed contract refusal: {overflow:?}"
+        );
+    }
+}
+
 /// The artifact build and reader ceilings must reserve through the process
 /// resident-memory authority: an authority too small for the advertised
 /// build ceiling refuses the build as a typed unavailability, and a serving
