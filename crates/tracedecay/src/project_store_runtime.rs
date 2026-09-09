@@ -45,7 +45,9 @@ pub(crate) async fn open_project_store_runtime(
     identity: LocalProfileIdentityAuthorityV1,
 ) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {
     crate::register_runtime_ports()?;
-    Ok(Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?))
+    Ok(Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity).await?,
+    ))
 }
 
 impl crate::tracedecay::TraceDecay {
