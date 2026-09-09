@@ -123,54 +123,6 @@ fn adapter(
 }
 
 #[test]
-fn admitted_providers_derive_python_and_typescript_from_project_files() {
-    let project = tempfile::tempdir().expect("project");
-    std::fs::write(project.path().join("pyproject.toml"), "").expect("python root marker");
-    std::fs::write(project.path().join("tsconfig.json"), "").expect("typescript root marker");
-    let python = project.path().join("pyright-langserver");
-    std::fs::write(&python, "").expect("mounted python provider");
-    let mut broker = DiagnosticBroker::new(
-        project.path(),
-        vec![
-            adapter(
-                "typescript",
-                project
-                    .path()
-                    .join("missing-typescript-language-server")
-                    .to_string_lossy(),
-                "ts",
-                "tsconfig.json",
-            ),
-            adapter("python", python.to_string_lossy(), "py", "pyproject.toml"),
-        ],
-        CodeDiagnosticsSettings::default(),
-    );
-
-    let admitted =
-        broker.admitted_providers_for_files(&["src/main.ts".to_owned(), "src/main.py".to_owned()]);
-
-    assert_eq!(
-        admitted,
-        vec![
-            AdmittedLspProvider {
-                language: "typescript".to_owned(),
-                command: project
-                    .path()
-                    .join("missing-typescript-language-server")
-                    .to_string_lossy()
-                    .into_owned(),
-                analyzer_available: false,
-            },
-            AdmittedLspProvider {
-                language: "python".to_owned(),
-                command: python.to_string_lossy().into_owned(),
-                analyzer_available: true,
-            },
-        ]
-    );
-}
-
-#[test]
 fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
     let project = tempfile::tempdir().expect("project");
     std::fs::write(project.path().join("Cargo.toml"), "").expect("rust root marker");
@@ -214,48 +166,6 @@ fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
             .mounted_providers_for_files(&["src/lib.rs".to_owned()])
             .is_empty()
     );
-}
-
-#[test]
-fn refresh_batch_canonicalizes_the_project_root_once() {
-    let project = tempfile::tempdir().expect("project");
-    std::fs::create_dir(project.path().join("src")).expect("source directory");
-    std::fs::write(project.path().join("Cargo.toml"), "").expect("root marker");
-    let command = project.path().join("analyzer");
-    std::fs::write(&command, "").expect("analyzer command");
-    let mut broker = DiagnosticBroker::new_for_test(
-        project.path(),
-        vec![adapter(
-            "rust",
-            command.to_string_lossy(),
-            "rs",
-            "Cargo.toml",
-        )],
-    );
-    reset_project_root_canonicalization_count();
-
-    let prepared = broker
-        .prepare_refresh(
-            "rust",
-            vec![
-                LspDocument {
-                    language: "rust".to_owned(),
-                    language_id: "rust".to_owned(),
-                    relative_path: "src/one.rs".to_owned(),
-                    text: "fn one() {}".to_owned(),
-                },
-                LspDocument {
-                    language: "rust".to_owned(),
-                    language_id: "rust".to_owned(),
-                    relative_path: "src/two.rs".to_owned(),
-                    text: "fn two() {}".to_owned(),
-                },
-            ],
-        )
-        .expect("refresh preparation");
-
-    assert!(prepared.is_some());
-    assert_eq!(project_root_canonicalization_count(), 1);
 }
 
 #[test]

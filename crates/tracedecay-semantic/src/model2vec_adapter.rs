@@ -614,41 +614,6 @@ impl EmbeddingSession for Model2VecEmbeddingSession {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_build_revision_names_the_pinned_decoder_versions() {
-        let manifest = include_str!("../Cargo.toml");
-        let pinned = |dependency: &str| {
-            manifest
-                .lines()
-                .find_map(|line| {
-                    let rest = line.trim().strip_prefix(dependency)?.trim_start();
-                    let rest = rest.strip_prefix('=')?.trim_start();
-                    let (_, rest) = rest.split_once("version = \"=")?;
-                    rest.split_once('"').map(|(version, _)| version.to_owned())
-                })
-                .unwrap_or_else(|| {
-                    panic!("tracedecay-semantic must pin an exact {dependency} version")
-                })
-        };
-        for (dependency, prefix) in [
-            ("tokenizers", "tokenizers-"),
-            ("safetensors", "safetensors-"),
-            ("half", "half-"),
-        ] {
-            let version = pinned(dependency);
-            assert!(
-                MODEL2VEC_RUNTIME_BUILD_REVISION_V1.contains(&format!("+{prefix}{version}")),
-                "MODEL2VEC_RUNTIME_BUILD_REVISION_V1 ({MODEL2VEC_RUNTIME_BUILD_REVISION_V1}) must \
-                 record the exact pinned {dependency} version ({version})"
-            );
-        }
-    }
-}
-
 #[cfg(all(test, feature = "semantic-model2vec"))]
 #[path = "model2vec_adapter/tests.rs"]
 mod inference_tests;

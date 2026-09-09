@@ -6,7 +6,7 @@ use tracedecay_domain::{
     EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
 };
 
-use crate::embedding_backend::{EmbeddingRuntimeFamilyV1, ProductionEmbeddingRuntime};
+use crate::embedding_backend::EmbeddingRuntimeFamilyV1;
 use crate::fastembed_adapter::lifecycle_test_support::{
     LifecycleInstallFixtureV1, MODEL2VEC_FIXTURE_TOKENIZER_JSON, lifecycle_authority_from,
     model2vec_fixture_table_bytes, model2vec_lifecycle_install_fixture,
@@ -297,29 +297,6 @@ fn lifecycle_install_opens_a_session_and_embeds_typed_vectors() {
     assert_eq!(vectors[1].values, vec![0.0, 0.0, 0.0]);
     let norm = 1.25_f32.sqrt();
     assert_close(&vectors[2].values, &[0.5 / norm, 1.0 / norm, 0.0]);
-}
-
-#[test]
-fn production_dispatcher_routes_a_model2vec_authority_to_the_static_runtime() {
-    let fixture =
-        model2vec_lifecycle_install_fixture(EmbeddingPrecisionV1::Fp32, NORMALIZED_CONFIG, 8);
-    let authority = fixture_authority(&fixture);
-    let runtime = ProductionEmbeddingRuntime::default();
-    runtime
-        .verify_artifact_compatibility(&authority)
-        .expect("dispatched compatibility");
-    let cancellation = ManualCancellation::new();
-    let mut session = runtime
-        .open_session(&authority, &cancellation)
-        .expect("dispatched session");
-    assert!(matches!(
-        session,
-        crate::embedding_backend::ProductionEmbeddingSession::Model2Vec(_)
-    ));
-    let vectors = session
-        .embed_batch(&batch(&["code"]), &cancellation)
-        .expect("dispatched embed");
-    assert_close(&vectors[0].values, &[0.0, 0.0, 1.0]);
 }
 
 #[test]

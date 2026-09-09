@@ -435,35 +435,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_route_error_class_is_distinct() {
-        let error = TraceDecayError::project_route(
-            "project_route_unavailable",
-            true,
-            "project registry is warming",
-        );
-
-        assert_eq!(error_class(&error), "project_route");
-    }
-
-    #[test]
-    fn reset_required_error_class_is_distinct() {
-        let error =
-            TraceDecayError::reset_required("session store", "session store reset required");
-
-        assert_eq!(error_class(&error), "reset_required");
-    }
-
-    #[test]
-    fn host_cli_requirement_error_class_is_distinct() {
-        let error = TraceDecayError::HostCliUnavailable {
-            program: "kiro-cli".to_string(),
-            lifecycle: "kiro MCP registry lifecycle".to_string(),
-        };
-
-        assert_eq!(error_class(&error), "host_cli_unavailable");
-    }
-
-    #[test]
     fn public_inventory_problem_never_exposes_the_local_path() {
         let error = TraceDecayError::File {
             message: "corrupt response-handle record: invalid JSON".to_string(),

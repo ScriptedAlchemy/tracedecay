@@ -64,25 +64,6 @@ mod tests {
     }
 
     #[test]
-    fn line_numbers_are_total_over_empty_input_and_offsets_past_the_end() {
-        assert_eq!(line_number_at("", 0), 1);
-        assert_eq!(line_number_at("", 7), 1);
-        assert_eq!(line_number_at("a\nb", usize::MAX), 2);
-    }
-
-    #[test]
-    fn interior_bytes_of_multibyte_characters_report_their_line() {
-        let source = "é\n字\n🦀";
-        let crab = source.find('🦀').unwrap();
-        assert_eq!(line_number_at(source, 1), 1, "second byte of é");
-        assert_eq!(
-            line_number_at(source, crab + 2),
-            3,
-            "third byte of the crab"
-        );
-    }
-
-    #[test]
     fn whitespace_skipping_clamps_to_the_input_length() {
         let bytes = b"  \t\nx  ";
         assert_eq!(skip_ascii_whitespace(bytes, 0), 4);

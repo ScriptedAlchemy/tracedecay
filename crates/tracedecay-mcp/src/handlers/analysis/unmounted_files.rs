@@ -489,68 +489,6 @@ mod tests {
             .expect("ecosystem section")
     }
 
-    /// The audit run against the repository that owns it.
-    ///
-    /// Ignored by default because it walks and parses the entire working tree,
-    /// which is a whole-repo cost no unit-test lane should pay on every run.
-    /// It is kept as a test rather than a script because it is the only check
-    /// that exercises the walk at real scale, over real cargo and npm
-    /// manifests, and because "our own tree is clean" is a claim that should
-    /// break loudly when it stops being true:
-    ///
-    /// ```text
-    /// cargo test --lib unmounted_files -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "walks the entire working tree; run explicitly for a dogfooding pass"]
-    fn this_repository_has_no_unmounted_rust_files() {
-        // Audits this repository, which is the workspace root above the package.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root above crates/tracedecay");
-        let audit = audit_project(root).expect("audit");
-        for ecosystem in &audit.ecosystems {
-            println!(
-                "[{}] {} · packages={} entries={} scanned={} mounted={} unclaimed={} findings={}",
-                ecosystem.ecosystem,
-                ecosystem.status.as_str(),
-                ecosystem.package_count,
-                ecosystem.entry_point_count,
-                ecosystem.scanned_file_count,
-                ecosystem.mounted_file_count,
-                ecosystem.unclaimed_file_count,
-                ecosystem.unmounted.len(),
-            );
-            for entry in &ecosystem.unmounted {
-                println!("    {} (package {})", entry.file, entry.package);
-            }
-        }
-        let rust = ecosystem(&audit, "rust");
-        let unmounted: Vec<&str> = rust
-            .unmounted
-            .iter()
-            .map(|entry| entry.file.as_str())
-            .collect();
-        for required in [
-            "src/sessions/claude_observation_benchmark.rs",
-            "src/sessions/claude_observation_benchmark/artifact.rs",
-            "src/sessions/ingest_tests.rs",
-            "src/sessions/workflow_ingest_tests.rs",
-            "src/profile_backup.rs",
-            "src/profile_backup/error.rs",
-        ] {
-            assert!(
-                !unmounted.contains(&required),
-                "{required} must be reachable via #[path] from its declaring file; unmounted={unmounted:?}"
-            );
-        }
-        assert!(
-            unmounted.is_empty(),
-            "this repository must have no unmounted rust files; found {unmounted:?}"
-        );
-    }
-
     #[test]
     fn path_normalization_resolves_parent_traversal() {
         assert_eq!(

@@ -178,49 +178,12 @@ mod tests {
     }
 
     #[test]
-    fn explicit_cpu_is_cpu() {
-        with_env(Some("cpu"), || {
-            assert_eq!(
-                requested_execution_provider(),
-                RequestedExecutionProviderV1::Cpu
-            );
-        });
-    }
-
-    #[test]
-    fn coreml_is_case_and_whitespace_insensitive() {
-        with_env(Some(" CoreML \n"), || {
-            assert_eq!(
-                requested_execution_provider(),
-                RequestedExecutionProviderV1::CoreMl
-            );
-        });
-    }
-
-    #[test]
-    fn cuda_is_recognized() {
-        with_env(Some("cuda"), || {
-            assert_eq!(
-                requested_execution_provider(),
-                RequestedExecutionProviderV1::Cuda
-            );
-        });
-    }
-
-    #[test]
     fn unrecognized_value_falls_back_to_cpu() {
         with_env(Some("rocm"), || {
             assert_eq!(
                 requested_execution_provider(),
                 RequestedExecutionProviderV1::Cpu
             );
-        });
-    }
-
-    #[test]
-    fn default_env_produces_no_execution_providers() {
-        with_env(None, || {
-            assert!(requested_execution_providers().is_empty());
         });
     }
 

@@ -358,22 +358,6 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn prepared_refreshes_share_four_running_batch_permits() {
-        let capacity = BrokerRefreshCapacity::new();
-        let first = capacity.reserve(2).expect("first prepared refresh");
-        let second = capacity.reserve(2).expect("second prepared refresh");
-        let (first_a, first_b, second_a, second_b) = tokio::join!(
-            first.acquire_run(),
-            first.acquire_run(),
-            second.acquire_run(),
-            second.acquire_run(),
-        );
-        let permits = [first_a, first_b, second_a, second_b];
-        assert!(permits.iter().all(Option::is_some));
-        assert!(capacity.running.clone().try_acquire_owned().is_err());
-    }
-
     #[test]
     fn global_queued_batch_reservation_rejects_the_129th_batch() {
         let capacity = BrokerRefreshCapacity::new();

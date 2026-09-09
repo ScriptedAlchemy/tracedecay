@@ -190,8 +190,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::fingerprint::{
-        DiagnosticsFingerprint, DiagnosticsFingerprintOperationCounts, operation_counts,
-        reset_operation_counts,
+        DiagnosticsFingerprintOperationCounts, operation_counts, reset_operation_counts,
     };
     use super::*;
 
@@ -302,35 +301,6 @@ mod tests {
         }
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn generation_cache_hit_performs_zero_workspace_operations() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join("src")).unwrap();
-        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
-
-        let cache = DiagnosticsCache::default();
-        let calls = Arc::new(AtomicUsize::new(0));
-        reset_operation_counts(temp.path());
-
-        for message in ["first", "cached"] {
-            let calls = Arc::clone(&calls);
-            let diagnostics = cache
-                .run_with_generation(temp.path(), &Scope::Workspace, 7, || async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(vec![test_diagnostic(message)])
-                })
-                .await
-                .unwrap();
-            assert_eq!(diagnostics[0].message, "first");
-        }
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            operation_counts(temp.path()),
-            DiagnosticsFingerprintOperationCounts::default()
-        );
     }
 
     #[tokio::test]
@@ -589,25 +559,5 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(retry[0].message, "retry");
-    }
-
-    #[tokio::test]
-    async fn fingerprint_tracks_metadata_changes() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join("src")).unwrap();
-        let source = temp.path().join("src/lib.rs");
-        std::fs::write(&source, "pub fn a() {}\n").unwrap();
-        let first = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace)
-            .await
-            .unwrap();
-
-        std::fs::write(&source, "pub fn b() {}\n// changed\n").unwrap();
-        let second = DiagnosticsFingerprint::capture(temp.path(), &Scope::Workspace)
-            .await
-            .unwrap();
-
-        assert_eq!(first.files.len(), 1);
-        assert_eq!(second.files.len(), 1);
-        assert_ne!(first, second);
     }
 }

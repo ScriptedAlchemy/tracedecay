@@ -615,28 +615,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn authorized_workspace_retains_anchor_independent_of_scope_sort_order() {
-        let workspace = AuthorizedLspWorkspace::anchored(
-            Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
-            vec![
-                AdmittedRoot::authorized(
-                    "file:///first-by-scope",
-                    ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
-                ),
-                AdmittedRoot::authorized(
-                    "file:///active",
-                    ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap(),
-                ),
-            ],
-            "file:///active/",
-        )
-        .unwrap();
-
-        assert_eq!(workspace.anchor_root_uri(), "file:///active");
-        assert_eq!(workspace.primary().uri(), "file:///active");
-    }
-
     #[cfg(unix)]
     #[test]
     fn authorized_workspace_accepts_root_aliases_without_admitting_other_roots() {

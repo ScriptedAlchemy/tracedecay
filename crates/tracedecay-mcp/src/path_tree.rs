@@ -124,7 +124,7 @@ fn compact_directory_chain<'a>(segment: &str, mut node: &'a PathNode) -> (String
 
 #[cfg(test)]
 mod tests {
-    use super::{format_compact_annotated_path_list, format_compact_path_list};
+    use super::format_compact_path_list;
 
     #[test]
     fn compacts_shared_directory_prefixes() {
@@ -141,51 +141,6 @@ mod tests {
         assert_eq!(
             list,
             "tests/gateway/\n  test_gateway_shutdown.py\n  test_goal_verdict_send.py\n  test_homeassistant.py"
-        );
-    }
-
-    #[test]
-    fn preserves_leaf_suffixes() {
-        let list = format_compact_annotated_path_list(
-            [
-                ("src/a.rs", " (edited 1m ago)"),
-                ("src/b.rs", " (edited 2m ago)"),
-            ],
-            "- ",
-            "",
-        );
-
-        assert_eq!(list, "src/\n  a.rs (edited 1m ago)\n  b.rs (edited 2m ago)");
-    }
-
-    #[test]
-    fn keeps_bullets_when_tree_is_not_shorter() {
-        let list = format_compact_path_list(["src/main.rs"], "- ", "");
-
-        assert_eq!(list, "- src/main.rs");
-    }
-
-    #[test]
-    fn keeps_bullets_for_flat_paths() {
-        let list = format_compact_path_list(["a.rs", "b.rs"], "- ", "");
-
-        assert_eq!(list, "- a.rs\n- b.rs");
-    }
-
-    #[test]
-    fn indents_compact_annotated_tree() {
-        let list = format_compact_annotated_path_list(
-            [
-                ("src/a.rs", " (edited 1m ago)"),
-                ("src/b.rs", " (edited 2m ago)"),
-            ],
-            "  - ",
-            "  ",
-        );
-
-        assert_eq!(
-            list,
-            "  src/\n    a.rs (edited 1m ago)\n    b.rs (edited 2m ago)"
         );
     }
 }

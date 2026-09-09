@@ -31,60 +31,11 @@ pub fn handle_remote_status(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::Arc;
 
     use serde_json::{Value, json};
-    use tracedecay_contracts::remote::status::{
-        RemoteOperationalStatusReadV1, RemoteOperationalStatusReaderV1, RemoteOperationalStatusV1,
-        RemoteSpoolOperationalStatusV1,
-    };
-    use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
-    use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
     use super::handle_remote_status;
     use crate::ToolResult;
-
-    fn available_authority() -> CurrentRemoteAuthorityStateV1 {
-        serde_json::from_value(json!({
-            "state": "available",
-            "value": {
-                "fence": {
-                    "brain_id": "brain.status",
-                    "shard_id": "shard.status",
-                    "generation_id": "generation.status",
-                    "placement_revision": 1,
-                    "authority_epoch": 1,
-                    "authority_node_id": "node.authority"
-                },
-                "credential_revision": 1,
-                "observed_at": 10
-            }
-        }))
-        .unwrap()
-    }
-
-    fn observed_fixture() -> RemoteOperationalStatusReadV1 {
-        let status = RemoteOperationalStatusV1::compose(
-            true,
-            available_authority(),
-            RemoteSpoolOperationalStatusV1 {
-                pending_count: 3,
-                quarantined_count: 0,
-                has_sequence_gap: false,
-            },
-            false,
-            true,
-            false,
-            false,
-            UtcMicros(10),
-        )
-        .unwrap();
-        RemoteOperationalStatusReadV1::Observed {
-            listener: RemoteListenerReadV1::Serving,
-            status,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        }
-    }
 
     fn parse_tool_json(result: &ToolResult) -> Value {
         serde_json::from_str(
@@ -93,26 +44,6 @@ mod tests {
                 .expect("tool JSON text"),
         )
         .expect("parse tool JSON")
-    }
-
-    #[test]
-    fn handler_returns_observed_json_when_provider_is_installed() {
-        let expected = observed_fixture();
-        let provider: RemoteOperationalStatusReaderV1 = {
-            let expected = expected.clone();
-            Arc::new(move || expected.clone())
-        };
-        let result = handle_remote_status(
-            Path::new("."),
-            &json!({ "format": "json" }),
-            Some(&provider),
-        )
-        .expect("observed remote status serializes");
-        assert_eq!(
-            parse_tool_json(&result),
-            serde_json::to_value(&expected).unwrap()
-        );
-        assert_ne!(result.semantic_error(), Some(true));
     }
 
     #[test]

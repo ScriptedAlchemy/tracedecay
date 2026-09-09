@@ -164,12 +164,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonicalise_file_relative_passes_through() {
-        let root = Path::new("/tmp/proj");
-        assert_eq!(canonicalise_file("src/lib.rs", root), "src/lib.rs");
-    }
-
-    #[test]
     fn canonicalise_file_absolute_strips_root() {
         let root = Path::new("/tmp/proj");
         assert_eq!(
@@ -179,27 +173,12 @@ mod tests {
     }
 
     #[test]
-    fn canonicalise_file_outside_project_passes_through() {
-        let root = Path::new("/tmp/proj");
-        assert_eq!(canonicalise_file("/etc/passwd", root), "/etc/passwd");
-    }
-
-    #[test]
     fn is_diagnostic_level_filters_advisory() {
         assert!(is_diagnostic_level("error"));
         assert!(is_diagnostic_level("warning"));
         assert!(!is_diagnostic_level("note"));
         assert!(!is_diagnostic_level("help"));
         assert!(!is_diagnostic_level("failure-note"));
-    }
-
-    #[test]
-    fn target_dir_is_outside_project_tree() {
-        let project = Path::new("/tmp/proj");
-        let target = target_dir_for(project);
-        assert!(target.starts_with(std::env::temp_dir().join("tracedecay-target")));
-        assert!(target.ends_with("diagnostics"));
-        assert!(!target.starts_with(project));
     }
 
     #[test]

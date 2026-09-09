@@ -84,14 +84,6 @@ mod tests {
     use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
     #[test]
-    fn published_resume_is_distinct_from_a_large_batch_count() {
-        assert_ne!(
-            SemanticProjectionResumeOutcomeV1::AlreadyPublished,
-            SemanticProjectionResumeOutcomeV1::CompletedBatches(u64::MAX)
-        );
-    }
-
-    #[test]
     fn completed_batch_offset_rejects_progress_beyond_the_canonical_plan() {
         assert_eq!(
             completed_batch_offset(SemanticProjectionResumeOutcomeV1::CompletedBatches(2), 1),

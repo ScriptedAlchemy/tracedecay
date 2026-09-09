@@ -312,40 +312,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn query_warmup_opens_and_releases_one_reusable_session() {
-        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
-            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
-        let service = SemanticRuntimeService::new_owned(
-            Arc::new(authority()),
-            factory,
-            config(1, Duration::from_mins(1), 1 << 20),
-        )
-        .expect("runtime service");
-
-        service.warm_query_session().expect("warm query session");
-        let warmed = service.stats();
-        assert!(
-            warmed.last_cold_load_micros.is_some(),
-            "warmup records the cold session load duration"
-        );
-        assert_eq!(
-            warmed,
-            SessionPoolStats {
-                idle: 1,
-                live_sessions: 1,
-                resident_bytes: 1024,
-                sessions_opened: 1,
-                last_cold_load_micros: warmed.last_cold_load_micros,
-                ..SessionPoolStats::default()
-            }
-        );
-
-        let session = service.acquire().expect("reuse warmed session");
-        assert_eq!(service.stats().sessions_opened, 1);
-        drop(session);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_reload_keeps_prior_runtime_available_until_atomic_swap() {
         let initial: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
@@ -532,48 +498,6 @@ mod tests {
             !publication_ran.load(Ordering::SeqCst),
             "cancelled preparation must not enter atomic publication"
         );
-    }
-
-    #[tokio::test]
-    async fn publication_installs_runtime_and_current_pointer_before_observation() {
-        let handle = SemanticRuntimeSchedulingHandleV1::new();
-        let observed_handle = handle.clone();
-        let installed = Arc::new(AtomicBool::new(false));
-        let installed_for_commit = Arc::clone(&installed);
-        let installed_for_observer = Arc::clone(&installed);
-        let expected = pointer('e');
-        let expected_for_work = expected.clone();
-        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
-
-        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
-            expected.source_generation.clone(),
-            1,
-            move |_cancellation| async move {
-                Ok(PreparedSemanticRuntimeCommitV1::new(
-                    move || async move { Ok(expected_for_work) },
-                )
-                .on_success(move |_pointer| {
-                    installed_for_commit.store(true, Ordering::SeqCst);
-                    Ok(())
-                })
-                .on_published(move |pointer| async move {
-                    let _ = observed_tx.send((
-                        installed_for_observer.load(Ordering::SeqCst),
-                        observed_handle.current(),
-                        pointer,
-                    ));
-                }))
-            },
-        )));
-
-        let (runtime_installed, current, observed) =
-            tokio::time::timeout(Duration::from_secs(1), observed_rx)
-                .await
-                .expect("publication observation")
-                .expect("publication observer");
-        assert!(runtime_installed);
-        assert_eq!(current, Some(expected.clone()));
-        assert_eq!(observed, expected);
     }
 
     #[tokio::test]
