@@ -57,7 +57,7 @@ pub struct TraceDecay {
     context_scout_owner: Option<
         Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     >,
-    context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaim>>,
+    context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
     _standalone_maintenance_scope:
@@ -66,14 +66,17 @@ pub struct TraceDecay {
 
 const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
 
-type MountedContextScoutClaim = (
-    Arc<tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-    tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-    tracedecay_contracts::RequestContext,
-    tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-    ContextScoutAddressV1,
-    [u8; 32],
-);
+#[derive(Clone)]
+struct MountedContextScoutClaimAuthorityV1 {
+    registry: Arc<
+        tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1,
+    >,
+    pin: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+    context: tracedecay_contracts::RequestContext,
+    lifecycle: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+    address: ContextScoutAddressV1,
+    input_watermark: [u8; 32],
+}
 
 impl TraceDecay {
     pub(crate) fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
@@ -156,11 +159,18 @@ impl TraceDecay {
         {
             return false;
         }
-        let mounted = (registry, pin, context, lifecycle, address, input_watermark);
+        let mounted = MountedContextScoutClaimAuthorityV1 {
+            registry,
+            pin,
+            context,
+            lifecycle,
+            address,
+            input_watermark,
+        };
         let mut authorities = self.context_scout_claim_authorities.write().await;
         if let Some(existing) = authorities
             .iter_mut()
-            .find(|existing| existing.3 == mounted.3)
+            .find(|existing| existing.lifecycle == mounted.lifecycle)
         {
             *existing = mounted;
             return true;
@@ -183,27 +193,35 @@ impl TraceDecay {
         lifecycle: &tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
-        let (registry, pin, context, _, address, input_watermark) = self
+        let mounted = self
             .context_scout_claim_authorities
             .read()
             .await
             .iter()
-            .find(|mounted| mounted.3 == *lifecycle)
+            .find(|mounted| mounted.lifecycle == *lifecycle)
             .cloned()?;
-        if !self.context_scout_configuration_is_current(&pin).await {
+        if !self
+            .context_scout_configuration_is_current(&mounted.pin)
+            .await
+        {
             return None;
         }
-        let resolved = registry
-            .resolve_current_exact(hook, &pin, lifecycle, &context, observed_at)
+        let resolved = mounted
+            .registry
+            .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
             .await;
         let resolved = (resolved
             == tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                address,
+                mounted.address,
             ))
-        .then_some((address, input_watermark));
+        .then_some((mounted.address, mounted.input_watermark));
         // Re-check currentness after the registry read: a configuration
         // revision that lands mid-resolve must not hand out a stale claim.
-        if resolved.is_some() && self.context_scout_configuration_is_current(&pin).await {
+        if resolved.is_some()
+            && self
+                .context_scout_configuration_is_current(&mounted.pin)
+                .await
+        {
             resolved
         } else {
             None
