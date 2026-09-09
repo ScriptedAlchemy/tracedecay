@@ -28,10 +28,10 @@ use tracedecay_tool_catalog::{
 mod work;
 mod workflow;
 
+pub(crate) use tracedecay_mcp::handlers::work::work_operation_for_tool;
+pub(crate) use tracedecay_mcp::handlers::workflow_family::workflow_operation_for_tool;
 use work::work_executable_binding_for_tool;
-pub(crate) use work::work_operation_for_tool;
 use workflow::workflow_executable_binding_for_tool;
-pub(crate) use workflow::workflow_operation_for_tool;
 
 /// Which dispatch family owns a tool once the surface predicates decline it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
