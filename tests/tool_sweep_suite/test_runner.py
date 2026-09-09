@@ -73,6 +73,20 @@ class ProblemCodeTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "policy.denied")
 
+    def test_declared_unavailable_is_not_working_coverage(self) -> None:
+        runner = load_runner()
+
+        class Client:
+            def call_tool(self, _name: str, _arguments: dict[str, object], _deadline_ms: int):
+                return {"error": {"data": {"problem": {"kind": "unavailable", "code": "tool.unavailable"}}}}, 4
+
+        row = runner._unavailable_tool_row(
+            Client(), runner.ToolPolicy("tracedecay_unavailable", "unavailable", "read", 1_000)
+        )
+
+        self.assertEqual(row["verdict"], "UNPROVEN")
+        self.assertEqual(row["problem_code"], "tool.unavailable")
+
     def test_direct_problem_shape_is_preserved_in_artifacts(self) -> None:
         """Both MCP error framings retain their typed diagnosis."""
         runner = load_runner()
@@ -167,10 +181,10 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
     def definition(name):
         return {"name": name, "inputSchema": {"type": "object", "properties": {}, "required": []}}
 
-    def test_exact_expected_denial_is_the_passing_hermetic_verdict(self) -> None:
-        """A declared non-producible surface passes only on its exact typed denial."""
+    def test_exact_expected_denial_is_unproven_functionality(self) -> None:
+        """An exact typed denial proves safety, but not a working success path."""
         runner = load_runner()
-        name = "tracedecay_test_results"
+        name = "tracedecay_branch_search"
         self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
         kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
 
@@ -181,7 +195,7 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             fixture={},
         )
 
-        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(row["verdict"], "UNPROVEN")
         self.assertTrue(row["expected_denial"])
         self.assertEqual(row["problem_code"], code)
 
@@ -241,7 +255,7 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             policies={},
         )
 
-        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(row["verdict"], "UNPROVEN")
         self.assertTrue(row["expected_denial"])
         self.assertEqual(row["rollback"], "not_required")
 
@@ -948,7 +962,7 @@ class MountRetryTests(unittest.TestCase):
 
         row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
 
-        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(row["verdict"], "UNPROVEN")
         self.assertTrue(row["expected_denial"])
         self.assertEqual(len(client.calls), 1)
 
@@ -971,7 +985,7 @@ class MountRetryTests(unittest.TestCase):
 
         row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
 
-        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(row["verdict"], "UNPROVEN")
         self.assertTrue(row["expected_denial"])
         self.assertEqual(row["problem_code"], code)
         self.assertEqual(len(client.calls), 2)
@@ -1005,7 +1019,7 @@ class MountRetryTests(unittest.TestCase):
             row = runner._read_tool_row(
                 client, self.definition(name), self.policy(runner, name), fixture={}
             )
-            self.assertEqual(row["verdict"], "PASS", name)
+            self.assertEqual(row["verdict"], "UNPROVEN", name)
             self.assertTrue(row["expected_denial"], name)
             self.assertEqual(len(client.calls), 1, name)
             arguments = client.calls[0][1]
