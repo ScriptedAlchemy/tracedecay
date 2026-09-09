@@ -9,11 +9,10 @@ use crate::tool_context::{McpRequestAuthoritiesV1, McpToolBinding, McpToolContex
 /// The binding a standalone (non-daemon) server produces: a worktree root and
 /// no admitted authority at all.
 pub(super) fn standalone_context(project_root: &Path) -> McpToolContext<'_> {
-    McpToolContext::bind(McpToolBinding {
-        project: None,
-        request: McpRequestAuthoritiesV1::default(),
+    McpToolContext::bind(McpToolBinding::Unprojected {
         project_root,
         active_branch: None,
+        request: McpRequestAuthoritiesV1::default(),
         scope: None,
         project_session_store: None,
     })
@@ -25,11 +24,10 @@ pub(super) fn standalone_context_on_branch<'a>(
     project_root: &'a Path,
     active_branch: &'a str,
 ) -> McpToolContext<'a> {
-    McpToolContext::bind(McpToolBinding {
-        project: None,
-        request: McpRequestAuthoritiesV1::default(),
+    McpToolContext::bind(McpToolBinding::Unprojected {
         project_root,
         active_branch: Some(active_branch),
+        request: McpRequestAuthoritiesV1::default(),
         scope: None,
         project_session_store: None,
     })

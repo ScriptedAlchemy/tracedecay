@@ -1269,27 +1269,31 @@ fn admitted_tool_context<'a>(
                 .or(options.session_authorities.project),
         )
         .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
-    Ok(McpToolContext::bind(McpToolBinding {
-        project,
-        request: McpRequestAuthoritiesV1 {
-            controls: RequestControls {
-                deadline: options.application_deadline.as_ref(),
-                cancellation: options.application_cancellation.as_ref(),
-            },
-            code_index,
-            freshness: snapshots.freshness.as_ref(),
-            generation_census: snapshots.generation_census.as_ref(),
-            semantic_owner: snapshots.semantic_owner.as_ref(),
-            semantic_owner_authority_attached: snapshots.semantic_owner_authority_attached,
-            doctor_report: snapshots.doctor_report.as_ref(),
-            doctor_report_read_failed: snapshots.doctor_report_read_failed,
-            ..McpRequestAuthoritiesV1::default()
+    let request = McpRequestAuthoritiesV1 {
+        controls: RequestControls {
+            deadline: options.application_deadline.as_ref(),
+            cancellation: options.application_cancellation.as_ref(),
         },
-        project_root: cg.project_root(),
-        active_branch: cg.active_branch(),
-        scope,
-        project_session_store,
-    })?)
+        code_index,
+        freshness: snapshots.freshness.as_ref(),
+        generation_census: snapshots.generation_census.as_ref(),
+        semantic_owner: snapshots.semantic_owner.as_ref(),
+        semantic_owner_authority_attached: snapshots.semantic_owner_authority_attached,
+        doctor_report: snapshots.doctor_report.as_ref(),
+        doctor_report_read_failed: snapshots.doctor_report_read_failed,
+        ..McpRequestAuthoritiesV1::default()
+    };
+    let binding = match project {
+        Some(project) => McpToolBinding::Admitted { project, request },
+        None => McpToolBinding::Unprojected {
+            project_root: cg.project_root(),
+            active_branch: cg.active_branch(),
+            request,
+            scope,
+            project_session_store,
+        },
+    };
+    Ok(McpToolContext::bind(binding)?)
 }
 
 /// Dispatch source-editing tools (`tracedecay_str_replace`,

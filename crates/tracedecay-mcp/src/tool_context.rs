@@ -320,25 +320,37 @@ pub struct McpRequestAuthoritiesV1<'a> {
 }
 
 /// Everything the composition root admits for one MCP tool call.
+///
+/// Two real serving shapes, not one struct with `Option` fallbacks. An
+/// [`Admitted`](Self::Admitted) route carries root, scope, branch, and
+/// session store only on the project snapshot — there is no second label a
+/// caller can set beside it. An [`Unprojected`](Self::Unprojected) standalone
+/// or core-server call carries the loose checkout fields and cannot also
+/// present a snapshot.
 #[derive(Clone, Copy)]
-pub struct McpToolBinding<'a> {
-    /// Project-lifetime bundle when the serving route published one. Absent
-    /// on a standalone server and on the core server that answers before
-    /// project-open publication resolves a route.
-    pub project: Option<&'a McpProjectAuthoritiesV1>,
-    pub request: McpRequestAuthoritiesV1<'a>,
-    /// The admitted worktree root every handler resolves paths against when
-    /// `project` is absent. Ignored when the bundle is present: the bundle
-    /// already proved its own root.
-    pub project_root: &'a Path,
-    /// The branch git resolved for that worktree, when it has one.
-    pub active_branch: Option<&'a str>,
-    /// The one checkout the daemon admitted for this request. Absent on a
-    /// standalone server and on the core server that answers before
-    /// project-open publication resolves a route.
-    pub scope: Option<&'a ResolvedScope>,
-    pub project_session_store: Option<AdmittedProjectStore<'a>>,
+pub enum McpToolBinding<'a> {
+    /// The serving route published a project snapshot for this call.
+    Admitted {
+        project: &'a McpProjectAuthoritiesV1,
+        request: McpRequestAuthoritiesV1<'a>,
+    },
+    /// Standalone server, or the core server before project-open publication
+    /// resolves a route. No snapshot, so no second root/scope/store.
+    Unprojected {
+        project_root: &'a Path,
+        active_branch: Option<&'a str>,
+        request: McpRequestAuthoritiesV1<'a>,
+        scope: Option<&'a ResolvedScope>,
+        project_session_store: Option<AdmittedProjectStore<'a>>,
+    },
 }
+
+/// Compile-level proof that an admitted binding cannot also carry a loose
+/// root, scope, or session store: those fields exist only on [`McpToolBinding::Unprojected`].
+const _: for<'a> fn(
+    &'a McpProjectAuthoritiesV1,
+    McpRequestAuthoritiesV1<'a>,
+) -> McpToolBinding<'a> = |project, request| McpToolBinding::Admitted { project, request };
 
 /// Admitted daemon authorities for one MCP tool call.
 ///
@@ -372,18 +384,42 @@ impl<'a> McpToolContext<'a> {
     /// it. Nothing is defaulted or repaired: a binding that does not prove one
     /// coherent request scope is refused whole.
     pub fn bind(binding: McpToolBinding<'a>) -> std::result::Result<Self, McpToolBindingError> {
-        let project_root = binding.project.map_or(binding.project_root, |project| {
-            project.identity.project_root.as_path()
-        });
+        let (project, project_root, active_branch, request, admitted_scope, project_session_store) =
+            match binding {
+                McpToolBinding::Admitted { project, request } => {
+                    let project_session_store =
+                        project.project_session_store.as_ref().map(|lease| {
+                            AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized)
+                        });
+                    (
+                        Some(project),
+                        project.identity.project_root.as_path(),
+                        project.identity.active_branch.as_deref(),
+                        request,
+                        Some(&project.identity.scope),
+                        project_session_store,
+                    )
+                }
+                McpToolBinding::Unprojected {
+                    project_root,
+                    active_branch,
+                    request,
+                    scope,
+                    project_session_store,
+                } => (
+                    None,
+                    project_root,
+                    active_branch,
+                    request,
+                    scope,
+                    project_session_store,
+                ),
+            };
         if !project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
                 root: project_root.display().to_string(),
             });
         }
-        let admitted_scope = binding
-            .project
-            .map(|project| &project.identity.scope)
-            .or(binding.scope);
         if let Some(scope) = admitted_scope
             && let Err(error) = scope.validate()
         {
@@ -391,23 +427,16 @@ impl<'a> McpToolContext<'a> {
                 detail: error.to_string(),
             });
         }
-        let project_session_store = binding.project_session_store.or_else(|| {
-            binding.project.and_then(|project| {
-                project.project_session_store.as_ref().map(|lease| {
-                    AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized)
-                })
-            })
-        });
         if let Some(store) = project_session_store {
             verify_store_lease(
                 require_scope(admitted_scope, "project session store")?,
                 store,
             )?;
         }
-        if binding.request.code_index.is_some() {
+        if request.code_index.is_some() {
             require_scope(admitted_scope, "code index")?;
         }
-        if let Some(graph) = binding.request.graph {
+        if let Some(graph) = request.graph {
             verify_scope_isolation(admitted_scope, graph.request_context().scope()).map_err(
                 |error| McpToolBindingError::ScopeInvalid {
                     detail: error.to_string(),
@@ -416,29 +445,20 @@ impl<'a> McpToolContext<'a> {
         }
 
         Ok(Self {
-            project: binding.project,
-            request: binding.request,
+            project,
+            request,
             project_root,
-            active_branch: binding.project.map_or(binding.active_branch, |project| {
-                project.identity.active_branch.as_deref()
-            }),
-            deadline: binding.request.controls.deadline,
-            cancellation: binding.request.controls.cancellation,
+            active_branch,
+            deadline: request.controls.deadline,
+            cancellation: request.controls.cancellation,
             admitted_scope,
             project_session_db: project_session_store.map(|store| store.lease),
             project_session_authorization: project_session_store.map(|store| store.authorization),
-            code_index_search_executor: binding
-                .request
-                .code_index
-                .and_then(|code_index| code_index.search),
-            code_index_branch_diff_executor: binding
-                .request
+            code_index_search_executor: request.code_index.and_then(|code_index| code_index.search),
+            code_index_branch_diff_executor: request
                 .code_index
                 .and_then(|code_index| code_index.branch_diff),
-            code_index_search_authority: binding
-                .request
-                .code_index
-                .map(|code_index| code_index.authority),
+            code_index_search_authority: request.code_index.map(|code_index| code_index.authority),
         })
     }
 
@@ -517,16 +537,16 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
+    pub fn admitted_graph(&self) -> Option<&'a VerifiedGraphQuery> {
+        self.request.graph
+    }
+
+    #[must_use]
     pub fn branch_diagnostics(
         &self,
     ) -> Option<tracedecay_application::tracedecay::BranchDiagnostics> {
         self.project
             .map(McpProjectAuthoritiesV1::branch_diagnostics)
-    }
-
-    #[must_use]
-    pub fn admitted_graph(&self) -> Option<&'a VerifiedGraphQuery> {
-        self.request.graph
     }
 
     #[must_use]
@@ -790,13 +810,21 @@ mod tests {
     }
 
     fn binding<'a>(root: &'a Path, scope: Option<&'a ResolvedScope>) -> McpToolBinding<'a> {
-        McpToolBinding {
-            project: None,
-            request: McpRequestAuthoritiesV1::default(),
+        unprojected(root, scope, McpRequestAuthoritiesV1::default(), None)
+    }
+
+    fn unprojected<'a>(
+        root: &'a Path,
+        scope: Option<&'a ResolvedScope>,
+        request: McpRequestAuthoritiesV1<'a>,
+        project_session_store: Option<AdmittedProjectStore<'a>>,
+    ) -> McpToolBinding<'a> {
+        McpToolBinding::Unprojected {
             project_root: root,
             active_branch: None,
+            request,
             scope,
-            project_session_store: None,
+            project_session_store,
         }
     }
 
@@ -898,15 +926,17 @@ mod tests {
         let search: CodeIndexSearchExecutor =
             std::sync::Arc::new(|_| unreachable!("binding must be refused before any search runs"));
 
-        let error = McpToolContext::bind(McpToolBinding {
-            request: McpRequestAuthoritiesV1 {
+        let error = McpToolContext::bind(unprojected(
+            temp.path(),
+            None,
+            McpRequestAuthoritiesV1 {
                 code_index: Some(
                     AdmittedCodeIndex::new(&authority, Some(&search), None).expect("admission"),
                 ),
                 ..McpRequestAuthoritiesV1::default()
             },
-            ..binding(temp.path(), None)
-        })
+            None,
+        ))
         .expect_err("an unscoped code index admission must be refused");
 
         assert_eq!(error.reason_code(), "mcp_tool_binding_scope_unresolved");
@@ -958,13 +988,15 @@ mod tests {
             registered_project_store(home.path(), "foreign").await;
         let admitted = scope("admitted");
 
-        let error = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
+        let error = McpToolContext::bind(unprojected(
+            home.path(),
+            Some(&admitted),
+            McpRequestAuthoritiesV1::default(),
+            Some(AdmittedProjectStore::new(
                 &foreign_lease,
                 ValidatedAuthorization::Authorized,
             )),
-            ..binding(home.path(), Some(&admitted))
-        })
+        ))
         .map(|_| ())
         .expect_err("another project's real lease must be refused");
         assert_eq!(
@@ -973,13 +1005,15 @@ mod tests {
         );
         assert!(error.to_string().contains("project.foreign"), "got {error}");
 
-        let bound = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
+        let bound = McpToolContext::bind(unprojected(
+            home.path(),
+            Some(&admitted),
+            McpRequestAuthoritiesV1::default(),
+            Some(AdmittedProjectStore::new(
                 &admitted_lease,
                 ValidatedAuthorization::Authorized,
             )),
-            ..binding(home.path(), Some(&admitted))
-        })
+        ))
         .expect("the admitted project's own lease must bind");
         let (bound_lease, authorization) = bound
             .authorized_project_session_db()
@@ -1007,13 +1041,15 @@ mod tests {
         )
         .await;
 
-        let error = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
+        let error = McpToolContext::bind(unprojected(
+            home.path(),
+            Some(&admitted),
+            McpRequestAuthoritiesV1::default(),
+            Some(AdmittedProjectStore::new(
                 &lease,
                 ValidatedAuthorization::Authorized,
             )),
-            ..binding(home.path(), Some(&admitted))
-        })
+        ))
         .map(|_| ())
         .expect_err("a non-session-family lease must be refused");
         assert_eq!(
@@ -1088,13 +1124,15 @@ mod tests {
         let home = tempfile::tempdir().expect("temp home");
         let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
 
-        let error = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
+        let error = McpToolContext::bind(unprojected(
+            home.path(),
+            None,
+            McpRequestAuthoritiesV1::default(),
+            Some(AdmittedProjectStore::new(
                 &lease,
                 ValidatedAuthorization::Authorized,
             )),
-            ..binding(home.path(), None)
-        })
+        ))
         .map(|_| ())
         .expect_err("an unscoped store admission must be refused");
 
@@ -1110,13 +1148,15 @@ mod tests {
         let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
         let admitted = scope("admitted");
 
-        let bound = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
+        let bound = McpToolContext::bind(unprojected(
+            home.path(),
+            Some(&admitted),
+            McpRequestAuthoritiesV1::default(),
+            Some(AdmittedProjectStore::new(
                 &lease,
                 ValidatedAuthorization::Unauthorized,
             )),
-            ..binding(home.path(), Some(&admitted))
-        })
+        ))
         .expect("an unauthorized store is still a coherent binding");
 
         let (_, authorization) = bound
@@ -1233,12 +1273,11 @@ mod tests {
         let admitted = scope("admitted");
         let project = project_bundle(temp.path(), &admitted, None);
 
-        let bound = McpToolContext::bind(McpToolBinding {
-            project: Some(&project),
+        let bound = McpToolContext::bind(McpToolBinding::Admitted {
+            project: &project,
             request: McpRequestAuthoritiesV1::default(),
-            ..binding(temp.path(), Some(&admitted))
         })
-        .expect("a bundle with no optional request authorities must still bind");
+        .expect("a snapshot with no optional request authorities must still bind");
 
         assert!(
             bound.generation_census().is_none(),
@@ -1283,5 +1322,28 @@ mod tests {
             ),
             "the typed unavailable census is what a handler must emit, not an empty success"
         );
+    }
+
+    /// An admitted snapshot is the only source of root, scope, and store.
+    /// The [`McpToolBinding::Admitted`] variant has no fields that could
+    /// supply a second label; bind reports the snapshot's identity.
+    #[test]
+    fn an_admitted_binding_cannot_carry_a_second_root_or_scope() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = scope("admitted");
+        let project = project_bundle(temp.path(), &admitted, None);
+
+        let bound = McpToolContext::bind(McpToolBinding::Admitted {
+            project: &project,
+            request: McpRequestAuthoritiesV1::default(),
+        })
+        .expect("admitted snapshot binds");
+
+        assert_eq!(
+            bound.project_root(),
+            project.identity.project_root.as_path()
+        );
+        assert_eq!(bound.admitted_scope(), Some(&project.identity.scope));
+        assert!(bound.project().is_some());
     }
 }

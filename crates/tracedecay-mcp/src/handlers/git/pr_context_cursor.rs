@@ -746,11 +746,10 @@ mod tests {
             changes: &changes,
         };
         let context_for = |authorization| {
-            McpToolContext::bind(McpToolBinding {
-                project: None,
-                request: McpRequestAuthoritiesV1::default(),
+            McpToolContext::bind(McpToolBinding::Unprojected {
                 project_root: home.path(),
                 active_branch: None,
+                request: McpRequestAuthoritiesV1::default(),
                 scope: Some(&scope),
                 project_session_store: Some(AdmittedProjectStore::new(&lease, authorization)),
             })
