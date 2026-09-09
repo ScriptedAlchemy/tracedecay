@@ -202,6 +202,19 @@ pub fn path_identity_key(path: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
+/// Stored form of a live filesystem project path.
+///
+/// [`path_identity_key`] folds Windows display syntax only; it leaves Unix
+/// symlink aliases byte-exact. Session rows and dashboard reads must agree on
+/// one OS identity (`/var` vs `/private/var`, `tmp/link` vs `tmp/real`) or a
+/// scoped session query silently returns zero rows.
+#[must_use]
+pub fn durable_project_path_key(path: &str) -> String {
+    let canonical =
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(Path::new(path));
+    path_identity_key(&canonical.to_string_lossy())
+}
+
 fn canonical_drive_path(path: &str) -> Option<String> {
     let head = path.as_bytes();
     if head.len() >= 3
@@ -1106,6 +1119,28 @@ mod tests {
             r"opaque\project-key"
         );
         assert_eq!(path_identity_key(r"\\server"), r"\\server");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_project_path_collapses_a_symlink_alias() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).expect("real project root");
+        std::os::unix::fs::symlink(&real, &link).expect("directory alias");
+
+        let via_link = super::durable_project_path_key(link.to_str().expect("utf-8 link"));
+        let via_real = super::durable_project_path_key(real.to_str().expect("utf-8 real"));
+        assert_eq!(
+            via_link, via_real,
+            "one directory reached through a symlink alias is one stored project path"
+        );
+        assert_ne!(
+            link.to_string_lossy().as_ref(),
+            via_link.as_str(),
+            "fixture must keep the caller spelling distinct from the stored identity"
+        );
     }
 
     fn unknown_then_resolved_identity(path: &Path) -> GitRepositoryIdentityOutcome {
