@@ -46,6 +46,7 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::large_enum_variant)]
 
+pub mod application_surface;
 pub mod client;
 pub mod client_identity;
 pub mod connection;
@@ -57,6 +58,11 @@ pub mod request;
 pub mod surface;
 pub mod transport;
 
+pub use application_surface::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    ApplicationToolRequest, FeedbackSurfaceRequest, adapt_application_tool_request,
+    parse_application_surface_request, separate_application_tool_request,
+};
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
     CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationDelivery,
@@ -107,7 +113,8 @@ pub use surface::{
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
     ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
-    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
+    ContextScoutSurfaceRequest, GIT_READ_SURFACE_DEFAULT_MAX_BYTES,
+    GIT_READ_SURFACE_DEFAULT_MAX_ENTRIES, GitReadSurfaceRequest,
 };
 pub use transport::{
     AUTH_PREFACE_PROTOCOL, BrokerListener, BrokerReadHalf, BrokerStream, BrokerWriteHalf,

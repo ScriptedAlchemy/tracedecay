@@ -783,9 +783,9 @@ mod tests {
         (graph, database_scope)
     }
 
-    fn invocation_context<'a>(
-        executor: Option<&'a dyn DaemonInvocationExecutor>,
-    ) -> SourceEditInvocationContext<'a> {
+    fn invocation_context(
+        executor: Option<&dyn DaemonInvocationExecutor>,
+    ) -> SourceEditInvocationContext<'_> {
         SourceEditInvocationContext {
             executor,
             request_id: Some(RequestId::new("request.mcp.source-edit.fixture").unwrap()),

@@ -11,10 +11,12 @@ use tracedecay_contracts::{
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+};
+use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat,
 };
 use tracedecay_daemon_service::application_surface::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
     execute_application_surface, observe_surface_argument_rejection,
     resolve_application_surface_dispatch, resolve_application_surface_dispatch_with_controls,
 };

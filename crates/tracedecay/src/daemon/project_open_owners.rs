@@ -81,8 +81,8 @@ async fn install_project_open_source_edit_owners(
     service
         .register_source_edit_owner(project_root.to_path_buf(), owner)
         .await
-        .map_err(|_| TraceDecayError::Config {
-            message: "project-open source edit authority was already installed".to_owned(),
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open source edit authority failed to register: {error}"),
         })
 }
 

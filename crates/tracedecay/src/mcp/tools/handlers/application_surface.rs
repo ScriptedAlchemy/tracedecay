@@ -12,10 +12,10 @@ use crate::mcp::tools::dispatch::{
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
-use tracedecay_daemon_service::application_surface::{
+use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
 };
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 
@@ -177,9 +177,9 @@ pub(super) async fn handle_application_surface(
 /// Map surface-resolution failures to typed reason codes so MCP clients see
 /// truthful unavailable/denied states instead of an untyped internal error.
 fn application_surface_dispatch_error(
-    error: tracedecay_daemon_service::application_surface::ApplicationSurfaceAdapterError,
+    error: tracedecay_daemon_protocol::ApplicationSurfaceAdapterError,
 ) -> TraceDecayError {
-    use tracedecay_daemon_service::application_surface::ApplicationSurfaceAdapterError as AdapterError;
+    use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError as AdapterError;
     let (reason_code, retryable) = match &error {
         AdapterError::DaemonUnavailable => ("application_surface_unavailable", true),
         // Keep the transport's own reason code (`daemon_connect_down` /
