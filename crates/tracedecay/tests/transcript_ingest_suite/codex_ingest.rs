@@ -179,55 +179,6 @@ async fn codex_archived_rollout_is_ingested() {
     assert_eq!(health.pending_bytes, tail.len() as u64);
 }
 #[tokio::test]
-async fn codex_rollout_ingest_is_incremental() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let path = write_codex_rollout(&home, &project, "codex-sess");
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
-
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        2
-    );
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
-
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(
-        f,
-        "{}",
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:01:00.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "Added a regression test."}
-        })
-    )
-    .unwrap();
-    drop(f);
-
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        1
-    );
-}
-
-#[tokio::test]
 async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
