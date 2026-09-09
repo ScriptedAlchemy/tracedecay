@@ -571,8 +571,9 @@ pub fn symbol_search_handler_descriptor()
 
 /// Catalog contribution for the declared symbol-search use case.
 ///
-/// Root composition remains outside this crate; the contribution declares
-/// transport bindings but has no dispatch, storage, or transport side effect.
+/// The contribution declares transport bindings but has no dispatch, storage,
+/// or transport side effect; binding them to the canonical dispatcher stays in
+/// `tracedecay-daemon-service`.
 pub fn symbol_search_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;

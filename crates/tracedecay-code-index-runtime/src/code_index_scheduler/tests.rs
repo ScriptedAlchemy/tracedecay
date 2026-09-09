@@ -31,22 +31,22 @@ use tracedecay_domain::{
     SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use crate::semantic_code::{
     CatalogedFastEmbedModelV1, DaemonSemanticRuntimeHandleV1, FastEmbedModelCatalogV1,
     ModelLifecycleErrorV1, ModelMemberSourceV1, SemanticModelLifecycleOwnerV1,
     production_fastembed_catalog,
 };
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use tracedecay_application::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
     SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
 };
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use tracedecay_graph_db::NeverCancelled;
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use tracedecay_semantic_contracts::{DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings};
 use tracedecay_semantic_contracts::{RerankCompatibilityPinsV1, SemanticFallbackReasonV1};
 
@@ -11867,7 +11867,7 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
 /// evaluation graph stands in for the daemon-retained code-graph runtime, so
 /// publish/restore flows exercise the same verified staging/publication
 /// machinery the production provider resolves.
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 struct IsolatedSemanticVectorGraphProviderV1 {
     graph:
         Arc<tracedecay_application::store::vector_generations::IsolatedSemanticEvaluationGraphV1>,
@@ -11875,7 +11875,7 @@ struct IsolatedSemanticVectorGraphProviderV1 {
     generation_reads: std::sync::atomic::AtomicUsize,
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 impl IsolatedSemanticVectorGraphProviderV1 {
     fn new(
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
@@ -11899,7 +11899,7 @@ impl IsolatedSemanticVectorGraphProviderV1 {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
     fn graph_for_generation<'a>(
         &'a self,
@@ -11927,7 +11927,7 @@ impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() {
     struct PreparedJinaFixture {

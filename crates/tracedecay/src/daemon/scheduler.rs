@@ -278,6 +278,12 @@ pub(super) struct AutomationSchedulerHandle {
     termination: Arc<MaintenanceTaskTermination>,
 }
 
+impl AutomationSchedulerHandle {
+    pub(super) fn request_stop(&self) {
+        self.stop_requested.request();
+    }
+}
+
 #[cfg(test)]
 impl AutomationSchedulerHandle {
     pub(super) fn for_test(task: JoinHandle<()>) -> Self {
@@ -954,6 +960,19 @@ impl DaemonEngine {
         Some(AutomationSchedulerRetirement { termination })
     }
 
+    /// Request every automation loop to stop without awaiting the scheduler
+    /// map. Prepare-time cancel must be synchronous; `try_lock` skips a
+    /// contended map and the join still retires those owners.
+    pub(super) fn cancel_automation_schedulers(&self) {
+        let Ok(schedulers) = self.store_administration.automation_schedulers().try_lock() else {
+            return;
+        };
+        for handle in schedulers.values() {
+            handle.request_stop();
+            handle.wake.notify_one();
+        }
+    }
+
     #[hotpath::skip]
     pub(super) async fn shutdown_automation_schedulers(&self) {
         // Draining is latched before this runs, and every registration path
@@ -1017,15 +1036,6 @@ async fn retained_project_graph(
     Some(server.cg().await)
 }
 
-/// Consecutive project-open failures after which the scheduler loop exits.
-///
-/// The loop is respawned by the next scheduler reconcile, so this bounds one
-/// futile retry streak rather than retiring the automation lane.
-const SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
-
-/// Longest gap between project-open retries.
-const SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING: Duration = Duration::from_mins(5);
-
 struct BackgroundJobGaugeGuard {
     #[cfg(test)]
     test_counter: Option<Arc<std::sync::atomic::AtomicI64>>,
@@ -1057,16 +1067,6 @@ impl Drop for BackgroundJobGaugeGuard {
             counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
-}
-
-/// Exponential backoff for repeated project-open failures, from one tick.
-fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
-    let base = Duration::from_secs(
-        tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-    );
-    let steps = consecutive_failures.saturating_sub(1).min(16);
-    base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
-        .min(SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1195,7 +1195,9 @@ async fn run_automation_scheduler_loop(
                         ),
                     ],
                 );
-                if consecutive_open_failures >= SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION {
+                if consecutive_open_failures
+                    >= tracedecay_automation_runtime::automation::scheduler::PROJECT_OPEN_FAILURE_ESCALATION
+                {
                     tracing::warn!(
                         event = "scheduler_project_open",
                         outcome = "escalated",
@@ -1214,7 +1216,10 @@ async fn run_automation_scheduler_loop(
                     );
                     break;
                 }
-                let backoff = scheduler_project_open_backoff(consecutive_open_failures);
+                let backoff =
+                    tracedecay_automation_runtime::automation::scheduler::project_open_backoff(
+                        consecutive_open_failures,
+                    );
                 tokio::select! {
                     () = tokio::time::sleep(backoff) => {}
                     () = wake.notified() => {}
@@ -2210,60 +2215,10 @@ async fn scheduled_user_job_run_id(
 }
 
 #[cfg(test)]
-mod scheduler_project_open_backoff_tests {
-    use super::{
-        BackgroundJobGaugeGuard, SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING,
-        SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION, scheduler_project_open_backoff,
-    };
+mod background_job_gauge_tests {
+    use super::BackgroundJobGaugeGuard;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
-    use std::time::Duration;
-
-    #[test]
-    fn backoff_starts_at_one_tick_and_grows() {
-        let tick = Duration::from_secs(
-            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
-        assert_eq!(scheduler_project_open_backoff(1), tick);
-        assert_eq!(scheduler_project_open_backoff(2), tick * 2);
-        assert_eq!(scheduler_project_open_backoff(3), tick * 4);
-    }
-
-    #[test]
-    fn backoff_is_capped_and_never_regresses() {
-        let mut previous = Duration::ZERO;
-        for attempt in 1..=64 {
-            let backoff = scheduler_project_open_backoff(attempt);
-            assert!(backoff >= previous, "backoff must be monotonic");
-            assert!(
-                backoff <= SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING,
-                "backoff must stay under its ceiling"
-            );
-            previous = backoff;
-        }
-        assert_eq!(
-            scheduler_project_open_backoff(64),
-            SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING
-        );
-    }
-
-    #[test]
-    fn escalation_bounds_the_total_futile_retry_window() {
-        let total: Duration = (1..=SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION)
-            .map(scheduler_project_open_backoff)
-            .sum();
-        let tick = Duration::from_secs(
-            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
-        assert!(
-            total > tick,
-            "escalation must allow more than one retry before exiting"
-        );
-        assert!(
-            total <= Duration::from_hours(1),
-            "a futile streak must not run for hours before escalating"
-        );
-    }
 
     #[tokio::test]
     async fn background_job_gauge_is_released_when_the_tick_is_aborted() {

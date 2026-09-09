@@ -84,8 +84,8 @@ async fn cli_configuration_set(
         tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
@@ -108,11 +108,11 @@ async fn cli_configuration_set(
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .expect("CLI cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Set(request),
             ),
             PageRequest::first(10).expect("CLI page"),
@@ -121,10 +121,14 @@ async fn cli_configuration_set(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("CLI configuration dispatch");
-    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
-        .await
-        .expect("CLI application invocation")
-        .result
+    tracedecay_daemon_service::application_surface::execute_application_surface(
+        operation,
+        dispatched,
+        Some(&executor),
+    )
+    .await
+    .expect("CLI application invocation")
+    .result
 }
 
 async fn current_profile_id(
@@ -174,8 +178,8 @@ async fn configuration_batch_via_surface(
         tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
@@ -203,10 +207,10 @@ async fn configuration_batch_via_surface(
         tracedecay_contracts::request_identity::mint_global_request_id(request_surface)
             .expect("surface request id");
     if surface == tracedecay_tool_catalog::BindingSurface::Dashboard {
-        return crate::application_surface::resolve_dashboard_application_surface(
+        return tracedecay_daemon_service::application_surface::resolve_dashboard_application_surface(
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
@@ -220,11 +224,11 @@ async fn configuration_batch_via_surface(
         CancellationSignal::active(format!("cancellation.surface.{}", request_id.as_str()))
             .expect("surface cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             surface,
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             PageRequest::first(10).expect("surface page"),
@@ -233,10 +237,14 @@ async fn configuration_batch_via_surface(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
-        .await
-        .expect("configuration batch application invocation")
-        .result
+    tracedecay_daemon_service::application_surface::execute_application_surface(
+        operation,
+        dispatched,
+        Some(&executor),
+    )
+    .await
+    .expect("configuration batch application invocation")
+    .result
 }
 
 async fn configuration_http_sdk(
@@ -265,12 +273,13 @@ async fn configuration_http_sdk(
         project_root,
         scope,
     ));
-    let router = crate::application_surface::http_application_router_with_executor(
-        executor,
-        daemon_operation_event_authority(),
-        target.project_id.clone(),
-    )
-    .expect("canonical HTTP application router");
+    let router =
+        tracedecay_daemon_service::application_surface::http_application_router_with_executor(
+            executor,
+            daemon_operation_event_authority(),
+            target.project_id.clone(),
+        )
+        .expect("canonical HTTP application router");
     let registry = crate::daemon::http_application::DaemonHttpApplicationRegistry::default();
     registry
         .mount(target.project_id.as_str(), router)

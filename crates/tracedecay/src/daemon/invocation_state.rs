@@ -17,6 +17,9 @@ use tracedecay_runtime_core::resident_memory::{
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use tracedecay_application::work::{
+    WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
+};
 use tracedecay_daemon_service::{
     DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar, DaemonInvocationOutcome,
@@ -45,8 +48,7 @@ pub(crate) struct DaemonInvocationState {
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
-    work_federated_query_authority:
-        Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1>,
+    work_federated_query_authority: Arc<dyn WorkFederatedQueryAuthorityPortV1>,
     semantic_projection_scheduler:
         tracedecay_application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
@@ -432,7 +434,7 @@ impl DaemonInvocationState {
 
     pub(super) fn work_federated_query_authority(
         &self,
-    ) -> Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1> {
+    ) -> Arc<dyn WorkFederatedQueryAuthorityPortV1> {
         Arc::clone(&self.work_federated_query_authority)
     }
 
@@ -1027,7 +1029,7 @@ impl DaemonInvocationState {
                 extract_work_application_payload(&outcome)
             }
             ParsedMultiRootOperationV1::Surface { operation, request } => {
-                crate::application_surface::invoke_multi_root_surface_request(
+                tracedecay_daemon_service::application_surface::invoke_multi_root_surface_request(
                     Arc::new(InProcessDaemonInvocationExecutor::with_project_admission(
                         self.clone(),
                         store_administration.clone(),
@@ -1073,13 +1075,41 @@ impl DaemonInvocationState {
         hotpath::gauge!("daemon.invocation_state.cancel_admissions_total").inc(1_u64);
         self.service.cancel_admissions();
         self.github_credential_lifecycle.shutdown();
+        // Code-index workers only observe `shutting_down` / closed admission
+        // once cancel runs. Leaving this until the join lets an in-flight
+        // reconcile (graph seat, follow-up pass) keep the worker alive for
+        // the whole background-drain budget.
+        self.code_index_schedulers.cancel();
     }
 
     #[hotpath::measure(label = "daemon.invocation_state.shutdown", future = true)]
     pub(super) async fn shutdown(&self) -> bool {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
-        self.code_index_schedulers.shutdown().await;
+        self.code_index_schedulers.cancel();
+        // Reconciliation is abandonable: the worker already saw cancel, and a
+        // large follow-up pass must not spend the supervisor TERM grace. The
+        // abort deadline is the same bound every other uncooperative
+        // background owner uses; a timeout is a typed abandon, not a clean
+        // join.
+        if tokio::time::timeout(
+            super::DAEMON_TASK_ABORT_DEADLINE,
+            self.code_index_schedulers.shutdown(),
+        )
+        .await
+        .is_err()
+        {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "code_index_scheduler_abandoned".to_string()),
+                    (
+                        "reason",
+                        "reconcile_join_exceeded_abort_deadline".to_string(),
+                    ),
+                ],
+            );
+        }
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         let expired = self.service.expire_all().await;
         if !expired {
@@ -1140,13 +1170,11 @@ struct DaemonWorkFederatedQueryAuthorityV1 {
     provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
 }
 
-impl crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1
-    for DaemonWorkFederatedQueryAuthorityV1
-{
+impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {
     fn authority_for<'a>(
         &'a self,
         scope: &'a tracedecay_contracts::ResolvedScope,
-    ) -> crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityFutureV1<'a> {
+    ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
         Box::pin(async move {
             let mounted = self.schedulers.query_authority_for_scope(scope).await?;
             self.provider
@@ -1172,6 +1200,27 @@ mod resident_memory_tests {
             state_memory.snapshot().limit_bytes,
             tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
                 .get()
+        );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancel_admissions_then_empty_shutdown_is_prompt() {
+        let state = DaemonInvocationState::default();
+        state.cancel_admissions();
+        state.cancel_admissions();
+        let started = std::time::Instant::now();
+        assert!(
+            state.shutdown().await,
+            "empty invocation shutdown must expire cleanly"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "empty code-index join must not spend the TERM grace"
         );
     }
 }

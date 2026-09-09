@@ -4,6 +4,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::work::{
+    WorkTaskSessionAdmittedRetrievalFutureV1, WorkTaskSessionAdmittedRetrievalPortV1,
+};
 use tracedecay_contracts::{CancellationSignal, RequestContext, ResolvedScope};
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
@@ -599,6 +602,62 @@ const fn temporal_store_unavailable_value() -> SessionRetrievalUnavailable {
     SessionRetrievalUnavailable::without_worker(
         SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
     )
+}
+
+impl WorkTaskSessionAdmittedRetrievalPortV1 for DaemonSessionRetrievalService {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
+}
+
+impl WorkTaskSessionAdmittedRetrievalPortV1 for dyn SessionApplicationRetrievalPortV1 {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
 }
 
 #[cfg(test)]

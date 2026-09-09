@@ -265,15 +265,17 @@ fn query_daemon_identity_stream(
     preamble.push('\n');
     preamble.push_str(&request.to_string());
     preamble.push('\n');
-    let remaining = remaining_probe_time(deadline, "daemon readiness probe")?;
-    stream.set_probe_write_timeout(remaining)?;
+    arm_probe_timeout(deadline, "daemon readiness probe", |timeout| {
+        stream.set_probe_write_timeout(timeout)
+    })?;
     IoWrite::write_all(&mut stream, preamble.as_bytes())?;
     IoWrite::flush(&mut stream)?;
 
     let mut reader = BufReader::new(stream);
     loop {
-        let remaining = remaining_probe_time(deadline, "daemon readiness probe")?;
-        reader.get_ref().set_probe_read_timeout(remaining)?;
+        arm_probe_timeout(deadline, "daemon readiness probe", |timeout| {
+            reader.get_ref().set_probe_read_timeout(timeout)
+        })?;
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
             return Err(TraceDecayError::Config {
@@ -341,15 +343,17 @@ fn request_daemon_shutdown_stream(
     let request = request.to_string();
     let preamble = format!("{preface}\n{handshake}\n{request}\n");
 
-    let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
-    stream.set_probe_write_timeout(remaining)?;
+    arm_probe_timeout(deadline, "daemon shutdown request", |timeout| {
+        stream.set_probe_write_timeout(timeout)
+    })?;
     let acknowledgement = (|| -> Result<()> {
         IoWrite::write_all(&mut stream, preamble.as_bytes())?;
         IoWrite::flush(&mut stream)?;
         let mut reader = BufReader::new(stream);
         loop {
-            let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
-            reader.get_ref().set_probe_read_timeout(remaining)?;
+            arm_probe_timeout(deadline, "daemon shutdown request", |timeout| {
+                reader.get_ref().set_probe_read_timeout(timeout)
+            })?;
             let mut line = String::new();
             if reader.read_line(&mut line)? == 0 {
                 return Err(TraceDecayError::Config {
@@ -375,16 +379,42 @@ fn request_daemon_shutdown_stream(
     })
 }
 
+fn deadline_exceeded(operation: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("{operation} exceeded its absolute deadline"),
+    }
+}
+
 fn remaining_probe_time(
     deadline: std::time::Instant,
     operation: &str,
 ) -> Result<std::time::Duration> {
     deadline
         .checked_duration_since(std::time::Instant::now())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!("{operation} exceeded its absolute deadline"),
-        })
+        // `SO_RCVTIMEO`/`SO_SNDTIMEO` use `timeval`. Zero is EINVAL on every
+        // platform; macOS also rejects some sub-microsecond remainders after
+        // `tv_usec` truncation. Those are a spent budget, not an I/O failure.
+        .filter(|remaining| remaining.as_micros() >= 1)
+        .ok_or_else(|| deadline_exceeded(operation))
+}
+
+fn arm_probe_timeout(
+    deadline: std::time::Instant,
+    operation: &str,
+    set_timeout: impl FnOnce(std::time::Duration) -> std::io::Result<()>,
+) -> Result<()> {
+    let remaining = remaining_probe_time(deadline, operation)?;
+    match set_timeout(remaining) {
+        Ok(()) => Ok(()),
+        // macOS: `setsockopt(SO_RCVTIMEO)` after the peer answered and closed
+        // the Unix socket returns EINVAL. The reply is still in the receive
+        // buffer and must be classified.
+        Err(error) if error.raw_os_error() == Some(22) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+            Err(deadline_exceeded(operation))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(any(not(unix), test))]
@@ -508,5 +538,157 @@ fn current_loopback_authority(
 fn missing_loopback_authority() -> TraceDecayError {
     TraceDecayError::Config {
         message: "TraceDecay daemon authority record is not available".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod timeout_classification_tests {
+    use std::io::{self, Cursor, Read, Write};
+    use std::time::{Duration, Instant};
+
+    use tracedecay_runtime_core::config::PinnedUserDataDir;
+
+    use super::{
+        ProbeStream, arm_probe_timeout, query_daemon_identity_stream, remaining_probe_time,
+    };
+
+    struct AnsweredThenReadTimeoutEinval {
+        reply: Cursor<Vec<u8>>,
+    }
+
+    impl Read for AnsweredThenReadTimeoutEinval {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reply.read(buf)
+        }
+    }
+
+    impl Write for AnsweredThenReadTimeoutEinval {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ProbeStream for AnsweredThenReadTimeoutEinval {
+        fn set_probe_read_timeout(&self, _timeout: Duration) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(22))
+        }
+
+        fn set_probe_write_timeout(&self, _timeout: Duration) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct UnusedStream;
+
+    impl Read for UnusedStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            panic!("spent probe budget must not touch the stream");
+        }
+    }
+
+    impl Write for UnusedStream {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            panic!("spent probe budget must not touch the stream");
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            panic!("spent probe budget must not touch the stream");
+        }
+    }
+
+    impl ProbeStream for UnusedStream {
+        fn set_probe_read_timeout(&self, _timeout: Duration) -> io::Result<()> {
+            panic!("spent probe budget must not arm a socket timeout");
+        }
+
+        fn set_probe_write_timeout(&self, _timeout: Duration) -> io::Result<()> {
+            panic!("spent probe budget must not arm a socket timeout");
+        }
+    }
+
+    #[test]
+    fn readiness_probe_classifies_denial_after_read_timeout_einval() {
+        let _profile = PinnedUserDataDir::new();
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32001, "message": "authentication denied"}
+        });
+        let stream = AnsweredThenReadTimeoutEinval {
+            reply: Cursor::new(format!("{response}\n").into_bytes()),
+        };
+        let error = query_daemon_identity_stream(
+            stream,
+            Some("token"),
+            "0.1.0-test+service-probe",
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect_err("authentication denial must stay unresponsive");
+        assert!(
+            error.to_string().contains("authentication denied"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn spent_readiness_probe_budget_is_typed_deadline() {
+        let _profile = PinnedUserDataDir::new();
+        let error = query_daemon_identity_stream(
+            UnusedStream,
+            Some("token"),
+            "0.1.0-test+service-probe",
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("clock can express a spent probe deadline"),
+        )
+        .expect_err("spent budget must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("daemon readiness probe exceeded its absolute deadline"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn remaining_probe_time_rejects_spent_budget() {
+        let error = remaining_probe_time(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("clock can express a spent probe deadline"),
+            "daemon readiness probe",
+        )
+        .expect_err("spent budget must be a typed deadline");
+        assert!(
+            error
+                .to_string()
+                .contains("daemon readiness probe exceeded its absolute deadline"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn arm_probe_timeout_maps_zero_socket_timeout_to_deadline() {
+        let error = arm_probe_timeout(
+            Instant::now() + Duration::from_secs(1),
+            "daemon readiness probe",
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cannot set a 0 duration timeout",
+                ))
+            },
+        )
+        .expect_err("zero socket timeout is a spent budget");
+        assert!(
+            error
+                .to_string()
+                .contains("daemon readiness probe exceeded its absolute deadline"),
+            "{error}"
+        );
     }
 }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use tempfile::TempDir;
-use tracedecay_application::git_intelligence::churn::file_churn;
+use tracedecay_runtime_core::git::churn::file_churn;
 use tracedecay_graph_query::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
     gini_coefficient, gini_label, modularity_score,

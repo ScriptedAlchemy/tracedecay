@@ -176,6 +176,7 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
         .insert(key, test_automation_scheduler_handle(task));
 
     engine.lifecycle.begin_draining();
+    engine.cancel_automation_schedulers();
     tokio::time::timeout(
         tokio::time::Duration::from_secs(1),
         engine.shutdown_automation_schedulers(),

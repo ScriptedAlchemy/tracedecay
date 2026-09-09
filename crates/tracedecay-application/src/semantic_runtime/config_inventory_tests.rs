@@ -393,3 +393,167 @@ async fn absent_project_inventory_is_authoritative_until_profile_bootstrap() {
     assert!(published.revision().is_some());
     assert_eq!(published.scope_count(), 1);
 }
+
+#[test]
+fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope() {
+    use crate::config::retrieval::{
+        RetrievalProfileActivationErrorV1, RetrievalProfileCasV1, RetrievalProfileCommitMetadataV1,
+        RetrievalProfileMutationCapabilityV1,
+    };
+    use tracedecay_configuration::{
+        ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
+    };
+    use tracedecay_domain::UtcMicros;
+    use tracedecay_domain::configuration::{
+        ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1,
+    };
+
+    let capability = |revision: ConfigurationRevisionId| {
+        let scope_digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+        let policy_digest: tracedecay_domain::AccessPolicyDigest =
+            typed(&format!("sha256:{}", "b".repeat(64)));
+        RetrievalProfileMutationCapabilityV1::from_current_authorization(
+            ConfigurationMutationAuthority {
+                receipt: ConfigurationMutationGrantReceiptV1::issue(
+                    typed("configuration.grant-receipt.scope"),
+                    typed("configuration.grant.scope"),
+                    typed("actor.scope"),
+                    ConfigurationMutationOperationV1::DirectMutation,
+                    scope_digest.clone(),
+                    revision,
+                    1,
+                    policy_digest.clone(),
+                    ConfigurationMutationSinkV1::ConfigurationStore,
+                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                    Some(typed("configuration.idempotency.scope")),
+                    UtcMicros(1),
+                    UtcMicros(100),
+                )
+                .unwrap(),
+            },
+            CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 1,
+                grant_digest: scope_digest.clone(),
+                scope_digest,
+                policy_epoch: 1,
+                policy_digest,
+            },
+        )
+        .unwrap()
+    };
+    let cas = |state: &RetrievalProfileStateV1| RetrievalProfileCasV1 {
+        expected_configuration_revision: state.configuration_revision().clone(),
+        expected_active_digest: state.active().profile_digest().clone(),
+        expected_rollback_digest: state.rollback_profile().map(|p| p.profile_digest().clone()),
+    };
+    let (_, mut primary) = initial_state("a");
+    let mut sibling = primary.clone();
+    let (_, candidate) = initial_state("b");
+    let runtime = RetrievalRuntimeCompatibilityV1 {
+        retrieval_ceiling: primary.active().profile().retrieval_budget,
+        semantic: None,
+        semantic_ceiling: None,
+        rerank: None,
+        rerank_ceiling: None,
+    };
+    let first_revision = primary.configuration_revision().clone();
+    let sibling_revision = typed::<ConfigurationRevisionId>("configuration.sibling");
+    let next_revision = typed::<ConfigurationRevisionId>("configuration.next");
+    let metadata = |base, result| {
+        RetrievalProfileCommitMetadataV1::new(
+            ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            base,
+            result,
+            UtcMicros(2),
+        )
+    };
+    let initial = cas(&primary);
+    primary
+        .activate(
+            &capability(first_revision.clone()),
+            &initial,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            metadata(first_revision.clone(), sibling_revision.clone()),
+        )
+        .unwrap();
+    // A project commit must not change the sibling's scope token. Its new grant
+    // authorizes the current project revision, while CAS checks its own state.
+    sibling
+        .activate(
+            &capability(sibling_revision.clone()),
+            &initial,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            metadata(sibling_revision.clone(), next_revision.clone()),
+        )
+        .unwrap();
+    sibling.snapshot().unwrap().into_state().unwrap();
+    let committed = sibling.clone();
+    assert_eq!(
+        sibling.activate(
+            &capability(next_revision.clone()),
+            &initial,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            metadata(next_revision.clone(), typed("configuration.stale")),
+        ),
+        Err(RetrievalProfileActivationErrorV1::CasConflict),
+    );
+    assert_eq!(sibling, committed);
+    let expected = cas(&sibling);
+    assert_eq!(
+        sibling.rollback(
+            &capability(sibling_revision.clone()),
+            &expected,
+            &runtime,
+            "restore".into(),
+            metadata(next_revision.clone(), typed("configuration.denied")),
+        ),
+        Err(RetrievalProfileActivationErrorV1::Unauthorized),
+    );
+    assert_eq!(sibling, committed);
+    // Unrelated project changes also leave rollback available.
+    let settings_revision = typed::<ConfigurationRevisionId>("configuration.settings");
+    sibling
+        .rollback(
+            &capability(settings_revision.clone()),
+            &expected,
+            &runtime,
+            "restore".into(),
+            metadata(settings_revision, typed("configuration.restored")),
+        )
+        .unwrap();
+    assert_eq!(sibling.active(), committed.rollback_profile().unwrap());
+    sibling.snapshot().unwrap().into_state().unwrap();
+    let restored_cas = cas(&sibling);
+    let restored_revision = sibling.configuration_revision().clone();
+    sibling
+        .activate(
+            &capability(restored_revision.clone()),
+            &restored_cas,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            metadata(restored_revision, typed("configuration.reactivated")),
+        )
+        .unwrap();
+    assert_eq!(sibling.active(), committed.active());
+    assert_eq!(sibling.rollback_profile(), committed.rollback_profile());
+    // Matching digests after activate/rollback/activate must not admit an old CAS.
+    let revision = sibling.configuration_revision().clone();
+    assert_eq!(
+        sibling.rollback(
+            &capability(revision.clone()),
+            &expected,
+            &runtime,
+            "stale restore".into(),
+            metadata(revision, typed("configuration.stale-aba")),
+        ),
+        Err(RetrievalProfileActivationErrorV1::CasConflict),
+    );
+}

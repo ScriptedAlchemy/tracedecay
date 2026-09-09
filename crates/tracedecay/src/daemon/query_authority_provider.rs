@@ -1,8 +1,8 @@
 //! Daemon-owned query activation and durable cursor-key authority.
 //!
-//! This provider never chooses retrieval weights, calibration, diversity, or
-//! evaluation identity. It exposes only the exact profile already accepted by
-//! [`RetrievalProfileStateV1`] after a successful configuration activation.
+//! This provider retains the profile and evaluation accepted by
+//! [`RetrievalProfileStateV1`]. Execution reuses the checked-in core policy
+//! identity when all ranking material is identical to that policy.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -27,7 +27,7 @@ use tracedecay_application::semantic_runtime::{
 };
 use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::{
     AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
-    QueryAuthorityProviderV1,
+    QueryAuthorityProviderV1, canonical_query_policy,
 };
 use tracedecay_query::retrieval::QueryAuthorityV1;
 
@@ -586,10 +586,13 @@ impl DaemonQueryAuthorityProviderV1 {
         };
         let material = query_material_for_activated(&candidate, privacy_domain)
             .map_err(map_unavailable_update_error)?;
+        let (profile, diversity) =
+            canonical_query_policy(&material.profile, &material.diversity)
+                .map_err(|_| QueryAuthorityUpdateErrorV1::ActivationNotCurrent)?;
         let query_authority = Arc::new(
             QueryAuthorityV1::new(
-                material.profile,
-                material.diversity,
+                profile,
+                diversity,
                 material.ranking_revision,
                 material
                     .keyring

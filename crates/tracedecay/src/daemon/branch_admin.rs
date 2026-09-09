@@ -1185,6 +1185,10 @@ impl StoreAdministration {
             .await
     }
 
+    pub(super) fn cancel_host_admission_replay(&self) {
+        self.profile_host_admission_replay.cancel();
+    }
+
     #[hotpath::measure(
         label = "daemon.branch_admin.host_admission_replay.shutdown",
         future = true

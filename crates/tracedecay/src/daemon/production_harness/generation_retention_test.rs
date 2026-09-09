@@ -1171,7 +1171,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     restarted.shutdown().await;
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
     let graph = harness.server(project).expect("project server").cg().await;
     let project_id = graph
@@ -1232,7 +1232,7 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
     );
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 async fn vector_generation_exists(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -1252,7 +1252,7 @@ async fn vector_generation_exists(
         .is_some()
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 async fn run_generation_cadence(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
@@ -1275,10 +1275,10 @@ async fn run_generation_cadence(
     .is_complete()
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 const EIGHT_DAYS_SECS: i64 = 8 * 24 * 60 * 60;
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn age_scope_for_reconciliation(scope: &Path) {
     let old = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(EIGHT_DAYS_SECS as u64))
@@ -1295,7 +1295,7 @@ fn age_scope_for_reconciliation(scope: &Path) {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey() {
     use super::semantic_activation_journey_test::{
@@ -1421,14 +1421,15 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     let linked_vector_id = linked_vector.generation_id().clone();
     let primary_graph = harness.server(&primary).expect("primary server").cg().await;
     let linked_graph = harness.server(&linked).expect("linked server").cg().await;
-    let linked_scope = crate::daemon::store_maintenance::code_index_scope_store_root(
-        &primary_graph.hook_store_layout().data_root,
-    )
-    .join(
-        tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
-            linked_graph.project_root(),
-        ),
-    );
+    let linked_scope =
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_store_root(
+            &primary_graph.hook_store_layout().data_root,
+        )
+        .join(
+            tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
+                linked_graph.project_root(),
+            ),
+        );
     assert!(linked_scope.is_dir());
     drop(primary_graph);
     drop(linked_graph);
@@ -1615,16 +1616,21 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         .expect("collector resources")
         .invocation
         .code_index_schedulers;
-    let primary_scope = crate::daemon::store_maintenance::code_index_scope_store_root(
-        &collector
-            .server(&primary)
-            .expect("collector primary server")
-            .cg()
-            .await
-            .hook_store_layout()
-            .data_root,
-    )
-    .join(tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(&primary));
+    let primary_scope =
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_store_root(
+            &collector
+                .server(&primary)
+                .expect("collector primary server")
+                .cg()
+                .await
+                .hook_store_layout()
+                .data_root,
+        )
+        .join(
+            tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
+                &primary,
+            ),
+        );
     let _ = run_generation_cadence(&collector, &primary).await;
     assert!(
         !linked_scope.exists(),

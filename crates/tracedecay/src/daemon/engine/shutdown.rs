@@ -102,15 +102,29 @@ impl DaemonEngine {
                         }
                     },
                 ),
-                ShutdownOwner::new("automation", || {}, async move {
-                    automation_join.shutdown_automation_schedulers().await;
-                }),
+                ShutdownOwner::new(
+                    "automation",
+                    {
+                        let automation_cancel = self.clone();
+                        move || automation_cancel.cancel_automation_schedulers()
+                    },
+                    async move {
+                        automation_join.shutdown_automation_schedulers().await;
+                    },
+                ),
                 ShutdownOwner::new("session_temporal_refresh", || {}, async move {
                     session_refresh.shutdown().await;
                 }),
-                ShutdownOwner::new("host_admission_replay", || {}, async move {
-                    replay_join.shutdown_host_admission_replay().await;
-                }),
+                ShutdownOwner::new(
+                    "host_admission_replay",
+                    {
+                        let replay_cancel = self.store_administration.clone();
+                        move || replay_cancel.cancel_host_admission_replay()
+                    },
+                    async move {
+                        replay_join.shutdown_host_admission_replay().await;
+                    },
+                ),
                 ShutdownOwner::new(
                     "maintenance",
                     {

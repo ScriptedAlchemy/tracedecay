@@ -5,7 +5,9 @@ mod reset;
 pub mod retention;
 mod schema;
 
-pub use refusal_census::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+pub use refusal_census::{
+    ObservationRefusalCensusV1, ObservationRefusalCountV1, ingest_refusal_read_from_censuses,
+};
 pub use reset::{ObservationAuthorityResetV1, reset_refused_observation_authority};
 pub(super) use schema::ensure_observation_schema;
 pub use schema::{OBSERVATION_AUTHORITY, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION};

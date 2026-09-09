@@ -12,6 +12,8 @@
 //! callers use the bounded CLI fallback here for native Git writes, signing,
 //! recovery, and reads where exact porcelain semantics remain the authority.
 
+pub mod churn;
+
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

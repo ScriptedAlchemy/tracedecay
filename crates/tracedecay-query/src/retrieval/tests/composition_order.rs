@@ -1,4 +1,7 @@
-use tracedecay_domain::{FusedCandidate, RankingDecision, RankingDecisionKind};
+use tracedecay_domain::{
+    EvidenceRole, ExactClass, FreshnessCompatibilityV1, FusedCandidate, OccurrenceProvenance,
+    RankingDecision, RankingDecisionKind, RetrievalAnchorId, SourceFreshness, UtcMicros,
+};
 
 use super::{composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
 use crate::retrieval::fusion::{
@@ -234,5 +237,135 @@ fn capped_composition_is_lane_order_invariant_and_digest_stable() {
             digest_candidate_set(&output.ranked_candidates).unwrap(),
             expected_digest
         );
+    }
+}
+
+fn generation_scoped_hit(
+    stable_name: &str,
+    generation_tag: &str,
+    occurrence_sort_key: &str,
+) -> FusedCandidate {
+    FusedCandidate {
+        anchor_id: RetrievalAnchorId::new(format!(
+            "code-symbol:symbol.v1.{generation_tag}.{occurrence_sort_key}"
+        ))
+        .expect("valid generation-scoped anchor"),
+        logical_evidence_id: id(&format!(
+            "code-rank:{stable_name}|src/{stable_name}.rs|function"
+        )),
+        occurrences: vec![OccurrenceProvenance {
+            source_occurrence_id: id(&format!(
+                "code-chunk:{generation_tag}:{occurrence_sort_key}"
+            )),
+            file_occurrence_id: None,
+            retriever_evidence_anchor: RetrievalAnchorId::new(format!(
+                "code-lexical:lexical:chunk.{stable_name}"
+            ))
+            .expect("valid evidence anchor"),
+            source_namespace: id("namespace.code"),
+            repository_id: None,
+            session_or_thread_id: None,
+            logical_copy_cluster_id: None,
+            logical_copy_evidence_anchor: None,
+            evidence_role: EvidenceRole::Primary,
+            freshness: SourceFreshness {
+                source_namespace: id("namespace.code"),
+                source_instance: id("instance.code"),
+                source_watermark: Some(7),
+                projection_watermark: Some(7),
+                observed_at: UtcMicros(7),
+                source_generation: Some(1),
+                generation_lag: Some(0),
+                compatibility: FreshnessCompatibilityV1::Current,
+                policy_revision: id("policy.fixture.v1"),
+            },
+        }],
+        exact_class: ExactClass::Approximate,
+        utility_micros: 4_000_000,
+        contributions: Vec::new(),
+        freshness: Vec::new(),
+        decisions: Vec::new(),
+    }
+}
+
+#[test]
+fn fused_order_ignores_generation_scoped_ids_among_equal_utilities() {
+    // Same utilities and the same generation-independent lexical evidence
+    // anchors (`code-lexical:{lane}:{chunk_id}`). Generation A hashes sort
+    // zeta before alpha; generation B reverses that. Ranking must follow the
+    // chunk-stable anchors, not the rematerialized occurrence ids.
+    let mut generation_a = vec![
+        generation_scoped_hit("zeta", "gen-a", "aaa"),
+        generation_scoped_hit("alpha", "gen-a", "zzz"),
+    ];
+    let mut generation_b = vec![
+        generation_scoped_hit("zeta", "gen-b", "zzz"),
+        generation_scoped_hit("alpha", "gen-b", "aaa"),
+    ];
+    generation_a.sort_by(compare_fused);
+    generation_b.sort_by(compare_fused);
+
+    let names = |candidates: &[FusedCandidate]| {
+        candidates
+            .iter()
+            .map(|candidate| candidate.logical_evidence_id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&generation_a), names(&generation_b));
+    assert_eq!(
+        names(&generation_a),
+        vec![
+            "code-rank:alpha|src/alpha.rs|function",
+            "code-rank:zeta|src/zeta.rs|function",
+        ]
+    );
+}
+
+#[test]
+fn comparator_record_retains_the_actual_evidence_tie_break() {
+    let fusion = DeterministicFixedPointFusion::new(id("ranking.fixture.v1"));
+    let mut left = generation_scoped_hit("alpha", "a", "zzz");
+    let right = generation_scoped_hit("zeta", "b", "aaa");
+    let mut other = left.occurrences[0].clone();
+    other.retriever_evidence_anchor = id("code-lexical:lexical:chunk.omega");
+    left.occurrences
+        .extend([other, left.occurrences[0].clone()]);
+    left.occurrences.reverse();
+    let record = fusion.comparator_record(&left);
+    assert_eq!(
+        record.retriever_evidence_anchors,
+        vec![
+            id("code-lexical:lexical:chunk.alpha"),
+            id("code-lexical:lexical:chunk.omega"),
+        ]
+    );
+    assert_eq!(
+        compare_fused(&left, &right),
+        record
+            .retriever_evidence_anchors
+            .cmp(&fusion.comparator_record(&right).retriever_evidence_anchors)
+    );
+    let output = compose_corpus(&no_caps());
+    for (record, ranked) in output
+        .comparator_records
+        .iter()
+        .zip(&output.ranked_candidates)
+    {
+        let detail = &ranked
+            .candidate
+            .decisions
+            .iter()
+            .find(|decision| decision.kind == RankingDecisionKind::ComparatorProvenance)
+            .unwrap()
+            .detail;
+        let anchors = record
+            .retriever_evidence_anchors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(detail.contains(&format!("evidence_anchors=[{anchors}]")));
+        assert!(!detail.contains(";anchor="));
+        assert!(!detail.contains(";logical="));
     }
 }

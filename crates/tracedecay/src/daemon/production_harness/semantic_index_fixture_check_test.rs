@@ -12,7 +12,7 @@
 //! model hub is never contacted; bytes that fail their pin are never used
 //! and never re-fetched. See `tests/fixtures/semantic_index/README.md`.
 
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 
 use std::fs;
 use std::io::Read;

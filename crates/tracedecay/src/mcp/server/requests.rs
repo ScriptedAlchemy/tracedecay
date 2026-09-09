@@ -3,15 +3,15 @@
 
 use std::path::Component;
 
-use super::dispatch_settlement::{
-    ApplicationCancellationRegistration, DispatchControl, DispatchSettlement,
-    PreparedDispatchControl, dispatch_cancelled_error,
-};
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_mcp::server::{
+    ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest,
+    DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
+};
 use tracedecay_mcp::{
-    ToolResult, mark_semantic_tool_error, semantic_failure_reason, tool_error_response,
-    tool_result_has_semantic_error,
+    ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
+    tool_error_response, tool_result_has_semantic_error,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -186,6 +186,53 @@ pub(super) fn dispatch_deadline_horizon_micros(bounded_operation: bool) -> Optio
         return None;
     }
     i64::try_from(tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE.as_micros()).ok()
+}
+
+fn tool_carries_effect(tool_name: &str) -> bool {
+    crate::mcp::tools::binding::mcp_dispatch_contract(tool_name)
+        .is_ok_and(|contract| !contract.read_only())
+}
+
+impl McpServer {
+    pub(super) fn prepare_dispatch_control<'a>(
+        &'a self,
+        id: &Value,
+        tool_name: &str,
+        memory_request_scope: &str,
+        pre_cancelled: bool,
+        caller_deadline: Option<tracedecay_contracts::Deadline>,
+    ) -> Result<PreparedDispatchControl<'a>> {
+        let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("could not resolve MCP dispatch deadline: {error}"),
+            })?;
+        let application_surface = ApplicationSurfaceOperation::from_tool_name(tool_name);
+        let carried_horizon_micros = if application_surface.is_some() {
+            i64::try_from(ceiling.as_micros()).ok()
+        } else {
+            dispatch_deadline_horizon_micros(
+                is_controlled_read_tool(tool_name) || is_source_edit_tool(tool_name),
+            )
+        };
+        self.dispatch_authority
+            .prepare_control(DispatchControlRequest {
+                wire_id: id,
+                connection_scope: memory_request_scope,
+                tool_name,
+                pre_cancelled,
+                caller_deadline,
+                ceiling,
+                carried_horizon_micros,
+                policy: DispatchToolPolicy {
+                    live_cancellable: tool_supports_live_cancellation(tool_name),
+                    carries_effect: tool_carries_effect(tool_name),
+                    canonical_effect_settlement:
+                        crate::mcp::tools::binding::tool_requires_canonical_effect_settlement(
+                            tool_name,
+                        ),
+                },
+            })
+    }
 }
 
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
@@ -571,14 +618,15 @@ impl McpServer {
         // the daemon-owned code-index scheduler queue as soon as the routing
         // event is observed. Independent of host-admission durability so an
         // after-edit reaches indexing even when effect processing is deferred.
-        // Best-effort: a `false` return (no mounted worktree) is not an error.
+        // Best-effort: a policy refusal or unavailable scheduler emits no activity.
         if !event.rel_paths.is_empty()
             && let Some(sink) = &dispatch_server.code_index_hook_sink
         {
-            // A `true` return means the paths really entered a mounted
+            // An accepted admission means the paths really entered a mounted
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone()).await
+                == super::CodeIndexAdmission::Accepted
                 && let Some(activity_db) = dispatch_server.project_session_db.as_deref()
             {
                 tracedecay_session_memory::event_lane::publish(
@@ -1284,7 +1332,7 @@ impl McpServer {
                 mark_semantic_tool_error(&mut result);
                 if !tool_result_has_semantic_error(&result)
                     && let Err(error) = hotpath::future!(
-                        super::live_transcript_refresh::join_required_live_transcript_refresh(
+                        join_required_live_transcript_refresh(
                             &tool_name,
                             &analytics_arguments,
                             selected_owner.is_some(),
@@ -1527,7 +1575,7 @@ impl McpServer {
         let PreparedDispatchControl {
             request_id: application_request_id,
             control,
-            _registration,
+            registration: _registration,
         } = match self.prepare_dispatch_control(
             &id,
             &tool_name,
@@ -1564,7 +1612,11 @@ impl McpServer {
                 return tool_error_response(
                     id,
                     &tool_name,
-                    &dispatch_cancelled_error(&tool_name, DispatchSettlement::NotStarted),
+                    &dispatch_cancelled_error(
+                        &tool_name,
+                        DispatchSettlement::NotStarted,
+                        tool_carries_effect(&tool_name),
+                    ),
                 );
             }
         };
@@ -1794,7 +1846,6 @@ mod tool_call_preparation_tests {
 #[cfg(test)]
 mod git_read_control_tests {
     use super::*;
-    use crate::mcp::server::dispatch_settlement::ApplicationCancellationRegistration;
 
     #[test]
     fn controlled_operations_receive_live_registration_and_bounded_deadlines() {

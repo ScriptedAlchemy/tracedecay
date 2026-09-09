@@ -30,9 +30,10 @@ impl HostAdmissionTestRuntimeV1 {
         server_stats: Option<serde_json::Value>,
         scope_prefix: Option<&str>,
     ) -> Result<tracedecay_mcp::ToolResult> {
-        let project_registry_reads = crate::mcp::server::DaemonProjectRegistryReadService::new(
-            self.profile_database.clone(),
-        );
+        let project_registry_reads =
+            tracedecay_daemon_service::DaemonProjectRegistryReadService::new(
+                self.profile_database.clone(),
+            );
         crate::mcp::tools::handle_tool_call_with_registry_options(
             cg,
             tool_name,

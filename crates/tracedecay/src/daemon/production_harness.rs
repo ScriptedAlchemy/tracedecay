@@ -1000,7 +1000,10 @@ async fn wait_for_production_composition_code_index(
     // daemon's own deferred owners answer that admission at spawn time rather
     // than parking on it. Mount the composition the same way; reads then report
     // the typed `linked_worktree_disabled` state.
-    if super::project_open_owners::code_index_disabled_for_scope(invocation, scope) {
+    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
+        &invocation.code_index_schedulers,
+        scope,
+    ) {
         return Ok(());
     }
     let wait_started = Instant::now();
