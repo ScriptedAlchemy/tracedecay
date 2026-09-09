@@ -51,7 +51,7 @@ use evidence::{
     SkillWriterEvidenceOutcome, build_session_reflector_evidence, build_skill_writer_evidence,
     canonical_evidence_hash,
 };
-use retrieval::{production_project_automation_retrieval, production_user_automation_retrieval};
+use retrieval::{production_user_automation_retrieval, unavailable_automation_retrieval};
 use session_reflector::{
     ProposedAgentOutput, SessionReflectorFinalization, build_session_reflector_prompt,
     finalize_session_reflector_success, validate_session_fact_candidates,
@@ -418,7 +418,7 @@ pub async fn run_combined_review_with_backend(
     options: CombinedReviewAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> Result<CombinedReviewDispatch> {
-    let retrieval = production_project_automation_retrieval().await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_combined_review_for_retrieval(
         cg,
         config,
@@ -471,7 +471,7 @@ pub async fn run_combined_review_with_backend_for_retained_settlement(
     options: CombinedReviewAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> RetainedCombinedReviewRun {
-    let retrieval = production_project_automation_retrieval().await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_combined_review_with_backend_and_retrieval_for_retained_settlement(
         cg,
         config,

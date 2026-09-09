@@ -126,7 +126,7 @@ pub async fn run_skill_writer_with_backend(
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
-    let retrieval = production_project_automation_retrieval().await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_skill_writer_with_backend_and_retrieval(
         cg,
         config,
@@ -148,7 +148,7 @@ pub async fn run_skill_writer_with_backend_for_retained_settlement(
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> RetainedAutomationRun<SkillWriterAutomationRun> {
-    let retrieval = production_project_automation_retrieval().await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
         cg,
         config,

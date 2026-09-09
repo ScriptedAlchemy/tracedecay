@@ -767,12 +767,9 @@ pub async fn registered_project_automation_retrieval(
     Ok(registered_automation_retrieval_for_identity(database, identity).await)
 }
 
-pub(super) async fn production_project_automation_retrieval() -> Box<dyn AutomationSessionRetrieval>
-{
-    unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
-}
-
-fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationSessionRetrieval> {
+pub(super) fn unavailable_automation_retrieval(
+    reason: &'static str,
+) -> Box<dyn AutomationSessionRetrieval> {
     // The static fallback session id is a fixed, valid identifier.
     #[allow(clippy::expect_used)]
     Box::new(UnavailableAutomationSessionRetrieval {

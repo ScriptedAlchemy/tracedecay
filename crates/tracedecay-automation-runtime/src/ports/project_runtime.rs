@@ -1,7 +1,7 @@
 //! Runtime authorities supplied by the root composition layer.
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use tracedecay_domain::errors::Result;
@@ -15,7 +15,6 @@ pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 
 
 /// Immutable project values captured by the composition root for one
 /// automation run.
-#[derive(Clone)]
 pub struct AutomationProjectContext {
     pub project_root: PathBuf,
     pub dashboard_root: PathBuf,
@@ -25,6 +24,18 @@ pub struct AutomationProjectContext {
     pub profile_database: RegisteredGlobalDbLeaseV1,
     pub project_sessions: RegisteredGlobalDbLeaseV1,
     pub project_memory_database: Database,
+}
+
+impl AutomationProjectContext {
+    #[must_use]
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
 }
 
 /// Profile runtime needed by projectless automation.

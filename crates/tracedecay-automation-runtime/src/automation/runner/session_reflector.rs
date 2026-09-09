@@ -35,7 +35,7 @@ use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
     build_session_reflector_evidence,
 };
-use super::retrieval::{AutomationSessionRetrieval, production_project_automation_retrieval};
+use super::retrieval::{AutomationSessionRetrieval, unavailable_automation_retrieval};
 
 mod privacy;
 use privacy::{
@@ -1040,7 +1040,7 @@ pub async fn run_session_reflector_with_backend(
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
-    let retrieval = production_project_automation_retrieval().await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_session_reflector_with_backend_and_retrieval(
         cg,
         config,
@@ -1064,7 +1064,7 @@ pub async fn run_session_reflector_with_backend_for_retained_settlement(
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> RetainedAutomationRun<SessionReflectorAutomationRun> {
-    let retrieval = production_project_automation_retrieval().await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
         cg,
         config,
