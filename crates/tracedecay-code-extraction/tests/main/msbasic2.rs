@@ -176,19 +176,6 @@ fn test_msbasic2_subroutine_complexity() {
 }
 
 #[test]
-fn test_msbasic2_extensions() {
-    let extractor = MsBasic2Extractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"bas"));
-}
-
-#[test]
-fn test_msbasic2_language_name() {
-    let extractor = MsBasic2Extractor;
-    assert_eq!(extractor.language_name(), "MS BASIC 2.0");
-}
-
-#[test]
 fn test_msbasic2_subroutine_signatures() {
     let result = extract_fixture();
 

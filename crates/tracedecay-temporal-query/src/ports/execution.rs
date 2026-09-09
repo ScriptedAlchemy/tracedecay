@@ -238,7 +238,7 @@ impl ExecutionControl {
     }
 }
 
-pub(crate) async fn await_controlled<T, E>(
+pub async fn await_controlled<T, E>(
     control: &ExecutionControl,
     future: impl Future<Output = Result<T, E>>,
 ) -> Result<T, E>

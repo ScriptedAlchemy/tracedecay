@@ -9,7 +9,7 @@ use tracedecay_store::{
     ObservationReplayRequest, SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
 };
 
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
@@ -35,7 +35,7 @@ use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
 /// delegates to the same helper `HostAdmissionTestRuntimeV1` uses instead of
 /// racing it with a benchmark-private handle.
 fn ensure_background_cpu_authority() {
-    crate::host_admission::ensure_process_background_cpu_authority()
+    tracedecay::host_admission::ensure_process_background_cpu_authority()
         .expect("install process capture authorities for the benchmark");
 }
 
@@ -208,7 +208,9 @@ impl Fixture {
     async fn verify_projector_only_current_writes(&self) {
         let snapshot = self
             .runtime
-            .read_snapshot(HostAdmissionScope::Profile)
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered benchmark profile database")
+            .read_snapshot()
             .await
             .expect("open registered benchmark projection snapshot");
         let mut rows = snapshot

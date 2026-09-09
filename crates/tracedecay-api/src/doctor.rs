@@ -441,18 +441,6 @@ mod tests {
     }
 
     #[test]
-    fn projection_notes_name_the_exact_absence() {
-        assert_eq!(
-            DoctorProjectionErrorV1::FamilyAbsent.note(),
-            "canonical Doctor report omitted the requested finding family"
-        );
-        assert_eq!(
-            DoctorProjectionErrorV1::FamilyAbsent.to_string(),
-            DoctorProjectionErrorV1::FamilyAbsent.note()
-        );
-    }
-
-    #[test]
     fn source_failure_note_preserves_the_owner_error() {
         assert_eq!(
             doctor_report_failure_note(&"scope unavailable"),

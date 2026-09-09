@@ -64,6 +64,35 @@ fn canonicalizes_alias_and_strip_prefix() {
 }
 
 #[test]
+fn application_operations_resolve_by_identity_and_by_cli_spelling() {
+    for operation in ApplicationSurfaceOperation::ALL {
+        assert_eq!(
+            cli_application_operation(&canonical_tool_name(operation.as_str())),
+            Some(operation),
+            "{} must resolve by its canonical identity",
+            operation.as_str()
+        );
+        assert_eq!(
+            cli_application_operation(&canonical_tool_name(operation.mcp_operation_name())),
+            Some(operation),
+            "{} must resolve by its CLI binding spelling",
+            operation.as_str()
+        );
+    }
+    for spelling in ["diagnostics_read", "diagnostics", "tracedecay_diagnostics"] {
+        assert_eq!(
+            cli_application_operation(&canonical_tool_name(spelling)),
+            Some(ApplicationSurfaceOperation::DiagnosticsRead),
+            "{spelling}"
+        );
+    }
+    assert_eq!(
+        cli_application_operation(&canonical_tool_name("totally-fake-tool")),
+        None
+    );
+}
+
+#[test]
 fn whole_payload_invocation_parses_without_a_tool_definition() {
     let parsed = parse_whole_payload_invocation_with_stdin(
         &[
@@ -930,6 +959,28 @@ fn join_content_text_joins_warning_and_payload() {
         join_content_text(&value),
         "warning: index is stale\n\nactual payload\ntracedecay_metrics: 123"
     );
+}
+
+#[test]
+fn join_content_text_routes_the_daemon_metrics_footer_to_stderr() {
+    // `--format json` payloads are parsed from stdout as one document; the
+    // daemon appends its token accounting as a separate block, which must not
+    // trail the payload (run 34296614024: "Extra data: line 4 column 1").
+    let value = json!({
+        "content": [
+            { "type": "text", "text": r#"{"code":[],"coverage":{"exact":"complete"}}"# },
+            { "type": "text", "text": "\ntracedecay_metrics: before=151600 after=3721" }
+        ]
+    });
+    assert_eq!(
+        join_content_text(&value),
+        r#"{"code":[],"coverage":{"exact":"complete"}}"#
+    );
+    assert_eq!(
+        token_accounting_footers(&value),
+        vec!["tracedecay_metrics: before=151600 after=3721".to_owned()]
+    );
+    assert!(token_accounting_footers(&json!({ "content": [] })).is_empty());
 }
 
 #[test]

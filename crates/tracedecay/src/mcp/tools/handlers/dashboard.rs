@@ -672,6 +672,7 @@ pub(super) async fn handle_dashboard(
     >,
     explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     feedback_status_reader: Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    pr_autotrack_reader: Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
@@ -823,8 +824,8 @@ pub(super) async fn handle_dashboard(
                     "retained dashboard project server resolved a different root",
                 ));
             }
-            let retained_cg: Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime> =
-                retained_graph;
+            let retained_cg =
+                Arc::new(crate::dashboard::dashboard_project_context(&retained_graph));
             let dashboard_project_graph_resolver = retained_project_server_resolver
                 .clone()
                 .zip(daemon_user_profile_id.clone())
@@ -871,7 +872,7 @@ pub(super) async fn handle_dashboard(
                     compose_dashboard_profile_code_index_worker_settings(
                         database,
                         profile_id,
-                        retained_cg.project_root().to_path_buf(),
+                        retained_cg.store_layout.project_root.clone(),
                         &service,
                     )
                 });
@@ -907,7 +908,7 @@ pub(super) async fn handle_dashboard(
             let delivery_read_authority = daemon_invocation_service.map(|service| {
                 let adapter = super::dashboard_delivery::DashboardDeliveryReadAdapter::new(
                     service,
-                    retained_cg.project_root().to_path_buf(),
+                    retained_cg.store_layout.project_root.clone(),
                 );
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });
@@ -937,6 +938,7 @@ pub(super) async fn handle_dashboard(
                     code_index_freshness_reader,
                     explorer_semantic_reader,
                     feedback_status_reader,
+                    pr_autotrack_reader,
                     code_diagnostics_broker,
                     application_invocation_executor,
                     delivery_settlement_authority,

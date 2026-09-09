@@ -440,6 +440,7 @@ struct ProjectRoutePorts {
         tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
+    dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     code_index_hook_sink: crate::mcp::server::CodeIndexHookSink,
     code_index_reconcile_sink: crate::mcp::server::CodeIndexReconcileSink,
@@ -493,6 +494,7 @@ impl ComposedCoreServer {
             .with_dashboard_feedback_status_reader(Arc::clone(
                 &ports.dashboard_feedback_status_reader,
             ))
+            .with_dashboard_pr_autotrack_reader(Arc::clone(&ports.dashboard_pr_autotrack_reader))
             .with_diagnostics_lsp(Arc::clone(&ports.diagnostic_broker))
             .with_code_index_hook_sink(Arc::clone(&ports.code_index_hook_sink))
             .with_code_index_reconcile_sink(Arc::clone(&ports.code_index_reconcile_sink))
@@ -513,7 +515,7 @@ impl ComposedCoreServer {
                 crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
                     Arc::clone(&code_index.graph_read_admission_port),
                     Arc::clone(&code_index.graph_projection_read_port),
-                    Some(Arc::clone(cg) as Arc<dyn tracedecay_graph_query::SourceReadRuntimePort>),
+                    cg.source_read_context(),
                 ),
             )
             .with_code_index_search_authority(code_index.search_authority.clone())
@@ -884,6 +886,7 @@ impl ProjectOpenInputs<'_> {
                     tracedecay_dashboard_api::feedback_api::feedback_status_reader(
                         self.invocation.feedback_runtime_registrar(),
                     ),
+                dashboard_pr_autotrack_reader: project_dashboard_pr_autotrack_reader(),
                 diagnostic_broker,
                 code_index_hook_sink,
                 code_index_reconcile_sink,
@@ -1940,6 +1943,22 @@ fn project_dashboard_freshness_reader(
             Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
         });
     reader
+}
+
+fn project_dashboard_pr_autotrack_reader()
+-> tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader {
+    Arc::new(|store_root| {
+        crate::daemon::pr_autotrack::managed_summary(&store_root)
+            .into_iter()
+            .map(
+                |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                    branch: entry.branch,
+                    pr: entry.pr,
+                    head_branch: entry.head_branch,
+                },
+            )
+            .collect()
+    })
 }
 
 /// Register the project graph and the session databases this route owns with

@@ -13,6 +13,7 @@ use tracedecay_automation_runtime::automation::runner::{
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
 };
+use tracedecay_automation_runtime::ports::project_runtime::AutomationProjectContext;
 
 use super::scheduler_automation_effect;
 use crate::daemon::DaemonEngine;
@@ -360,9 +361,7 @@ where
 pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
     engine: &DaemonEngine,
-    memory: &TraceDecay,
-    project_id: &tracedecay_domain::ProjectId,
-    project_path: &Path,
+    automation_context: &AutomationProjectContext,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
     backend: &dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
@@ -373,9 +372,7 @@ pub(super) async fn run_combined_scheduler_effect(
     run_combined_scheduler_effect_inner(
         admission,
         engine,
-        memory,
-        project_id,
-        project_path,
+        automation_context,
         config,
         configuration_revision_id,
         backend,
@@ -394,9 +391,7 @@ pub(super) async fn run_combined_scheduler_effect(
 fn run_combined_scheduler_effect_inner<'a>(
     admission: CombinedEffectAdmission,
     engine: &'a DaemonEngine,
-    memory: &'a TraceDecay,
-    project_id: &'a tracedecay_domain::ProjectId,
-    project_path: &'a Path,
+    automation_context: &'a AutomationProjectContext,
     config: &'a tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision_id: &'a tracedecay_domain::configuration::ConfigurationRevisionId,
     backend: &'a dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
@@ -408,7 +403,7 @@ fn run_combined_scheduler_effect_inner<'a>(
         let outcome = match admission {
             CombinedEffectAdmission::Conflict => {
                 super::log_scheduler_admission_conflict(
-                    project_path,
+                    automation_context.project_root(),
                     tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
                 );
                 CombinedEffectOutcome::Handled
@@ -416,7 +411,7 @@ fn run_combined_scheduler_effect_inner<'a>(
             CombinedEffectAdmission::PreAdmissionProblem(problems) => {
                 for problem in problems {
                     super::log_scheduler_pre_admission_problem(
-                        project_path,
+                        automation_context.project_root(),
                         tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
                         &problem,
                     );
@@ -425,12 +420,12 @@ fn run_combined_scheduler_effect_inner<'a>(
             }
             CombinedEffectAdmission::Replay { reflector, skill } => {
                 super::log_scheduler_automation_replay(
-                    project_path,
+                    automation_context.project_root(),
                     tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                     &reflector,
                 );
                 super::log_scheduler_automation_replay(
-                    project_path,
+                    automation_context.project_root(),
                     tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                     &skill,
                 );
@@ -447,7 +442,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 skill,
             } => {
                 super::log_scheduler_automation_replay(
-                    project_path,
+                    automation_context.project_root(),
                     tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                     &reflector,
                 );
@@ -456,7 +451,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 skill_options.trigger = options.trigger;
                 let replay_completed = reflector.is_completed();
                 let retained = run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-                    memory,
+                    automation_context,
                     config,
                     configuration_revision_id,
                     backend,
@@ -466,8 +461,8 @@ fn run_combined_scheduler_effect_inner<'a>(
                 .await;
                 settle_single_replay_leg(
                     engine,
-                    project_id,
-                    project_path,
+                    automation_context.project_id(),
+                    automation_context.project_root(),
                     first_error,
                     replay_completed,
                     tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
@@ -484,7 +479,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 skill,
             } => {
                 super::log_scheduler_automation_replay(
-                    project_path,
+                    automation_context.project_root(),
                     tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                     &skill,
                 );
@@ -494,7 +489,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 let replay_completed = skill.is_completed();
                 let retained =
                     run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                        memory,
+                        automation_context,
                         config,
                         &reflector_control,
                         configuration_revision_id,
@@ -505,8 +500,8 @@ fn run_combined_scheduler_effect_inner<'a>(
                     .await;
                 settle_single_replay_leg(
                     engine,
-                    project_id,
-                    project_path,
+                    automation_context.project_id(),
+                    automation_context.project_root(),
                     first_error,
                     replay_completed,
                     tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
@@ -528,9 +523,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                     *reflector,
                     *skill,
                     engine,
-                    memory,
-                    project_id,
-                    project_path,
+                    automation_context,
                     config,
                     configuration_revision_id,
                     backend,
@@ -566,9 +559,7 @@ fn run_execute_pair<'a>(
     reflector: AutomationEffectAuthority,
     skill: AutomationEffectAuthority,
     engine: &'a DaemonEngine,
-    memory: &'a TraceDecay,
-    project_id: &'a tracedecay_domain::ProjectId,
-    project_path: &'a Path,
+    automation_context: &'a AutomationProjectContext,
     config: &'a tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision_id: &'a tracedecay_domain::configuration::ConfigurationRevisionId,
     backend: &'a dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
@@ -577,8 +568,10 @@ fn run_execute_pair<'a>(
     first_error: &'a mut Option<tracedecay_domain::errors::TraceDecayError>,
 ) -> Pin<Box<dyn Future<Output = CombinedEffectOutcome> + Send + 'a>> {
     Box::pin(async move {
+        let project_id = automation_context.project_id();
+        let project_path = automation_context.project_root();
         let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-            memory,
+            automation_context,
             config,
             configuration_revision_id,
             backend,
@@ -1551,10 +1544,14 @@ mod tests {
         let options = CombinedReviewAutomationOptions::default();
         assert_eq!(options.trigger, AutomationTrigger::Scheduler);
         assert_eq!(options.skill_writer.trigger, AutomationTrigger::ManualCli);
+        let automation_context = fixture
+            .memory
+            .automation_project_context()
+            .expect("compose project automation context");
 
         let prior_skill_run_id = "combined-partial-replay-prior-skill";
         let prior_skill = run_skill_writer_with_backend_and_retrieval(
-            fixture.memory.as_ref(),
+            &automation_context,
             &config,
             &fixture.configuration_revision_id,
             &backend,
@@ -1603,7 +1600,7 @@ mod tests {
         reflector_options.run_id = Some(combined_run_id.to_owned());
         let reflector_run =
             run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                fixture.memory.as_ref(),
+                &automation_context,
                 &config,
                 &parent_control,
                 &fixture.configuration_revision_id,
@@ -1671,9 +1668,7 @@ mod tests {
         let mut effect = Box::pin(run_combined_scheduler_effect(
             admission,
             &fixture.engine,
-            fixture.memory.as_ref(),
-            &fixture.project_id,
-            &fixture.project_root,
+            &automation_context,
             &config,
             &fixture.configuration_revision_id,
             &backend,

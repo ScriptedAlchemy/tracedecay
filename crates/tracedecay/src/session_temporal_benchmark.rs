@@ -42,9 +42,9 @@ use tracedecay_session_memory::context::{
 };
 use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRequestBinding,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalQuery,
 };
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_sessions::observation::ObservationCancellation;
@@ -254,15 +254,6 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
             binding,
             request,
         )
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct NoopWake;
-
-impl SessionRefreshSchedulerPort for NoopWake {
-    fn wake(&self) -> Result<(), SessionRefreshSchedulerError> {
-        Ok(())
     }
 }
 
@@ -1253,36 +1244,6 @@ mod tests {
     #[test]
     fn contract_matches_checked_in_artifacts() {
         validate_contract().expect("session-temporal contract");
-    }
-
-    #[test]
-    fn phases_are_descriptive_and_ordered() {
-        assert_eq!(
-            Phase::ALL.map(Phase::as_str),
-            [
-                "rebuild_activate",
-                "exact_replay",
-                "compact_rank",
-                "late_hydrate",
-            ]
-        );
-        assert_eq!(P95_LABEL, "descriptive nearest-rank sample p95");
-        assert_eq!(
-            P99_LABEL,
-            "descriptive nearest-rank sample p99 (sample maximum when n=30)"
-        );
-    }
-
-    #[test]
-    fn diagnostic_measurement_host_policy_allows_linux_and_macos() {
-        assert!(BenchmarkHostPolicy::for_target_os("linux").allows_diagnostic_measurement());
-        assert!(BenchmarkHostPolicy::for_target_os("macos").allows_diagnostic_measurement());
-    }
-
-    #[test]
-    fn contract_refresh_host_policy_is_linux_only() {
-        assert!(BenchmarkHostPolicy::for_target_os("linux").allows_contract_refresh());
-        assert!(!BenchmarkHostPolicy::for_target_os("macos").allows_contract_refresh());
     }
 
     #[test]

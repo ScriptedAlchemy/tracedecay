@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
@@ -11,32 +11,6 @@ struct FixtureCodeGraphProjection {
     scope: tracedecay_contracts::ResolvedScope,
     store: Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore>,
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
-}
-
-#[derive(Clone)]
-struct FixtureSourceReadRuntime {
-    project_root: PathBuf,
-    project_id: String,
-    database: tracedecay_runtime_core::db::Database,
-    read_only: bool,
-}
-
-impl tracedecay_graph_query::SourceReadRuntimePort for FixtureSourceReadRuntime {
-    fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-
-    fn db(&self) -> &tracedecay_runtime_core::db::Database {
-        &self.database
-    }
-
-    fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
-    fn project_id(&self) -> &str {
-        &self.project_id
-    }
 }
 
 #[derive(Clone)]
@@ -262,12 +236,12 @@ fn verified_graph_options_with_freshness<'a>(
                 .code_graph_projection_read_port
                 .clone()
                 .expect("graph fixture projection"),
-            Some(Arc::new(FixtureSourceReadRuntime {
-                project_root: cg.project_root().to_path_buf(),
-                project_id: project_id.as_str().to_owned(),
-                database: cg.db().clone(),
-                read_only: cg.is_read_only(),
-            })),
+            Some(tracedecay_graph_query::SourceReadContext::new(
+                cg.project_root().to_path_buf(),
+                cg.db().clone(),
+                cg.is_read_only(),
+                project_id.as_str().to_owned(),
+            )),
         ),
     );
     options

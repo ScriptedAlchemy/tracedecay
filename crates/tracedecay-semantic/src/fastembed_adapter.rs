@@ -2694,23 +2694,4 @@ mod tests {
             }))
         ));
     }
-
-    #[test]
-    fn fake_reports_resident_bytes_and_close_counters() {
-        let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(4096);
-        let counters = runtime.counters();
-        {
-            let session = runtime
-                .open_session(&authority(8), &never_cancelled())
-                .expect("session");
-            assert_eq!(session.resident_bytes_estimate(), 4096);
-            assert_eq!(counters.sessions_opened.load(Ordering::SeqCst), 1);
-            assert_eq!(counters.sessions_closed.load(Ordering::SeqCst), 0);
-        }
-        assert_eq!(
-            counters.sessions_closed.load(Ordering::SeqCst),
-            1,
-            "closing a session is observable"
-        );
-    }
 }

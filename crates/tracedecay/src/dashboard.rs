@@ -9,6 +9,8 @@
 //! runtime ([`crate::product_runtime`]). The canonical API crate owns the
 //! resulting HTTP router and transport policy.
 
+use tracedecay_dashboard_api::DashboardProjectContext;
+
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_service::DaemonInvocationService;
 #[cfg(feature = "test-transport")]
@@ -28,8 +30,7 @@ pub use tracedecay_dashboard_api::contract_schema;
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub use tracedecay_dashboard_api::{
-    DashboardHostAdmissionTestAuthorityV1, DashboardTestEndpointV1, DashboardTestProjectGraphsV1,
-    run_until_shutdown_for_tests_with_host_admission,
+    DashboardHostAdmissionTestAuthorityV1, DashboardTestEndpointV1,
 };
 
 /// Canonical observation-capture seeding for dashboard integration fixtures.
@@ -54,6 +55,68 @@ pub fn spa_router(assets: tracedecay_api::StaticDashboardAssets) -> axum::Router
 pub fn register_test_schema_installer() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
     REGISTER.call_once(tracedecay_store_runtime::register_registered_schema_installer);
+}
+
+pub(crate) fn dashboard_project_context(
+    graph: &crate::tracedecay::TraceDecay,
+) -> DashboardProjectContext {
+    DashboardProjectContext {
+        store_layout: graph.store_layout().clone(),
+        dashboard_db_path: graph.dashboard_db_path(),
+        dashboard_database: graph.dashboard_database_guard(),
+        retention_config: tracedecay_dashboard_api::config::RetentionConfig {
+            store_soft_budgets_bytes: graph
+                .get_config()
+                .sync
+                .retention
+                .store_soft_budgets_bytes
+                .clone(),
+        },
+        host_io: tracedecay_agent_hosts::host_io(),
+        user_settings_client: graph.configuration_runtime().user_settings_client(),
+    }
+}
+
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct DashboardTestProjectGraphsV1 {
+    contexts: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
+}
+
+#[cfg(feature = "test-transport")]
+impl DashboardTestProjectGraphsV1 {
+    pub fn register(&self, graph: std::sync::Arc<crate::tracedecay::TraceDecay>) {
+        self.contexts
+            .register(std::sync::Arc::new(dashboard_project_context(&graph)));
+    }
+}
+
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
+    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    authority: DashboardHostAdmissionTestAuthorityV1,
+    project_graphs: DashboardTestProjectGraphsV1,
+    endpoint: DashboardTestEndpointV1<'_>,
+    build_version: &'static str,
+    spa_routes: axum::Router,
+    shutdown: F,
+) -> tracedecay_domain::errors::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tracedecay_dashboard_api::run_until_shutdown_for_tests_with_host_admission(
+        std::sync::Arc::new(dashboard_project_context(&graph)),
+        authority,
+        project_graphs.contexts,
+        endpoint,
+        build_version,
+        spa_routes,
+        shutdown,
+    )
+    .await
 }
 
 /// Composes the production dashboard automation authority over one retained

@@ -582,6 +582,14 @@ name = "transcript_ingest_suite"
 path = "tests/transcript_ingest_suite/main.rs"
 required-features = ["test-helpers"]
 
+# Reproducible claude-observation pipeline baseline. The `#[ignore]`d
+# measurement is driven by `scripts/run-claude-observation-benchmark.sh`; the
+# evidence-directory contract checks run with the suite.
+[[test]]
+name = "claude_observation_benchmark"
+path = "tests/claude_observation_benchmark/main.rs"
+required-features = ["test-helpers"]
+
 # Former standalone default-feature singles, compiled as modules of one binary.
 [[test]]
 name = "product_surface_suite"

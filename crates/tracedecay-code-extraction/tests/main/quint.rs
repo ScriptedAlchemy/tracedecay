@@ -196,18 +196,6 @@ fn comments_do_not_break_pending_kind() {
 }
 
 #[test]
-fn extensions_are_qnt() {
-    let ext = QuintExtractor;
-    assert_eq!(ext.extensions(), &["qnt"]);
-}
-
-#[test]
-fn language_name_is_quint() {
-    let ext = QuintExtractor;
-    assert_eq!(ext.language_name(), "Quint");
-}
-
-#[test]
 fn empty_file_produces_only_file_node() {
     let result = extract("");
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

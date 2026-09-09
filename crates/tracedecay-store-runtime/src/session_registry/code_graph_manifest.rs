@@ -27,6 +27,22 @@ use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
 
 const SEAL_READ_CHECK_BYTES: usize = 64 * 1024;
 
+fn classify_sealed_generation_decode_error(
+    error: CodeIndexProductionErrorV1,
+    sealed_state_digest: &ManifestDigest,
+) -> GraphDbError {
+    match error {
+        CodeIndexProductionErrorV1::SourceCommitmentsUnavailable => {
+            GraphDbError::SourceCommitmentsUnavailable {
+                sealed_state_digest: sealed_state_digest.as_str().to_owned(),
+            }
+        }
+        error => GraphDbError::Corrupt {
+            message: format!("sealed code generation replay is invalid: {error}"),
+        },
+    }
+}
+
 fn validate_sealed_generation_metadata(metadata: &std::fs::Metadata) -> Result<u64, GraphDbError> {
     if !metadata.file_type().is_file() {
         return Err(GraphDbError::Corrupt {
@@ -415,9 +431,8 @@ fn decode_verified_seal_with_bundle_barrier(
     );
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_registry.seal.decode.bytes_total").inc(admitted_len);
-    let monolithic = decoded.map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed code generation replay is invalid: {error}"),
-    })?;
+    let monolithic = decoded
+        .map_err(|error| classify_sealed_generation_decode_error(error, &expected_digest))?;
     let mut lifetime_lock = Some(lifetime_lock);
     let generation = if let Some(generation) = monolithic {
         generation
@@ -495,9 +510,7 @@ fn decode_verified_seal_with_bundle_barrier(
             return Err(interruption);
         }
         decoded
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("sealed code generation replay is invalid: {error}"),
-            })?
+            .map_err(|error| classify_sealed_generation_decode_error(error, &expected_digest))?
             .ok_or_else(|| GraphDbError::Corrupt {
                 message: "sealed code generation format revision is incompatible".to_owned(),
             })?
