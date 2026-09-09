@@ -740,11 +740,17 @@ fn ndcg_at_10_ppm(
     if anchors.is_empty() {
         return 0;
     }
-    let dcg = candidates
+    // Recall and ideal gain count labelled targets, not rows. Multiple
+    // occurrences or aliases of one target must not earn repeated gain.
+    let anchors = anchors.iter().collect::<BTreeSet<_>>();
+    let dcg = anchors
         .iter()
-        .enumerate()
-        .filter(|(_, candidate)| candidate_matches_any_anchor(candidate, anchors))
-        .map(|(index, _)| 1.0 / ((index + 2) as f64).log2())
+        .filter_map(|anchor| {
+            candidates
+                .iter()
+                .position(|candidate| candidate_matches_anchor(candidate, anchor))
+        })
+        .map(|index| 1.0 / ((index + 2) as f64).log2())
         .sum::<f64>();
     let ideal = (0..anchors.len().min(10))
         .map(|index| 1.0 / ((index + 2) as f64).log2())
@@ -1354,6 +1360,46 @@ mod tests {
             ),
             (1, 12)
         );
+    }
+
+    #[test]
+    fn ndcg_credits_each_label_once_despite_distinct_candidate_aliases() {
+        let query = query("aliases", "natural_language", &["a", "b", "c"]);
+        let mut candidates = (0..5)
+            .map(|index| {
+                let mut candidate = ranked(&format!("symbol-{index}"));
+                candidate.anchors.push("a".to_owned());
+                candidate
+            })
+            .collect::<Vec<_>>();
+        let repeated = evaluate_query(&query, &row("aliases", candidates.clone())).unwrap();
+        assert_eq!(repeated.quality.recall_at_10.numerator, 1);
+        assert_eq!(repeated.quality.duplicate_rate.numerator, 0);
+        assert_eq!(repeated.quality.ndcg_at_10_ppm, 469_279);
+
+        // Adding genuinely new labelled evidence earns gain at its real rank;
+        // extra aliases of the first label did not move its first occurrence.
+        candidates.push(ranked("b"));
+        candidates.push(ranked("c"));
+        let covered = evaluate_query(&query, &row("aliases", candidates)).unwrap();
+        assert_eq!(covered.quality.recall_at_10.numerator, 3);
+        assert!(covered.quality.ndcg_at_10_ppm > repeated.quality.ndcg_at_10_ppm);
+        assert!(covered.quality.ndcg_at_10_ppm < 1_000_000);
+
+        let ideal = evaluate_query(
+            &query,
+            &row("aliases", vec![ranked("a"), ranked("b"), ranked("c")]),
+        )
+        .unwrap();
+        assert_eq!(ideal.quality.ndcg_at_10_ppm, 1_000_000);
+
+        // One row can satisfy multiple labelled targets; each earns its first
+        // gain at that row, rather than being lost to binary row relevance.
+        let mut composite = ranked("composite");
+        composite.anchors = vec!["a".to_owned(), "b".to_owned()];
+        let multiple = evaluate_query(&query, &row("aliases", vec![composite])).unwrap();
+        assert_eq!(multiple.quality.recall_at_10.numerator, 2);
+        assert_eq!(multiple.quality.ndcg_at_10_ppm, 938_557);
     }
 
     #[test]

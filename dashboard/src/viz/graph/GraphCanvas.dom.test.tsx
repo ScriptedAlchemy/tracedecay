@@ -51,11 +51,8 @@ vi.mock('./activation.ts', () => ({
   settled: () => true,
 }));
 
-vi.mock('graphology-layout-forceatlas2', () => ({
-  default: {
-    inferSettings: () => ({ gravity: 1 }),
-    assign: () => undefined,
-  },
+vi.mock('./emergentLayout.ts', () => ({
+  settleEmergentOffThread: async () => true,
 }));
 
 /** Mirrors the one behaviour of the real renderer this file is about: Sigma
