@@ -22,17 +22,6 @@ use tracedecay_session_memory::runtime_telemetry::{
 /// (b) `stat` the `SQLite` files and ask the connection for its journal
 /// mode. Unavailable pragmas remain optional; failures to identify or stat the
 /// store itself fail the read instead of fabricating a zero-sized database.
-pub async fn collect(cg: &crate::tracedecay::TraceDecay) -> Result<RuntimeSnapshot> {
-    collect_with_integrity(cg, false).await
-}
-
-pub async fn collect_with_integrity(
-    cg: &crate::tracedecay::TraceDecay,
-    include_integrity: bool,
-) -> Result<RuntimeSnapshot> {
-    collect_with_integrity_and_generation_census(cg, include_integrity, None).await
-}
-
 #[hotpath::measure(label = "runtime_ports.collect", future = true)]
 pub(crate) async fn collect_with_integrity_and_generation_census(
     cg: &crate::tracedecay::TraceDecay,

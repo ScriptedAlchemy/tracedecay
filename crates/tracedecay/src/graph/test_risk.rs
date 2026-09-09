@@ -13,13 +13,13 @@ const MAX_TEST_RISK_SYMBOLS: usize = 500_000;
 const MAX_TEST_RISK_RELATIONS: usize = 2_000_000;
 
 #[derive(Debug, Serialize)]
-pub struct TestRiskReport {
+pub(crate) struct TestRiskReport {
     pub risks: Vec<TestRiskEntry>,
     pub summary: TestRiskSummary,
 }
 
 #[derive(Debug, Serialize)]
-pub struct TestRiskEntry {
+pub(crate) struct TestRiskEntry {
     pub id: String,
     pub name: String,
     pub file: String,
@@ -37,7 +37,7 @@ pub struct TestRiskEntry {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TestRiskSummary {
+pub(crate) struct TestRiskSummary {
     pub total_functions: usize,
     pub tested: usize,
     pub skipped: usize,
@@ -51,7 +51,7 @@ pub struct TestRiskSummary {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TestRiskAttributionSummary {
+pub(crate) struct TestRiskAttributionSummary {
     pub depth: usize,
     pub direct_unit_attributed: usize,
     pub closure_attributed: usize,
@@ -62,7 +62,7 @@ pub struct TestRiskAttributionSummary {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TestRiskBucketSummary {
+pub(crate) struct TestRiskBucketSummary {
     pub attributed: usize,
     pub reachable_unattributed: usize,
     pub orphan_entry: usize,
