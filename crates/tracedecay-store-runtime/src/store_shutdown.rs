@@ -1,4 +1,4 @@
-//! Typed receipts and bounded joins for named daemon shutdown tasks.
+//! Typed receipts and bounded joins for named store-runtime shutdown tasks.
 //!
 //! `join_shutdown_tasks_until` reserves an abort budget inside the caller's
 //! deadline: tasks get the cooperative window first, then stragglers are
@@ -8,24 +8,25 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use super::DAEMON_TASK_ABORT_DEADLINE;
-use super::shutdown_coordination::ShutdownStatus;
+use tracedecay_daemon_service::ShutdownStatus;
+use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 
-pub(super) type ShutdownTaskStatus = ShutdownStatus;
+pub type ShutdownTaskStatus = ShutdownStatus;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ShutdownTaskOutcome {
-    pub(super) owner: String,
-    pub(super) status: ShutdownTaskStatus,
+pub struct ShutdownTaskOutcome {
+    pub owner: String,
+    pub status: ShutdownTaskStatus,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct ShutdownTaskReceipt {
-    pub(super) outcomes: Vec<ShutdownTaskOutcome>,
+pub struct ShutdownTaskReceipt {
+    pub outcomes: Vec<ShutdownTaskOutcome>,
 }
 
 impl ShutdownTaskReceipt {
-    pub(super) fn failed(owner: impl Into<String>, error: impl Into<String>) -> Self {
+    #[must_use]
+    pub fn failed(owner: impl Into<String>, error: impl Into<String>) -> Self {
         Self {
             outcomes: vec![ShutdownTaskOutcome {
                 owner: owner.into(),
@@ -34,7 +35,8 @@ impl ShutdownTaskReceipt {
         }
     }
 
-    pub(super) fn timed_out(owner: impl Into<String>) -> Self {
+    #[must_use]
+    pub fn timed_out(owner: impl Into<String>) -> Self {
         Self {
             outcomes: vec![ShutdownTaskOutcome {
                 owner: owner.into(),
@@ -43,14 +45,15 @@ impl ShutdownTaskReceipt {
         }
     }
 
-    pub(super) fn is_clean(&self) -> bool {
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
         self.outcomes
             .iter()
             .all(|outcome| outcome.status == ShutdownTaskStatus::Clean)
     }
 
-    #[cfg(test)]
-    pub(super) fn status(&self) -> ShutdownTaskStatus {
+    #[must_use]
+    pub fn status(&self) -> ShutdownTaskStatus {
         let failures = self
             .outcomes
             .iter()
@@ -72,11 +75,11 @@ impl ShutdownTaskReceipt {
         }
     }
 
-    pub(super) fn extend(&mut self, mut other: Self) {
+    pub fn extend(&mut self, mut other: Self) {
         self.outcomes.append(&mut other.outcomes);
     }
 
-    pub(super) fn retain_failures_from(&mut self, failures: &[ShutdownTaskOutcome]) {
+    pub fn retain_failures_from(&mut self, failures: &[ShutdownTaskOutcome]) {
         for failure in failures {
             let ShutdownTaskStatus::Failed(prior_error) = &failure.status else {
                 continue;
@@ -103,14 +106,16 @@ impl ShutdownTaskReceipt {
         }
     }
 
-    pub(super) fn failed_count(&self) -> usize {
+    #[must_use]
+    pub fn failed_count(&self) -> usize {
         self.outcomes
             .iter()
             .filter(|outcome| matches!(outcome.status, ShutdownTaskStatus::Failed(_)))
             .count()
     }
 
-    pub(super) fn timed_out_count(&self) -> usize {
+    #[must_use]
+    pub fn timed_out_count(&self) -> usize {
         self.outcomes
             .iter()
             .filter(|outcome| outcome.status == ShutdownTaskStatus::TimedOut)
@@ -118,7 +123,7 @@ impl ShutdownTaskReceipt {
     }
 }
 
-pub(super) async fn join_shutdown_tasks_until<Tasks, Task>(
+pub async fn join_shutdown_tasks_until<Tasks, Task>(
     deadline: tokio::time::Instant,
     tasks: Tasks,
 ) -> ShutdownTaskReceipt

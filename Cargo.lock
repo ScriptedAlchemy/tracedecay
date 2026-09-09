@@ -7189,6 +7189,7 @@ dependencies = [
  "tracedecay-code-index-runtime",
  "tracedecay-contracts",
  "tracedecay-daemon-identity",
+ "tracedecay-daemon-service",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",

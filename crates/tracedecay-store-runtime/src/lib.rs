@@ -28,8 +28,12 @@
 pub mod remote_credentials;
 pub mod remote_query;
 pub mod remote_replay_transaction;
+pub mod semantic_artifact_gc;
 pub mod session_registry;
+pub mod standalone_session;
 pub mod store_locator_resolver;
+pub mod store_shutdown;
+pub mod writer_gate;
 
 mod schema;
 
@@ -41,6 +45,9 @@ pub use remote_credentials::{
 pub use remote_query::DaemonRemoteExactObservationQueryPortV1;
 pub use remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 pub use schema::register_registered_schema_installer;
+pub use semantic_artifact_gc::{
+    SemanticArtifactGcMaintenanceTask, spawn_semantic_artifact_gc_maintenance,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use session_registry::maintenance::RegisteredSchemaConvergenceTestGate;
 pub use session_registry::maintenance::{
@@ -52,3 +59,8 @@ pub use session_registry::{
     mark_process_long_lived_for_session_maintenance, open_user_memory_db,
     process_runtime_generation, registry_open_error, release_process_allocator_memory,
 };
+pub use standalone_session::join_standalone_session_registry;
+pub use store_shutdown::{
+    ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus, join_shutdown_tasks_until,
+};
+pub use writer_gate::{StoreWriterClass, StoreWriterGates, WriterAdmissionGuard, WriterScope};

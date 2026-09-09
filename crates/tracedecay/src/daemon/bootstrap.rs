@@ -10,6 +10,7 @@ use tokio::task::JoinSet;
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
+use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
@@ -454,7 +455,7 @@ fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownRece
     }
 }
 
-fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskReceipt) {
+fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::ShutdownTaskReceipt) {
     if receipt.is_clean() {
         return;
     }
@@ -468,9 +469,9 @@ fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskRec
     );
     for outcome in &receipt.outcomes {
         let status = match outcome.status {
-            store_shutdown::ShutdownTaskStatus::Clean => continue,
-            store_shutdown::ShutdownTaskStatus::Failed(_) => "failed",
-            store_shutdown::ShutdownTaskStatus::TimedOut => "timed_out",
+            tracedecay_store_runtime::ShutdownTaskStatus::Clean => continue,
+            tracedecay_store_runtime::ShutdownTaskStatus::Failed(_) => "failed",
+            tracedecay_store_runtime::ShutdownTaskStatus::TimedOut => "timed_out",
         };
         log_daemon_event(
             "daemon_shutdown",

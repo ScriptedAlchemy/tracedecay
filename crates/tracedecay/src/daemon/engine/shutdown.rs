@@ -23,7 +23,7 @@ use crate::daemon::shutdown_coordination::{ShutdownOwner, ShutdownStatus};
 use crate::daemon::shutdown_orchestration::{
     DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,
 };
-use crate::daemon::store_shutdown::ShutdownTaskReceipt;
+use tracedecay_store_runtime::ShutdownTaskReceipt;
 use crate::daemon::{log_daemon_event, project_open_tasks, shutdown_project_servers};
 #[cfg(test)]
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;

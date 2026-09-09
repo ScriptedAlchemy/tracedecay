@@ -24,8 +24,8 @@ use super::profile_host_admission_replay::{
 };
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
-use super::store_writer_gate::StoreWriterGates;
-pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
+use tracedecay_store_runtime::StoreWriterGates;
+pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_identity::{authority, profile_identity};
@@ -432,7 +432,7 @@ impl ProfileHostAdmissionBootstrapContext {
 /// administration cannot prove ownership against stale daemon state.
 ///
 /// Writer admission itself is *per store* — see
-/// [`store_writer_gate`](super::store_writer_gate) for the hierarchy and the
+/// [`tracedecay_store_runtime::writer_gate`] for the hierarchy and the
 /// exclusivity argument. The proof branch administration performs is computed
 /// from one store family's database paths, so a writer on another store can
 /// never invalidate it; a single daemon-wide gate only meant a sync of project

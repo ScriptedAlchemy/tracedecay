@@ -13,7 +13,7 @@ use crate::daemon::maintenance::{
     SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
     StoreTelemetrySamplingRegistry,
 };
-use crate::daemon::store_writer_gate::{StoreWriterGates, WriterScope};
+use tracedecay_store_runtime::{StoreWriterGates, WriterScope};
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_retention::code_index_generations::{

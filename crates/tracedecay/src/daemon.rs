@@ -264,7 +264,6 @@ mod shutdown_orchestration;
 mod shutdown_watchdog;
 #[cfg(feature = "hotpath")]
 pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
-mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
@@ -312,9 +311,6 @@ use lsp_sessions::{
     settle_pending_lsp_workspace_mutation, update_connection_lsp_sessions,
 };
 mod maintenance;
-mod maintenance_tasks;
-pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
-use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 pub mod pr_autotrack;
 mod production_harness;
 mod store_maintenance;
@@ -401,7 +397,6 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
-mod store_writer_gate;
 mod wire_io;
 #[cfg(test)]
 mod work_evidence_retrieval_tests;

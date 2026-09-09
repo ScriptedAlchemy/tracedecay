@@ -6,7 +6,7 @@
 
 use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::shutdown_coordination::ShutdownStatus;
-use super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt, join_shutdown_tasks_until};
+use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
 use std::collections::HashSet;
 use tracedecay_daemon_identity::authority;

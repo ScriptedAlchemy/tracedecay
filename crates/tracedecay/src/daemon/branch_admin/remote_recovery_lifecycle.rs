@@ -15,7 +15,7 @@ use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
 use crate::daemon::maintenance::StoreTelemetrySamplingRegistry;
-use crate::daemon::store_writer_gate::WriterAdmissionGuard;
+use tracedecay_store_runtime::WriterAdmissionGuard;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_domain::errors::{Result, TraceDecayError};
