@@ -172,9 +172,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           * narrow column (the shell's `main` is the scroll container), split
           * panes from `lg`. */}
         <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
-          {/* Same HUD geometry as the all-projects field, so the two Brains
-            * read as one instrument in two states rather than two designs. */}
-          <div className="pointer-events-none static z-10 mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
+          {/* Readouts reserve space above the graph at every viewport. */}
+          <div className="pointer-events-none mb-2 flex shrink-0 flex-wrap items-start gap-2">
             <ScopedReadout
               items={[
                 { label: 'nodes', ...splitCount(totals?.nodes ?? null) },
@@ -216,8 +215,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                     body: 'symbol',
                     size: 'connectedness',
                     hue: 'symbol kind',
-                    signal: 'click activation',
-                    relation: 'relation; activation thickens',
+                    signal: 'static; no symbol activity supplied',
+                    relation: 'returned relation',
                   }}
                   caption={
                     <>
@@ -230,7 +229,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                             .filter(Boolean)
                             .join(' and ')}`
                         : ''}{' '}
-                      · size = connectedness · hover isolates a neighbourhood, click fires it
+                      · size = connectedness · hover isolates a neighbourhood
                     </>
                   }
                 />

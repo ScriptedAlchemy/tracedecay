@@ -88,14 +88,9 @@ export function createActivationOverlay({
         const lit = heat > 0
           ? lerpRgbTuple(resting, colors.hot, Math.min(1, heat))
           : resting;
-        const shared = { x: attrs['x'], y: attrs['y'], label: '' };
-        // Sigma draws each companion as a hard-edged disc, so a corona is
-        // really three concentric steps and every step is a visible edge.
-        // The old radii (1.55x and 2.9x the body) made those edges read as
-        // banding rather than falloff, and turned a modest graph into a field
-        // of lollipops. Pulled in tight, the resting glow is a rim on the
-        // body instead of a second object beside it -- and a strike still
-        // has all the room it needs to swell.
+        const shared = { x: attrs['x'], y: attrs['y'], label: null, type: 'glow' };
+        // The companion program fades these extents radially. Their size and
+        // brightness still derive only from measured vitality and real heat.
         upsert(graph, haloId, {
           ...shared,
           // Tight enough to read as a luminous rim, not a second donut body.

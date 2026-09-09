@@ -10,6 +10,7 @@ import {
 import { kindColor } from './kindColor.ts';
 import { isManaged } from './managed.ts';
 import { createNodeHoverDrawer } from './nodeHover.ts';
+import { GlowProgram } from './glowProgram.ts';
 import { palette, rgb, rgba, type ThemeBox } from './palette.ts';
 import type { FieldFrame } from './layout.ts';
 
@@ -119,6 +120,7 @@ export function createFieldRenderer({
   };
 
   const sigma = new Sigma(graph, container, {
+    nodeProgramClasses: { glow: GlowProgram },
     // Sigma's default hover pass paints an opaque white shadowed disc over
     // the hovered body; ours stays in the field's palette. See nodeHover.ts.
     defaultDrawNodeHover: createNodeHoverDrawer(theme),

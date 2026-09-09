@@ -54,6 +54,10 @@ vi.mock('sigma', () => ({
   },
 }));
 
+// The renderer reducer is exercised without a GPU; shader compilation belongs
+// to the real-browser pass, just as Sigma construction does.
+vi.mock('./glowProgram.ts', () => ({ GlowProgram: class {} }));
+
 const DARK: GraphPalette = {
   hot: [93, 231, 255],
   edge: [55, 83, 114],

@@ -214,7 +214,7 @@ export function buildDendrites(graph: Graph, edgeCount: number): Strand[] {
           // Geometry only: a waypoint is a joint, never a visible body.
           size: 0.01,
           color: 'rgba(0, 0, 0, 0)',
-          label: '',
+          label: null,
           zIndex: 0,
         });
       }

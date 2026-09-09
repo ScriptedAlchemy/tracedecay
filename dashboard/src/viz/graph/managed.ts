@@ -34,6 +34,9 @@ export function upsert(
   id: string,
   attributes: Record<string, unknown>,
 ): void {
-  if (graph.hasNode(id)) graph.mergeNodeAttributes(id, attributes);
-  else graph.addNode(id, attributes);
+  // Empty strings still enter Sigma's label collision grid: a larger halo
+  // would win its body's cell and suppress the actual identity label.
+  const decoration = { ...attributes, label: null };
+  if (graph.hasNode(id)) graph.mergeNodeAttributes(id, decoration);
+  else graph.addNode(id, decoration);
 }
