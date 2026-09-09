@@ -7,10 +7,10 @@ prints one cache id per line for every entry that can no longer be restored
 because a newer entry with the same restore lineage exists on the same ref.
 
 A lineage is the part of a key the workflow restores by prefix:
-Swatinem/rust-cache saves `v0-rust-<prefix>-<env hash>-<lockfile hash>` and
-restores `v0-rust-<prefix>-<env hash>-` by prefix, never across an env hash,
-so both an older lockfile generation and an older toolchain generation are
-unreachable.
+Swatinem/rust-cache saves `v<N>-rust-<prefix>-<env hash>-<lockfile hash>` and
+restores `v<N>-rust-<prefix>-<env hash>-` by prefix. rustc writes `.rmeta`
+read-only, so an older lockfile or generation of the same lane is not a
+usable compile cache — only the newest entry of that lane can be restored.
 
 Keys outside that shape (setup-node's `node-cache-…`, arbitrary
 `actions/cache` keys) are left alone: the same prefix can legitimately carry
@@ -20,21 +20,14 @@ several live entries there (one per lockfile a different job hashes).
 from __future__ import annotations
 
 import json
-import re
 import sys
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 from typing import Any
 
-LINEAGES = (re.compile(r"^(?P<lineage>v0-rust-.+)-[0-9a-f]{8}-[0-9a-f]{8}$"),)
-
-
-def lineage_of(key: str) -> str | None:
-    for pattern in LINEAGES:
-        match = pattern.match(key)
-        if match is not None:
-            return match.group("lineage")
-    return None
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rust_cache_lineage import lineage_of
 
 
 def superseded(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
