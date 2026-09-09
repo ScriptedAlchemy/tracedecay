@@ -25,9 +25,10 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use crate::daemon::automation_effect::recovery_index;
+use crate::daemon::automation_effect::recovery_index as recovery_composition;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 use tracedecay_automation_runtime::automation::effect_runtime::journal::*;
+use tracedecay_automation_runtime::automation::effect_runtime::recovery_index;
 
 struct NeverAutomationBackend;
 
@@ -102,7 +103,7 @@ fn seal_effect_authority(mut admission: DurableAutomationAdmission) -> DurableAu
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .expect("operation");
-    admission.effect_authority_digest = super::recovery_index::effect_authority_digest(
+    admission.effect_authority_digest = recovery_index::effect_authority_digest(
         admission.schema_version,
         &operation,
         &admission.request,
@@ -612,7 +613,7 @@ fn assert_effect_authority(admission: &DurableAutomationAdmission, expected: boo
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .expect("operation");
     assert_eq!(
-        super::recovery_index::admission_has_exact_authority(admission, &operation)
+        recovery_index::admission_has_exact_authority(admission, &operation)
             .expect("authority classification"),
         expected,
         "{label}"
@@ -2046,11 +2047,11 @@ fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
         .expect("reserved retirement");
     assert_eq!(reopened_record.admission().retirement(), Some(&binding));
     assert_eq!(
-        super::recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
+        recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
         Some("retirement_requires_exact_finalization")
     );
     assert_eq!(
-        super::recovery_index::special_recovery_defer_reason(reopened_record.admission(), false,),
+        recovery_index::special_recovery_defer_reason(reopened_record.admission(), false,),
         None
     );
     assert!(!reopened_record.is_terminal());
@@ -2161,7 +2162,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
 
     let corrupt_source = b"source changed after exact retirement admission";
     write_private_test_file(&source_path, corrupt_source);
-    let failed = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let failed = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
         &dashboard_root,
         &tracedecay_contracts::CancellationSignal::active(
@@ -2285,7 +2286,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     )
     .await
     .expect("reopen retirement recovery project");
-    let rejected = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let rejected = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
         &tracedecay_contracts::CancellationSignal::active(
@@ -2304,7 +2305,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     );
 
     write_private_test_file(&pending_index_path, &exact_transition_index);
-    let recovered = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let recovered = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
         &tracedecay_contracts::CancellationSignal::active(
@@ -2349,16 +2350,17 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     drop(entry_plus_marker_retirement);
     write_private_test_file(&source_path, &replacement_source);
 
-    let entry_plus_marker = recovery_index::reconcile_reserved_automation_effects_for_project(
-        &reopened,
-        &dashboard_root,
-        &tracedecay_contracts::CancellationSignal::active(
-            "cancellation.terminal-retirement-entry-plus-marker",
+    let entry_plus_marker =
+        recovery_composition::reconcile_reserved_automation_effects_for_project(
+            &reopened,
+            &dashboard_root,
+            &tracedecay_contracts::CancellationSignal::active(
+                "cancellation.terminal-retirement-entry-plus-marker",
+            )
+            .expect("entry-plus-marker cancellation"),
         )
-        .expect("entry-plus-marker cancellation"),
-    )
-    .await
-    .expect("entry-plus-marker restart converges through its marker first");
+        .await
+        .expect("entry-plus-marker restart converges through its marker first");
     assert_eq!(entry_plus_marker.inspected, 1);
     assert_eq!(entry_plus_marker.already_terminal, 1);
     assert_eq!(retirement_capture_count(&dashboard_root), 0);
@@ -2398,7 +2400,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
 
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
         .expect("re-index exact Terminal for idempotent retry");
-    let replayed = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let replayed = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
         &tracedecay_contracts::CancellationSignal::active(
@@ -2440,7 +2442,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
         .expect("re-index exact Terminal with archive and live admitted source");
     let archive_and_live_source =
-        recovery_index::reconcile_reserved_automation_effects_for_project(
+        recovery_composition::reconcile_reserved_automation_effects_for_project(
             &reopened,
             &dashboard_root,
             &tracedecay_contracts::CancellationSignal::active(
@@ -2505,7 +2507,7 @@ fn project_open_crash_recovery_preserves_shipped_reset_digest_until_exact_diagno
         Some(reset_digest.as_str())
     );
     assert_eq!(
-        super::recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
+        recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
         Some("shipped_proposals_require_exact_reset_diagnostic")
     );
     assert!(!reopened_record.is_terminal());
@@ -2819,7 +2821,7 @@ async fn post_write_reservation_error_retains_reserved_journal_and_pending_recov
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].path, path);
 
-    let report = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
         &tracedecay_contracts::CancellationSignal::active("cancellation.post-write-reservation")
@@ -2880,7 +2882,7 @@ async fn prewrite_reservation_error_retains_index_until_missing_journal_recovery
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].path, path);
 
-    let report = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
         &tracedecay_contracts::CancellationSignal::active("cancellation.prewrite-reservation")
@@ -2911,7 +2913,7 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
     let corrupt = b"corrupt-clean-eof-intent";
     write_private_test_file(&intent_path, corrupt);
 
-    let report = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
         &tracedecay_contracts::CancellationSignal::active("cancellation.clean-eof-corrupt-intent")
@@ -2972,7 +2974,7 @@ async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() 
     let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
     std::fs::write(&intent_path, b"corrupt-partial-intent").expect("corrupt append intent");
 
-    let report = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let report = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
         &tracedecay_contracts::CancellationSignal::active("cancellation.partial-corrupt-intent")
@@ -3712,7 +3714,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let ledger_path =
         tracedecay_automation_runtime::automation::run_ledger::run_ledger_path(dashboard_root);
     let ledger_before_recovery = std::fs::read(&ledger_path).expect("exact ledger bytes");
-    let recovery = recovery_index::reconcile_reserved_automation_effects_for_project(
+    let recovery = recovery_composition::reconcile_reserved_automation_effects_for_project(
         &cg,
         dashboard_root,
         &tracedecay_contracts::CancellationSignal::active("cancellation.corrupt-spool-recovery")

@@ -80,6 +80,20 @@ pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> 
     }
 }
 
+/// Consecutive project-open failures after which one scheduler loop exits.
+pub const PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
+
+/// Longest delay between retries after a project-open failure.
+pub const PROJECT_OPEN_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// Exponential project-open retry backoff, starting from one scheduler tick.
+pub fn project_open_backoff(consecutive_failures: u32) -> std::time::Duration {
+    let base = std::time::Duration::from_secs(super::config::DEFAULT_SCHEDULER_TICK_SECS);
+    let steps = consecutive_failures.saturating_sub(1).min(16);
+    base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
+        .min(PROJECT_OPEN_BACKOFF_CEILING)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutomationScheduleDecision {
     skip_reason: Option<&'static str>,
@@ -1430,6 +1444,47 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
+
+    #[test]
+    fn backoff_starts_at_one_tick_and_grows() {
+        let tick =
+            std::time::Duration::from_secs(super::super::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert_eq!(project_open_backoff(1), tick);
+        assert_eq!(project_open_backoff(2), tick * 2);
+        assert_eq!(project_open_backoff(3), tick * 4);
+    }
+
+    #[test]
+    fn backoff_is_capped_and_never_regresses() {
+        let mut previous = std::time::Duration::ZERO;
+        for attempt in 1..=64 {
+            let backoff = project_open_backoff(attempt);
+            assert!(backoff >= previous, "backoff must be monotonic");
+            assert!(
+                backoff <= PROJECT_OPEN_BACKOFF_CEILING,
+                "backoff must stay under its ceiling"
+            );
+            previous = backoff;
+        }
+        assert_eq!(project_open_backoff(64), PROJECT_OPEN_BACKOFF_CEILING);
+    }
+
+    #[test]
+    fn escalation_bounds_the_total_futile_retry_window() {
+        let total = (1..=PROJECT_OPEN_FAILURE_ESCALATION)
+            .map(project_open_backoff)
+            .sum::<std::time::Duration>();
+        let tick =
+            std::time::Duration::from_secs(super::super::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert!(
+            total > tick,
+            "escalation must allow more than one retry before exiting"
+        );
+        assert!(
+            total <= std::time::Duration::from_hours(1),
+            "a futile streak must not run for hours before escalating"
+        );
+    }
 
     fn session_evidence_task_config() -> AutomationTaskConfig {
         AutomationTaskConfig {
