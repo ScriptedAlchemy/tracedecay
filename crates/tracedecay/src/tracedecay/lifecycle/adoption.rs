@@ -263,15 +263,16 @@ fn moved_store_evidence(
         }
     }
     if layout.config_path.is_file() {
-        let config = crate::config::load_config_from_path(previous_root, &layout.config_path)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "cannot evaluate moved-store adoption evidence from '{}': {error}; \
+        let config =
+            tracedecay_configuration::load_config_from_path(previous_root, &layout.config_path)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "cannot evaluate moved-store adoption evidence from '{}': {error}; \
                      repair or remove the store config, or re-run `tracedecay init` \
                      with --fresh to mint a new identity without adoption",
-                    layout.config_path.display()
-                ),
-            })?;
+                        layout.config_path.display()
+                    ),
+                })?;
         let recorded = PathBuf::from(&config.root_dir);
         if paths_record_same_root(&recorded, new_root) {
             return Ok(MovedStoreEvidence::RecordsNewRoot);
@@ -328,9 +329,10 @@ async fn remap_moved_nongit_project(
                 ),
             })?
             .to_owned();
-        let mut config = crate::config::load_config_from_path(new_root, &layout.config_path)?;
+        let mut config =
+            tracedecay_configuration::load_config_from_path(new_root, &layout.config_path)?;
         config.root_dir = root_dir;
-        crate::config::save_config_to_path(&layout.config_path, &config)?;
+        tracedecay_configuration::save_config_to_path(&layout.config_path, &config)?;
     }
     registry
         .upsert_code_project(&candidate.project_id, new_root, None, None, None)

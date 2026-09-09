@@ -1476,7 +1476,7 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
 }
 
 fn global_table_retention_config(
-    config: &crate::config::RetentionConfig,
+    config: &tracedecay_configuration::RetentionConfig,
 ) -> tracedecay_maintenance::retention::RetentionConfig {
     let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
         (
@@ -1502,7 +1502,7 @@ fn global_table_retention_config(
 async fn maybe_run_global_retention(
     administration: &super::branch_admin::StoreAdministration,
     database: &tracedecay_global_db::RegisteredGlobalDb,
-    config: &crate::config::RetentionConfig,
+    config: &tracedecay_configuration::RetentionConfig,
 ) {
     let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
         return;
@@ -1703,8 +1703,8 @@ mod global_retention_tests {
             .expect("decode retention deletion receipt count")
     }
 
-    fn global_retention_config() -> crate::config::RetentionConfig {
-        let mut config = crate::config::RetentionConfig::default();
+    fn global_retention_config() -> tracedecay_configuration::RetentionConfig {
+        let mut config = tracedecay_configuration::RetentionConfig::default();
         config.session_lcm.enabled = true;
         config.session_lcm.dedupe_projected_after_days = Some(1);
         config.session_lcm.drop_after_days = None;

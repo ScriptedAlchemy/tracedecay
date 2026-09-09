@@ -64,14 +64,7 @@ pub(crate) fn dashboard_project_context(
         store_layout: graph.store_layout().clone(),
         dashboard_db_path: graph.dashboard_db_path(),
         dashboard_database: graph.dashboard_database_guard(),
-        retention_config: tracedecay_dashboard_api::config::RetentionConfig {
-            store_soft_budgets_bytes: graph
-                .get_config()
-                .sync
-                .retention
-                .store_soft_budgets_bytes
-                .clone(),
-        },
+        retention_config: graph.get_config().sync.retention.clone(),
         host_io: tracedecay_agent_hosts::host_io(),
         user_settings_client: graph.configuration_runtime().user_settings_client(),
     }

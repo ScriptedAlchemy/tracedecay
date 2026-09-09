@@ -675,11 +675,11 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     })
     .to_string();
 
-    let config = crate::config::TraceDecayConfig {
+    let config = tracedecay_configuration::TraceDecayConfig {
         root_dir: project.display().to_string(),
-        ..crate::config::TraceDecayConfig::default()
+        ..tracedecay_configuration::TraceDecayConfig::default()
     };
-    let config_path = crate::config::get_config_path(&project);
+    let config_path = tracedecay_configuration::get_config_path(&project);
     std::fs::create_dir_all(config_path.parent().expect("legacy config parent"))
         .expect("create legacy config parent");
     let legacy_input = serde_json::to_string_pretty(&config).expect("serialize legacy config");

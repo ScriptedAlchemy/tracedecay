@@ -477,7 +477,7 @@ pub struct DashboardState {
     pub dashboard_root: PathBuf,
     /// Retention policy resolved with the owning runtime configuration.
     /// Dashboard reads must not re-open mutable config input per request.
-    pub retention_config: crate::config::RetentionConfig,
+    pub retention_config: tracedecay_configuration::RetentionConfig,
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
     pub user_settings: Arc<dyn tracedecay_configuration::UserSettingsDaemonClient>,
@@ -2412,7 +2412,7 @@ mod authority_tests {
                 store_root: layout.data_root.clone(),
                 config_path: layout.config_path.clone(),
                 dashboard_root: layout.dashboard_root.clone(),
-                retention_config: crate::config::RetentionConfig::default(),
+                retention_config: tracedecay_configuration::RetentionConfig::default(),
                 user_settings: Arc::new(
                     tracedecay_configuration::ProductionUserSettingsDaemonClient::default(),
                 ),

@@ -354,7 +354,7 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
             &fixture.schedulers,
             &fixture.observations,
             &fixture.cancellation,
-            &crate::config::RetentionConfig::default(),
+            &tracedecay_configuration::RetentionConfig::default(),
             continuation,
         )
         .await;
@@ -392,7 +392,7 @@ async fn semantic_vector_continuation_skips_code_generation_retention() {
         &fixture.schedulers,
         &fixture.observations,
         &fixture.cancellation,
-        &crate::config::RetentionConfig::default(),
+        &tracedecay_configuration::RetentionConfig::default(),
         Some(crate::daemon::maintenance::MaintenanceContinuation::SemanticVectorRetention),
     )
     .await;

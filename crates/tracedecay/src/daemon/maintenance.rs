@@ -1287,7 +1287,7 @@ async fn run_maintenance_loop<F, Fut>(
 
 async fn run_registered_store_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
-    config: &crate::config::RetentionConfig,
+    config: &tracedecay_configuration::RetentionConfig,
 ) -> bool {
     let now = match now_secs_i64() {
         Ok(now) => now,
@@ -1619,7 +1619,7 @@ impl MaintenanceCoordinator {
         profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-        retention: crate::config::RetentionConfig,
+        retention: tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
     ) -> Self {
         let coordinator = Self::default();
@@ -1730,7 +1730,7 @@ impl MaintenanceCoordinator {
         profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-        retention: crate::config::RetentionConfig,
+        retention: tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
         interval: Duration,
     ) {
@@ -1759,7 +1759,7 @@ impl MaintenanceCoordinator {
         profile_database: &tracedecay_global_db::RegisteredGlobalDb,
         administration: &StoreAdministration,
         code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-        retention: &crate::config::RetentionConfig,
+        retention: &tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
         continuation: Option<MaintenanceContinuation>,
     ) -> MaintenanceTickOutcome {
@@ -2162,7 +2162,9 @@ impl ResidentMemoryLogStateV1 {
     }
 }
 
-pub(super) fn retention_maintenance_enabled(retention: &crate::config::RetentionConfig) -> bool {
+pub(super) fn retention_maintenance_enabled(
+    retention: &tracedecay_configuration::RetentionConfig,
+) -> bool {
     retention.session_lcm.enabled
         || retention.observation.enabled
         || retention.orphan_store_gc_days.is_some()
@@ -3132,7 +3134,7 @@ mod tests {
 
     #[test]
     fn debris_retention_enables_maintenance_without_orphan_gc() {
-        let mut retention = crate::config::RetentionConfig::default();
+        let mut retention = tracedecay_configuration::RetentionConfig::default();
         retention.session_lcm.enabled = false;
         retention.observation.enabled = false;
         retention.orphan_store_gc_days = None;
@@ -3144,7 +3146,7 @@ mod tests {
 
     #[test]
     fn soft_budget_alone_never_enables_destructive_maintenance() {
-        let mut retention = crate::config::RetentionConfig::default();
+        let mut retention = tracedecay_configuration::RetentionConfig::default();
         retention.session_lcm.enabled = false;
         retention.observation.enabled = false;
         retention.orphan_store_gc_days = None;

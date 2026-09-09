@@ -166,7 +166,7 @@ async fn run_foreground_loopback(
     );
 
     let lifecycle = DaemonLifecycle::default();
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = store_administration.registered_profile_database().await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
@@ -636,7 +636,7 @@ async fn run_foreground_unix(
             .session_runtime_registry()
             .await?,
     );
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration
         .registered_profile_database()

@@ -903,7 +903,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             schedulers,
             &observations,
             &cancellation,
-            &crate::config::RetentionConfig::default(),
+            &tracedecay_configuration::RetentionConfig::default(),
             None,
         )
         .await
@@ -920,7 +920,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             schedulers,
             &observations,
             &cancellation,
-            &crate::config::RetentionConfig::default(),
+            &tracedecay_configuration::RetentionConfig::default(),
             None,
         )
         .await
@@ -1014,7 +1014,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             schedulers,
             &observations,
             &cancellation,
-            &crate::config::RetentionConfig::default(),
+            &tracedecay_configuration::RetentionConfig::default(),
             None,
         )
         .await
@@ -1060,7 +1060,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             restarted_schedulers,
             &restarted_observations,
             &restarted_cancellation,
-            &crate::config::RetentionConfig::default(),
+            &tracedecay_configuration::RetentionConfig::default(),
             None,
         )
         .await
@@ -1268,7 +1268,7 @@ async fn run_generation_cadence(
         &resources.invocation.code_index_schedulers,
         &resources.store_administration.store_telemetry_sampling(),
         &tracedecay_session_memory::context::CancellationToken::new(),
-        &crate::config::RetentionConfig::default(),
+        &tracedecay_configuration::RetentionConfig::default(),
         None,
     )
     .await

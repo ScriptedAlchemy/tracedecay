@@ -29,7 +29,7 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_session_memory::context::CancellationToken,
-    retention: &crate::config::RetentionConfig,
+    retention: &tracedecay_configuration::RetentionConfig,
     continuation: Option<MaintenanceContinuation>,
 ) -> MaintenanceTickOutcome {
     // Each ordered phase gets its own wall span: the outer generation span is

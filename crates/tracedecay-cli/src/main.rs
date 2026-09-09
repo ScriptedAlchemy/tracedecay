@@ -910,7 +910,7 @@ pub(crate) async fn resolve_cli_project_root(
     if let Some(root) = resolve_registered_project_root(project_id, project_path).await? {
         return Ok(root);
     }
-    Ok(tracedecay::config::resolve_path_with_discovery(path))
+    Ok(tracedecay_configuration::resolve_path_with_discovery(path))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1290,7 +1290,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::error
             port,
             open,
         } => {
-            let project_path = tracedecay::config::resolve_path_with_discovery(path);
+            let project_path = tracedecay_configuration::resolve_path_with_discovery(path);
             let result = hotpath::future!(
                 commands::daemon_tool_json(
                     Some(&project_path),
@@ -1785,7 +1785,7 @@ async fn dispatch_configuration_command(
 ) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::CurrentCounter { path } => {
-            let project_path = tracedecay::config::resolve_path(path);
+            let project_path = tracedecay_configuration::resolve_path(path);
             let result = hotpath::future!(
                 commands::daemon_tool_json(
                     Some(&project_path),
@@ -1804,7 +1804,7 @@ async fn dispatch_configuration_command(
             println!("{value}");
         }
         Commands::ResetCounter { path } => {
-            let project_path = tracedecay::config::resolve_path(path);
+            let project_path = tracedecay_configuration::resolve_path(path);
             let result = commands::daemon_tool_json(
                 Some(&project_path),
                 "tracedecay_admin_project",
