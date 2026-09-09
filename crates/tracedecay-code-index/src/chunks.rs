@@ -10,7 +10,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use rayon::prelude::*;
@@ -126,7 +126,26 @@ pub struct CodeFileChunksV1 {
 /// ```
 #[derive(Clone, Debug)]
 pub struct ExactExtractionAuthorityV1 {
-    chunk_digests: BTreeMap<CodeSearchChunkId, String>,
+    chunk_digests: BTreeMap<CodeSearchChunkId, MintedChunkAuthorityV1>,
+}
+
+/// One minted chunk: its canonical digest and the row allocation the digest
+/// was computed over.
+///
+/// Every production admission presents the very rows the authority was minted
+/// from (a file's `artifacts.chunks` next to its `exact_authority`), so
+/// re-digesting them proved nothing the mint had not already proved and cost
+/// one canonical serialization plus SHA-256 per chunk per pass. A
+/// `CodeSearchChunkV1` has no interior mutability and a shared `Arc` cannot
+/// be written in place while this weak reference is live (`Arc::get_mut`
+/// refuses, `Arc::make_mut` moves the value to a fresh allocation), so a row
+/// that still upgrades to the minted allocation carries the minted bytes.
+/// Any other row — a fresh allocation, a row minted elsewhere, a forgery —
+/// is digested and compared as before.
+#[derive(Clone, Debug)]
+struct MintedChunkAuthorityV1 {
+    digest: String,
+    minted_row: Weak<CodeSearchChunkV1>,
 }
 
 /// One chunk re-admitted through parser-backed extraction authority.
@@ -204,10 +223,10 @@ fn try_for_each_chunk_ordered<F>(
     operation: F,
 ) -> Result<(), ChunkingFailureV1>
 where
-    F: Fn(&CodeSearchChunkV1) -> Result<(), ChunkingFailureV1> + Send + Sync,
+    F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> + Send + Sync,
 {
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-        return chunks.iter().try_for_each(|chunk| operation(chunk));
+        return chunks.iter().try_for_each(&operation);
     }
     let failure = chunks
         .par_iter()
@@ -233,9 +252,23 @@ impl ExactExtractionAuthorityV1 {
         )?;
         let mut chunk_digests = BTreeMap::new();
         for (chunk, digest) in chunks.iter().zip(digests) {
-            chunk_digests.insert(chunk.id.clone(), digest);
+            chunk_digests.insert(
+                chunk.id.clone(),
+                MintedChunkAuthorityV1 {
+                    digest,
+                    minted_row: Arc::downgrade(chunk),
+                },
+            );
         }
         Ok(Self { chunk_digests })
+    }
+
+    #[cfg(test)]
+    fn digests(&self) -> BTreeMap<CodeSearchChunkId, String> {
+        self.chunk_digests
+            .iter()
+            .map(|(id, minted)| (id.clone(), minted.digest.clone()))
+            .collect()
     }
 
     /// Reconstruct parser-backed exact admission from a sealed file artifact.
@@ -243,7 +276,9 @@ impl ExactExtractionAuthorityV1 {
     /// The durable generation decoder validates the complete extraction,
     /// chunk, manifest, receipt, and capability graph before exposing this
     /// authority. Recomputing digests here avoids persisting forgeable
-    /// authority internals.
+    /// authority internals; the sealed rows themselves are then admitted by
+    /// allocation identity (see [`MintedChunkAuthorityV1`]), so the mint is
+    /// the one digest pass a restored file pays.
     ///
     /// ```compile_fail
     /// use tracedecay_code_index::chunks::ExactExtractionAuthorityV1;
@@ -256,15 +291,26 @@ impl ExactExtractionAuthorityV1 {
         Self::mint(&chunks.chunks)
     }
 
-    fn validate_chunk(&self, chunk: &CodeSearchChunkV1) -> Result<(), ChunkingFailureV1> {
+    fn validate_chunk(&self, chunk: &Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> {
         chunk
             .validate()
             .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
-        let digest = canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)?;
-        if self.chunk_digests.get(&chunk.id) != Some(&digest) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+        let mismatch = || {
+            ChunkingFailureV1::NonCanonicalIdentity(
                 "chunk does not match parser-backed exact extraction authority".to_owned(),
-            ));
+            )
+        };
+        let minted = self.chunk_digests.get(&chunk.id).ok_or_else(mismatch)?;
+        if minted
+            .minted_row
+            .upgrade()
+            .is_some_and(|minted_row| Arc::ptr_eq(&minted_row, chunk))
+        {
+            return Ok(());
+        }
+        if canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk.as_ref())? != minted.digest
+        {
+            return Err(mismatch());
         }
         Ok(())
     }
@@ -2514,11 +2560,49 @@ mod tests {
         let chunks = wide_chunks(48);
         let first = ExactExtractionAuthorityV1::restore(&chunks).expect("first remint");
         let second = ExactExtractionAuthorityV1::restore(&chunks).expect("warm remint");
-        assert_eq!(first.chunk_digests, second.chunk_digests);
-        assert_eq!(
-            first.chunk_digests,
-            sequential_digest_reference(&chunks.chunks)
-        );
+        assert_eq!(first.digests(), second.digests());
+        assert_eq!(first.digests(), sequential_digest_reference(&chunks.chunks));
+    }
+
+    /// A row that is not the minted allocation is admitted by digest: an
+    /// equal copy passes, a same-id row with different bytes is refused, and
+    /// the minted rows keep admitting after every other reference to them
+    /// is gone.
+    #[test]
+    fn admission_falls_back_to_the_digest_for_rows_it_did_not_mint() {
+        let chunks = wide_chunks(48);
+        let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
+
+        let copy = Arc::new((*chunks.chunks[5]).clone());
+        assert!(!Arc::ptr_eq(&copy, &chunks.chunks[5]));
+        authority
+            .admit(Arc::clone(&copy))
+            .expect("an equal row in a fresh allocation is admitted by digest");
+
+        let mut forged = (*chunks.chunks[5]).clone();
+        forged.subtokens.push("forged".to_owned());
+        assert!(matches!(
+            authority.admit(Arc::new(forged)),
+            Err(ChunkingFailureV1::NonCanonicalIdentity(message))
+                if message.contains("does not match parser-backed exact extraction authority")
+        ));
+
+        let mut unknown = (*chunks.chunks[5]).clone();
+        unknown.id = id("chunk.v1.unknown");
+        assert!(matches!(
+            authority.admit(Arc::new(unknown)),
+            Err(ChunkingFailureV1::NonCanonicalIdentity(_))
+        ));
+
+        let copies = chunks
+            .chunks
+            .iter()
+            .map(|chunk| Arc::new((**chunk).clone()))
+            .collect::<Vec<_>>();
+        drop(chunks);
+        authority
+            .validate_all(&copies)
+            .expect("digests outlive the minted allocations");
     }
 
     /// The fanned-out digest sweep must produce byte-identical digests, in the
@@ -2529,7 +2613,7 @@ mod tests {
         let reference = sequential_digest_reference(&chunks.chunks);
 
         let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
-        assert_eq!(authority.chunk_digests, reference);
+        assert_eq!(authority.digests(), reference);
 
         authority
             .validate_all(&chunks.chunks)
