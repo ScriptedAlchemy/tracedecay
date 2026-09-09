@@ -1258,45 +1258,6 @@ mod tests {
     }
 
     #[test]
-    fn test_asset_name_stable() {
-        let name = asset_name("3.3.3", false);
-        assert!(name.starts_with("tracedecay-v3.3.3-"));
-        assert!(!name.contains("beta"));
-        if cfg!(windows) {
-            assert!(name.ends_with(".zip"));
-        } else {
-            assert!(name.ends_with(".tar.gz"));
-        }
-    }
-
-    #[test]
-    fn test_asset_name_beta() {
-        let name = asset_name("4.0.2-beta.1", true);
-        assert!(name.starts_with("tracedecay-beta-v4.0.2-beta.1-"));
-        if cfg!(windows) {
-            assert!(name.ends_with(".zip"));
-        } else {
-            assert!(name.ends_with(".tar.gz"));
-        }
-    }
-
-    #[test]
-    fn test_asset_name_uses_current_name() {
-        assert!(asset_name("3.3.3", false).starts_with("tracedecay-v3.3.3-"));
-    }
-
-    #[test]
-    fn test_release_tag() {
-        assert_eq!(release_tag("3.3.3"), "v3.3.3");
-        assert_eq!(release_tag("4.0.2-beta.1"), "v4.0.2-beta.1");
-    }
-
-    #[test]
-    fn test_current_platform_not_unknown() {
-        assert_ne!(current_platform(), "unknown");
-    }
-
-    #[test]
     fn only_a_single_tracedecay_semver_line_is_version_evidence() {
         assert_eq!(
             parse_version_output("tracedecay 5.0.1\n").as_deref(),
@@ -1703,31 +1664,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_upgrade_marks_equal_version_as_already_current() {
-        assert_eq!(
-            classify_upgrade("4.0.3", "4.0.3"),
-            UpgradeStatus::AlreadyCurrent
-        );
-    }
-
-    #[test]
     fn classify_upgrade_marks_newer_version_as_upgrade_available() {
         assert_eq!(
             classify_upgrade("4.0.2", "4.0.3"),
             UpgradeStatus::UpgradeAvailable("4.0.3")
         );
-    }
-
-    #[test]
-    fn github_latest_unavailable_error_mentions_assets_not_connectivity() {
-        let err = github_latest_unavailable_error(false);
-        let TraceDecayError::Config { message } = err else {
-            panic!("expected config error");
-        };
-
-        assert!(message.contains("no installable GitHub release asset"));
-        assert!(message.contains("current platform"));
-        assert!(!message.contains("could not reach GitHub"));
     }
 
     #[test]

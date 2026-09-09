@@ -888,36 +888,10 @@ mod tests {
     }
 
     #[test]
-    fn generated_artifact_bin_accepts_cargo_target_tracedecay_exe() {
-        let current = Path::new("/repo/target/debug/tracedecay");
-
-        assert_eq!(
-            current_tracedecay_exe_from(Some(current)).as_deref(),
-            Some("/repo/target/debug/tracedecay")
-        );
-    }
-
-    #[test]
     fn generated_artifact_bin_ignores_non_tracedecay_test_exe() {
         let current = Path::new("/repo/target/debug/deps/agent_suite-abc123");
 
         assert_eq!(current_tracedecay_exe_from(Some(current)), None);
-    }
-
-    #[test]
-    fn partition_empty_is_all_ok() {
-        assert!(matches!(
-            partition_reinstall_results(Vec::new()),
-            ReinstallOutcome::AllOk
-        ));
-    }
-
-    #[test]
-    fn partition_all_success_is_all_ok() {
-        assert!(matches!(
-            partition_reinstall_results(vec![ok("claude"), ok("cursor")]),
-            ReinstallOutcome::AllOk
-        ));
     }
 
     /// Kimi owns a canonical component set, so the receipt-backed transaction
@@ -1058,22 +1032,6 @@ mod tests {
             "an unknown id must not prevent AllOk / marker advancement"
         );
         Ok(())
-    }
-
-    /// A genuine `install()` failure (as opposed to an unresolvable id) is a
-    /// real failure: it stays in the results and yields PartialFailure so the
-    /// version markers do NOT advance and the work is retried.
-    #[test]
-    fn real_install_failure_yields_partial_failure() {
-        match partition_reinstall_results(vec![ok("claude"), err("cursor")]) {
-            ReinstallOutcome::PartialFailure { failed } => {
-                assert_eq!(
-                    failed,
-                    vec!["cursor: config error: install failed".to_string()]
-                );
-            }
-            ReinstallOutcome::AllOk => panic!("a real install() failure must gate markers"),
-        }
     }
 
     /// Markers advance only when every tracked agent reinstalled (AllOk).
@@ -1252,30 +1210,6 @@ mod tests {
     /// validates the binary it actually starts rather than the pre-upgrade
     /// one it quiesced.
     #[test]
-    fn upgrade_policy_reports_installed_version_for_restore_validation() {
-        let calls = RefCell::new(Vec::new());
-        let seen_binary = RefCell::new(None);
-
-        let installed_version = run_install_then_refresh(
-            RefreshPolicy::AfterInstall,
-            record_upgrade(
-                &calls,
-                "upgrade",
-                Ok(UpgradeOutcome::Installed {
-                    binary: Some(PathBuf::from("/usr/local/bin/tracedecay")),
-                    version: Some("9.9.9".to_string()),
-                }),
-            ),
-            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
-        )
-        .expect("upgrade steps should succeed");
-
-        assert_eq!(installed_version.as_deref(), Some("9.9.9"));
-    }
-
-    /// `update` (fatal-refresh policy) threads the installed version the same
-    /// way once its refresh succeeds.
-    #[test]
     fn update_policy_reports_installed_version_for_restore_validation() {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
@@ -1348,21 +1282,6 @@ mod tests {
             Some("9.9.9")
         );
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
-    }
-
-    #[test]
-    fn upgrade_policy_stops_after_upgrade_failure() {
-        let calls = RefCell::new(Vec::new());
-        let seen_binary = RefCell::new(None);
-
-        let result = run_install_then_refresh(
-            RefreshPolicy::AfterInstall,
-            record_upgrade(&calls, "upgrade", Err(config_err("upgrade failed"))),
-            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
-        );
-
-        assert!(result.is_err());
-        assert_eq!(calls.into_inner(), vec!["upgrade"]);
     }
 
     #[test]

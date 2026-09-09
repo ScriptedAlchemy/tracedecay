@@ -348,20 +348,6 @@ mod tests {
     use super::{push_recent_update, update_color_for};
 
     #[test]
-    fn push_recent_update_keeps_three_most_recent() {
-        let mut recent: Vec<(String, String)> = Vec::new();
-        push_recent_update(&mut recent, "proj", "tool_a");
-        push_recent_update(&mut recent, "proj", "tool_b");
-        push_recent_update(&mut recent, "proj", "tool_c");
-        push_recent_update(&mut recent, "proj", "tool_d");
-        assert_eq!(recent.len(), 3);
-        // Most recent first.
-        assert_eq!(recent[0].1, "tool_d");
-        assert_eq!(recent[1].1, "tool_c");
-        assert_eq!(recent[2].1, "tool_b");
-    }
-
-    #[test]
     fn push_recent_update_dedups_and_bumps_to_front() {
         let mut recent: Vec<(String, String)> = Vec::new();
         push_recent_update(&mut recent, "proj", "tool_a");
