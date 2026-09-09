@@ -70,7 +70,7 @@ jobs:
     name: PR checkout dogfood
     needs: [scope-gate, debug-cli]
     if: ${{ github.event_name == 'pull_request' && needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -109,7 +109,7 @@ jobs:
     name: Build debug CLI
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -130,7 +130,7 @@ jobs:
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-dev-${{ runner.os }}
+          shared-key: ci-dev-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: true
 
       - name: Build tracedecay binary
@@ -438,7 +438,7 @@ jobs:
     name: Test Linux ${{ matrix.partition }}
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # Each partition's budget is its measured wall time plus headroom, set in
     # the manifest beside the selection it covers.
     timeout-minutes: ${{ matrix.timeout }}
@@ -503,7 +503,7 @@ jobs:
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test-full-Linux
+          shared-key: ci-test-full-Linux-${{ runner.arch }}
           save-if: ${{ matrix.partition == 'root-journeys' }}
           cache-on-failure: true
 
@@ -611,7 +611,7 @@ jobs:
     name: Hotpath parity
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # 19.5 min for the two builds (hosted, above) + ~1.5 cold registry the
     # chain does not hide + ~1.5 setup + 0.5 test target + 0.5 run ≈ 24 min,
     # plus 25 % headroom, as for the partition budgets.
@@ -971,7 +971,7 @@ jobs:
     name: Feature gates
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -991,7 +991,7 @@ jobs:
     name: Hawk
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: 0
@@ -1107,7 +1107,7 @@ jobs:
     name: Hermes integration (stock)
     needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
       # Stock (upstream) Hermes pin — the generated plugin must keep working
@@ -1161,7 +1161,7 @@ jobs:
     name: Claude Code + OpenCode integration (stock)
     needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
       # Stock host pins — the installed bundle must keep working against these
