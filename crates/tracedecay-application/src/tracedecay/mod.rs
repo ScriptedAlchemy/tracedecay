@@ -196,7 +196,7 @@ pub fn build_branch_diagnostics(
     };
 
     let mut warnings = Vec::new();
-    if branch_drifted {
+    if branch_drifted && !(live_branch_tracked && !live_branch_ready) {
         warnings.push(format!(
             "branch drift detected: working tree is on '{}' but this instance opened on '{}' and is still serving '{}'. Reopen the index so reads and writes target the live branch.",
             current_branch.as_deref().unwrap_or("detached HEAD"),
