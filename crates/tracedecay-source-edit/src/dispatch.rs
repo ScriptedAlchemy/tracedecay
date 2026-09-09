@@ -13,23 +13,18 @@ use tracedecay_graph_query::{
 use super::outcome::SourceEditOutcome;
 use super::port::{SourceEditGraphReadV1, SourceEditRuntime};
 
-pub(super) struct SourceEditGraphReadAuthorityV1<'a> {
-    pub(super) port: &'a dyn CodeGraphProjectionReadPort,
-    pub(super) context: &'a RequestContext,
-    pub(super) observed_at: UtcMicros,
-    pub(super) cancellation: Arc<dyn GraphCancellation>,
-}
-
 #[hotpath::measure(label = "usecases.edit.graph_read", future = true)]
 async fn admitted_graph(
-    authority: &SourceEditGraphReadAuthorityV1<'_>,
+    port: &dyn CodeGraphProjectionReadPort,
+    context: &RequestContext,
+    observed_at: UtcMicros,
+    cancellation: &Arc<dyn GraphCancellation>,
 ) -> Result<SourceEditGraphReadV1> {
-    let verified = authority
-        .port
+    let verified = port
         .open(CodeGraphReadRequest::new(
-            authority.context,
-            authority.observed_at,
-            Arc::clone(&authority.cancellation),
+            context,
+            observed_at,
+            Arc::clone(cancellation),
         ))
         .await
         .map_err(map_code_graph_read_runtime_error)?;
@@ -52,22 +47,18 @@ async fn admitted_graph(
         ));
     }
     let reader = verified
-        .reader_with_cancellation(
-            authority.context,
-            authority.observed_at,
-            Arc::clone(&authority.cancellation),
-        )
+        .reader_with_cancellation(context, observed_at, Arc::clone(cancellation))
         .map_err(map_code_graph_read_runtime_error)?;
-    Ok(SourceEditGraphReadV1::new(
-        reader,
-        Arc::clone(&authority.cancellation),
-    ))
+    Ok(SourceEditGraphReadV1::new(reader, Arc::clone(cancellation)))
 }
 
 #[hotpath::measure(label = "usecases.edit.dispatch", future = true)]
 pub(super) async fn run_source_edit(
     graph: &SourceEditRuntime,
-    graph_read: SourceEditGraphReadAuthorityV1<'_>,
+    port: &dyn CodeGraphProjectionReadPort,
+    context: &RequestContext,
+    observed_at: UtcMicros,
+    cancellation: Arc<dyn GraphCancellation>,
     request: SourceEditRequest,
 ) -> Result<SourceEditOutcome> {
     Ok(match request {
@@ -143,7 +134,7 @@ pub(super) async fn run_source_edit(
         } => SourceEditOutcome::Edit(
             crate::edits::replace_symbol(
                 graph.project_root(),
-                admitted_graph(&graph_read).await?,
+                admitted_graph(port, context, observed_at, &cancellation).await?,
                 &symbol,
                 &new_source,
                 dry_run,
@@ -159,7 +150,7 @@ pub(super) async fn run_source_edit(
         } => SourceEditOutcome::Insert(
             crate::edits::insert_at_symbol(
                 graph.project_root(),
-                admitted_graph(&graph_read).await?,
+                admitted_graph(port, context, observed_at, &cancellation).await?,
                 &symbol,
                 &content,
                 &position,
@@ -175,7 +166,7 @@ pub(super) async fn run_source_edit(
         } => SourceEditOutcome::Move(
             crate::move_symbol::move_symbol(
                 graph.project_root(),
-                admitted_graph(&graph_read).await?,
+                admitted_graph(port, context, observed_at, &cancellation).await?,
                 &symbol,
                 &dest_file,
                 dry_run,
@@ -191,7 +182,7 @@ pub(super) async fn run_source_edit(
         } => SourceEditOutcome::Rename(Box::new(
             crate::edits::rename_symbol(
                 graph.project_root(),
-                admitted_graph(&graph_read).await?,
+                admitted_graph(port, context, observed_at, &cancellation).await?,
                 &binding,
                 &new_name,
                 dry_run,
@@ -211,13 +202,13 @@ mod tests {
     use tracedecay_contracts::CancellationSignal;
     use tracedecay_domain::CodeGenerationId;
     use tracedecay_domain::errors::{Result, TraceDecayError};
-    use tracedecay_graph_db::NeverCancelled;
+    use tracedecay_graph_db::{GraphCancellation, NeverCancelled};
     use tracedecay_graph_query::{
         CodeGraphProjectionReadPort, CodeGraphReadFreshnessV1, CodeGraphReadFuture,
         CodeGraphReadRequest, VerifiedCodeGraphRead,
     };
 
-    use super::{SourceEditGraphReadAuthorityV1, admitted_graph};
+    use super::admitted_graph;
     use crate::port::SourceEditGraphReadV1;
     use crate::test_support::fixture_request;
 
@@ -258,13 +249,8 @@ mod tests {
             store: seated_generation_store(),
             freshness,
         };
-        let authority = SourceEditGraphReadAuthorityV1 {
-            port: &port,
-            context: &request.context,
-            observed_at: request.observed_at,
-            cancellation: Arc::new(NeverCancelled),
-        };
-        admitted_graph(&authority).await
+        let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+        admitted_graph(&port, &request.context, request.observed_at, &cancellation).await
     }
 
     /// The projection port's serve-stale arm keeps reads answering during a
