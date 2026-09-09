@@ -22,7 +22,6 @@ use tracedecay_session_memory::context::{
 use tracedecay_store::StoreShardIdV1;
 
 use tracedecay_contracts::RetainedMemoryExecutionPortV1;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::lcm::DirectRetainedLcmPortV1;
 use super::session::DirectRetainedSessionPortV1;
@@ -33,7 +32,7 @@ use tracedecay_domain::errors::TraceDecayError;
 /// Exact mounted authorities for a profile-retained request.
 #[derive(Clone)]
 pub struct ProfileRetainedAuthoritiesV1<'a> {
-    pub profile_sessions: Option<RegisteredGlobalDbLeaseV1>,
+    pub profile_sessions: Option<super::ProfileSessionDatabaseSource<'a>>,
     pub session_identity: ResolvedSessionIdentity,
     pub configuration_digest: ManifestDigest,
     pub lcm_authority: Option<&'a dyn MountedLcmAuthorityPort>,
@@ -338,7 +337,7 @@ fn application_problem_envelope(
 }
 
 fn profile_retained_surface_ports<'a>(
-    authorities: &'a ProfileRetainedAuthoritiesV1<'a>,
+    authorities: &ProfileRetainedAuthoritiesV1<'a>,
 ) -> Result<RetainedSurfacePortsV1<'a>, TraceDecayError> {
     authorities
         .session_identity
@@ -639,6 +638,112 @@ mod tests {
         .kind
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn profile_memory_does_not_acquire_unrelated_session_storage() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let profile_identity = profile_identity::load_or_create(&profile_root).unwrap();
+        let _scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "retained memory independent session storage",
+        )
+        .unwrap();
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity.clone(),
+        )
+        .await
+        .unwrap();
+        let identity = profile_retrieval_root(&profile_identity).identity().clone();
+        let connection =
+            profile_retained_connection_authority(&profile_identity, &identity).unwrap();
+        let acquisitions = AtomicUsize::new(0);
+        let authorities = ProfileRetainedAuthoritiesV1 {
+            profile_sessions: Some(Arc::new(|| {
+                acquisitions.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(TraceDecayError::Database {
+                        operation: "mount profile session store".to_owned(),
+                        message: "unrelated session storage unavailable".to_owned(),
+                    })
+                })
+            })),
+            session_identity: identity,
+            configuration_digest: connection.configuration_digest().clone(),
+            lcm_authority: None,
+            session_refresh: None,
+            memory: Some(Arc::new(
+                tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::profile(
+                    &registry,
+                    connection.configuration_digest().clone(),
+                ),
+            )),
+        };
+        for (label, expired, cancelled) in [
+            ("healthy", false, false),
+            ("expired", true, false),
+            ("cancelled", false, true),
+        ] {
+            let now = now_micros();
+            let signal = CancellationSignal::active(format!("cancel.{label}")).unwrap();
+            if cancelled {
+                signal.cancel(now);
+            }
+            let result = execute_profile_retained_application(
+                authorities.clone(),
+                &connection,
+                request(),
+                RequestId::new(format!("request.{label}")).unwrap(),
+                Deadline::new(UtcMicros(if expired {
+                    now.0 - 1
+                } else {
+                    now.0 + 30_000_000
+                }))
+                .unwrap(),
+                signal,
+            )
+            .await
+            .unwrap();
+            if expired {
+                assert_eq!(
+                    result.unwrap_err().problem.kind,
+                    ApplicationProblemKind::TimedOut
+                );
+            } else if cancelled {
+                assert_eq!(
+                    result.unwrap_err().problem.kind,
+                    ApplicationProblemKind::Cancelled
+                );
+            } else {
+                assert!(matches!(
+                    result.unwrap().outcome,
+                    ApplicationOutcome::Evidence(_)
+                ));
+            }
+            assert_eq!(acquisitions.load(Ordering::SeqCst), 0, "{label}");
+        }
+        // The unavailable source is real to its consumer: a session search
+        // reaches it, preserves its typed refusal, and does not fabricate data.
+        let result = execute_profile_retained_application(
+            authorities,
+            &connection,
+            RetainedSurfaceRequestV1::MessageSearch(MessageSearchRequestV1 {
+                query: Some("beacon".to_owned()),
+                ..MessageSearchRequestV1::default()
+            }),
+            RequestId::new("request.sessions-unavailable").unwrap(),
+            Deadline::new(UtcMicros(now_micros().0 + 30_000_000)).unwrap(),
+            CancellationSignal::active("cancel.sessions-unavailable").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(result.problem.kind, ApplicationProblemKind::Unavailable);
+        assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn connection_admission_denies_a_different_profile_scope() {
         let admitted_identity = identity("profile.retained-admitted");
@@ -743,12 +848,7 @@ mod tests {
 
         let result = execute_profile_retained_application(
             ProfileRetainedAuthoritiesV1 {
-                profile_sessions: Some(
-                    runtime_registry
-                        .profile_sessions()
-                        .await
-                        .expect("profile sessions"),
-                ),
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity,
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
@@ -816,12 +916,7 @@ mod tests {
 
         let problem = execute_profile_retained_application(
             ProfileRetainedAuthoritiesV1 {
-                profile_sessions: Some(
-                    runtime_registry
-                        .profile_sessions()
-                        .await
-                        .expect("profile sessions"),
-                ),
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity,
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
@@ -880,12 +975,7 @@ mod tests {
 
         let problem = execute_profile_retained_application(
             ProfileRetainedAuthoritiesV1 {
-                profile_sessions: Some(
-                    runtime_registry
-                        .profile_sessions()
-                        .await
-                        .expect("profile sessions"),
-                ),
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity,
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,

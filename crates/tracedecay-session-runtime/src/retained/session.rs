@@ -75,7 +75,7 @@ pub struct ProjectRetainedSessionAuthoritiesV1 {
 enum RetainedSessionAuthority<'a> {
     Project(ProjectRetainedSessionAuthoritiesV1),
     Profile {
-        session_database: RegisteredGlobalDbLeaseV1,
+        session_database: super::ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         configuration_digest: ManifestDigest,
         refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
@@ -89,7 +89,7 @@ pub struct DirectRetainedSessionPortV1<'a> {
 impl<'a> DirectRetainedSessionPortV1<'a> {
     #[hotpath::skip]
     pub fn profile(
-        session_database: RegisteredGlobalDbLeaseV1,
+        session_database: super::ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         configuration_digest: ManifestDigest,
         refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
@@ -148,21 +148,21 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         request: &MessageSearchRequestV1,
-        session_database: &RegisteredGlobalDbLeaseV1,
+        session_database: &super::ProfileSessionDatabaseSource<'_>,
         identity: &ResolvedSessionIdentity,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         ensure_profile_message_scope(request)?;
         let input = MessageSearchInput::parse(request)?;
         let query = input.query()?;
-        let retrieval = DaemonSessionRetrievalService::new_admitted_profile(
-            session_database.clone(),
-            identity.clone(),
-        )
-        .ok_or_else(|| {
-            RetainedSurfaceExecutionErrorV1::unavailable(
-                "the profile session retrieval service could not be admitted",
-            )
-        })?;
+        let database =
+            super::bounded_execution(context, async { session_database().await }).await?;
+        let retrieval =
+            DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
+                .ok_or_else(|| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(
+                        "the profile session retrieval service could not be admitted",
+                    )
+                })?;
         let outcome = retrieve_bounded(context, &retrieval, query).await?;
         let result = input.result(outcome, SessionRetrievalStoreScope::Profile)?;
         evidence_outcome(

@@ -240,7 +240,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     let result = hotpath::future!(
         crate::daemon::retained_owner::execute_profile_retained_application(
             crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
-                profile_sessions: Some(runtime_registry.profile_sessions().await?),
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity: authority.session_identity().clone(),
                 configuration_digest: authority.configuration_digest().clone(),
                 lcm_authority,

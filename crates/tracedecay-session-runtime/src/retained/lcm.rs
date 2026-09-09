@@ -36,6 +36,7 @@ use tracedecay_sessions::serving::{
     SessionProjectionWorkerRetryClass,
 };
 
+use super::ProfileSessionDatabaseSource;
 use crate::lcm_authority::MountedLcmAuthorityPort;
 use crate::session_retrieval::{
     DaemonSessionRetrievalService, LcmDescribeServiceCommand, LcmDescribeServiceFuture,
@@ -43,7 +44,6 @@ use crate::session_retrieval::{
     SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
 };
 use tracedecay_contracts::retained_receipts::evidence_outcome;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::timeutil::SearchTimeBound;
 use tracedecay_session_memory::context::ResolvedSessionIdentity;
 use tracedecay_session_memory::session::SessionTemporalQuery;
@@ -63,7 +63,7 @@ enum DirectRetainedLcmAuthority<'a> {
     /// upward by the root assembler.
     Profile {
         authority: Option<&'a dyn MountedLcmAuthorityPort>,
-        session_database: RegisteredGlobalDbLeaseV1,
+        session_database: ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
     },
 }
@@ -295,7 +295,7 @@ impl RetainedLcmRetrieval<'_> {
 
 impl<'a> DirectRetainedLcmPortV1<'a> {
     pub fn profile(
-        session_database: RegisteredGlobalDbLeaseV1,
+        session_database: ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         authority: Option<&'a dyn MountedLcmAuthorityPort>,
     ) -> Self {
@@ -327,7 +327,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
     #[hotpath::skip]
     async fn lcm_authority<'b>(
         &'b self,
-        _context: &'b RetainedSurfaceExecutionContextV1<'b>,
+        context: &'b RetainedSurfaceExecutionContextV1<'b>,
     ) -> Result<ResolvedRetainedLcmAuthority<'b>, RetainedSurfaceExecutionErrorV1> {
         match &self.authority {
             DirectRetainedLcmAuthority::Project { authority, .. } => {
@@ -342,7 +342,8 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 session_database,
                 identity,
             } => {
-                let database = session_database.clone();
+                let database =
+                    super::bounded_execution(context, async { session_database().await }).await?;
                 let expected_shard = database.binding().shard_id.clone();
                 crate::lcm_authority::mount_registered_lcm_authority(
                     database,
@@ -377,7 +378,8 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 identity,
                 ..
             } => {
-                let database = session_database.clone();
+                let database =
+                    super::bounded_execution(context, async { session_database().await }).await?;
                 let service =
                     DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
                         .ok_or_else(|| {

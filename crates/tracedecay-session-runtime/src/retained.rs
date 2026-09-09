@@ -27,6 +27,17 @@ pub use profile::{
 pub use session::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 pub use session_refresh::RetainedSessionRefreshPortV1;
 
+/// The root selects the profile registry; session consumers acquire its lease
+/// only after admission, inside their existing bounded execution.
+pub type ProfileSessionDatabaseSource<'a> = std::sync::Arc<
+    dyn Fn() -> futures_util::future::BoxFuture<
+            'a,
+            Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1, TraceDecayError>,
+        > + Send
+        + Sync
+        + 'a,
+>;
+
 pub async fn bounded_execution<T, F>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     future: F,

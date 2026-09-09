@@ -85,7 +85,10 @@ async fn execute_refresh(
 ) -> ApplicationResult<RetainedSurfaceResultV1> {
     execute_profile_retained_application(
         ProfileRetainedAuthoritiesV1 {
-            profile_sessions: Some(profile_sessions),
+            profile_sessions: Some(Arc::new(move || {
+                let database = profile_sessions.clone();
+                Box::pin(async move { Ok(database) })
+            })),
             session_identity: session_identity.clone(),
             configuration_digest: connection.configuration_digest().clone(),
             lcm_authority: None,
