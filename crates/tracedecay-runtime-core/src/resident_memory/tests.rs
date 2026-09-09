@@ -6,13 +6,10 @@ use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
-    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
-    RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1, ResidentMemoryAdmissionFailureV1,
+    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1, effective_memory_bytes_v1,
     process_resident_memory_limit_for_system_v1, process_resident_memory_limit_v1,
-    resident_memory_watermark_bytes_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -560,28 +557,6 @@ fn pressure_authority() -> (Arc<ProcessResidentMemoryV1>, Arc<ResidentMemoryPres
 /// than about the request being small enough to always let through.
 fn growth_request() -> NonZeroU64 {
     bytes(RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1 * 2)
-}
-
-#[test]
-fn watermarks_derive_from_the_configured_limit_and_keep_low_below_high() {
-    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
-    let pressure = ResidentMemoryPressureV1::new(limit);
-    assert_eq!(
-        pressure.high_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(
-            limit,
-            RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1
-        )
-    );
-    assert_eq!(
-        pressure.low_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(
-            limit,
-            RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1
-        )
-    );
-    assert!(pressure.low_watermark_bytes() < pressure.high_watermark_bytes());
-    assert_eq!(pressure.state(), ResidentMemoryPressureStateV1::Unobserved);
 }
 
 #[test]

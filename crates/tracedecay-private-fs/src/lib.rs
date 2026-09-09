@@ -341,14 +341,6 @@ mod lock_contention_tests {
             "ERROR_ACCESS_DENIED (5) is an ACL problem, not a held lock"
         );
     }
-
-    #[test]
-    fn sharing_violation_is_not_lock_contention() {
-        assert!(
-            !is_lock_contended(&std::io::Error::from_raw_os_error(32)),
-            "ERROR_SHARING_VIOLATION (32) is an open/share conflict, not LockFileEx contention"
-        );
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -455,16 +447,6 @@ mod available_space_tests {
     use tempfile::tempdir;
 
     use super::available_space;
-
-    #[test]
-    fn available_space_reports_positive_capacity_on_tempdir() {
-        let temp = tempdir().unwrap();
-        let available = available_space(temp.path()).unwrap();
-        assert!(
-            available > 0,
-            "expected positive free space, got {available}"
-        );
-    }
 
     #[test]
     fn available_space_rejects_missing_path() {

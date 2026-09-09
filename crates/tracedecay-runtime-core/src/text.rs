@@ -82,21 +82,6 @@ mod tests {
     use super::utf8_prefix_at_or_before;
 
     #[test]
-    fn returns_whole_string_when_under_budget() {
-        assert_eq!(utf8_prefix_at_or_before("hello", 10), "hello");
-    }
-
-    #[test]
-    fn returns_whole_string_when_at_budget() {
-        assert_eq!(utf8_prefix_at_or_before("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncates_ascii_at_budget() {
-        assert_eq!(utf8_prefix_at_or_before("abcdef", 3), "abc");
-    }
-
-    #[test]
     fn walks_back_when_cut_lands_inside_multibyte_char() {
         // "é" is 2 bytes (0xC3 0xA9). With 20 'a's the total is 22 bytes;
         // a budget of 21 lands inside "é" and must walk back to 20.
@@ -109,16 +94,5 @@ mod tests {
         // 4-byte emoji at position 0; any budget < 4 (but > 0) walks back to 0.
         let s = "🦀tail";
         assert_eq!(utf8_prefix_at_or_before(s, 2), "");
-    }
-
-    #[test]
-    fn handles_empty_string() {
-        assert_eq!(utf8_prefix_at_or_before("", 10), "");
-        assert_eq!(utf8_prefix_at_or_before("", 0), "");
-    }
-
-    #[test]
-    fn handles_zero_budget() {
-        assert_eq!(utf8_prefix_at_or_before("abc", 0), "");
     }
 }

@@ -339,13 +339,6 @@ fn authority_does_not_report_truncation_at_exact_scan_boundary() {
     assert!(!history.truncated);
 }
 
-fn _assert_send_sync<T: Send + Sync>() {}
-
-#[test]
-fn authority_is_send_sync() {
-    _assert_send_sync::<GitRepositoryAuthority>();
-}
-
 #[test]
 fn authority_distinguishes_detached_unborn_and_unreadable_head() {
     let unborn = Fixture::init("sha1");

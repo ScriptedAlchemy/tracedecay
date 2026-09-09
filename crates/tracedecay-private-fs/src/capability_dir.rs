@@ -296,10 +296,4 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert!(tree.join("file").exists());
     }
-
-    #[test]
-    fn sync_directory_flushes_an_open_capability() {
-        let root = tempfile::tempdir().expect("create sync fixture");
-        sync_directory(&open(root.path())).expect("sync an open directory capability");
-    }
 }

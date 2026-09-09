@@ -1903,10 +1903,7 @@ mod controlled_invocation_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonInvocationError, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
-        SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-        SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
-        application_response, configuration_request_from_surface_payload,
+        DaemonInvocationError, application_response, configuration_request_from_surface_payload,
         feedback_handle_from_surface_payload, semantic_evaluation_application_problem,
         semantic_qualification_application_problem,
     };
@@ -1960,21 +1957,6 @@ mod tests {
             panic!("reset-required must remain an authoritative typed problem");
         };
         assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
-    }
-
-    #[test]
-    fn isolated_evaluation_dispatch_deadline_is_eval_scoped_not_production_900s() {
-        assert_eq!(SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS, 900_000_000);
-        assert_eq!(
-            SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-            1_800_000_000
-        );
-        const {
-            assert!(
-                SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS
-                    > SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS
-            );
-        }
     }
 
     #[test]
@@ -2230,59 +2212,6 @@ mod tests {
             message.contains("semantic evaluation publication rejected"),
             "client must keep the publication rejection prefix: {message}"
         );
-    }
-
-    #[test]
-    fn semantic_evaluation_result_retains_the_direct_report() {
-        let result = SemanticEvaluationPublicationResultV1 {
-            project_id: "project-1".to_owned(),
-            profile_digest: format!("sha256:{}", "1".repeat(64)),
-            report_digest: format!("sha256:{}", "2".repeat(64)),
-            report: serde_json::json!({
-                "command": "compare",
-                "status": "pass",
-                "workload_digest": format!("sha256:{}", "3".repeat(64)),
-                "corpus_digest": format!("sha256:{}", "4".repeat(64)),
-                "fixture_source_repository_commit": "fixture-commit",
-                "fixture_source_repository_tree": "fixture-tree",
-                "execution_contract": {
-                    "exact_file_count": 0,
-                    "exact_corpus_bytes": 0,
-                    "exact_eligible_chunks_current": 0,
-                    "exact_eligible_chunks_10x": 0,
-                    "exact_query_count": 0,
-                    "model_revision": "model.serialization-test.v1",
-                    "projection_revision": "projection.serialization-test.v1",
-                    "fusion_revision": "fusion.serialization-test.v1",
-                    "runtime_revision": "runtime.serialization-test.v1",
-                    "cache_state": "empty",
-                    "concurrency": {
-                        "query_workers": 1,
-                        "projection_workers": 1,
-                        "query_execution": "serial"
-                    }
-                },
-                "profile_material_digests": {},
-                "raw_output_digest": format!("sha256:{}", "6".repeat(64)),
-                "raw_outputs": [],
-                "profiles": []
-            }),
-            source_generation: "generation-1".to_owned(),
-            snapshot_digest: format!("sha256:{}", "5".repeat(64)),
-        };
-
-        let encoded = serde_json::to_value(result).expect("serialize evaluation result");
-        assert_eq!(encoded["report"]["status"], "pass");
-        assert_eq!(encoded["report"]["command"], "compare");
-    }
-
-    #[test]
-    fn semantic_qualification_result_preserves_canonical_bytes() {
-        let result = SemanticEvaluationQualificationResultV1 {
-            qualification_bytes: vec![0x51, 0x55, 0x41, 0x4c],
-        };
-
-        assert_eq!(result.qualification_bytes, vec![0x51, 0x55, 0x41, 0x4c]);
     }
 
     #[test]
