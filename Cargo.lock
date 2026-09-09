@@ -6530,6 +6530,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-lcm",
  "tracedecay-privacy",
+ "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-semantic-contracts",

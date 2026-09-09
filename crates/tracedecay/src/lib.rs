@@ -67,7 +67,6 @@ pub use product_runtime::{
     ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance, product_runtime,
     register_product_runtime,
 };
-pub mod profile_registry_maintenance;
 mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports};

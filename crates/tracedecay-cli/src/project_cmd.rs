@@ -2,15 +2,18 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 use tracedecay_contracts::{ProjectRegistryView, render_project_registry_view};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 
 use crate::cli::ProjectsAction;
-use crate::commands::{ProfileOfflineAuthority, join_outcome_and_restore, take_profile_offline};
+use crate::commands::{
+    ProfileOfflineAuthority, join_outcome_and_restore, take_profile_offline,
+    try_admit_profile_registry,
+};
 
 const MAX_LIMIT: usize = 1_000;
 
@@ -129,8 +132,7 @@ async fn forget_under_profile_offline(
         profile_root,
         "projects forget",
     )?;
-    let Some(registry) = ProfileRegistryMaintenanceRuntime::try_open_existing(profile_root).await?
-    else {
+    let Some(registry) = try_admit_profile_registry(profile_root).await? else {
         return Err(TraceDecayError::Config {
             message: "no profile registry exists; there is nothing to forget".to_string(),
         });
