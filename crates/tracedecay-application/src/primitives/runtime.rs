@@ -559,9 +559,7 @@ pub fn open_primitive_project_runtime(
             Arc::clone(&source_runtime),
             Arc::clone(&code_graph),
         )),
-        Arc::new(TraceDecayComplexityAuthorityV1::new(Arc::clone(
-            &code_graph,
-        ))),
+        Arc::new(TraceDecayComplexityAuthorityV1),
         redundancy,
         Arc::new(TraceDecayDependencyDepthAuthorityV1::new(Arc::clone(
             &code_graph,

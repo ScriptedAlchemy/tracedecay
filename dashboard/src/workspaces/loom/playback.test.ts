@@ -3,7 +3,7 @@ import {
   clampPlaybackCursor,
   initialPlaybackState,
   playbackTickMillis,
-  reconcilePlaybackState,
+  revealedFrames,
   returnToLive,
   seekPlayback,
   stepPlayback,
@@ -41,13 +41,6 @@ describe('Loom playback presentation state', () => {
     expect(clampPlaybackCursor(99, 3)).toBe(2);
   });
 
-  it('keeps a stable event across a refetch unless following the loaded tail', () => {
-    const frames = [frame('a'), frame('b'), frame('c')];
-    const pausedAtB = { ...initialPlaybackState(2), cursor: 1, followLive: false };
-    expect(reconcilePlaybackState(pausedAtB, 'b', frames).cursor).toBe(1);
-    expect(reconcilePlaybackState(initialPlaybackState(2), 'b', frames).cursor).toBe(2);
-  });
-
   it('suspends follow-live on a seek and restores it only by returning to tail', () => {
     const sought = seekPlayback(initialPlaybackState(4), 4, 1);
     expect(sought).toMatchObject({ cursor: 1, playing: false, followLive: false });
@@ -62,4 +55,17 @@ describe('Loom playback presentation state', () => {
     expect(playbackTickMillis(0.5)).toBe(1600);
     expect(playbackTickMillis(4)).toBe(200);
   });
+});
+
+it('withholds later content by both source position and recorded timestamp', () => {
+  const frames = [
+    { ...frame('earlier-ordinal-later-time'), timestamp: 50 },
+    { ...frame('selected'), timestamp: 20 },
+    { ...frame('later-ordinal-earlier-time'), timestamp: 10 },
+    frame('undated-future'),
+  ];
+  expect(revealedFrames(frames, 1, false).map(({ id }) => id)).toEqual(['selected']);
+  expect(revealedFrames(frames, -1, false)).toEqual([]);
+  expect(revealedFrames(frames, 3, true)).toEqual(frames);
+  expect(revealedFrames(frames, 3, false)).toEqual(frames);
 });

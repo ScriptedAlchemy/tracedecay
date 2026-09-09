@@ -1110,6 +1110,10 @@ mod runtime_configuration_cutover {
     /// their exact values.
     #[tokio::test]
     async fn open_cached_read_and_configuration_change_share_one_runtime_pin() {
+        #[cfg(feature = "hotpath")]
+        let _hotpath = hotpath::HotpathGuardBuilder::new("configuration-runtime-pin-journey")
+            .sections(vec![hotpath::Section::FunctionsTiming])
+            .build();
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("project.configuration-shared-pin-journey");

@@ -839,6 +839,8 @@ async fn register_semantic_configuration_owners(
     scope: ResolvedScope,
     configuration: &tracedecay_configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
+    // Registration joins configuration and activation state; callers retain only its pending handle.
+    Box::pin(async move {
     let configuration_pin =
         tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
             configuration,
@@ -1136,6 +1138,7 @@ async fn register_semantic_configuration_owners(
         );
     }
     Ok(())
+    }).await
 }
 
 pub(super) struct SemanticOwnerInstallFailureV1 {
@@ -1232,6 +1235,10 @@ pub(super) async fn install_semantic_activation_runtime_owner(
 }
 
 #[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Composition supplies distinct capability, database, analyzer and diagnostic owners without merging their authority."
+)]
 async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,

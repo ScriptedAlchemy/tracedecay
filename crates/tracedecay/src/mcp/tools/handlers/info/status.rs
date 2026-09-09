@@ -214,6 +214,10 @@ pub(crate) async fn graph_statistics_value(
 }
 
 #[hotpath::measure(label = "mcp.info.status.total")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Status combines independent index, session, generation, and daemon readers without making any one reader authoritative for another"
+)]
 pub(crate) async fn handle_status(
     cg: &TraceDecay,
     args: Value,

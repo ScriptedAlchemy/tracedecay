@@ -369,3 +369,77 @@ fn comparator_record_retains_the_actual_evidence_tie_break() {
         assert!(!detail.contains(";logical="));
     }
 }
+
+#[test]
+fn saturated_scores_preserve_retriever_strength_before_identity_ties() {
+    use tracedecay_domain::{
+        CandidateContribution, FixedPointScore, RetrieverKind, ScoreDomainCalibrationV1,
+    };
+
+    let calibration = ScoreDomainCalibrationV1 {
+        calibration_profile_id: id("calibration.lexical"),
+        score_domain: id("score.lexical"),
+        raw_min_micros: 0,
+        raw_max_micros: 1_000_000,
+    };
+    let contribution = |raw| CandidateContribution {
+        retriever: RetrieverKind::Lexical,
+        retriever_revision: id("retriever.lexical"),
+        source_occurrence_id: id("occurrence.lexical"),
+        ordinal_rank: 0,
+        raw_score: FixedPointScore(raw),
+        score_domain: calibration.score_domain.clone(),
+        calibration_profile_id: calibration.calibration_profile_id.clone(),
+        calibrated_feature_micros: calibration.calibrate(FixedPointScore(raw)).unwrap(),
+        weight_micros: 1_000_000,
+        weighted_contribution_micros: 1_000_000,
+    };
+    let mut weaker = generation_scoped_hit("alpha", "a", "aaa");
+    let mut stronger = generation_scoped_hit("zeta", "b", "zzz");
+    weaker.contributions = vec![contribution(4_000_000)];
+    stronger.contributions = vec![contribution(5_000_000)];
+    assert_eq!(
+        weaker.contributions[0].calibrated_feature_micros,
+        stronger.contributions[0].calibrated_feature_micros
+    );
+    assert_eq!(compare_fused(&stronger, &weaker), std::cmp::Ordering::Less);
+
+    let fusion = DeterministicFixedPointFusion::new(id("ranking.fixture.v1"));
+    assert_eq!(
+        fusion.comparator_record(&stronger).domain_scores,
+        vec![(
+            RetrieverKind::Lexical,
+            id("score.lexical"),
+            FixedPointScore(5_000_000)
+        ),]
+    );
+    let mut disabled = contribution(u64::MAX);
+    disabled.weight_micros = 0;
+    weaker.contributions.push(disabled);
+    assert_eq!(compare_fused(&stronger, &weaker), std::cmp::Ordering::Less);
+    weaker.utility_micros += 1;
+    assert_eq!(compare_fused(&weaker, &stronger), std::cmp::Ordering::Less);
+
+    // Numeric magnitudes never cross score-domain scales.
+    weaker.utility_micros = stronger.utility_micros;
+    weaker.contributions = vec![contribution(u64::MAX)];
+    weaker.contributions[0].score_domain = id("score.unrelated");
+    let domain_order = compare_fused(&stronger, &weaker);
+    assert_eq!(
+        domain_order,
+        calibration
+            .score_domain
+            .cmp(&weaker.contributions[0].score_domain)
+    );
+    weaker.contributions[0].raw_score = FixedPointScore(0);
+    assert_eq!(compare_fused(&stronger, &weaker), domain_order);
+
+    // At identical primary utility, different lane mixes use the recorded
+    // retriever tag order, not a magnitude comparison across score scales.
+    weaker.contributions[0].retriever = RetrieverKind::Semantic;
+    weaker.contributions[0].score_domain = id("score.semantic");
+    assert_eq!(
+        compare_fused(&stronger, &weaker),
+        RetrieverKind::Lexical.cmp(&RetrieverKind::Semantic)
+    );
+}

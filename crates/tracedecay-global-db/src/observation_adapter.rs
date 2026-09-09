@@ -1355,7 +1355,7 @@ impl ObservationStore for GlobalDbObservationStore {
         &self,
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
-        let mut outcomes = self.persist_observations(vec![write]).await?;
+        let mut outcomes = Box::pin(self.persist_observations(vec![write])).await?;
         if outcomes.len() != 1 {
             return Err(runtime_storage_error(
                 "persist_observation",

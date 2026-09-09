@@ -62,6 +62,7 @@ mod mcp_project_registry;
 mod mcp_workflow_index;
 pub mod project_owner_registration;
 pub mod project_runtime;
+pub mod remote_http_transport;
 pub mod request_cancellation;
 mod shutdown_coordination;
 
