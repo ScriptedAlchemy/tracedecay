@@ -243,8 +243,9 @@ impl McpServer {
                                 tracedecay_session_memory::user_config::UserConfig::load();
                             config.pending_upload += delta;
                             if upload_enabled
-                                && let Some(_total) =
-                                    crate::cloud::flush_pending(config.pending_upload)
+                                && let Some(_total) = tracedecay_dashboard_api::cloud::flush_pending(
+                                    config.pending_upload,
+                                )
                             {
                                 config.pending_upload = 0;
                                 let now = std::time::SystemTime::now()

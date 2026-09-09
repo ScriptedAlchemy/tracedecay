@@ -491,10 +491,12 @@ impl McpServer {
         let server = self.dispatch_authority.server();
         let spawned = self.spawn_background_task(hotpath::future!(
             async move {
-                let latest = tokio::task::spawn_blocking(crate::cloud::fetch_latest_version)
-                    .await
-                    .ok()
-                    .flatten();
+                let latest = tokio::task::spawn_blocking(
+                    tracedecay_dashboard_api::cloud::fetch_latest_version,
+                )
+                .await
+                .ok()
+                .flatten();
                 let Some(server) = server.upgrade() else {
                     return;
                 };
@@ -527,7 +529,7 @@ fn cached_version_warning(cache: &mut VersionCheckState, current: &str) -> (Opti
     let warning = cache
         .latest
         .as_deref()
-        .filter(|latest| crate::cloud::is_newer_minor_version(current, latest))
+        .filter(|latest| tracedecay_dashboard_api::cloud::is_newer_minor_version(current, latest))
         .map(|latest| {
             format!(
                 "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
