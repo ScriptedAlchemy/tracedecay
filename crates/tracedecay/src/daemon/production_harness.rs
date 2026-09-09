@@ -1119,10 +1119,19 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 #[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
     #[cfg(unix)]
-    resources
+    if let Err(reason) = resources
         .store_administration
         .shutdown_manual_branch_publications()
-        .await;
+        .await
+    {
+        super::log_daemon_event(
+            "manual_branch_publication",
+            &[
+                ("outcome", "harness_shutdown_failed".to_owned()),
+                ("reason", reason),
+            ],
+        );
+    }
     resources
         .store_administration
         .join_project_server_retirements()

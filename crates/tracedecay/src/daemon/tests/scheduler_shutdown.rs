@@ -761,3 +761,29 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
         "normal scheduler shutdown must not queue behind unrelated writer administration"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_branch_publication_panic_survives_reaping_in_shutdown_receipt() {
+    let engine = DaemonEngine::default();
+    let failure = engine
+        .store_administration
+        .run_manual_branch_publication(|_| async { panic!("publication owner failed") })
+        .await;
+    assert!(failure.is_err());
+    engine
+        .store_administration
+        .run_manual_branch_publication(|_| async {
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked)
+        })
+        .await
+        .unwrap();
+    let mut phases = engine.shutdown_owner_phases().await;
+    let receipt =
+        crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(vec![phases.remove(0)])
+            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await;
+    assert!(
+        matches!(&receipt.owners[0].status, crate::daemon::shutdown_coordination::ShutdownStatus::Failed(reason) if reason.contains("failed to join"))
+    );
+}

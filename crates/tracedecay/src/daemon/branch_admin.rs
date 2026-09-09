@@ -480,6 +480,7 @@ pub(super) struct StoreAdministration {
 #[cfg(unix)]
 struct ManualBranchPublicationTasks {
     closed: AtomicBool,
+    join_failed: AtomicBool,
     cancellation: CancellationToken,
     tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
 }
@@ -489,6 +490,7 @@ impl Default for ManualBranchPublicationTasks {
     fn default() -> Self {
         Self {
             closed: AtomicBool::new(false),
+            join_failed: AtomicBool::new(false),
             cancellation: CancellationToken::new(),
             tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
         }
@@ -625,6 +627,9 @@ impl StoreAdministration {
             }
             while let Some(result) = tasks.try_join_next() {
                 if let Err(error) = result {
+                    self.manual_branch_publications
+                        .join_failed
+                        .store(true, Ordering::Release);
                     super::log_daemon_event(
                         "manual_branch_publication",
                         &[
@@ -658,7 +663,9 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
-    pub(super) async fn shutdown_manual_branch_publications(&self) {
+    pub(super) async fn shutdown_manual_branch_publications(
+        &self,
+    ) -> std::result::Result<(), String> {
         self.cancel_manual_branch_publications();
         let mut tasks = {
             let mut owned = self.manual_branch_publications.tasks.lock().await;
@@ -666,6 +673,9 @@ impl StoreAdministration {
         };
         while let Some(result) = tasks.join_next().await {
             if let Err(error) = result {
+                self.manual_branch_publications
+                    .join_failed
+                    .store(true, Ordering::Release);
                 super::log_daemon_event(
                     "manual_branch_publication",
                     &[
@@ -675,6 +685,15 @@ impl StoreAdministration {
                     ],
                 );
             }
+        }
+        if self
+            .manual_branch_publications
+            .join_failed
+            .load(Ordering::Acquire)
+        {
+            Err("manual branch publication task failed to join".to_owned())
+        } else {
+            Ok(())
         }
     }
 

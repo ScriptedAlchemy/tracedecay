@@ -61,13 +61,17 @@ impl DaemonEngine {
             .map(crate::daemon::pr_autotrack::PrAutotrackTask::cancellation);
 
         vec![
-            vec![ShutdownOwner::new(
+            vec![ShutdownOwner::with_deadline_status(
                 "manual_branch_publication",
                 move || manual_branch_cancel.cancel_manual_branch_publications(),
-                async move {
-                    manual_branch_join
+                move |_| async move {
+                    match manual_branch_join
                         .shutdown_manual_branch_publications()
-                        .await;
+                        .await
+                    {
+                        Ok(()) => ShutdownStatus::Clean,
+                        Err(reason) => ShutdownStatus::Failed(reason),
+                    }
                 },
             )],
             vec![ShutdownOwner::with_deadline_status(
