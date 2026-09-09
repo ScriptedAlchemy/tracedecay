@@ -58,6 +58,7 @@ pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLI
 
 pub mod application_surface;
 pub mod invocation;
+pub mod project_owner_registration;
 pub mod project_runtime;
 pub mod request_cancellation;
 

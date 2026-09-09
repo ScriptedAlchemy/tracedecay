@@ -17,6 +17,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
 use super::AutomationSchedulerHandle;
+#[cfg(unix)]
 use super::engine::DaemonEngine;
 #[cfg(unix)]
 use super::explicit_git_state;
@@ -41,6 +42,7 @@ mod remote_project_recovery;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
+#[cfg(unix)]
 mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;

@@ -30,7 +30,7 @@ use tracedecay_session_memory::runtime_telemetry::{
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::daemon::project_open_owners::{
+use tracedecay_code_index_runtime::project_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
 };
 

@@ -24,6 +24,20 @@ pub trait CodeIndexScopeResolverV1: Clone + Send + Sync + 'static {
     ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1>;
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegisteredProjectScopeResolverV1;
+
+impl CodeIndexScopeResolverV1 for RegisteredProjectScopeResolverV1 {
+    fn resolved_scope_for_project(
+        &self,
+        project_root: &Path,
+        project_id: &ProjectId,
+    ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
+        crate::resolved_scope_for_project(project_root, project_id)
+            .map_err(|_| CodeIndexScopeUnavailableV1)
+    }
+}
+
 /// Closed admission refusal vocabulary the executors map onto search outcomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeIndexMcpAdmissionUnavailableV1 {

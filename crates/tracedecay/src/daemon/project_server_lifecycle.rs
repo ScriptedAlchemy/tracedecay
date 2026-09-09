@@ -16,6 +16,10 @@ pub(super) async fn cancel_retained_session_history(store_administration: &Store
         .session_temporal_refresh_schedulers()
         .cancel_historical_ingest()
         .await;
+    let servers = store_administration.project_servers().lock().await;
+    for server in servers.values() {
+        server.refuse_background_work();
+    }
 }
 
 /// One bounded, idempotent project-server teardown. Servers whose shutdown
@@ -151,7 +155,7 @@ pub(super) async fn shutdown_detached_project_servers(
         servers.into_iter().enumerate().map(|(ordinal, server)| {
             (format!("project_server[{ordinal}]"), None, async move {
                 let graph = server.cg().await;
-                hook_v2_replay::shutdown_hook_v2_replay_consumer(
+                hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
                     &graph.hook_store_layout().data_root,
                 )
                 .await;

@@ -39,7 +39,10 @@ impl TraceDecay {
     /// layout. Code-index routing never changes this database identity.
     #[hotpath::skip]
     pub(crate) async fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
-        if self.db_path() == self.store_layout.graph_db_path {
+        if tracedecay_runtime_core::path_safety::same_canonical_path(
+            &self.db_path(),
+            &self.store_layout.graph_db_path,
+        ) {
             Ok(ProjectMemoryDbHandle::Active(&self.db))
         } else {
             let database = if self.read_only {

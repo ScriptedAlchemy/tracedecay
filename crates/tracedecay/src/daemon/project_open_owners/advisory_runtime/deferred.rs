@@ -208,7 +208,10 @@ pub(super) fn spawn(
     // Nothing user-facing may wait on a layer this route disables by contract.
     // With no code index there is no generation to defer to, so the wait below
     // has no terminal state of its own: name it here instead.
-    if super::super::code_index_disabled_for_scope(&invocation, &state.scope) {
+    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
+        &invocation.code_index_schedulers,
+        &state.scope,
+    ) {
         log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
         return false;
     }

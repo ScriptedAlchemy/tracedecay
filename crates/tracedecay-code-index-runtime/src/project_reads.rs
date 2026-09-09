@@ -1,9 +1,7 @@
 //! Exact-scope code-index read bridges for daemon project owners.
 
 mod ignored_dependency_admission;
-pub(crate) use ignored_dependency_admission::project_code_index_ignored_dependency_admission_port;
-#[cfg(test)]
-mod ignored_dependency_admission_tests;
+pub use ignored_dependency_admission::project_code_index_ignored_dependency_admission_port;
 #[cfg(test)]
 mod scope_admission_tests;
 
@@ -12,11 +10,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
-use tracedecay_code_index_runtime::code_index_scheduler::{
-    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
-};
 use tracedecay_contracts::{Deadline, ResolvedScope, now_micros};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
+
+use crate::code_index_scheduler::{
+    CodeIndexAutomaticAdmissionV1, CodeIndexSchedulerRegistryV1, LatestCodeTextGenerationV1,
+    LatestCompleteCodeIndexV1,
+};
+
+/// Whether this route's code index is disabled by contract, so no generation
+/// will ever be published for it.
+///
+/// A disabled linked-worktree route serves but never indexes. Deferred owners
+/// must not wait on global publication signals for a generation this scope can
+/// never seat, because each wake would contend on the shared project writer.
+pub fn code_index_disabled_for_scope(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    scope: &ResolvedScope,
+) -> bool {
+    schedulers.automatic_admission_for_scope(scope)
+        == Some(CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
+}
 
 fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), CodeGraphReadError> {
     if request.cancellation.is_cancelled()
@@ -56,7 +70,7 @@ struct ProjectCodeGraphProjectionReadPortV1 {
 
 #[derive(Clone)]
 struct ProjectCodeGraphServingAuthorityV1 {
-    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
 }
@@ -216,8 +230,8 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
     }
 }
 
-pub(crate) fn project_code_graph_projection_read_port(
-    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+pub fn project_code_graph_projection_read_port(
+    schedulers: CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
 ) -> Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort> {
@@ -234,8 +248,8 @@ pub(crate) fn project_code_graph_projection_read_port(
 /// root and resolved scope through the same serving projection that graph
 /// queries open. A missing graph seat is an explicit unavailable census; it
 /// never falls back to the runtime database.
-pub(crate) fn project_code_index_generation_census_reader(
-    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+pub fn project_code_index_generation_census_reader(
+    schedulers: CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
 ) -> tracedecay_session_memory::runtime_telemetry::GenerationCensusReader {
