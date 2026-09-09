@@ -194,7 +194,7 @@ keyring_account = "review"
             ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted
         );
         assert_verified();
-        assert!(shutdown_generation.shutdown().await);
+        assert!(shutdown_generation.shutdown().await.is_clean());
         assert_cleared();
 
         let cancelled_generation = invocation_with_credentials(Arc::clone(&secrets));
