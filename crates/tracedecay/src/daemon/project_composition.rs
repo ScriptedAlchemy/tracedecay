@@ -840,8 +840,10 @@ impl ProjectOpenInputs<'_> {
             self.invocation.code_index_schedulers.clone(),
             Arc::clone(&code_index_activation),
         );
-        let code_index_freshness_probe_sink =
-            code_index_freshness_probe_sink(self.invocation.code_index_schedulers.clone());
+        let code_index_freshness_probe_sink = code_index_freshness_probe_sink(
+            self.invocation.code_index_schedulers.clone(),
+            Arc::clone(&code_index_activation),
+        );
         // The daemon mounts the same broker the MCP server and the directly
         // served dashboard open: persisted analyzer settings (with a recorded
         // degradation for an unreadable file) plus the home-level OpenCode

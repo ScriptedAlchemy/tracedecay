@@ -264,10 +264,16 @@ impl McpServer {
             freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
         };
         match refresh(request).await {
-            Ok(Some(fresh)) => {
+            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(Some(fresh))) => {
                 *crate::mcp::server::requests::recover_lock(&self.file_token_map) = fresh;
             }
-            Ok(None) => {}
+            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+            Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
+                tracing::info!(
+                    reason = "linked_worktree_disabled",
+                    "automatic code-index refresh disabled by watch policy"
+                );
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "startup catch-up admission failed");
                 self.startup_catch_up.settle();
@@ -449,12 +455,18 @@ impl McpServer {
         let _admitted = self.background_tasks.spawn(async move {
             let _running = running_guard;
             match refresh(request).await {
-                Ok(Some(fresh)) => {
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(Some(fresh))) => {
                     if let Ok(mut guard) = token_map.lock() {
                         *guard = fresh;
                     }
                 }
-                Ok(None) => {}
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+                Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
+                    tracing::info!(
+                        reason = "linked_worktree_disabled",
+                        "automatic code-index refresh disabled by watch policy"
+                    );
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
