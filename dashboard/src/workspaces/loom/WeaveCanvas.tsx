@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { axisTicks, clampWindow, fittedWindow, formatMoment, zoomWindow, type LoomWindow } from './tracks.ts';
@@ -12,26 +12,65 @@ import { kindColorVars } from '../../viz/graph/kindColor.ts';
 export const PLOT_WIDTH = 832;
 export const MARK_PITCH_PX = 24;
 const WIDTH = 960;
-const LEFT = 100;
 const RIGHT = 28;
-const SPAN = WIDTH - LEFT - RIGHT;
 
-export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy }: {
+export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy, initialWindow, onWindowChange }: {
   weave: Weave;
   hierarchy?: AnalyticsSubagentTreePayloadV1;
+  initialWindow?: LoomWindow | null;
+  onWindowChange?: (window: LoomWindow | null) => void;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   ariaLabel: string;
 }) {
   const clipId = useId();
-  const [zoomed, setZoomed] = useState<LoomWindow | null>(null);
+  const [zoomed, updateWindow] = useState<LoomWindow | null>(initialWindow ?? null);
+  const setZoomed = (window: LoomWindow | null) => { updateWindow(window); onWindowChange?.(window); };
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const extent = weave.extent;
-  const view = extent ? zoomed ?? fittedWindow(extent) : null;
-  const rows = Math.max(weave.hosts.reduce((sum, host) => sum + host.lanes, 0), 1);
-  const height = Math.max(300, Math.min(560, rows * 36 + 80));
-  const x = (time: number) => LEFT + (time - view!.start) / (view!.end - view!.start) * SPAN;
-  const lane = (column: number, offset: number) => weave.hosts.slice(0, column).reduce((sum, host) => sum + host.lanes, 0) + offset;
-  const y = (row: number) => 65 + row / rows * (height - 100);
+  const view = extent ? zoomed ? clampWindow(zoomed, extent) : fittedWindow(extent) : null;
+  const nodes = hierarchy?.available && !hierarchy.error ? hierarchy.nodes : [];
+  const nodeById = new Map(nodes.map((node) => [JSON.stringify([node.provider, node.session_id]), node]));
+  const threadById = new Map(weave.threads.map((thread) => [thread.id, thread]));
+  const parentById = new Map(nodes.flatMap((node) => {
+    const childId = JSON.stringify([node.provider, node.session_id]);
+    const parentId = JSON.stringify([node.provider, node.parent_session_id]);
+    return node.link === 'linked' && threadById.has(childId) && threadById.has(parentId)
+      ? [[childId, parentId] as const] : [];
+  }));
+  const ancestors = (id: string) => {
+    const visited = new Set<string>();
+    let parent = parentById.get(id);
+    while (parent && !visited.has(parent)) {
+      visited.add(parent);
+      parent = parentById.get(parent);
+    }
+    return [...visited];
+  };
+  // The canonical tree is already preorder. Retain it without changing any
+  // source timestamp; unrelated sessions keep the temporal read's ordering.
+  const ordered = [...new Set([...nodeById.keys(), ...threadById.keys()])]
+    .flatMap((id) => { const thread = threadById.get(id); return thread ? [thread] : []; });
+  const ancestorsById = new Map(ordered.map((thread) => [thread.id, ancestors(thread.id)]));
+  const visible = ordered.filter((thread) => !ancestorsById.get(thread.id)?.some((id) => collapsed.has(id)));
+  const descendantCounts = new Map<string, number>();
+  for (const parents of ancestorsById.values()) {
+    for (const parent of parents) descendantCounts.set(parent, (descendantCounts.get(parent) ?? 0) + 1);
+  }
+  const height = Math.max(440, visible.length * 42 + 70);
+  const rowById = new Map(visible.map((thread, index) => [thread.id, index]));
+  const left = 240, span = WIDTH - left - RIGHT;
+  const x = (time: number) => left + (time - view!.start) / (view!.end - view!.start) * span;
+  const y = (id: string) => 65 + (rowById.get(id) ?? 0) * Math.min(42, (height - 90) / Math.max(visible.length, 1));
+  const links = visible.flatMap((child) => {
+    const parentId = parentById.get(child.id);
+    const parent = parentId && rowById.has(parentId) ? threadById.get(parentId) : undefined;
+    return parent ? [{ parent, child }] : [];
+  });
+  const linkPath = (parent: typeof visible[number], child: typeof visible[number], projectX: (time: number) => number, projectY: (id: string) => number) => {
+    const px = projectX(parent.start), cx = projectX(child.start), bend = (px + cx) / 2;
+    return `M ${px} ${projectY(parent.id)} C ${bend} ${projectY(parent.id)}, ${bend} ${projectY(child.id)}, ${cx} ${projectY(child.id)}`;
+  };
   const zoom = (factor: number) => {
     if (extent && view) setZoomed(zoomWindow(view, extent, factor, (view.start + view.end) / 2));
   };
@@ -40,50 +79,68 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy 
     const delta = (view.end - view.start) * .25 * direction;
     setZoomed(clampWindow({ start: view.start + delta, end: view.end + delta }, extent));
   };
+  const pickKey = (event: KeyboardEvent, id: string) => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(id); }
+  };
+  const toggleBranch = (id: string) => setCollapsed((previous) => {
+    const next = new Set(previous);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const extentPattern = (thread: typeof visible[number]) => thread.endSource === 'session_end' ? undefined
+    : thread.endSource === 'last_message' ? '6 2' : '2 5';
+  const full = extent ? fittedWindow(extent) : null;
+  const miniX = (time: number) => left + (time - full!.start) / (full!.end - full!.start) * span;
+  const miniY = (id: string) => 8 + y(id) / height * 64;
   return <div className="min-w-0">
-    <div role="toolbar" aria-label="Time window" className="flex flex-wrap items-center gap-2 border border-edge-subtle p-2 text-xs">
-      <button className="td-hit" aria-label="Zoom in" onClick={() => zoom(.5)}>+</button>
-      <button className="td-hit" aria-label="Zoom out" onClick={() => zoom(2)}>−</button>
-      <button className="td-hit" aria-label="Pan to earlier sessions" disabled={!zoomed} onClick={() => pan(-1)}>←</button>
-      <button className="td-hit" aria-label="Pan to later sessions" disabled={!zoomed} onClick={() => pan(1)}>→</button>
-      <button className="td-hit" aria-label="Fit the whole extent" disabled={!zoomed} onClick={() => setZoomed(null)}>fit</button>
-      <span>{!zoomed ? 'whole extent' : `${formatMoment(zoomed.start)} – ${formatMoment(zoomed.end)}`}</span>
+    <div role="toolbar" aria-label="Time window" className="flex min-h-10 flex-wrap items-center gap-2 border border-edge-subtle px-1 text-xs">
+      <button className="min-h-8 min-w-8" aria-label="Zoom in" onClick={() => zoom(.5)}>+</button>
+      <button className="min-h-8 min-w-8" aria-label="Zoom out" onClick={() => zoom(2)}>−</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan to earlier sessions" disabled={!zoomed} onClick={() => pan(-1)}>←</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan to later sessions" disabled={!zoomed} onClick={() => pan(1)}>→</button>
+      <button className="min-h-8 min-w-8" aria-label="Fit the whole extent" disabled={!zoomed} onClick={() => setZoomed(null)}>fit</button>
+      <span>{!zoomed ? 'whole extent' : `${formatMoment(view!.start)} – ${formatMoment(view!.end)}`}</span>
+      <span>{visible.length} / {ordered.length} loaded sessions · {links.length} visible parent links</span>
     </div>
-    <div className="td-optic">
-      <svg role="img" aria-label={ariaLabel} width="100%" viewBox={`0 0 ${WIDTH} ${height}`}>
-        <defs><clipPath id={clipId}><rect x={LEFT} y={35} width={SPAN} height={height - 40} /></clipPath></defs>
-        {view && axisTicks(view, SPAN).map((tick) => <g key={tick.time}>
-          <line x1={LEFT + tick.x} x2={LEFT + tick.x} y1={35} y2={height - 20} stroke="var(--raw-graph-edge)" opacity={.3} />
-          <text x={LEFT + tick.x} y={22} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{tick.label}</text>
+    <div className="td-optic max-h-[60vh] overflow-auto">
+      <svg role="group" aria-label={ariaLabel} width="100%" style={{ minWidth: 720 }} viewBox={`0 0 ${WIDTH} ${height}`}>
+        <defs><clipPath id={clipId}><rect x={left} y={35} width={span} height={height - 40} /></clipPath></defs>
+        {view && axisTicks(view, span).map((tick) => <g key={tick.time}>
+          <line x1={left + tick.x} x2={left + tick.x} y1={35} y2={height - 20} stroke="var(--raw-graph-edge)" opacity={.3} />
+          <text x={left + tick.x} y={22} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{tick.label}</text>
         </g>)}
-        {weave.hosts.map((host, index) => <text key={host.id} x={12} y={y(lane(index, 0)) + 4} fill="var(--raw-graph-text)" fontSize={11}>{host.label}</text>)}
+        {visible.map((thread) => {
+          const depth = ancestorsById.get(thread.id)?.length ?? 0, count = descendantCounts.get(thread.id) ?? 0;
+          const node = nodeById.get(thread.id);
+          const quality = node?.link === 'linked' && !parentById.has(thread.id) ? 'parent outside loaded page' : node?.link ?? 'parentage unavailable';
+          return <g key={thread.id} style={kindColorVars(thread.host)}>
+            <g role="button" tabIndex={0} aria-label={`Open session ${thread.label}`} className="cursor-pointer" onClick={() => onSelect(thread.id)} onKeyDown={(event) => pickKey(event, thread.id)}>
+              <rect x={8} y={y(thread.id) - 18} width={192} height={36} fill="transparent" />
+              <text x={12 + Math.min(depth, 4) * 10} y={y(thread.id) - 3} fill="var(--kind-dark)" fontSize={11}>{thread.label.length > 26 ? `${thread.label.slice(0, 25)}…` : thread.label}</text>
+              <text x={12 + Math.min(depth, 4) * 10} y={y(thread.id) + 12} fill="var(--raw-graph-text)" fontSize={9}>{thread.host} · {quality}</text>
+            </g>
+            {count > 0 && <g role="button" tabIndex={0} aria-label={`${collapsed.has(thread.id) ? 'Expand' : 'Collapse'} branch ${thread.label}`} aria-expanded={!collapsed.has(thread.id)} className="cursor-pointer" onClick={() => toggleBranch(thread.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleBranch(thread.id); } }}>
+              <rect x={200} y={y(thread.id) - 18} width={36} height={36} fill="transparent" />
+              <text x={205} y={y(thread.id) + 4} fill="var(--raw-graph-text)" fontSize={11}>{collapsed.has(thread.id) ? '+' : '−'}{count}</text>
+            </g>}
+          </g>;
+        })}
         <g clipPath={`url(#${clipId})`}>
-          {view && hierarchy?.available && !hierarchy.error && hierarchy.nodes.filter((node) => node.link === 'linked').map((node) => {
-            const child = weave.threads.find((thread) => thread.host === node.provider && thread.sessionId === node.session_id);
-            const parent = weave.threads.find((thread) => thread.host === node.provider && thread.sessionId === node.parent_session_id);
-            if (!child || !parent) return null;
-            const px = x(parent.start), cx = x(child.start);
-            const py = y(lane(parent.column, parent.lane)), cy = y(lane(child.column, child.lane));
-            const path = `M ${px} ${py} C ${(px + cx) / 2} ${py}, ${(px + cx) / 2} ${cy}, ${cx} ${cy}`;
+          {view && links.map(({ parent, child }) => {
             const label = `Recorded parent ${parent.label} of ${child.label}`;
-            return <g key={child.id} role="button" tabIndex={0} aria-label={label} data-parent-session={parent.sessionId} data-child-session={child.sessionId} className="cursor-pointer" onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id); } }}>
-              <title>{label}. Session-bound placement; spawn time unavailable. Parent tool use: {node.parent_tool_use_id ?? 'unrecorded'}.</title>
-              <path d={path} fill="none" stroke="var(--ev-associated)" strokeWidth={1.5} />
-              <path d={path} fill="none" stroke="transparent" strokeWidth={18} />
+            return <g key={child.id} role="button" tabIndex={0} aria-label={label} data-parent-session={parent.sessionId} data-child-session={child.sessionId} className="cursor-pointer" onClick={() => onSelect(parent.id)} onKeyDown={(event) => pickKey(event, parent.id)}>
+              <title>{label}. Session-bound placement; spawn time unavailable. Parent tool use: {nodeById.get(child.id)?.parent_tool_use_id ?? 'unrecorded'}.</title>
+              <path d={linkPath(parent, child, x, y)} fill="none" stroke="var(--raw-graph-text)" strokeDasharray="4 3" strokeWidth={1.5} />
+              <path d={linkPath(parent, child, x, y)} fill="none" stroke="transparent" strokeWidth={14} />
             </g>;
           })}
-
-          {view && weave.threads.filter((thread) => thread.start <= view.end && (thread.end ?? thread.start) >= view.start).map((thread) => {
-            const start = x(thread.start);
-            const end = thread.end == null ? start + 18 : Math.max(start + 4, x(thread.end));
-            const middle = y(lane(thread.column, thread.lane));
-            const thickness = 2 + thread.weight * 7;
-            const evidence = thread.endSource === 'session_end' ? 'var(--ev-measured)'
-              : thread.endSource === 'last_message' ? 'var(--ev-associated)' : 'var(--ev-unknown)';
-            return <g key={thread.id} data-thread={thread.id} style={kindColorVars(thread.host)} opacity={selectedId && selectedId !== thread.id ? .25 : 1} onClick={() => onSelect(thread.id)} className="cursor-pointer">
-              <title>{thread.host} · {formatMoment(thread.start)} · {thread.messages} messages · {thread.endSource}</title>
+          {view && visible.filter((thread) => thread.start <= view.end && (thread.end ?? thread.start) >= view.start).map((thread) => {
+            const start = x(thread.start), end = thread.end == null ? start + 18 : Math.max(start + 4, x(thread.end));
+            const middle = y(thread.id), thickness = .7 + thread.weight * 1.3;
+            return <g key={thread.id} data-thread={thread.id} role="button" tabIndex={0} aria-label={`Inspect session ${thread.label}`} style={kindColorVars(thread.host)} opacity={selectedId && selectedId !== thread.id ? .25 : 1} onClick={() => onSelect(thread.id)} onKeyDown={(event) => pickKey(event, thread.id)} className="cursor-pointer">
+              <title>{thread.host} · {formatMoment(thread.start)} · {thread.messages} messages · {thread.endSource ?? 'end unavailable'}</title>
               <line x1={start} x2={end} y1={middle} y2={middle} stroke="var(--kind-dark)" strokeWidth={thickness + 7} opacity={.12} />
-              <line x1={start} x2={end} y1={middle} y2={middle} stroke={evidence} strokeWidth={thickness} strokeDasharray={thread.end == null ? '3 4' : undefined} />
+              <line x1={start} x2={end} y1={middle} y2={middle} stroke="var(--kind-dark)" strokeWidth={thickness} strokeLinecap="round" strokeDasharray={extentPattern(thread)} />
               <circle cx={start} cy={middle} r={4} fill={thread.hollow ? 'var(--raw-graph-bg)' : 'var(--kind-dark)'} stroke="var(--kind-dark)" />
               <rect x={start - 8} y={middle - 14} width={Math.max(end - start + 16, 24)} height={28} fill="transparent" />
             </g>;
@@ -91,6 +148,16 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy 
         </g>
       </svg>
     </div>
+    {full && view && <div className="td-optic">
+      <svg role="group" aria-label="Session hierarchy minimap" width="100%" viewBox={`0 0 ${WIDTH} 80`}>
+        {links.map(({ parent, child }) => <path key={child.id} data-minimap-parent={parent.sessionId} d={linkPath(parent, child, miniX, miniY)} fill="none" stroke="var(--raw-graph-text)" strokeDasharray="4 3" strokeWidth={1} />)}
+        {visible.map((thread) => <line key={thread.id} data-minimap-session={thread.sessionId} style={kindColorVars(thread.host)} x1={miniX(thread.start)} x2={thread.end == null ? miniX(thread.start) + 3 : miniX(thread.end)} y1={miniY(thread.id)} y2={miniY(thread.id)} stroke="var(--kind-dark)" strokeDasharray={extentPattern(thread)} />)}
+        <rect x={miniX(view.start)} y={4} width={miniX(view.end) - miniX(view.start)} height={72} fill="none" stroke="var(--raw-graph-text)" />
+      </svg>
+      <label className="flex items-center gap-2 text-3xs text-text-muted">Session window
+        <input className="flex-1" aria-label="Session minimap viewport" type="range" min={full.start} max={Math.max(full.start, full.end - (view.end - view.start))} step="any" value={view.start} disabled={!zoomed} onChange={(event) => { const start = Number(event.currentTarget.value); setZoomed({ start, end: start + view.end - view.start }); }} />
+      </label>
+    </div>}
   </div>;
 }
 

@@ -429,12 +429,24 @@ describe('LoomPage', () => {
     const path = parent.querySelector('path')!.getAttribute('d')!;
     expect(path.startsWith(`M ${parentLine.getAttribute('x1')} ${parentLine.getAttribute('y1')} C`)).toBe(true);
     expect(path.endsWith(`${childLine.getAttribute('x1')} ${childLine.getAttribute('y1')}`)).toBe(true);
-    fireEvent.keyDown(parent, { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse branch Deliver Git primitive runtime' }));
+    expect(container.querySelector('[data-child-session="sess-closed"]')).toBeNull();
+    expect(container.querySelector('[data-minimap-session="sess-closed"]')).toBeNull();
+    expect(screen.getByText(/2 \/ 3 loaded sessions/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand branch Deliver Git primitive runtime' }));
+    expect(container.querySelector('[data-minimap-session="sess-closed"]')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    const overviewSearch = screen.getByTestId('loom-url').textContent;
+    expect(overviewSearch).toContain('loomOverviewWindow=');
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Recorded parent Deliver Git primitive runtime of Verify QUERY scheduler' }), { key: 'Enter' });
     await screen.findByRole('button', { name: 'Select stored event m0' });
     expect(container.querySelector('[data-parent-session]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Select stored event m0' }));
     expect(screen.queryByRole('button', { name: 'Select stored event m2' })).toBeNull();
     expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
+    fireEvent.click(screen.getByRole('button', { name: '← All loaded sessions' }));
+    expect(screen.getByTestId('loom-url').textContent).toBe(overviewSearch);
+    expect(screen.getByRole('button', { name: 'Fit the whole extent' })).toHaveProperty('disabled', false);
   });
 
   it('does not present unfed Delivery outcomes as a Loom relation', async () => {
@@ -525,10 +537,10 @@ describe('LoomPage', () => {
     ).toBeTruthy();
   });
 
-  it('says the sub-column offset encodes nothing, so packing is never read as data', async () => {
+  it('distinguishes presentation lane spacing from recorded parent identity', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
-    expect(screen.getByText(/it\s+encodes nothing/)).toBeTruthy();
+    expect(screen.getByText(/Lane spacing is presentation only/)).toBeTruthy();
   });
 
   it('reports each causal source with its real authority or dependency', async () => {
@@ -848,12 +860,12 @@ describe('LoomPage', () => {
   it('gives the canvas an accessible description and a real table alongside', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
-    const figure = screen.getByRole('img', { name: /Weave:/ });
+    const figure = screen.getByRole('group', { name: /Weave:/ });
     expect(figure.getAttribute('aria-label')).toContain('drawn open');
     expect(figure.getAttribute('aria-label')).toContain(
-      'Provider-qualified causal rows are served and listed',
+      'Only recorded parent identities are drawn',
     );
-    expect(figure.getAttribute('aria-label')).toContain('not geometrically drawn');
+    expect(figure.getAttribute('aria-label')).toContain('timed spawn and rejoin remain unavailable');
     expect(screen.getByRole('table')).toBeTruthy();
   });
 });
