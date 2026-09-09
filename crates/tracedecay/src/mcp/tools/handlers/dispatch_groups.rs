@@ -24,7 +24,7 @@ use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::{
-    AdmittedCodeIndex, AdmittedProjectStore, McpProjectAuthoritiesV1, McpProjectIdentityV1,
+    AdmittedCodeIndex, AdmittedProjectStore, McpAdmittedProjectV1, McpProjectIdentityV1,
     McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
 };
 use tracedecay_runtime_core::storage::registered_project_id;
@@ -1074,16 +1074,15 @@ fn dispatch_git_tools_inner<'a>(
     })
 }
 
-/// Builds the project-lifetime authority bundle from the retained project
-/// server. The live `TraceDecay` is that composition: graph DB, store
-/// layout, and runtimes exist whether or not the MCP request carried a
-/// separately admitted scope. A request-carried scope is preferred and
-/// still has to match the layout project id; fixture `handle_tool_call`
-/// derives the checkout from the opened project instead.
+/// Builds the request-scoped admitted project snapshot from the live
+/// `TraceDecay` this call already holds. It must not be cached: a later
+/// branch reopen swaps the served instance. A request-carried scope is
+/// preferred and still has to match the layout project id; fixture
+/// `handle_tool_call` derives the checkout from the opened project instead.
 fn admitted_project_authorities(
     cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
-) -> Result<Option<McpProjectAuthoritiesV1>> {
+) -> Result<Option<McpAdmittedProjectV1>> {
     let scope = match options.admitted_project_scope.clone() {
         Some(scope) => scope,
         None => {
@@ -1101,7 +1100,7 @@ fn admitted_project_authorities(
             })?
         }
     };
-    Ok(Some(McpProjectAuthoritiesV1::new(
+    Ok(Some(McpAdmittedProjectV1::new(
         McpProjectIdentityV1 {
             project_root: cg.project_root().to_path_buf(),
             scope,
@@ -1229,7 +1228,7 @@ async fn admitted_freshness_payload(
 fn admitted_tool_context<'a>(
     cg: &'a TraceDecay,
     options: &'a ToolCallRegistryOptions<'a>,
-    project: Option<&'a McpProjectAuthoritiesV1>,
+    project: Option<&'a McpAdmittedProjectV1>,
     snapshots: &'a AdmittedRequestSnapshotsV1,
 ) -> Result<McpToolContext<'a>> {
     // Project open resolves one checkout per served route and publishes it

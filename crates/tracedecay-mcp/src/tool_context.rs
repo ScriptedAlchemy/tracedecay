@@ -170,7 +170,7 @@ impl<'a> AdmittedCodeIndex<'a> {
     }
 }
 
-/// The checkout identity a project-lifetime MCP authority bundle carries.
+/// The checkout identity a request-scoped admitted project snapshot carries.
 #[derive(Clone, Debug)]
 pub struct McpProjectIdentityV1 {
     pub project_root: PathBuf,
@@ -184,9 +184,14 @@ pub struct McpProjectIdentityV1 {
     pub fallback_warning: Option<String>,
 }
 
-/// Per-project-lifetime handles a moved handler family may read.
+/// Request-scoped handles a moved handler family may read.
 ///
-/// Constructed only in the composition root from the retained project server.
+/// Lives exactly as long as the request's `Arc<TraceDecay>` snapshot and must
+/// never be cached. A `Database` retained across a branch reopen would be a
+/// stale handle: project-open swaps the served instance, then reconciles
+/// owners (`mcp/server/lifecycle.rs`). The composition root builds this
+/// snapshot per call from the instance that request already holds.
+///
 /// In-process handles are not wire contracts. Optional handles stay `None`
 /// when the daemon never admitted them; handlers turn that into their own
 /// typed unavailable state rather than panicking or inventing an empty
@@ -194,8 +199,8 @@ pub struct McpProjectIdentityV1 {
 ///
 /// Trimmed to what graph leftovers, status/active-project, and runtime health
 /// actually read: profile-session and diagnostics-database handles are not
-/// on this bundle because those families do not touch them.
-pub struct McpProjectAuthoritiesV1 {
+/// on this snapshot because those families do not touch them.
+pub struct McpAdmittedProjectV1 {
     pub identity: McpProjectIdentityV1,
     pub store_layout: StoreLayout,
     pub graph_database: Option<Database>,
@@ -205,8 +210,8 @@ pub struct McpProjectAuthoritiesV1 {
     pub project_session_store: Option<RegisteredGlobalDbLeaseV1>,
 }
 
-impl McpProjectAuthoritiesV1 {
-    /// Validates one project-lifetime bundle and freezes it.
+impl McpAdmittedProjectV1 {
+    /// Validates one request-scoped snapshot and freezes it.
     ///
     /// The root must be absolute, the admitted scope self-consistent, the
     /// store layout must name that same project, and a session lease — when
@@ -272,11 +277,11 @@ impl McpProjectAuthoritiesV1 {
     }
 }
 
-impl std::fmt::Debug for McpProjectAuthoritiesV1 {
+impl std::fmt::Debug for McpAdmittedProjectV1 {
     /// Names the admitted set without reaching into opaque handles.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("McpProjectAuthoritiesV1")
+            .debug_struct("McpAdmittedProjectV1")
             .field("identity", &self.identity)
             .field(
                 "store_layout_project_id",
@@ -330,7 +335,7 @@ pub struct McpRequestAuthoritiesV1<'a> {
 pub enum McpToolBinding<'a> {
     /// The serving route published a project snapshot for this call.
     Admitted {
-        project: &'a McpProjectAuthoritiesV1,
+        project: &'a McpAdmittedProjectV1,
         request: McpRequestAuthoritiesV1<'a>,
     },
     /// Standalone server, or the core server before project-open publication
@@ -346,10 +351,8 @@ pub enum McpToolBinding<'a> {
 
 /// Compile-level proof that an admitted binding cannot also carry a loose
 /// root, scope, or session store: those fields exist only on [`McpToolBinding::Unprojected`].
-const _: for<'a> fn(
-    &'a McpProjectAuthoritiesV1,
-    McpRequestAuthoritiesV1<'a>,
-) -> McpToolBinding<'a> = |project, request| McpToolBinding::Admitted { project, request };
+const _: for<'a> fn(&'a McpAdmittedProjectV1, McpRequestAuthoritiesV1<'a>) -> McpToolBinding<'a> =
+    |project, request| McpToolBinding::Admitted { project, request };
 
 /// Admitted daemon authorities for one MCP tool call.
 ///
@@ -357,7 +360,7 @@ const _: for<'a> fn(
 /// the handler family only reads them, so no handler can outlive the
 /// admission that produced them.
 pub struct McpToolContext<'a> {
-    project: Option<&'a McpProjectAuthoritiesV1>,
+    project: Option<&'a McpAdmittedProjectV1>,
     request: McpRequestAuthoritiesV1<'a>,
     project_root: &'a Path,
     active_branch: Option<&'a str>,
@@ -455,7 +458,7 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn project(&self) -> Option<&'a McpProjectAuthoritiesV1> {
+    pub fn project(&self) -> Option<&'a McpAdmittedProjectV1> {
         self.project
     }
 
@@ -532,8 +535,7 @@ impl<'a> McpToolContext<'a> {
     pub fn branch_diagnostics(
         &self,
     ) -> Option<tracedecay_application::tracedecay::BranchDiagnostics> {
-        self.project
-            .map(McpProjectAuthoritiesV1::branch_diagnostics)
+        self.project.map(McpAdmittedProjectV1::branch_diagnostics)
     }
 
     #[must_use]
@@ -853,8 +855,8 @@ mod tests {
         root: &Path,
         admitted: &ResolvedScope,
         lease: Option<RegisteredGlobalDbLeaseV1>,
-    ) -> McpProjectAuthoritiesV1 {
-        McpProjectAuthoritiesV1::new(
+    ) -> McpAdmittedProjectV1 {
+        McpAdmittedProjectV1::new(
             project_identity(root, admitted),
             test_store_layout(root, admitted.project_id.as_str()),
             None,
@@ -1178,7 +1180,7 @@ mod tests {
     #[test]
     fn a_relative_root_is_refused_by_the_project_bundle() {
         let admitted = scope("admitted");
-        let error = McpProjectAuthoritiesV1::new(
+        let error = McpAdmittedProjectV1::new(
             McpProjectIdentityV1 {
                 project_root: PathBuf::from("relative/root"),
                 scope: admitted.clone(),
@@ -1204,7 +1206,7 @@ mod tests {
     fn a_store_layout_for_another_project_is_refused() {
         let temp = tempfile::tempdir().expect("temp root");
         let admitted = scope("admitted");
-        let error = McpProjectAuthoritiesV1::new(
+        let error = McpAdmittedProjectV1::new(
             project_identity(temp.path(), &admitted),
             test_store_layout(temp.path(), "project.foreign"),
             None,
@@ -1234,7 +1236,7 @@ mod tests {
         )
         .await;
 
-        let error = McpProjectAuthoritiesV1::new(
+        let error = McpAdmittedProjectV1::new(
             project_identity(home.path(), &admitted),
             test_store_layout(home.path(), admitted.project_id.as_str()),
             None,

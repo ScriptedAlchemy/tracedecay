@@ -94,7 +94,7 @@ pub use tool_call_deadline::{
     tool_call_deadline_meta,
 };
 pub use tool_context::{
-    AdmittedCodeIndex, AdmittedProjectStore, McpProjectAuthoritiesV1, McpProjectIdentityV1,
+    AdmittedCodeIndex, AdmittedProjectStore, McpAdmittedProjectV1, McpProjectIdentityV1,
     McpRequestAuthoritiesV1, McpToolBinding, McpToolBindingError, McpToolContext, RequestControls,
 };
 pub use tool_errors::{
