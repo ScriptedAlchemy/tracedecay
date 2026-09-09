@@ -8,6 +8,8 @@ use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::{DaemonInvocationService, Lease};
+use tracedecay_mcp::BrokerSelectedResponseLease;
+use tracedecay_session_memory::context::CancellationToken;
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.
 ///
@@ -16,6 +18,12 @@ use tracedecay_daemon_service::{DaemonInvocationService, Lease};
 /// path as the daemon without adding a shipped benchmark API.
 #[cfg(feature = "rmcp-benchmark")]
 pub mod rmcp_benchmark;
+
+impl BrokerSelectedResponseLease for crate::mcp::server::SelectedProjectResponseLease {
+    fn response_revoked(&self) -> &CancellationToken {
+        self.revoked()
+    }
+}
 
 type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,

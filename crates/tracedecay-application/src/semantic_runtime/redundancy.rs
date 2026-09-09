@@ -18,74 +18,11 @@ use super::{
     project_semantic_production_runtime,
 };
 
-const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
+pub use tracedecay_graph_query::redundancy_scan::{
+    SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
+};
+
 const MAX_COSINE_DISTANCE_MICROS: i64 = 2_000_000_000;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SemanticRedundancyVectorV1 {
-    pub file_path: String,
-    pub qualified_name: String,
-    pub values: Vec<f32>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SemanticRedundancyGenerationV1 {
-    pub vector_generation: String,
-    pub source_generation: String,
-    pub projection_key: String,
-    pub profile: SemanticRedundancyProfileV1,
-    pub vectors: Vec<SemanticRedundancyVectorV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SemanticRedundancyProfileV1 {
-    pub scope_digest: String,
-    pub accepted_profile_digest: String,
-    pub calibration_profile_id: String,
-    pub calibration_digest: String,
-    pub redundancy_profile_digest: String,
-    pub maximum_distance_micros: i64,
-}
-
-impl SemanticRedundancyProfileV1 {
-    pub(crate) fn distance_micros(&self, cosine: f64) -> Option<i64> {
-        if !cosine.is_finite() || !(-1.0..=1.0).contains(&cosine) {
-            return None;
-        }
-        let scaled = ((1.0 - cosine) * SEMANTIC_DISTANCE_SCALE).round();
-        (scaled >= 0.0 && scaled <= MAX_COSINE_DISTANCE_MICROS as f64).then_some(scaled as i64)
-    }
-
-    pub fn accepts(&self, cosine: f64) -> Option<i64> {
-        let distance = self.distance_micros(cosine)?;
-        (distance <= self.maximum_distance_micros).then_some(distance)
-    }
-
-    /// Half-width, in normalized-vector coordinate units, of the smallest
-    /// window that still contains every pair this profile could accept.
-    ///
-    /// For unit vectors `u`, `v` we have `‖u − v‖² = 2(1 − cos)`, and every
-    /// single coordinate obeys `|u_k − v_k| ≤ ‖u − v‖`. A pair is accepted only
-    /// when `round((1 − cos)·SCALE) ≤ maximum_distance_micros`, which requires
-    /// `(1 − cos) ≤ (maximum_distance_micros + 0.5)/SCALE` (the `+0.5` bounds
-    /// the rounding). Substituting yields a per-coordinate bound of
-    /// `sqrt(2·(maximum_distance_micros + 0.5)/SCALE)`.
-    ///
-    /// Sorting normalized vectors by any one coordinate and comparing only
-    /// entries within this half-width therefore excludes **no** acceptable pair
-    /// (perfect recall): the returned window is a necessary condition on every
-    /// accepted pair, never a sufficient one, so callers must still re-check
-    /// [`accepts`] on each surviving candidate. A tiny epsilon is added for
-    /// floating-point slack; the value saturates at `2.0` (a window that spans
-    /// the whole normalized range, i.e. no pruning) for permissive profiles.
-    pub fn cosine_projection_window(&self) -> f64 {
-        let allowed = (self.maximum_distance_micros as f64 + 0.5) / SEMANTIC_DISTANCE_SCALE;
-        if allowed <= 0.0 {
-            return 0.0;
-        }
-        ((2.0 * allowed).sqrt() + 1e-9).min(2.0)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SemanticRedundancyAuthorityV1 {

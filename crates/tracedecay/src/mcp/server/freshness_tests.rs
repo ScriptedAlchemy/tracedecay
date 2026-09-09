@@ -168,7 +168,7 @@ async fn startup_catch_up_spawned_once_per_server() {
     let server = McpServer::new(cg, None).await;
     // The D1 spawn should have claimed the one-shot flag.
     assert!(
-        server.startup_catch_up.dispatch_claimed(),
+        !server.startup_catch_up.try_claim_dispatch(),
         "startup catch-up should have been dispatched by new_with_dbs"
     );
     assert!(
@@ -197,34 +197,34 @@ async fn startup_catch_up_spawned_once_per_server() {
 /// that landed in between observed a false "ready".
 #[tokio::test]
 async fn a_claimed_dispatch_is_never_observed_as_settled() {
-    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+    use tracedecay_mcp::server::StartupCatchUpMachineV1;
 
     let machine = StartupCatchUpMachineV1::default();
     // Undispatched machines are ready: nothing will ever run.
-    assert!(machine.settled_for_test());
+    assert!(machine.settled());
 
     assert!(machine.try_claim_dispatch());
-    assert!(machine.dispatch_claimed());
+    assert!(!machine.try_claim_dispatch());
     // Claiming dispatch is itself the transition into `Syncing`.
-    assert!(!machine.settled_for_test());
+    assert!(!machine.settled());
 
-    machine.settle_for_test();
-    assert!(machine.settled_for_test());
+    machine.settle();
+    assert!(machine.settled());
 }
 
 /// Shutdown must leave the startup sync readable as settled.
 #[tokio::test]
 async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
-    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+    use tracedecay_mcp::server::StartupCatchUpMachineV1;
 
     let machine = StartupCatchUpMachineV1::default();
     assert!(machine.try_claim_dispatch());
-    machine.mark_cancelled_for_test();
-    assert!(machine.settled_for_test());
+    machine.mark_cancelled();
+    assert!(machine.settled());
 
     // A late in-flight task settling after shutdown cannot resurrect it.
-    machine.settle_for_test();
-    assert!(machine.settled_for_test());
+    machine.settle();
+    assert!(machine.settled());
     assert!(!machine.try_claim_dispatch());
 }
 

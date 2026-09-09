@@ -39,14 +39,17 @@ pub fn register_runtime_ports() -> Result<()> {
     Ok(())
 }
 
-/// Adapts the root catalog composer to the code-index runtime's provider seam.
+/// Injects the contracts-owned catalog composition into the code-index
+/// runtime's provider seam.
 pub(crate) fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
 > {
-    crate::catalog_composition::build_application_catalog_snapshot().map_err(|error| {
-        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
-    })
+    tracedecay_contracts::catalog_composition::build_application_catalog_snapshot().map_err(
+        |error| {
+            tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

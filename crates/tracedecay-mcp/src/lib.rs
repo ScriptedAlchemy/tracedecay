@@ -4,14 +4,13 @@
 //! This crate owns the MCP surface itself: JSON-RPC contracts, concrete
 //! stdio/channel/replay transports, tool definitions, response truncation,
 //! canonical application-result presentation, request-deadline decoding,
-//! tool-error classification, hook-event plan decoding, construction ports
-//! that need MCP-adjacent types, and the tool handlers that translate a
-//! transport request into a business-owner call.
+//! tool-error classification, hook-event plan decoding, connection scheduling,
+//! typed RMCP adaptation, request lifecycle state, and tool handlers that
+//! translate transport requests into business-owner calls.
 //!
-//! Handlers reach daemon state only through [`McpToolContext`], the single
-//! context the composition root fills with the authorities it admitted for
-//! the call. Server construction, connection lifecycle adapters, and the
-//! wiring that builds that context stay in the composition root.
+//! Handlers reach daemon state through [`McpToolContext`], filled by the
+//! composition root with the authorities admitted for the call. Product
+//! dependency construction and concrete lifecycle adapters stay in that root.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -43,17 +42,18 @@
 
 pub mod analysis;
 pub mod application_output;
+mod broker_stream_transport;
 mod catalog_error;
 pub mod context_headings;
 pub mod handlers;
 pub mod hook_events;
 pub mod hook_runtime;
-pub mod host_cli;
 pub mod jsonrpc;
 pub mod lifecycle;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
+pub mod server;
 pub mod tool_call_deadline;
 pub mod tool_context;
 pub mod tool_errors;
@@ -62,6 +62,10 @@ pub mod transport;
 pub mod workflow;
 
 pub use analysis::{is_ident_byte, line_number_at, skip_ascii_whitespace};
+pub use broker_stream_transport::{
+    BrokerResponseLifecycle, BrokerSelectedResponseAuthority, BrokerSelectedResponseLease,
+    BrokerStreamTransport, BrokerWorkDeliverySettlement,
+};
 pub use catalog_error::McpCatalogError;
 pub use context_headings::{
     CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,

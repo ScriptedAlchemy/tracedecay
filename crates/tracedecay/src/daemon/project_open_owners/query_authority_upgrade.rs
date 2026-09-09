@@ -51,7 +51,10 @@ pub(super) fn spawn_deferred_query_authority_mount(
     // is disabled never seats a text generation, so this retry has nothing to
     // wait for. Parking it would poll the shared store once a second for the
     // daemon's life and re-mount on every other route's publication.
-    if super::code_index_disabled_for_scope(&invocation, &scope) {
+    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
+        &invocation.code_index_schedulers,
+        &scope,
+    ) {
         tracing::info!(
             event = "query_authority_mount",
             outcome = "code_index_disabled",

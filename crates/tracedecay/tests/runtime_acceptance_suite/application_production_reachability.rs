@@ -12,11 +12,6 @@ use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, CallableCodeSurfaceMeta,
-    CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest, parse_application_surface_request,
-    resolve_http_application_surface,
-};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_contracts::retrieval::SymbolGraphScope;
 use tracedecay_contracts::{
@@ -24,6 +19,11 @@ use tracedecay_contracts::{
     ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_daemon_service::application_surface::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, CallableCodeSurfaceMeta,
+    CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest, parse_application_surface_request,
+    resolve_http_application_surface,
+};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Every surface pins its page size to ten rows, so a query with more matches

@@ -9,7 +9,7 @@
 //! a tool-level refusal, not a JSON-RPC failure — without poisoning the
 //! surrounding lanes.
 
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

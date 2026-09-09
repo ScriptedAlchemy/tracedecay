@@ -237,13 +237,13 @@ async fn broker_bounds_lsp_document_write_hangs() {
             url::Url::from_directory_path(temp.path())
                 .unwrap()
                 .to_string(),
-            bounded_fake_lsp_timeouts(),
+            hang_after_start_fake_lsp_timeouts(),
         )
         .unwrap()
         .expect("fake analyzer is executable");
 
     let result = tokio::time::timeout(
-        OUTER_ASYNC_TIMEOUT,
+        FAKE_LSP_START_TIMEOUT + OUTER_ASYNC_TIMEOUT,
         broker.refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
             vec![fake_document(
@@ -251,7 +251,7 @@ async fn broker_bounds_lsp_document_write_hangs() {
                 FAKE_PATH,
                 &"let nope\n".repeat(HANGING_WRITE_LINE_COUNT),
             )],
-            bounded_fake_lsp_timeouts(),
+            hang_after_start_fake_lsp_timeouts(),
         ),
     )
     .await;
@@ -366,7 +366,7 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
             url::Url::from_directory_path(temp.path())
                 .unwrap()
                 .to_string(),
-            bounded_fake_lsp_timeouts(),
+            hang_after_start_fake_lsp_timeouts(),
         )
         .unwrap()
         .expect("fake analyzer is executable");
@@ -375,7 +375,7 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
         .refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            bounded_fake_lsp_timeouts(),
+            hang_after_start_fake_lsp_timeouts(),
         )
         .await
         .expect_err("partial diagnostics frame should crash the cached client");

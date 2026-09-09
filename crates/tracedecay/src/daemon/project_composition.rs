@@ -134,7 +134,7 @@ async fn release_one_idle_project_server_before_open(
                 .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
             for data_root in hook_data_roots {
-                super::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
+                super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
             }
             for prior in prior_owner_retirements {
                 prior.wait().await?;
@@ -545,7 +545,8 @@ struct CoreRouteBinding {
 struct CoreRouteActivation {
     publication_attempt: tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1,
     /// The core's preview-only source-edit lane; `None` for a read-only database.
-    core_source_edit_mutation: Option<Arc<project_open_owners::SourceEditMutationGate>>,
+    core_source_edit_mutation:
+        Option<Arc<tracedecay_daemon_service::project_owner_registration::SourceEditMutationGate>>,
 }
 
 /// Both session databases this route serves, admitted together.
@@ -1869,23 +1870,25 @@ fn project_code_index_authorities(
             .map_err(|error| TraceDecayError::Config {
             message: format!("project search scope is invalid: {error:?}"),
         })?;
-    let graph_projection_read_port = project_open_owners::project_code_graph_projection_read_port(
-        invocation.code_index_schedulers.clone(),
-        canonical_project_path.to_path_buf(),
-        scope.clone(),
-    );
-    let ignored_dependency_admission =
-        project_open_owners::project_code_index_ignored_dependency_admission_port(
+    let graph_projection_read_port =
+        tracedecay_code_index_runtime::project_reads::project_code_graph_projection_read_port(
+            invocation.code_index_schedulers.clone(),
+            canonical_project_path.to_path_buf(),
+            scope.clone(),
+        );
+    let ignored_dependency_admission = tracedecay_code_index_runtime::project_reads::
+        project_code_index_ignored_dependency_admission_port(
             invocation.code_index_schedulers.clone(),
             canonical_project_path.to_path_buf(),
             scope.clone(),
             !project_database_is_read_only,
         );
-    let generation_census_reader = project_open_owners::project_code_index_generation_census_reader(
-        invocation.code_index_schedulers.clone(),
-        canonical_project_path.to_path_buf(),
-        scope.clone(),
-    );
+    let generation_census_reader =
+        tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader(
+            invocation.code_index_schedulers.clone(),
+            canonical_project_path.to_path_buf(),
+            scope.clone(),
+        );
     let graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort = Arc::new(
         crate::daemon::callable_code_authorization::DaemonCodeGraphReadAdmission::production(
             canonical_project_path.to_path_buf(),
@@ -1912,13 +1915,13 @@ fn project_code_index_authorities(
         invocation.code_index_schedulers.clone(),
         project_id.clone(),
         read_admission_provider.clone(),
-        project_open_owners::DaemonCodeIndexScopeResolverV1,
+        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
     );
     let branch_diff_executor = code_index_branch_diff_executor(
         invocation.code_index_schedulers.clone(),
         project_id.clone(),
         read_admission_provider,
-        project_open_owners::DaemonCodeIndexScopeResolverV1,
+        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
     );
     Ok(ProjectCodeIndexAuthorities {
         publication_identity,

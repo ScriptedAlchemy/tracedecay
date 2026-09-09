@@ -69,7 +69,8 @@ fn quote_log_value(value: &str) -> String {
 }
 
 pub(crate) fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
-    eprintln!("{}", format_daemon_log_line(event, fields));
+    let line = format_daemon_log_line(event, fields);
+    eprintln!("{line}");
 }
 
 /// The stderr tracing filter derived from a `RUST_LOG` value.

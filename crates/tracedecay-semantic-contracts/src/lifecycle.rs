@@ -129,7 +129,7 @@ impl SemanticModelLifecycleStateV1 {
             | Self::Failed {
                 retryable: false, ..
             } => SemanticModelRemediationV1 {
-                retry: matches!(self, Self::Failed { .. }),
+                retry: false,
                 remove: true,
                 rollback: true,
             },
