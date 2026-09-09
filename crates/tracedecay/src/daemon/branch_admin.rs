@@ -663,7 +663,7 @@ impl StoreAdministration {
         Ok(result_receiver)
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, any(test, feature = "test-transport")))]
     pub(super) async fn run_manual_branch_publication<Publication, Task>(
         &self,
         publication: Publication,
