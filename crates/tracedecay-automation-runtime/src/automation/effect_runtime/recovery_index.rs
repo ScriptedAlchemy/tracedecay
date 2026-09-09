@@ -50,7 +50,6 @@ pub enum AutomationEffectRecoveryPreparation {
 pub struct PreparedAutomationEffectRecovery {
     dashboard_root: PathBuf,
     transitions: Vec<IndexedRetirementTransition>,
-    indexed: Vec<IndexedJournal>,
 }
 
 #[hotpath::measure(label = "daemon.automation.effect.prepare_recovery", future = true)]
@@ -96,7 +95,6 @@ pub async fn prepare_reserved_automation_effect_recovery(
         PreparedAutomationEffectRecovery {
             dashboard_root: dashboard_root.to_path_buf(),
             transitions,
-            indexed,
         },
     ))
 }
@@ -111,7 +109,6 @@ pub async fn reconcile_prepared_automation_effects_for_project<A: ProjectMemoryF
     let PreparedAutomationEffectRecovery {
         dashboard_root,
         transitions,
-        indexed,
     } = preparation;
     let owner = memory.owner().clone();
     let tracedecay_domain::FactOwnerV1::Project { project_id } = &owner else {
@@ -154,9 +151,16 @@ pub async fn reconcile_prepared_automation_effects_for_project<A: ProjectMemoryF
             }
         }
     }
-    for indexed in indexed.into_iter().filter(|indexed| {
-        indexed.project_id == scope.project_id && indexed.scope_digest == scope.scope_digest
-    }) {
+    let indexed_root = dashboard_root.clone();
+    let indexed_scope = scope.clone();
+    let indexed = tokio::task::spawn_blocking(move || {
+        indexed_journals_blocking(&indexed_root, &indexed_scope)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!("automation recovery index reader failed: {error}"))
+    })??;
+    for indexed in indexed {
         if cancellation.is_cancelled() {
             break;
         }
@@ -1040,7 +1044,6 @@ fn encode_pending_index(index: &PendingIndex) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
 pub fn indexed_journals_blocking(
     dashboard_root: &Path,
     scope: &ResolvedScope,
@@ -1373,7 +1376,6 @@ mod tests {
         PreparedAutomationEffectRecovery {
             dashboard_root: dashboard_root.to_path_buf(),
             transitions: Vec::new(),
-            indexed: Vec::new(),
         }
     }
 
