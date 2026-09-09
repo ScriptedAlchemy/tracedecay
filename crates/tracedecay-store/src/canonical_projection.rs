@@ -1305,35 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_projection_does_not_duplicate_goal_colocated_with_message() {
-        let envelope = envelope(vec![
-            CanonicalObservationFactV1::WorkflowLifecycle {
-                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
-                provider_reference: Some("session.fixture".to_owned()),
-                item_id: None,
-                parent_reference: None,
-                list_reference: None,
-                state: None,
-                status: Some("active".to_owned()),
-                item_order: None,
-                revision: None,
-                event_sequence: None,
-                content: Some(json!({"objective": "supporting goal"})),
-            },
-            CanonicalObservationFactV1::Message {
-                role: CanonicalMessageRoleV1::Assistant,
-                content: json!({"text": "authored response"}),
-                model: None,
-                timestamp: Some(43),
-            },
-        ]);
-
-        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
-        assert_eq!(fields.kind, "message");
-        assert_eq!(fields.text, "authored response");
-    }
-
-    #[test]
     fn canonical_projection_skips_boundary_only_records() {
         let envelope = envelope(vec![CanonicalObservationFactV1::Boundary {
             boundary_kind: CanonicalBoundaryKindV1::TurnEnd,

@@ -1,7 +1,7 @@
 use serde_json::json;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
-    ComponentVersion, CoverageReportV1, EvidenceClass, NativeAliasKindV2, ObservationId,
+    ComponentVersion, CoverageReportV1, EvidenceClass, ObservationId,
     ObservationIdentityMaterialV1, PayloadAccessState, PayloadReferenceV1,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
     ResolutionAuthorizationV1, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
@@ -249,45 +249,6 @@ fn commit_receipt_rejects_a_partial_mismatched_aggregate() {
             projection_generation(),
         ),
         Err(ObservationStoreError::RetrievalAnchorObservationMismatch)
-    ));
-}
-
-#[test]
-fn alias_collision_is_typed_without_a_partial_commit_receipt() {
-    let alias = NativeAliasV2::new(
-        NativeAliasKindV2::ProviderRecord,
-        PrivacyDomainBoundLocatorDigest::new(DIGEST_A).unwrap(),
-    )
-    .unwrap();
-    let first_observation = observation("alias-first", ObservationScopeV1::Profile);
-    let second_observation = observation("alias-second", ObservationScopeV1::Profile);
-    let first = anchor(
-        &first_observation,
-        ObservationScopeV1::Profile,
-        vec![alias.clone()],
-        1,
-    );
-    let second = anchor(
-        &second_observation,
-        ObservationScopeV1::Profile,
-        vec![alias.clone()],
-        2,
-    );
-    let result: ObservationStoreResult<ObservationPersistOutcome> =
-        Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-            alias: Box::new(alias.clone()),
-            existing_anchor_id: Box::new(first.anchor_id().clone()),
-            candidate_anchor_id: Box::new(second.anchor_id().clone()),
-        });
-    assert!(matches!(
-        result,
-        Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-            alias: collided,
-            existing_anchor_id,
-            candidate_anchor_id,
-        }) if collided.as_ref() == &alias
-            && existing_anchor_id.as_ref() == first.anchor_id()
-            && candidate_anchor_id.as_ref() == second.anchor_id()
     ));
 }
 

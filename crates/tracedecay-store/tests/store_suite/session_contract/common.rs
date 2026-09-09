@@ -180,19 +180,6 @@ pub(super) fn ready<F: Future>(future: F) -> F::Output {
     panic!("contract future did not become ready")
 }
 
-pub(super) fn yields_then_ready<F>(future: F) -> F::Output
-where
-    F: Future + Send,
-{
-    let mut context = Context::from_waker(Waker::noop());
-    let mut future = std::pin::pin!(future);
-    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("yielding contract future did not resume"),
-    }
-}
-
 #[test]
 fn temporal_digests_are_bounded_and_canonical() {
     let digest = temporal_digest('a');
@@ -218,50 +205,5 @@ fn temporal_digests_are_bounded_and_canonical() {
                 reason: actual_reason
             }) if actual_reason == reason
         ));
-    }
-}
-
-#[derive(Default)]
-pub(super) struct InMemorySessionState {
-    pub(super) rebuild: Option<SessionGenerationRebuildReceiptV1>,
-    pub(super) projection: Option<SessionTemporalProjectionBatchReceiptV1>,
-    pub(super) refresh_request: Option<SessionRefreshBeginOrJoinRequestV1>,
-    pub(super) refresh_progress: Option<SessionRefreshProgressV1>,
-    pub(super) refresh_receipt: Option<SessionRefreshReceiptV1>,
-}
-
-#[derive(Default)]
-pub(super) struct InMemorySessionPorts {
-    pub(super) state: Mutex<InMemorySessionState>,
-}
-
-pub(super) async fn yield_once() {
-    let mut yielded = false;
-    std::future::poll_fn(move |context| {
-        if yielded {
-            Poll::Ready(())
-        } else {
-            yielded = true;
-            context.waker().wake_by_ref();
-            Poll::Pending
-        }
-    })
-    .await
-}
-
-impl SessionTemporalCapabilityProvider for InMemorySessionPorts {
-    fn session_temporal_capabilities(&self) -> &SessionTemporalCapabilitiesV1 {
-        static CAPABILITIES: std::sync::LazyLock<SessionTemporalCapabilitiesV1> =
-            std::sync::LazyLock::new(|| {
-                capabilities([
-                    SessionTemporalCapabilityV1::FrozenWatermarks,
-                    SessionTemporalCapabilityV1::GenerationRebuild,
-                    SessionTemporalCapabilityV1::ImmutableSummaryPublication,
-                    SessionTemporalCapabilityV1::RefreshJoin,
-                    SessionTemporalCapabilityV1::RefreshProgressPersistence,
-                    SessionTemporalCapabilityV1::RefreshCancellation,
-                ])
-            });
-        &CAPABILITIES
     }
 }

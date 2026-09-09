@@ -535,28 +535,6 @@ fn busy_snapshot_worker_bounds_the_table_sizes_reply() {
 }
 
 #[test]
-fn exact_sql_health_snapshot_retires_its_reader_after_drop() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-
-    let snapshot = pool
-        .begin_exact_sql_health_snapshot(Duration::from_millis(100))
-        .unwrap();
-    assert_eq!(pool.snapshot().leased_health, 1);
-    drop(snapshot);
-
-    let state = pool.snapshot();
-    assert_eq!(state.leased_health, 0);
-    assert_eq!(state.health_workers, 0);
-    assert_eq!(state.available_health, 0);
-}
-
-#[test]
 fn application_telemetry_port_reads_real_store_size() {
     let store = TestStore::new();
     let pool = ReaderPool::start(

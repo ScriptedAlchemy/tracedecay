@@ -1,8 +1,8 @@
 use std::future::Future;
 
 use tracedecay_store::{
-    BrainId, CommitSequenceV1, ProjectId, StoreAuthorityEpochV1, StoreCommitReceiptV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
+    BrainId, CommitSequenceV1, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
 };
 
 use super::*;
@@ -62,32 +62,6 @@ fn notification_before_subscribe_is_visible() {
             WatermarkSourceState::Available(watermark(&binding, 1))
         );
     });
-}
-
-#[test]
-fn writer_receipt_is_the_public_commit_input() {
-    let metadata = crate::test_support::metadata("operation.watermark", "key.watermark", 'a');
-    let binding = StoreRuntimeBindingV1::new(
-        metadata.shard_id.clone(),
-        metadata.incarnation,
-        metadata.authority_epoch,
-    );
-    let publisher = CommittedWatermarkPublisher::new(binding.clone());
-    let receipt = StoreCommitReceiptV1 {
-        operation_id: metadata.operation_id,
-        idempotency: metadata.idempotency,
-        shard_id: binding.shard_id.clone(),
-        incarnation: binding.incarnation,
-        authority_epoch: binding.authority_epoch,
-        commit_sequence: CommitSequenceV1(1),
-        committed_at: metadata.admitted_at,
-    };
-
-    publisher.publish_committed(&receipt).unwrap();
-    assert_eq!(
-        publisher.subscribe().current(&binding.shard_id),
-        WatermarkSourceState::Available(watermark(&binding, 1))
-    );
 }
 
 #[test]

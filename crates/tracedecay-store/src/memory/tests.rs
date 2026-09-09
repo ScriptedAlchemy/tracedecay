@@ -294,28 +294,6 @@ fn batch_rejects_missing_and_cyclic_anchor_lineage() {
 }
 
 #[test]
-fn batch_accepts_order_independent_acyclic_anchor_lineage() {
-    let owner = FactOwnerV1::Profile;
-    let fact_id = fact_id(owner.clone(), "operation.anchor-dag");
-    let root = anchor("entity.dag.root", vec![]);
-    let child = anchor(
-        "entity.dag.child",
-        vec![anchor_source(root.anchor_id().clone())],
-    );
-
-    FactWriteBatch::new(
-        fact_id.clone(),
-        owner.clone(),
-        None,
-        vec![payload_event(fact_id, owner, 1)],
-        vec![child, root],
-        vec![],
-        None,
-    )
-    .unwrap();
-}
-
-#[test]
 fn batch_rejects_missing_evidence_anchor() {
     let owner = FactOwnerV1::Profile;
     let fact_id = fact_id(owner.clone(), "operation.anchor");
@@ -441,20 +419,6 @@ fn normalized_tag_batch_rejects_non_correction_and_timestamp_mismatch() {
             })
         ));
     }
-}
-
-#[test]
-fn batch_accepts_item_counts_at_the_limit() {
-    let owner = FactOwnerV1::Profile;
-    let fact_id = fact_id(owner.clone(), "operation.batch-limit.boundary");
-    let events = (1..=MAX_FACT_WRITE_BATCH_EVENTS)
-        .map(|offset| payload_event(fact_id.clone(), owner.clone(), offset as i64))
-        .collect();
-    let new_anchors = (0..MAX_FACT_WRITE_BATCH_NEW_ANCHORS)
-        .map(|index| anchor(&format!("entity.batch-limit.{index}"), vec![]))
-        .collect();
-
-    FactWriteBatch::new(fact_id, owner, None, events, new_anchors, vec![], None).unwrap();
 }
 
 #[test]

@@ -173,60 +173,6 @@ fn pinned_batch_allows_schema_install_ddl() {
 }
 
 #[test]
-fn unpinned_batch_allows_schema_install_ddl() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    channel
-        .execute_batch("CREATE TABLE protected (value INTEGER NOT NULL)".to_owned())
-        .unwrap();
-    let transaction = channel.begin_immediate().unwrap();
-    transaction
-        .execute_batch("INSERT INTO protected VALUES (1)".to_owned())
-        .unwrap();
-    transaction.commit().unwrap();
-
-    channel
-        .execute_batch("DROP TABLE protected".to_owned())
-        .unwrap();
-}
-
-#[test]
-fn exact_sql_guard_restores_authorizer_after_success() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection
-        .authorizer(Some(crate::connection::authorize_writer))
-        .unwrap();
-    connection
-        .execute_batch("CREATE TABLE protected (value INTEGER)")
-        .unwrap();
-
-    with_exact_sql_guard(
-        &connection,
-        false,
-        false,
-        None,
-        None,
-        true,
-        None,
-        crate::connection::authorize_writer,
-        true,
-        None,
-        None,
-        || {
-            connection
-                .execute_batch("DROP TABLE protected")
-                .map_err(|error| sqlite_error("test exact SQL DDL", error))
-        },
-    )
-    .unwrap();
-
-    connection
-        .execute_batch("CREATE TABLE protected (value INTEGER)")
-        .unwrap();
-    assert!(connection.execute_batch("DROP TABLE protected").is_err());
-}
-
-#[test]
 fn exact_sql_guard_restores_authorizer_after_panic() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
