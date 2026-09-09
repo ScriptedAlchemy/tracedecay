@@ -2,13 +2,13 @@
 
 use crate::compaction_receipt::record_live_compaction_outcome;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
-use crate::retention::branch_compaction::CompactionThresholdConfig;
 use crate::store_maintenance::{
     CodeGenerationRetentionOutcomeV1, run_branch_compaction, run_code_generation_retention,
     run_code_index_scope_reconciliation, run_semantic_vector_generation_retention,
 };
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 
 /// Run the production generation-maintenance journey for one admitted store lease.
 ///

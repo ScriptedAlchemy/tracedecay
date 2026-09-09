@@ -142,13 +142,14 @@ impl TraceDecay {
             Some(layout) => Ok(layout),
             None if allow_default_identity => {
                 if let Some(registry_database) = registry_database
-                    && let Some(layout) = Self::adopt_moved_nongit_project(
-                        project_root,
-                        &profile_root,
-                        registry_database,
-                        adoption,
-                    )
-                    .await?
+                    && let Some(layout) =
+                        tracedecay_application::project_adoption::adopt_moved_nongit_project(
+                            project_root,
+                            &profile_root,
+                            registry_database,
+                            adoption,
+                        )
+                        .await?
                 {
                     return Ok(layout);
                 }

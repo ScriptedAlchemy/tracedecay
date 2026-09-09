@@ -981,7 +981,7 @@ pub(crate) async fn dashboard_state_fixture(
         store_root,
         config_path: project.path().join("config.json"),
         dashboard_root,
-        retention_config: crate::config::RetentionConfig::default(),
+        retention_config: tracedecay_configuration::RetentionConfig::default(),
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
         profile_code_index_worker_settings: None,
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),

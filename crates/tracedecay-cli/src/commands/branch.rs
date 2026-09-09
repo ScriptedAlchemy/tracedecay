@@ -38,9 +38,10 @@ fn handle_branch_action_inner(
 
         match action {
             BranchAction::List { path } => {
-                let resolved =
-                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
-                        .await?;
+                let resolved = super::scope::resolve_project_scope(
+                    tracedecay_configuration::resolve_path(path),
+                )
+                .await?;
                 let status = daemon_tool_json(
                     Some(&resolved.project_path),
                     "tracedecay_status",
@@ -189,9 +190,10 @@ fn handle_branch_action_inner(
                 }
             }
             BranchAction::Add { name, path } => {
-                let resolved =
-                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
-                        .await?;
+                let resolved = super::scope::resolve_project_scope(
+                    tracedecay_configuration::resolve_path(path),
+                )
+                .await?;
                 let branch_name = match name {
                     Some(n) => n,
                     None => branch::current_branch(&resolved.project_path).ok_or_else(|| {
@@ -230,9 +232,10 @@ fn handle_branch_action_inner(
                 }
             }
             BranchAction::Remove { name, path } => {
-                let resolved =
-                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
-                        .await?;
+                let resolved = super::scope::resolve_project_scope(
+                    tracedecay_configuration::resolve_path(path),
+                )
+                .await?;
                 let response = daemon_tool_json(
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch",
@@ -258,9 +261,10 @@ fn handle_branch_action_inner(
                 }
             }
             BranchAction::Removeall { path } => {
-                let resolved =
-                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
-                        .await?;
+                let resolved = super::scope::resolve_project_scope(
+                    tracedecay_configuration::resolve_path(path),
+                )
+                .await?;
                 let response = daemon_tool_json(
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch",
@@ -293,9 +297,10 @@ fn handle_branch_action_inner(
                 }
             }
             BranchAction::Gc { path } => {
-                let resolved =
-                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
-                        .await?;
+                let resolved = super::scope::resolve_project_scope(
+                    tracedecay_configuration::resolve_path(path),
+                )
+                .await?;
                 let response = daemon_tool_json(
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch",
@@ -362,12 +367,13 @@ async fn handle_branch_autotrack_action(
     action: crate::cli::BranchAutotrackAction,
 ) -> tracedecay_domain::errors::Result<()> {
     use crate::cli::BranchAutotrackAction;
-    use tracedecay::config::MIN_AUTO_TRACK_PR_POLL_SECS;
+    use tracedecay_configuration::MIN_AUTO_TRACK_PR_POLL_SECS;
 
     match action {
         BranchAutotrackAction::Status { path } => {
             let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
+                super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path))
+                    .await?;
             let enabled = super::settings::current_project_setting(
                 &resolved.project_path,
                 tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
@@ -419,7 +425,8 @@ async fn handle_branch_autotrack_action(
         }
         BranchAutotrackAction::Enable { poll_secs, path } => {
             let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
+                super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path))
+                    .await?;
             let expected_revision =
                 super::settings::current_configuration_revision(&resolved.project_path).await?;
             let current_enabled = super::settings::current_project_setting(
@@ -481,7 +488,8 @@ async fn handle_branch_autotrack_action(
         }
         BranchAutotrackAction::Disable { path } => {
             let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
+                super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path))
+                    .await?;
             let expected_revision =
                 super::settings::current_configuration_revision(&resolved.project_path).await?;
             let current = super::settings::current_project_setting(

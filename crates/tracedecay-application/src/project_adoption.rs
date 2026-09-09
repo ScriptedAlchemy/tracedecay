@@ -27,12 +27,9 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_daemon_protocol::MovedStoreAdoption;
-
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
-
-use super::TraceDecay;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MovedNongitCandidate {
@@ -51,114 +48,111 @@ enum MovedStoreEvidence {
     NoMatch,
 }
 
-impl TraceDecay {
-    /// Remaps a moved non-git project onto `project_root` under an explicit
-    /// operator adoption decision.
-    ///
-    /// Returns `Ok(None)` when adoption was not requested or there is no
-    /// moved-store candidate, so first-touch may mint a new identity.
-    /// Ambiguous or conflicting adoption is a typed refusal, never an alias.
-    #[hotpath::measure(label = "lifecycle.adopt_moved_nongit", future = true)]
-    pub(crate) async fn adopt_moved_nongit_project(
-        project_root: &Path,
-        profile_root: &Path,
-        registry: &RegisteredGlobalDb,
-        adoption: &MovedStoreAdoption,
-    ) -> Result<Option<StoreLayout>> {
-        if matches!(adoption, MovedStoreAdoption::Never) {
-            return Ok(None);
-        }
-        if tracedecay_runtime_core::worktree::git_common_dir(project_root).is_some() {
-            return Ok(None);
-        }
+/// Remaps a moved non-git project onto `project_root` under an explicit
+/// operator adoption decision.
+///
+/// Returns `Ok(None)` when adoption was not requested or there is no
+/// moved-store candidate, so first-touch may mint a new identity.
+/// Ambiguous or conflicting adoption is a typed refusal, never an alias.
+#[hotpath::measure(label = "lifecycle.adopt_moved_nongit", future = true)]
+pub async fn adopt_moved_nongit_project(
+    project_root: &Path,
+    profile_root: &Path,
+    registry: &RegisteredGlobalDb,
+    adoption: &MovedStoreAdoption,
+) -> Result<Option<StoreLayout>> {
+    if matches!(adoption, MovedStoreAdoption::Never) {
+        return Ok(None);
+    }
+    if tracedecay_runtime_core::worktree::git_common_dir(project_root).is_some() {
+        return Ok(None);
+    }
 
-        let new_root = project_root
-            .canonicalize()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "could not canonicalize moved-project adoption root '{}': {error}",
-                    project_root.display()
-                ),
-            })?;
+    let new_root = project_root
+        .canonicalize()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "could not canonicalize moved-project adoption root '{}': {error}",
+                project_root.display()
+            ),
+        })?;
 
-        if let Some(existing) = registry
-            .project_registry_context_by_alias(&new_root)
-            .await?
-        {
-            return refuse_if_adoption_conflicts(adoption, &existing.project.project_id, &new_root);
-        }
+    if let Some(existing) = registry
+        .project_registry_context_by_alias(&new_root)
+        .await?
+    {
+        return refuse_if_adoption_conflicts(adoption, &existing.project.project_id, &new_root);
+    }
 
-        let candidates =
-            discover_moved_nongit_candidates(&new_root, profile_root, registry).await?;
-        let resuming = candidates
-            .iter()
-            .filter(|candidate| candidate.records_new_root)
-            .collect::<Vec<_>>();
-        let selected = match adoption {
-            MovedStoreAdoption::Never => return Ok(None),
-            MovedStoreAdoption::AdoptNamed(requested) => {
-                match candidates
-                    .iter()
-                    .find(|candidate| &candidate.project_id == requested)
-                {
-                    Some(candidate) => candidate,
-                    None => {
-                        return Err(TraceDecayError::Config {
-                            message: format!(
-                                "project '{requested}' is not a moved non-git store \
-                                 that can be adopted at '{}'",
-                                new_root.display()
-                            ),
-                        });
-                    }
-                }
-            }
-            MovedStoreAdoption::AdoptUnique => match (resuming.as_slice(), candidates.as_slice()) {
-                (_, []) => return Ok(None),
-                // A store whose manifest already records this exact root is
-                // positive linkage; it outranks unlinked stale rows.
-                ([resumable], _) => *resumable,
-                (_, [candidate]) => candidate,
-                _ => {
+    let candidates = discover_moved_nongit_candidates(&new_root, profile_root, registry).await?;
+    let resuming = candidates
+        .iter()
+        .filter(|candidate| candidate.records_new_root)
+        .collect::<Vec<_>>();
+    let selected = match adoption {
+        MovedStoreAdoption::Never => return Ok(None),
+        MovedStoreAdoption::AdoptNamed(requested) => {
+            match candidates
+                .iter()
+                .find(|candidate| &candidate.project_id == requested)
+            {
+                Some(candidate) => candidate,
+                None => {
                     return Err(TraceDecayError::Config {
                         message: format!(
-                            "moved non-git project adoption at '{}' is ambiguous \
-                             (candidates: {}); re-run `tracedecay init` with \
-                             --adopt-project <proj_id>, or with --fresh to mint a \
-                             new project identity here",
-                            new_root.display(),
-                            candidate_ids(&candidates)
+                            "project '{requested}' is not a moved non-git store \
+                                 that can be adopted at '{}'",
+                            new_root.display()
                         ),
                     });
                 }
-            },
-            MovedStoreAdoption::OfferCandidates => {
-                match (resuming.as_slice(), candidates.as_slice()) {
-                    (_, []) => return Ok(None),
-                    // Resuming an interrupted remap needs no flag: the store's
-                    // manifest recording this root was written under a previous
-                    // explicit adoption and is the journal record to replay.
-                    ([resumable], _) => *resumable,
-                    _ => {
-                        return Err(TraceDecayError::Config {
-                            message: format!(
-                                "a moved non-git store may belong at '{}' (candidates: {}); \
+            }
+        }
+        MovedStoreAdoption::AdoptUnique => match (resuming.as_slice(), candidates.as_slice()) {
+            (_, []) => return Ok(None),
+            // A store whose manifest already records this exact root is
+            // positive linkage; it outranks unlinked stale rows.
+            ([resumable], _) => *resumable,
+            (_, [candidate]) => candidate,
+            _ => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "moved non-git project adoption at '{}' is ambiguous \
+                             (candidates: {}); re-run `tracedecay init` with \
+                             --adopt-project <proj_id>, or with --fresh to mint a \
+                             new project identity here",
+                        new_root.display(),
+                        candidate_ids(&candidates)
+                    ),
+                });
+            }
+        },
+        MovedStoreAdoption::OfferCandidates => {
+            match (resuming.as_slice(), candidates.as_slice()) {
+                (_, []) => return Ok(None),
+                // Resuming an interrupted remap needs no flag: the store's
+                // manifest recording this root was written under a previous
+                // explicit adoption and is the journal record to replay.
+                ([resumable], _) => *resumable,
+                _ => {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "a moved non-git store may belong at '{}' (candidates: {}); \
                              adoption rebinds a registered project identity and needs an \
                              explicit choice: re-run `tracedecay init` with \
                              --adopt-project <proj_id> (or --yes when exactly one \
                              candidate exists), or with --fresh to mint a new project \
                              identity here",
-                                new_root.display(),
-                                candidate_ids(&candidates)
-                            ),
-                        });
-                    }
+                            new_root.display(),
+                            candidate_ids(&candidates)
+                        ),
+                    });
                 }
             }
-        };
+        }
+    };
 
-        remap_moved_nongit_project(&new_root, profile_root, registry, selected).await
-    }
+    remap_moved_nongit_project(&new_root, profile_root, registry, selected).await
 }
 
 fn candidate_ids(candidates: &[MovedNongitCandidate]) -> String {
@@ -263,15 +257,16 @@ fn moved_store_evidence(
         }
     }
     if layout.config_path.is_file() {
-        let config = crate::config::load_config_from_path(previous_root, &layout.config_path)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "cannot evaluate moved-store adoption evidence from '{}': {error}; \
+        let config =
+            tracedecay_configuration::load_config_from_path(previous_root, &layout.config_path)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "cannot evaluate moved-store adoption evidence from '{}': {error}; \
                      repair or remove the store config, or re-run `tracedecay init` \
                      with --fresh to mint a new identity without adoption",
-                    layout.config_path.display()
-                ),
-            })?;
+                        layout.config_path.display()
+                    ),
+                })?;
         let recorded = PathBuf::from(&config.root_dir);
         if paths_record_same_root(&recorded, new_root) {
             return Ok(MovedStoreEvidence::RecordsNewRoot);
@@ -328,9 +323,10 @@ async fn remap_moved_nongit_project(
                 ),
             })?
             .to_owned();
-        let mut config = crate::config::load_config_from_path(new_root, &layout.config_path)?;
+        let mut config =
+            tracedecay_configuration::load_config_from_path(new_root, &layout.config_path)?;
         config.root_dir = root_dir;
-        crate::config::save_config_to_path(&layout.config_path, &config)?;
+        tracedecay_configuration::save_config_to_path(&layout.config_path, &config)?;
     }
     registry
         .upsert_code_project(&candidate.project_id, new_root, None, None, None)

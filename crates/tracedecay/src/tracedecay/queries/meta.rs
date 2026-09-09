@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use crate::config::TraceDecayConfig;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::tracedecay::{
     add_local_counter, get_local_counter, get_tokens_saved, reset_local_counter, set_tokens_saved,
 };
+use tracedecay_configuration::TraceDecayConfig;
 use tracedecay_domain::errors::Result;
 
 impl TraceDecay {

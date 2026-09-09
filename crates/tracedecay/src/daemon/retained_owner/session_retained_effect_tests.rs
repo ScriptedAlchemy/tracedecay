@@ -27,16 +27,18 @@ use tracedecay_store::{
     SessionRefreshReceiptRequestV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
 };
 
-use super::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 use crate::daemon::StoreOwnerKey;
-use crate::daemon::retained_owner::session_refresh::{
-    MountedSessionRefreshAuthorityV1, admitted_session_refresh_command,
-};
 use crate::mcp::server::DaemonSessionRefreshService;
 use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_daemon_service::DaemonWorkflowIndexReadService;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_memory::session::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
+use tracedecay_session_runtime::retained::session_refresh::{
+    MountedSessionRefreshAuthorityV1, admitted_session_refresh_command,
+};
+use tracedecay_session_runtime::retained::{
+    DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1,
+};
 use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
 };

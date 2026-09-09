@@ -9,7 +9,7 @@ use tracedecay_configuration::UserSettingsDaemonClient;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage::StoreLayout;
 
-use crate::config::RetentionConfig;
+use tracedecay_configuration::RetentionConfig;
 
 /// Immutable project values captured by the composition root for dashboard
 /// state construction.
