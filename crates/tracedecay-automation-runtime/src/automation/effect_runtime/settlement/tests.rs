@@ -2093,8 +2093,8 @@ fn pending_index_project_binding_conflict_remains_a_contract_error() {
     assert!(error.to_string().contains("project binding"));
 }
 
-#[tokio::test]
-async fn reserved_admission_conflict_preserves_recovery_index() {
+#[test]
+fn reserved_admission_conflict_preserves_recovery_index() {
     let temp = tempfile::tempdir().expect("tempdir");
     let dashboard_root = temp.path();
     let path = dashboard_root
@@ -2114,9 +2114,7 @@ async fn reserved_admission_conflict_preserves_recovery_index() {
         panic!("stable mismatch must be a conflict")
     };
     assert!(!terminal);
-    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal)
-        .await
-        .expect("map conflict");
+    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal);
     assert!(matches!(
         admission,
         super::AutomationEffectAdmission::Conflict
@@ -2129,8 +2127,8 @@ async fn reserved_admission_conflict_preserves_recovery_index() {
     );
 }
 
-#[tokio::test]
-async fn terminal_admission_conflict_preserves_existing_cleanup_authority() {
+#[test]
+fn terminal_admission_conflict_preserves_existing_cleanup_authority() {
     let temp = tempfile::tempdir().expect("tempdir");
     let dashboard_root = temp.path();
     let path = dashboard_root
@@ -2156,9 +2154,7 @@ async fn terminal_admission_conflict_preserves_existing_cleanup_authority() {
         panic!("terminal mismatch must be a conflict")
     };
     assert!(terminal);
-    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal)
-        .await
-        .expect("map conflict");
+    let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal);
     assert!(matches!(
         admission,
         super::AutomationEffectAdmission::Conflict

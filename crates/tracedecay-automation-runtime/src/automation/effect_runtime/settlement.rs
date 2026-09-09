@@ -1433,9 +1433,11 @@ impl AutomationEffectAuthority {
                     .await?;
                 Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
-            ReservationResult::Conflict { terminal } => {
-                reservation_conflict_admission(&dashboard_root, &journal_path, terminal).await
-            }
+            ReservationResult::Conflict { terminal } => Result::Ok(reservation_conflict_admission(
+                &dashboard_root,
+                &journal_path,
+                terminal,
+            )),
         }?;
         observe_admission_decision(&admission);
         Ok(admission)
@@ -2347,15 +2349,15 @@ async fn discard_direct_recovery_unbound_spools(
     }
 }
 
-async fn reservation_conflict_admission(
+fn reservation_conflict_admission(
     _dashboard_root: &Path,
     _journal_path: &Path,
     _terminal: bool,
-) -> Result<AutomationEffectAdmission> {
+) -> AutomationEffectAdmission {
     // A conflicting caller does not own the existing terminal's retirement or
     // staged-publication cleanup proof. Project recovery may retire an exact
     // stale index entry, but this admission must not erase that authority.
-    Ok(AutomationEffectAdmission::Conflict)
+    AutomationEffectAdmission::Conflict
 }
 
 fn validate_retirement_binding(
