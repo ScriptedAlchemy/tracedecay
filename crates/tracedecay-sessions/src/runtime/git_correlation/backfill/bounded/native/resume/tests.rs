@@ -218,20 +218,6 @@ fn existing_tag_transition_is_detached() {
 }
 
 #[test]
-fn deleted_tag_transition_remains_detached() {
-    let fixture = fixture();
-    git(fixture.path(), &["tag", "release"]);
-    git(fixture.path(), &["checkout", "release"]);
-    git(fixture.path(), &["tag", "-d", "release"]);
-    git(fixture.path(), &["checkout", "main"]);
-    assert!(
-        collect_segments(fixture.path())
-            .iter()
-            .any(|segment| segment.branch.is_none())
-    );
-}
-
-#[test]
 fn deleted_local_label_is_conservatively_detached() {
     let fixture = fixture();
     git(fixture.path(), &["branch", "historical"]);

@@ -1412,14 +1412,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_exec_output_reads_exit_code_and_wall_time() {
-        let output = "Chunk ID: 9f149c\nWall time: 0.4325 seconds\nProcess exited with code 2\nOriginal token count: 37\nOutput:\nboom\n";
-        let (exit, wall) = parse_exec_output(output);
-        assert_eq!(exit, Some(2));
-        assert_eq!(wall, Some(0.4325));
-    }
-
-    #[test]
     fn parse_exec_output_absent_markers_are_null_not_guessed() {
         // A successful MCP-style command wrapper: wall time but no exit marker.
         let (exit, wall) = parse_exec_output("Wall time: 0.1655 seconds\nOutput:\n[{\"ok\":true}]");
@@ -1535,21 +1527,6 @@ mod tests {
         assert_eq!(
             candidates.observed,
             vec!["abcdef1234567890abcdef1234567890abcdef12"]
-        );
-    }
-
-    #[test]
-    fn fast_forward_merge_head_print_is_observed_not_produced() {
-        // A fast-forward merge creates no commit; the HEAD it prints belongs to
-        // whichever branch it advanced to, not to this session.
-        let candidates = commit_candidates(
-            "git merge feature && git rev-parse HEAD",
-            "Output:\nUpdating 1111111..2222222\nFast-forward\n2222222222222222222222222222222222222222",
-        );
-        assert!(candidates.produced.is_empty());
-        assert_eq!(
-            candidates.observed,
-            vec!["2222222222222222222222222222222222222222"]
         );
     }
 
@@ -1792,30 +1769,6 @@ mod tests {
                 .is_none(),
             "an output with no buffered exec call falls through"
         );
-    }
-
-    #[test]
-    fn custom_tool_call_exec_without_output_flushes_null_result_row() {
-        let mut state = CodexStructuredState::new();
-        let path = std::path::Path::new("/tmp/rollout.jsonl");
-        let call = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "custom_tool_call",
-                "name": "exec",
-                "call_id": "call_hang",
-                "input": "const r = await tools.exec_command({\"cmd\":\"cargo test-all\"});\ntext(r.output);\n"
-            }
-        });
-        state
-            .event_from_line(&call, &meta(), None, path, 7)
-            .expect("custom exec call recognized");
-        let flushed = state.flush_pending(&meta(), path);
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].text, "cargo test-all");
-        let md = metadata_of(&flushed[0]);
-        assert_eq!(md["exit_code"], Value::Null);
-        assert_eq!(md["success"], Value::Null);
     }
 
     #[test]

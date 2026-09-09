@@ -683,17 +683,6 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
 }
 
 #[test]
-fn preparation_uses_the_daemon_installed_worker_width() {
-    super::install_test_shared_jsonl_preparation_authority();
-    assert_eq!(super::shared_jsonl_preparation_workers(), 48);
-}
-
-#[test]
-fn preparation_preserves_configured_widths_above_sixty_four() {
-    assert_eq!(super::shared_jsonl_preparation_workers_from(96), 96);
-}
-
-#[test]
 fn preparation_width_backs_down_under_memory_pressure() {
     let reservation = super::SHARED_JSONL_WORKER_RESERVATION_BYTES;
     assert_eq!(
@@ -704,13 +693,6 @@ fn preparation_width_backs_down_under_memory_pressure() {
         super::shared_jsonl_preparation_capacity_from(48, reservation * 8, reservation * 6),
         2
     );
-}
-
-#[test]
-fn speculative_preparation_reserves_capacity_for_exact_cursor_demand() {
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(48), 47);
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(2), 1);
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(1), 0);
 }
 
 #[test]

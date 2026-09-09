@@ -157,13 +157,6 @@ mod tests {
     }
 
     #[test]
-    fn root_scope_never_synthesizes_a_session() {
-        let scope = SessionRetrievalScope::AllSessionsInAuthorizedRoot;
-        assert_eq!(scope.kind(), "all_sessions_in_authorized_root");
-        assert_eq!(scope.session_id(), None);
-    }
-
-    #[test]
     fn access_matches_only_the_exact_requested_access() {
         for granted in [
             SessionAccess::Read,

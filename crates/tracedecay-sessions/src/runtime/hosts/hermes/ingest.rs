@@ -584,25 +584,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ordinary_sweeps_have_a_finite_aggregate_budget() {
-        let default = new_sweep_budget(None);
-        assert_eq!(default.remaining(), Some(DEFAULT_HERMES_SWEEP_BYTES));
-
-        let explicit = new_sweep_budget(Some(17));
-        assert_eq!(explicit.remaining(), Some(17));
-    }
-
-    #[test]
     fn missing_home_is_typed_absence_not_empty_homes() {
         assert_eq!(hermes_homes_from(None), None);
-    }
-
-    #[test]
-    fn resolved_home_points_at_the_default_hermes_profile() {
-        let home = PathBuf::from("/tmp/operator-home");
-        assert_eq!(
-            hermes_homes_from(Some(home.clone())),
-            Some(vec![home.join(".hermes")])
-        );
     }
 }

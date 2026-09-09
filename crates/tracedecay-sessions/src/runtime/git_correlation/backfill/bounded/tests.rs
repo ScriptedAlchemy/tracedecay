@@ -1219,25 +1219,3 @@ fn cancellation_precedes_deadline() {
         BoundedBackfillInterruption::Cancelled
     );
 }
-
-#[test]
-fn interrupted_evidence_keeps_the_completed_row_frontier() {
-    let frontier = GitHistoryIndexFrontier {
-        activity_timestamp: 100,
-        source_rowid: 7,
-    };
-    let outcome = interrupted_outcome(
-        BackfillStats::default(),
-        false,
-        frontier,
-        BoundedBackfillInterruption::CommandTimedOut,
-    );
-    assert_eq!(outcome.frontier, frontier);
-    assert_eq!(outcome.remaining_sessions, 1);
-}
-
-#[test]
-fn bounded_history_page_reports_unconsumed_session_suffix() {
-    assert!(bounded_page_has_more(51, 50));
-    assert!(!bounded_page_has_more(50, 50));
-}

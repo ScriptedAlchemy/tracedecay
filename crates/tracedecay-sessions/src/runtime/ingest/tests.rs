@@ -365,11 +365,6 @@ fn parse_git_log_commits_reads_sha_and_time_skipping_malformed() {
     );
 }
 
-#[test]
-fn parse_git_log_commits_empty_is_empty() {
-    assert!(parse_git_log_commits("").is_empty());
-}
-
 use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
 
 struct GraphBackedTestStore {

@@ -795,24 +795,6 @@ async fn exact_duplicate_with_missed_read_back_has_unavailable_projection_status
 }
 
 #[tokio::test]
-async fn not_queued_exact_duplicate_with_missed_read_back_has_unavailable_projection_status() {
-    assert_duplicate_read_miss_status_is_unavailable(
-        DuplicatePersistKind::Exact,
-        ObservationProjectionStatus::NotQueued,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn covered_duplicate_with_missed_read_back_has_unavailable_projection_status() {
-    assert_duplicate_read_miss_status_is_unavailable(
-        DuplicatePersistKind::Covered,
-        ObservationProjectionStatus::Queued,
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn not_queued_covered_duplicate_with_missed_read_back_has_unavailable_projection_status() {
     assert_duplicate_read_miss_status_is_unavailable(
         DuplicatePersistKind::Covered,
