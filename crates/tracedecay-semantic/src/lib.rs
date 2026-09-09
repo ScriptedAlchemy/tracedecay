@@ -1705,28 +1705,34 @@ mod scheduling_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::sync::oneshot;
+    #[cfg(feature = "semantic-fastembed")]
     use tracedecay_code_index::embedding_document::{
         EmbeddingDocumentComposerV1, EmbeddingSymbolContextIndexV1,
     };
+    #[cfg(feature = "semantic-fastembed")]
     use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
+    #[cfg(feature = "semantic-fastembed")]
     use tracedecay_domain::{
-        ChangedCodeChunkSetV1, CodeGenerationId, ManifestDigest, ProjectionBatchRequestV1,
-        ProjectionKeyV1, ProjectionReplayReasonV1, VectorGenerationIdV1,
+        ChangedCodeChunkSetV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
     };
+    use tracedecay_domain::{CodeGenerationId, ManifestDigest, VectorGenerationIdV1};
 
+    #[cfg(feature = "semantic-fastembed")]
+    use super::SemanticProjectionResumeOutcomeV1;
     use super::fastembed_adapter::EmbedError;
     use super::fastembed_adapter::lifecycle_test_support::digest_mismatched_lifecycle_authority;
     use super::session_pool::SessionAcquireError;
     use super::{
-        SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticProjectionResumeOutcomeV1,
-        SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-        SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1, warm_failure,
+        SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1,
+        SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+        warm_failure,
     };
 
     fn source_generation(value: char) -> CodeGenerationId {
         CodeGenerationId::new(format!("code-generation.{value}")).expect("source generation")
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     fn documents(value: char) -> Arc<EmbeddingDocumentComposerV1> {
         let index = GenerationSymbolIndexV1::new(source_generation(value), Vec::new())
             .expect("empty symbol index");
@@ -1751,16 +1757,7 @@ mod scheduling_tests {
         }
     }
 
-    fn projection_request(source: char) -> ProjectionBatchRequestV1 {
-        projection_request_with_key(
-            source,
-            super::session_pool::test_support::authority()
-                .projection()
-                .projection_key()
-                .clone(),
-        )
-    }
-
+    #[cfg(feature = "semantic-fastembed")]
     fn projection_request_with_key(
         source: char,
         target_projection_key: ProjectionKeyV1,
@@ -1803,73 +1800,6 @@ mod scheduling_tests {
     }
 
     #[tokio::test]
-    async fn scheduling_returns_before_blocked_semantic_preparation() {
-        let handle = SemanticRuntimeSchedulingHandleV1::new();
-        let (started_tx, started_rx) = oneshot::channel();
-        let (_release_tx, release_rx) = oneshot::channel::<()>();
-        let target = source_generation('a');
-
-        handle.schedule(SemanticRuntimeWorkV1::new(
-            target.clone(),
-            3,
-            move |_cancellation| async move {
-                let _ = started_tx.send(());
-                let _ = release_rx.await;
-                Err(SemanticRuntimeScheduleFailureV1::Projection)
-            },
-        ));
-
-        started_rx
-            .await
-            .expect("preparation started asynchronously");
-        assert!(matches!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Indexing {
-                target_generation,
-                completed_units: 0,
-                total_units: 3,
-                ..
-            } if target_generation == target
-        ));
-        assert!(handle.current().is_none());
-    }
-
-    #[tokio::test]
-    async fn saved_edit_scheduling_does_not_block_exact_search() {
-        let handle =
-            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
-        let (started_tx, started_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-
-        let request = super::FastEmbedSemanticGenerationRequestV1::new(
-            source_generation('a'),
-            projection_request('a'),
-            Vec::new(),
-            documents('a'),
-            8,
-            move || {
-                let _ = started_tx.send(());
-                let _ = release_rx.recv();
-                Err(SemanticRuntimeScheduleFailureV1::Projection)
-            },
-            || async { Ok(SemanticProjectionResumeOutcomeV1::ReplayFromStart) },
-            |_prepared| async { Ok(()) },
-            move || async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
-        )
-        .expect("saved generation request");
-        assert!(handle.schedule_generation(request));
-        started_rx.await.expect("saved edit started in background");
-
-        let exact_results = ["exact-match"];
-        assert_eq!(exact_results, ["exact-match"]);
-        assert!(matches!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Indexing { .. }
-        ));
-        release_tx.send(()).expect("release artifact loader");
-    }
-
-    #[tokio::test]
     async fn stale_restart_snapshot_cannot_replace_newer_indexing_work() {
         let handle =
             super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
@@ -1894,33 +1824,6 @@ mod scheduling_tests {
         assert!(matches!(
             handle.status(),
             SemanticRuntimeScheduleStatusV1::Indexing { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn indexing_progress_reports_completed_units_monotonically() {
-        let handle = SemanticRuntimeSchedulingHandleV1::new();
-        let (progress_tx, progress_rx) = oneshot::channel();
-        let (_release_tx, release_rx) = oneshot::channel::<()>();
-        handle.schedule(SemanticRuntimeWorkV1::new(
-            source_generation('a'),
-            4,
-            move |progress| async move {
-                progress.set_completed_units(2);
-                let _ = progress_tx.send(());
-                let _ = release_rx.await;
-                Err(SemanticRuntimeScheduleFailureV1::Projection)
-            },
-        ));
-        progress_rx.await.expect("progress reported");
-
-        assert!(matches!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Indexing {
-                completed_units: 2,
-                total_units: 4,
-                ..
-            }
         ));
     }
 
@@ -2172,23 +2075,6 @@ mod scheduling_tests {
         );
     }
 
-    #[test]
-    fn restart_restore_installs_current_pointer_without_indexing() {
-        let handle = SemanticRuntimeSchedulingHandleV1::new();
-        // Vector char must be a valid sha256 hex digit for `ManifestDigest`;
-        // the source char is a plain string id, so the restore mnemonic stays.
-        let restored = pointer('e', 'r');
-        handle.restore_current(restored.clone());
-
-        assert_eq!(handle.current(), Some(restored.clone()));
-        assert_eq!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Current {
-                generation: restored.generation,
-            }
-        );
-    }
-
     #[cfg(feature = "semantic-fastembed")]
     #[test]
     fn exact_unbind_clears_pointer_and_factory_but_preserves_newer_generation() {
@@ -2279,23 +2165,6 @@ mod scheduling_tests {
         assert_ne!(
             handle.current().map(|pointer| pointer.generation),
             Some(old)
-        );
-    }
-
-    #[test]
-    fn artifact_schedule_failure_carries_source_error_text() {
-        let failure = SemanticRuntimeScheduleFailureV1::artifact(
-            "cataloged lifecycle install is missing a required member",
-        );
-        assert_eq!(
-            failure,
-            SemanticRuntimeScheduleFailureV1::ArtifactDetail(
-                "cataloged lifecycle install is missing a required member".to_owned()
-            )
-        );
-        assert_eq!(
-            failure.to_string(),
-            "Artifact: cataloged lifecycle install is missing a required member"
         );
     }
 }

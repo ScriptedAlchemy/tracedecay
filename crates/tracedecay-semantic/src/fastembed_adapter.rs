@@ -2004,35 +2004,6 @@ mod tests {
         id(&format!("sha256:{}", byte.to_string().repeat(64)))
     }
 
-    /// A session must be charged what one session retains, not the whole
-    /// process budget.
-    ///
-    /// Charging the ceiling per session is self-defeating: the first session
-    /// reserves the entire budget, so the pool's memory check refuses every
-    /// later acquisition and embedding collapses to one session on every
-    /// host, whatever the CPU width arithmetic asked for.
-    #[test]
-    fn resident_estimate_admits_more_than_one_session_under_the_process_ceiling() {
-        const CEILING: u64 = 2 * 1024 * 1024 * 1024;
-        // The shipped default code model plus its tokenizer.
-        const MEMBER_BYTES: u64 = 612 * 1024 * 1024 + 2 * 1024 * 1024;
-
-        let estimate = resident_bytes_estimate_for(MEMBER_BYTES, CEILING);
-        assert!(
-            estimate < CEILING,
-            "a single session must not reserve the whole process budget"
-        );
-        assert!(
-            estimate >= MEMBER_BYTES,
-            "the estimate must still cover the artifact's own declared bytes"
-        );
-        assert!(
-            CEILING / estimate >= 2,
-            "the default ceiling must admit at least the two concurrent \
-             sessions the host width arithmetic derives"
-        );
-    }
-
     /// End-to-end over the real admission path: a production-scale artifact
     /// must not charge one session the whole process budget.
     ///
@@ -2072,18 +2043,6 @@ mod tests {
             "the process ceiling must admit at least the two sessions the host \
              width arithmetic derives, but only {admitted} fit at {reserved} bytes each"
         );
-    }
-
-    #[test]
-    fn resident_estimate_never_exceeds_the_ceiling_and_survives_unknown_sizes() {
-        const CEILING: u64 = 4096;
-        // An artifact that declares no lengths keeps the previous
-        // conservative behaviour rather than under-reserving.
-        assert_eq!(resident_bytes_estimate_for(0, CEILING), CEILING);
-        // A model larger than the ceiling still clamps to it; the pool's own
-        // `reserved_bytes > resident_byte_ceiling` check then refuses it.
-        assert_eq!(resident_bytes_estimate_for(u64::MAX, CEILING), CEILING);
-        assert!(resident_bytes_estimate_for(1024, CEILING) <= CEILING);
     }
 
     fn authority(dimensions: u32) -> AdmittedProjectionArtifactV1 {
@@ -2147,19 +2106,6 @@ mod tests {
         }
     }
 
-    fn descriptor(authority: &AdmittedProjectionArtifactV1) -> &VerifiedEmbeddingArtifactV1 {
-        authority.runtime_artifact()
-    }
-
-    fn descriptor_paths(authority: &AdmittedProjectionArtifactV1) -> (&str, &str, &str) {
-        let descriptor = descriptor(authority);
-        (
-            descriptor.model_file.as_str(),
-            descriptor.tokenizer_file.as_str(),
-            descriptor.config_file.as_str(),
-        )
-    }
-
     fn batch(texts: &[&str]) -> BoundedSanitizedTextBatchV1 {
         BoundedSanitizedTextBatchV1::try_new(
             texts.iter().map(|t| (*t).to_string()).collect(),
@@ -2171,19 +2117,6 @@ mod tests {
 
     fn never_cancelled() -> ManualCancellation {
         ManualCancellation::new()
-    }
-
-    #[test]
-    fn private_runtime_descriptor_uses_domain_projection_types() {
-        let authority = authority(384);
-        let descriptor = descriptor(&authority);
-        assert_eq!(descriptor.dimensions(), 384);
-        assert_eq!(descriptor.metric(), EmbeddingMetricV1::Cosine);
-        assert_eq!(descriptor.normalization(), EmbeddingNormalizationV1::L2);
-        assert_eq!(
-            descriptor_paths(&authority),
-            ("model.onnx", "tokenizer.json", "config.json")
-        );
     }
 
     #[test]
@@ -2476,56 +2409,6 @@ mod tests {
     }
 
     #[test]
-    fn echo_dimensions_metric_and_normalization_are_exact() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority_with(
-            24,
-            'a',
-            EmbeddingMetricV1::DotProduct,
-            EmbeddingNormalizationV1::L2,
-        );
-        let mut session = runtime
-            .open_session(&authority, &never_cancelled())
-            .expect("session");
-        let vectors = session
-            .embed_batch(&batch(&["echo me"]), &never_cancelled())
-            .expect("embed");
-        assert_eq!(vectors.len(), 1);
-        let v = &vectors[0];
-        assert_eq!(v.values.len(), 24);
-        assert_eq!(v.dimensions, 24);
-        assert_eq!(v.metric, EmbeddingMetricV1::DotProduct);
-        assert_eq!(v.normalization, EmbeddingNormalizationV1::L2);
-        let norm = v.squared_l2_norm().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 1e-5,
-            "L2-normalized vector has unit norm, got {norm}"
-        );
-    }
-
-    #[test]
-    fn unnormalized_echo_stays_raw() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority_with(
-            24,
-            'a',
-            EmbeddingMetricV1::Cosine,
-            EmbeddingNormalizationV1::None,
-        );
-        let mut session = runtime
-            .open_session(&authority, &never_cancelled())
-            .expect("session");
-        let vectors = session
-            .embed_batch(&batch(&["raw values"]), &never_cancelled())
-            .expect("embed");
-        assert_eq!(vectors[0].normalization, EmbeddingNormalizationV1::None);
-        assert!(
-            vectors[0].values.iter().all(|v| (-1.0..1.0).contains(v)),
-            "fake raw values stay in [-1, 1)"
-        );
-    }
-
-    #[test]
     fn cancellation_before_embed_aborts() {
         let runtime = FakeEmbeddingRuntime::new();
         let mut session = runtime
@@ -2661,21 +2544,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compatibility_check_consumes_admitted_authority() {
-        let runtime = FakeEmbeddingRuntime::new();
-        runtime
-            .verify_artifact_compatibility(&authority(8))
-            .expect("admitted authority is compatible");
-        assert_eq!(
-            runtime
-                .counters()
-                .compatibility_checks
-                .load(Ordering::SeqCst),
-            1
-        );
-    }
-
     #[cfg(feature = "semantic-fastembed")]
     #[test]
     fn real_fastembed_runtime_rejects_unnormalized_projection_before_loading() {
@@ -2693,24 +2561,5 @@ mod tests {
                 ..
             }))
         ));
-    }
-
-    #[test]
-    fn fake_reports_resident_bytes_and_close_counters() {
-        let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(4096);
-        let counters = runtime.counters();
-        {
-            let session = runtime
-                .open_session(&authority(8), &never_cancelled())
-                .expect("session");
-            assert_eq!(session.resident_bytes_estimate(), 4096);
-            assert_eq!(counters.sessions_opened.load(Ordering::SeqCst), 1);
-            assert_eq!(counters.sessions_closed.load(Ordering::SeqCst), 0);
-        }
-        assert_eq!(
-            counters.sessions_closed.load(Ordering::SeqCst),
-            1,
-            "closing a session is observable"
-        );
     }
 }

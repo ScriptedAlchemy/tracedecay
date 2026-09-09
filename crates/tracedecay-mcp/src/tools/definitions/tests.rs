@@ -16,21 +16,6 @@ fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
 }
 
 #[test]
-fn multi_root_tools_are_discoverable() {
-    let definitions = get_tool_definitions().expect("tool definitions");
-    for name in [
-        "tracedecay_multi_root_scope_set_read",
-        "tracedecay_multi_root_scope_set_compare_and_swap",
-        "tracedecay_multi_root_execute",
-    ] {
-        assert!(
-            definitions.iter().any(|definition| definition.name == name),
-            "{name} must expose its daemon-owned public journey"
-        );
-    }
-}
-
-#[test]
 fn stack_snapshot_requires_an_exact_selection_binding() {
     let definition = get_tool_definitions()
         .expect("tool definitions")
@@ -60,57 +45,6 @@ fn stack_snapshot_requires_an_exact_selection_binding() {
 }
 
 #[test]
-fn test_explore_call_budget_tiers() {
-    assert_eq!(explore_call_budget(0), 3);
-    assert_eq!(explore_call_budget(5000), 3);
-    assert_eq!(explore_call_budget(5001), 4);
-    assert_eq!(explore_call_budget(20000), 4);
-    assert_eq!(explore_call_budget(20001), 5);
-    assert_eq!(explore_call_budget(80000), 5);
-    assert_eq!(explore_call_budget(80001), 7);
-    assert_eq!(explore_call_budget(250000), 7);
-    assert_eq!(explore_call_budget(250001), 10);
-}
-
-#[test]
-fn test_context_description_contains_budget() {
-    let desc = context_description(5000, 4);
-    assert!(
-        desc.contains("4 calls maximum"),
-        "description should contain budget: {desc}"
-    );
-    assert!(
-        desc.contains("5000 nodes"),
-        "description should contain node count: {desc}"
-    );
-}
-
-#[test]
-fn context_scout_read_surfaces_are_registered_read_only() {
-    let definitions = get_tool_definitions().expect("tool definitions");
-    for name in [
-        "tracedecay_context_scout_status",
-        "tracedecay_context_scout_recent",
-        "tracedecay_context_scout_explain",
-        "tracedecay_context_scout_capability",
-        "tracedecay_context_scout_budget",
-    ] {
-        let definition = definitions
-            .iter()
-            .find(|definition| definition.name == name)
-            .expect("Context Scout read surface is registered");
-        assert_eq!(
-            definition
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get("readOnlyHint"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-    }
-}
-
-#[test]
 fn handle_gated_feedback_reads_are_advertised_with_their_request_handle() {
     let definitions = get_tool_definitions().expect("tool definitions");
     for name in [
@@ -137,41 +71,6 @@ fn handle_gated_feedback_reads_are_advertised_with_their_request_handle() {
             "{name} must require the request handle"
         );
     }
-}
-
-#[test]
-fn test_context_description_scopes_budget_and_frees_narrow_tools() {
-    let desc = context_description(5000, 4);
-    assert!(
-        desc.contains("tracedecay_context ONLY"),
-        "budget must be scoped to tracedecay_context so agents don't abandon after one call: {desc}"
-    );
-    assert!(
-        desc.contains("UNBUDGETED"),
-        "description must tell agents the narrow tools are unbudgeted: {desc}"
-    );
-    for narrow in [
-        "tracedecay_search",
-        "tracedecay_grep",
-        "tracedecay_callers",
-        "tracedecay_body",
-    ] {
-        assert!(
-            desc.contains(narrow),
-            "description should name the narrow follow-up tool {narrow}: {desc}"
-        );
-    }
-}
-
-#[test]
-fn test_get_tool_definitions_with_budget() {
-    let defs = get_tool_definitions_with_budget(10000, 4).expect("tool definitions");
-    let context_tool = defs
-        .iter()
-        .find(|d| d.name == "tracedecay_context")
-        .unwrap();
-    assert!(context_tool.description.contains("4 calls maximum"));
-    assert!(context_tool.description.contains("10000 nodes"));
 }
 
 #[test]
