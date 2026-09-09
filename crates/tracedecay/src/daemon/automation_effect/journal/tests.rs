@@ -2763,7 +2763,6 @@ async fn reserved_admission_conflict_preserves_recovery_index() {
     };
     assert!(!terminal);
     let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal)
-        .await
         .expect("map conflict");
     assert!(matches!(
         admission,
@@ -2805,7 +2804,6 @@ async fn terminal_admission_conflict_preserves_existing_cleanup_authority() {
     };
     assert!(terminal);
     let admission = super::reservation_conflict_admission(dashboard_root, &path, terminal)
-        .await
         .expect("map conflict");
     assert!(matches!(
         admission,
