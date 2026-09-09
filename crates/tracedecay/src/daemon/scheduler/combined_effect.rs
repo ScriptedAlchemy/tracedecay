@@ -19,11 +19,11 @@ use super::scheduler_automation_effect;
 use crate::daemon::DaemonEngine;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 
-use crate::daemon::automation_effect::{
+use crate::tracedecay::TraceDecay;
+use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, DeferredProblemSettlementRequest,
     DeferredRunSettlementRequest, DeferredSettlementOutcome, DeferredSettlementRequest,
 };
-use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::Result;
 
 pub(super) enum CombinedEffectAdmission {

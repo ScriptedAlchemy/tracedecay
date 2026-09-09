@@ -11,6 +11,7 @@ pub mod recovery_index;
 #[cfg(not(any(test, feature = "test-helpers")))]
 mod recovery_index;
 pub mod retirement;
+pub mod settlement;
 pub mod terminal;
 
 pub use authority::finalize_terminal_housekeeping;
@@ -24,5 +25,13 @@ pub use recovery_index::{
     PreparedAutomationEffectRecovery, add_pending_blocking, effect_authority_digest,
     prepare_reserved_automation_effect_recovery, reconcile_prepared_automation_effects_for_project,
     recovered_partial_terminal, remove_pending_blocking,
+};
+pub use settlement::{
+    AdmittedAutomationEffectRequest, AutomationEffectAdmission, AutomationEffectAuthority,
+    AutomationLedgerObserver, DeferredProblemSettlementRequest, DeferredRunSettlementRequest,
+    DeferredSettledOutcome, DeferredSettlementOutcome, DeferredSettlementPairSubmission,
+    DeferredSettlementRequest, RetainedAutomationSettlementOutcome,
+    RetainedAutomationSettlementProjection, RetainedSettlementPairWaiter, RetainedSettlementWaiter,
+    ReusedSchedulerSkipStartError, pinned_automation_configuration_digest,
 };
 pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal};

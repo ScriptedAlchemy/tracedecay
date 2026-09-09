@@ -23,7 +23,9 @@ use super::profile_host_admission_replay::{
     ProfileHostAdmissionReplayRegistry,
 };
 #[cfg(unix)]
-use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
+use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
+
+use super::scheduler::AutomationSchedulerHandle;
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
