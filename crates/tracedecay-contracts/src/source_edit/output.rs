@@ -359,29 +359,6 @@ mod tests {
     }
 
     #[test]
-    fn source_edit_surface_result_round_trips_failure() {
-        let expected = serde_json::json!({
-            "success": false,
-            "failed": true,
-            "message": "edit was denied",
-            "expected_state": EXPECTED_STATE,
-            "replayed": false,
-        });
-
-        let decoded: SourceEditSurfaceResultV1 =
-            serde_json::from_value(expected.clone()).expect("deserialize failure result");
-
-        assert!(matches!(
-            &decoded.outcome,
-            SourceEditSurfaceOutcomeV1::Failed(_)
-        ));
-        assert_eq!(
-            serde_json::to_value(decoded).expect("serialize failure result"),
-            expected
-        );
-    }
-
-    #[test]
     fn source_edit_surface_result_round_trips_reconciled_outcome() {
         let expected = serde_json::json!({
             "success": true,

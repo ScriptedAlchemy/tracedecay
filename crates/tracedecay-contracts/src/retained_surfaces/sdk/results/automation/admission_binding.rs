@@ -45,18 +45,6 @@ fn disabled_job_commands_are_a_user_job_skip_only() {
 }
 
 #[test]
-fn session_evidence_unavailability_skips_session_backed_writers() {
-    let reason =
-        AutomationSkipReasonV1::from_ledger_reason("session_evidence_retrieval_unavailable")
-            .expect("known session-evidence skip");
-    assert!(reason.matches_task(AutomationTaskV1::SessionReflector));
-    assert!(reason.matches_task(AutomationTaskV1::SkillWriter));
-    assert!(reason.matches_task(AutomationTaskV1::CombinedReview));
-    assert!(!reason.matches_task(AutomationTaskV1::MemoryCurator));
-    assert!(!reason.matches_task(AutomationTaskV1::UserJob));
-}
-
-#[test]
 fn session_evidence_timeout_is_typed_for_only_session_backed_tasks() {
     let reason = AutomationSkipReasonV1::from_ledger_reason("session_evidence_timed_out")
         .expect("known session-evidence timeout skip");

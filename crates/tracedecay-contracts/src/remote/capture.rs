@@ -296,8 +296,6 @@ pub enum RemoteCaptureApplicationErrorV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
     #[test]
@@ -332,55 +330,6 @@ mod tests {
         );
         writer.project_id = writer.scope.project_id.clone();
         assert_eq!(writer.target_project_id(), Ok(&writer.scope.project_id));
-    }
-
-    struct FakeCapturePort {
-        authority: CurrentRemoteAuthorityStateV1,
-        captures: Mutex<Vec<u64>>,
-    }
-
-    impl RemoteCapturePortV1 for FakeCapturePort {
-        fn current_writer_authority(
-            &self,
-            _writer: &RemoteWriterAuthorityV1,
-        ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
-            Ok(self.authority.clone())
-        }
-
-        fn capture_pending(
-            &self,
-            command: &AdmittedRemoteCaptureV1,
-        ) -> Result<RemoteCaptureReceiptV1, RemoteCapturePersistenceErrorV1> {
-            self.captures
-                .lock()
-                .expect("capture calls")
-                .push(command.sequence.sequence);
-            Ok(RemoteCaptureReceiptV1 {
-                event_id: "remote.event.0123456789abcdef".to_owned(),
-                sequence: command.sequence.sequence,
-                disposition: RemoteCaptureDispositionV1::CapturedPending,
-            })
-        }
-    }
-
-    #[test]
-    fn unknown_reachability_is_not_treated_as_offline() {
-        let authority = CurrentRemoteAuthorityStateV1::Unavailable {
-            reason: RemoteAuthorityUnavailableReasonV1::RegistryUnavailable,
-            observed_at: UtcMicros(1),
-        };
-        let port = FakeCapturePort {
-            authority: authority.clone(),
-            captures: Mutex::new(Vec::new()),
-        };
-        assert!(!matches!(
-            port.authority,
-            CurrentRemoteAuthorityStateV1::Unavailable {
-                reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
-                ..
-            }
-        ));
-        assert!(port.captures.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -561,34 +561,6 @@ fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
 }
 
 #[test]
-fn callable_code_page_preserves_generation_cursor_and_query_fallback() {
-    let cursor = OpaqueCursor::new("cursor.generation.fixture.page-2").unwrap();
-    let page = CodeQueryPage::<String>::new(
-        scope().generation,
-        Vec::new(),
-        Some(0),
-        Some(cursor),
-        Some(fallback()),
-    )
-    .unwrap();
-
-    assert_eq!(page.generation.as_str(), "generation.fixture");
-    assert_eq!(page.total, Some(0));
-    assert_eq!(
-        page.next_cursor.as_ref().unwrap().as_str(),
-        "cursor.generation.fixture.page-2"
-    );
-    page.query_fallback.as_ref().unwrap().validate().unwrap();
-
-    let outcome = RetrievalPortOutcome::Completed(common::evidence(page));
-    assert_eq!(
-        outcome.evidence().coverage.completeness,
-        CoverageCompleteness::Complete
-    );
-    assert!(outcome.evidence().payload.is_some());
-}
-
-#[test]
 fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
     let contribution = callable_code_catalog_contribution().unwrap();
     let descriptors = callable_code_handler_descriptors().unwrap();

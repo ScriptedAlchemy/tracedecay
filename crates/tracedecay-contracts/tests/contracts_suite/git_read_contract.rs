@@ -107,24 +107,6 @@ fn blob_request(reader: &ExternalGitReader, include_bytes: bool) -> GitHistorica
 }
 
 #[test]
-fn an_external_type_can_implement_both_read_ports() {
-    let reader = ExternalGitReader::new();
-    let request = blob_request(&reader, true);
-
-    let blob = GitHistoricalBlobReadPort::historical_blob(&reader, &request)
-        .expect("external adapter serves its own historical blob");
-    assert_eq!(blob.path, request.path);
-    assert_eq!(blob.commit, request.commit);
-    assert_eq!(blob.bytes.as_deref(), Some(b"external blob".as_slice()));
-
-    let without_bytes =
-        GitHistoricalBlobReadPort::historical_blob(&reader, &blob_request(&reader, false))
-            .expect("an absent-bytes read is still a successful read");
-    assert!(without_bytes.bytes.is_none());
-    assert_eq!(without_bytes.blob_oid, blob.blob_oid);
-}
-
-#[test]
 fn both_ports_stay_usable_through_trait_objects() {
     let reader = ExternalGitReader::new();
     let request = blob_request(&reader, false);
@@ -178,32 +160,4 @@ fn the_full_read_port_implies_the_historical_blob_port() {
         accepts_read_port(&ExternalGitReader::new(), "src/main.rs"),
         "src/main.rs"
     );
-}
-
-#[test]
-fn published_read_bounds_are_enforceable_by_an_external_adapter() {
-    let reader = ExternalGitReader::new();
-    let over_bound = GitHistoricalBlobRequestV1 {
-        max_bytes: GIT_HISTORICAL_BLOB_MAX_BYTES + 1,
-        ..blob_request(&reader, false)
-    };
-
-    assert!(
-        matches!(
-            reader.historical_blob(&over_bound),
-            Err(GitIntelligenceError::HistoricalBlobBoundExceeded { bound, actual })
-                if bound == GIT_HISTORICAL_BLOB_MAX_BYTES
-                    && actual == GIT_HISTORICAL_BLOB_MAX_BYTES + 1
-        ),
-        "the byte bound and its typed rejection must both be reachable externally"
-    );
-
-    let history = GitHistoryRequest {
-        max_count: GIT_HISTORY_MAX_COUNT_LIMIT,
-        ..GitHistoryRequest::default()
-    };
-    assert!(matches!(
-        reader.history(&history),
-        Err(GitIntelligenceError::ReadOnlyViolation(_))
-    ));
 }

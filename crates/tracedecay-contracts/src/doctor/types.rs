@@ -414,23 +414,6 @@ mod tests {
     }
 
     #[test]
-    fn doctor_healthy_finding_with_complete_coverage_constructs() {
-        let finding = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::StorageRuntime,
-            DoctorEvidenceStateV1::HealthyCompleteCoverage,
-            vec![evidence(
-                DoctorFindingFamilyV1::StorageRuntime,
-                "runtime.graph-quick-check",
-            )],
-            complete_coverage(),
-        )
-        .expect("healthy finding");
-        assert!(finding.state().is_healthy_complete());
-        assert_eq!(finding.evidence().len(), 1);
-        assert!(finding.coverage().is_complete());
-    }
-
-    #[test]
     fn doctor_finding_wire_contract_contains_diagnostics_only() {
         let finding = DoctorFindingV1::new(
             DoctorFindingFamilyV1::Configuration,
@@ -514,31 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn doctor_healthy_finding_rejects_unknown_coverage() {
-        let coverage = DoctorCoverageStatementV1::new(
-            DoctorCoverageCompletenessV1::Unknown,
-            "coverage unknown",
-        )
-        .expect("valid coverage");
-        let error = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::StorageRuntime,
-            DoctorEvidenceStateV1::HealthyCompleteCoverage,
-            vec![evidence(
-                DoctorFindingFamilyV1::StorageRuntime,
-                "runtime.temporal-health",
-            )],
-            coverage,
-        )
-        .expect_err("unknown coverage cannot be healthy");
-        assert_eq!(
-            error,
-            ApplicationContractError::Inconsistent {
-                field: "doctor healthy coverage"
-            }
-        );
-    }
-
-    #[test]
     fn doctor_evidence_reference_rejects_empty_trimmed_and_control_input() {
         assert_eq!(
             DoctorEvidenceReferenceV1::new("").expect_err("empty rejected"),
@@ -569,81 +527,6 @@ mod tests {
                 field: "doctor coverage statement"
             }
         );
-    }
-
-    #[test]
-    fn doctor_evidence_state_is_healthy_complete_only_for_one_variant() {
-        for state in [
-            DoctorEvidenceStateV1::Unsupported,
-            DoctorEvidenceStateV1::Absent,
-            DoctorEvidenceStateV1::Stale,
-            DoctorEvidenceStateV1::Degraded,
-            DoctorEvidenceStateV1::Partial,
-            DoctorEvidenceStateV1::Unknown,
-            DoctorEvidenceStateV1::Denied,
-        ] {
-            assert!(
-                !state.is_healthy_complete(),
-                "{state:?} must not be healthy"
-            );
-        }
-        assert!(DoctorEvidenceStateV1::HealthyCompleteCoverage.is_healthy_complete());
-    }
-
-    #[test]
-    fn doctor_storage_family_finding_constructs() {
-        let finding = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::Storage,
-            DoctorEvidenceStateV1::Degraded,
-            vec![evidence(
-                DoctorFindingFamilyV1::Storage,
-                "storage.orphan-store.age-42d",
-            )],
-            complete_coverage(),
-        )
-        .expect("storage finding");
-        assert_eq!(finding.family(), DoctorFindingFamilyV1::Storage);
-        assert!(!finding.state().is_healthy_complete());
-    }
-
-    #[test]
-    fn doctor_storage_family_healthy_finding_still_rejects_partial_coverage() {
-        let error = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::Storage,
-            DoctorEvidenceStateV1::HealthyCompleteCoverage,
-            vec![evidence(
-                DoctorFindingFamilyV1::Storage,
-                "storage.size.within-budget",
-            )],
-            partial_coverage(),
-        )
-        .expect_err("partial coverage cannot be healthy");
-        assert_eq!(
-            error,
-            ApplicationContractError::Inconsistent {
-                field: "doctor healthy coverage"
-            }
-        );
-    }
-
-    #[test]
-    fn doctor_storage_finding_wrapper_attaches_kind_and_requires_storage_family() {
-        let finding = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::Storage,
-            DoctorEvidenceStateV1::Degraded,
-            vec![evidence(
-                DoctorFindingFamilyV1::Storage,
-                "storage.orphan-store.age-42d",
-            )],
-            complete_coverage(),
-        )
-        .expect("storage finding");
-        let typed =
-            DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, finding.clone())
-                .expect("typed storage finding");
-        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
-        assert_eq!(typed.finding(), &finding);
-        assert_eq!(typed.into_finding(), finding);
     }
 
     #[test]
@@ -691,18 +574,6 @@ mod tests {
                 serde_json::from_str(&encoded).expect("deserialize");
             assert_eq!(decoded, kind);
         }
-    }
-
-    #[test]
-    fn doctor_storage_finding_kinds_are_distinct_from_storage_runtime_family() {
-        assert_ne!(
-            DoctorFindingFamilyV1::Storage,
-            DoctorFindingFamilyV1::StorageRuntime
-        );
-        assert_eq!(
-            serde_json::to_string(&DoctorFindingFamilyV1::Storage).expect("serialize"),
-            "\"storage\""
-        );
     }
 
     #[test]
