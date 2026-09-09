@@ -110,6 +110,7 @@ pub async fn handle_affected(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
+    ctx.verify_graph_scope(graph)?;
     let files = require_string_array_arg(&args, "files")?;
     let max_depth = clamped_depth_arg(&args, "depth", 5, 10);
 

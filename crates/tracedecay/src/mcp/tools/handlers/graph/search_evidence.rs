@@ -7,6 +7,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_mcp::tools::render::Md;
 
+use tracedecay_mcp::McpToolContext;
 use tracedecay_mcp::handlers::dependency_hints;
 
 #[hotpath::measure(future = true, label = "mcp.graph.search_race")]
@@ -131,24 +132,19 @@ impl<'a> SearchGraphEvidence<'a> {
     #[hotpath::measure(future = true, label = "mcp.graph.import_hint")]
     pub(super) async fn external_import_hint(
         &self,
+        ctx: &McpToolContext<'_>,
         query: &str,
         limit: usize,
         scope_prefix: Option<&str>,
-        deadline: Option<&tracedecay_contracts::Deadline>,
-        cancellation: Option<&tracedecay_contracts::CancellationSignal>,
     ) -> Option<Value> {
         match self.graph {
-            Ok(graph) => match dependency_hints::external_import_hint(
-                graph,
-                query,
-                limit,
-                scope_prefix,
-                deadline,
-                cancellation,
-            ) {
-                Ok(hint) => hint,
-                Err(error) => Some(dependency_hints::unavailable_hint(&error)),
-            },
+            Ok(graph) => {
+                match dependency_hints::external_import_hint(ctx, graph, query, limit, scope_prefix)
+                {
+                    Ok(hint) => hint,
+                    Err(error) => Some(dependency_hints::unavailable_hint(&error)),
+                }
+            }
             Err(error) => Some(dependency_hints::unavailable_hint(error)),
         }
     }

@@ -25,10 +25,10 @@ use super::support::{
     self, CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request,
     take_internal_context_memory_analytics, text_tool_result, unique_file_paths,
 };
-use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::dependency_hints;
 use tracedecay_mcp::handlers::support::retrieval_cursor;
 use tracedecay_mcp::tools::render::{self, Md};
+use tracedecay_mcp::{McpToolContext, ToolResult};
 
 mod context_support;
 mod lexical_routing;
@@ -235,12 +235,13 @@ pub(super) async fn handle_search<F>(
         &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
     freshness_reader: Option<&CodeIndexFreshnessReader>,
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
+    ctx: &McpToolContext<'_>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
+    let deadline = ctx.deadline().cloned();
+    let cancellation = ctx.cancellation().cloned();
     let query =
         args.get("query")
             .and_then(|v| v.as_str())
@@ -323,12 +324,11 @@ where
                 preserve_complete_search_after_lazy_admission(
                     hotpath::future!(
                         dependency_hints::admit_verified_ignored_dependency(
+                            ctx,
                             ignored_dependency_admission,
                             &graph,
                             query,
-                            scope_prefix,
-                            deadline.as_ref(),
-                            cancellation.as_ref()
+                            scope_prefix
                         ),
                         label = "mcp.graph.search.admit"
                     )
@@ -407,13 +407,7 @@ where
             if (scope_prefix.is_some()
                 || dependency_hints::should_check_external_import_hint(result_count, limit))
                 && let Some(hint) = graph_evidence
-                    .external_import_hint(
-                        query,
-                        limit,
-                        scope_prefix,
-                        deadline.as_ref(),
-                        cancellation.as_ref(),
-                    )
+                    .external_import_hint(ctx, query, limit, scope_prefix)
                     .await
             {
                 output["external_import_hint"] = hint;
@@ -798,12 +792,13 @@ pub(super) async fn handle_context<F>(
     search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
     freshness_reader: Option<&CodeIndexFreshnessReader>,
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
+    ctx: &McpToolContext<'_>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
+    let deadline = ctx.deadline().cloned();
+    let cancellation = ctx.cancellation().cloned();
     let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
     let task = request.task.as_str();
     let mode = request.mode.unwrap_or(ContextModeV1::Explore);
@@ -1047,8 +1042,7 @@ pub(super) async fn handle_find_exact_symbol(
     ignored_dependency_admission: Option<
         &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
-    deadline: Option<&tracedecay_contracts::Deadline>,
-    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
+    ctx: &McpToolContext<'_>,
 ) -> Result<ToolResult> {
     let name =
         args.get("name")
@@ -1068,12 +1062,11 @@ pub(super) async fn handle_find_exact_symbol(
     if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
         hotpath::future!(
             dependency_hints::admit_verified_ignored_dependency(
+                ctx,
                 ignored_dependency_admission,
                 graph,
                 name,
                 scope_prefix,
-                deadline,
-                cancellation,
             ),
             label = "mcp.graph.find_exact_symbol.admit"
         )

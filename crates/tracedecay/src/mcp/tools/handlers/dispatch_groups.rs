@@ -20,7 +20,10 @@ use tracedecay_mcp::handlers::git;
 use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
-use tracedecay_mcp::{McpToolContext, ToolResult};
+use tracedecay_mcp::{
+    AdmittedCodeIndex, AdmittedProjectStore, McpToolBinding, McpToolContext, RequestControls,
+    ToolResult,
+};
 
 use super::ToolCallRegistryOptions;
 use super::support::{effective_path, generic_tool_result, unique_file_paths};
@@ -505,8 +508,7 @@ fn dispatch_graph_tools_inner<'a>(
                     options.code_index_search_authority.as_ref(),
                     options.code_index_ignored_dependency_admission.as_deref(),
                     options.code_index_freshness_reader.as_ref(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
+                    &admitted_tool_context(cg, &options)?,
                 )
                 .await
             }
@@ -542,8 +544,7 @@ fn dispatch_graph_tools_inner<'a>(
                     options.code_index_search_executor.as_ref(),
                     options.code_index_search_authority.as_ref(),
                     options.code_index_freshness_reader.as_ref(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
+                    &admitted_tool_context(cg, &options)?,
                 )
                 .await
             }
@@ -598,8 +599,7 @@ fn dispatch_graph_tools_inner<'a>(
                     args,
                     selected_scope_prefix,
                     options.code_index_ignored_dependency_admission.as_deref(),
-                    options.application_deadline.as_ref(),
-                    options.application_cancellation.as_ref(),
+                    &admitted_tool_context(cg, &options)?,
                 )
                 .await
             }
@@ -1026,7 +1026,7 @@ fn dispatch_git_tools_inner<'a>(
         // also tells the underlying operation to stop at its next checkpoint.
         let carried_deadline = options.application_deadline.as_ref();
         let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
-        let ctx = git_tool_context(cg, &options);
+        let ctx = admitted_tool_context(cg, &options)?;
 
         let handler = async {
             match tool_name {
@@ -1081,30 +1081,57 @@ fn dispatch_git_tools_inner<'a>(
     })
 }
 
-/// Binds the admitted authorities the git handler family reads.
+/// Binds the admitted authorities a moved handler family reads.
 ///
-/// Everything the family may touch — the project route, the caller's deadline
-/// and cancellation, the registered project session store that authenticates
-/// PR-context cursors, and the daemon-owned code-index executors with the
-/// authorization proved for them — crosses into `tracedecay-mcp` through this
-/// one context. An authority the daemon did not admit stays absent, and the
-/// handler reports its own typed unavailable state.
-fn git_tool_context<'a>(
+/// Everything the family may touch — the resolved project scope, the caller's
+/// deadline and cancellation, the registered project session store that
+/// authenticates PR-context cursors, and the daemon-owned code-index executors
+/// with the authorization proved for them — crosses into `tracedecay-mcp` as
+/// one validated binding. Each store or executor group travels paired with the
+/// checkout the daemon admitted it for, so `bind` refuses a set that names two
+/// checkouts instead of letting a handler read across projects. An authority
+/// the daemon did not admit stays absent, and the handler reports its own
+/// typed unavailable state.
+fn admitted_tool_context<'a>(
     cg: &'a TraceDecay,
     options: &'a ToolCallRegistryOptions<'a>,
-) -> McpToolContext<'a> {
-    McpToolContext::new(cg.project_root())
-        .with_active_branch(cg.active_branch())
-        .with_request_control(
-            options.application_deadline.as_ref(),
-            options.application_cancellation.as_ref(),
-        )
-        .with_project_session_db(options.registered_project_session_db.as_ref())
-        .with_code_index_authorities(
-            options.code_index_search_executor.as_ref(),
-            options.code_index_branch_diff_executor.as_ref(),
-            options.code_index_search_authority.as_ref(),
-        )
+) -> Result<McpToolContext<'a>> {
+    // Two independent authorities name a checkout here, and a git tool may
+    // only run when they agree. The invocation target is the checkout the
+    // *caller's* request resolved to; the project route is the checkout the
+    // daemon admitted these authorities under. The session store and the
+    // code-index executors both mount behind that route, so they enter paired
+    // with it, and `bind` refuses the call if the caller selected a different
+    // project than the route admitted.
+    let requested = options.application_invocation_target.resolved();
+    let admitted = options.resolved_project_route.map(|route| &route.scope);
+    // An executor is worth carrying even when the authorization is absent: the
+    // executor itself denies the request and names *that* as the reason,
+    // whereas dropping it would report the index as unmounted.
+    let code_index = (options.code_index_search_executor.is_some()
+        || options.code_index_branch_diff_executor.is_some())
+    .then_some(AdmittedCodeIndex {
+        scope: admitted,
+        authority: options.code_index_search_authority.as_ref(),
+        search: options.code_index_search_executor.as_ref(),
+        branch_diff: options.code_index_branch_diff_executor.as_ref(),
+    });
+    Ok(McpToolContext::bind(McpToolBinding {
+        project_root: cg.project_root(),
+        active_branch: cg.active_branch(),
+        controls: RequestControls {
+            deadline: options.application_deadline.as_ref(),
+            cancellation: options.application_cancellation.as_ref(),
+        },
+        scope: requested,
+        project_session_store: options.registered_project_session_db.as_ref().map(|lease| {
+            AdmittedProjectStore {
+                scope: admitted,
+                lease,
+            }
+        }),
+        code_index,
+    })?)
 }
 
 /// Dispatch source-editing tools (`tracedecay_str_replace`,

@@ -89,7 +89,10 @@ pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, caller_tool_call_deadline_from_meta,
     tool_call_deadline_meta,
 };
-pub use tool_context::McpToolContext;
+pub use tool_context::{
+    AdmittedCodeIndex, AdmittedProjectStore, McpToolBinding, McpToolBindingError, McpToolContext,
+    RequestControls,
+};
 pub use tool_errors::{
     mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
     structured_hook_error_data, tool_error_response, tool_result_has_semantic_error,

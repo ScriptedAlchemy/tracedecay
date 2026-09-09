@@ -1,7 +1,32 @@
-//! Repository fixtures and the ref-read serializer shared by this family's
-//! tests.
+//! Repository fixtures, admitted-binding shorthands, and the ref-read
+//! serializer shared by this family's tests.
 
+use std::path::Path;
 use std::sync::LazyLock;
+
+use crate::tool_context::{McpToolBinding, McpToolContext, RequestControls};
+
+/// The binding a standalone (non-daemon) server produces: a worktree root and
+/// no admitted authority at all.
+pub(super) fn standalone_context(project_root: &Path) -> McpToolContext<'_> {
+    McpToolContext::standalone(project_root).expect("an absolute root binds standalone")
+}
+
+/// The same standalone binding with the branch git resolved for the worktree.
+pub(super) fn standalone_context_on_branch<'a>(
+    project_root: &'a Path,
+    active_branch: &'a str,
+) -> McpToolContext<'a> {
+    McpToolContext::bind(McpToolBinding {
+        project_root,
+        active_branch: Some(active_branch),
+        controls: RequestControls::default(),
+        scope: None,
+        project_session_store: None,
+        code_index: None,
+    })
+    .expect("an absolute root binds standalone")
+}
 
 /// The branch-ref admission semaphore is process-wide, and
 /// `branch::tests::branch_ref_route_reports_capacity_without_queueing`
