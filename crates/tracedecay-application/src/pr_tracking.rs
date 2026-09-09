@@ -13,10 +13,12 @@ use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError};
 
 mod worktrees;
 pub use worktrees::{
-    ManualBranchActivationError, ManualBranchArtifactOwnershipV1, ManualBranchArtifactsV1,
-    ManualBranchLifecycleLeaseV1, PrCleanupArtifact, PrCleanupError, PrCleanupReceipt,
-    cleanup_owned_worktree, cleanup_pr_worktree, manual_branch_artifact_ownership,
-    manual_branch_artifacts_match, manual_branch_source_owns_artifacts,
+    ManualBranchActivation, ManualBranchActivationError, ManualBranchArtifactOwnershipV1,
+    ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1, PrCleanupArtifact, PrCleanupError,
+    PrCleanupReceipt, ReconcileReport, cleanup_owned_worktree, cleanup_owned_worktree_off_runtime,
+    cleanup_pr_worktree, cleanup_pr_worktree_off_runtime, manual_branch_artifact_ownership,
+    manual_branch_artifact_ownership_off_runtime, manual_branch_artifacts_match,
+    manual_branch_artifacts_match_off_runtime, manual_branch_source_owns_artifacts,
     prepare_manual_branch_worktree, prepare_pr_worktree, resolve_branch_head,
     try_acquire_manual_branch_lifecycle,
 };

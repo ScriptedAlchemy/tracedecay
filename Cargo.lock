@@ -6443,6 +6443,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-graph-query",
  "tracedecay-hooks",
+ "tracedecay-host-admission",
  "tracedecay-lsp",
  "tracedecay-policy",
  "tracedecay-private-fs",

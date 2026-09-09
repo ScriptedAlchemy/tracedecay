@@ -618,10 +618,16 @@ pub(super) async fn register_project_open_production_owners(
         admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
             message: format!("project-open admitted root URI denied: {error}"),
         })?;
+    let source = graph
+        .source_read_context()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open primitive runtime requires an exact registered source identity"
+                .to_owned(),
+        })?;
     open_and_register_project_primitive_runtime(
         invocation,
         project_root,
-        graph.clone(),
+        source,
         server,
         session_db.clone(),
         access.clone(),

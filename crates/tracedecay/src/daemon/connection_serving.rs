@@ -4,9 +4,9 @@
 //! portable broker path. Each entry point owns framing, project-owner routing,
 //! and connection teardown for exactly one client.
 
-use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
+use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::{DaemonInvocationService, Lease};
 use tracedecay_mcp::BrokerSelectedResponseLease;
 use tracedecay_session_memory::context::CancellationToken;
