@@ -13,7 +13,7 @@ use tracedecay_global_db::observation::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATIO
 
 use crate::common::{
     canonical_existing_path, git_program, initialize_tracedecay_cli_project,
-    spawn_tracedecay_daemon, stop_managed_daemon, tracedecay_command_with_home,
+    spawn_tracedecay_daemon_with, stop_managed_daemon, tracedecay_command_with_home,
 };
 
 /// How long the daemon may take to re-derive the reset store from the
@@ -352,8 +352,19 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
         "a converged store records the swept Codex corpus and provider coverage"
     );
 
-    // Recovery runs offline: the daemon cannot open a refused store.
+    // Reopening unchanged history must settle without a spurious conflict.
+    assert_search_hits(&home, &project, true, "baseline catch_up");
     stop_managed_daemon(&home);
+    let reopen_log = home.join("ordinary-reopen.log");
+    let daemon = spawn_tracedecay_daemon_with(&home, |command| {
+        command.stderr(std::fs::File::create(&reopen_log).unwrap());
+    });
+    wait_for_described_session(&home, &project, "ordinary reopen");
+    assert_search_hits(&home, &project, true, "ordinary reopen catch_up");
+    drop(daemon);
+    assert_no_replay_conflicts(&reopen_log);
+
+    // Recovery runs offline: the daemon cannot open a refused store.
     make_observation_authority_refused(&sessions_db);
     replace_codex_rollout_identity(&home);
 
@@ -404,7 +415,10 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
     // store that has already converged is complete and current — and only
     // once its generations are rebuilt. Neither reading may be an unavailable
     // projection or the reset store read as converged.
-    let _daemon = spawn_tracedecay_daemon(&home);
+    let reset_log = home.join("reset-reopen.log");
+    let daemon = spawn_tracedecay_daemon_with(&home, |command| {
+        command.stderr(std::fs::File::create(&reset_log).unwrap());
+    });
     let reopened = doctor(&home, &project);
     assert!(
         is_evidence(&reopened),
@@ -486,4 +500,21 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
         scheduling_cursor_count(&sessions_db) > 0,
         "the rebuilt authority must record the swept Codex corpus and provider coverage again"
     );
+    drop(daemon);
+    assert_no_replay_conflicts(&reset_log);
+}
+
+fn assert_no_replay_conflicts(log: &Path) {
+    let output = std::fs::read_to_string(log).unwrap();
+    for reason in [
+        "authority_write_failed",
+        "external_source_commit_failed",
+        "observation repository provenance collision",
+        "external source idempotency key conflicts",
+    ] {
+        assert!(
+            !output.contains(reason),
+            "reopen must settle on its first pass: {output}"
+        );
+    }
 }
