@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { useActivationField } from '../../viz/graph/useActivationField.ts';
@@ -45,6 +45,7 @@ import {
  *   guesses that a generic failure means "not mounted".
  */
 export function ScopedBrain({ projectId, label }: { projectId: string; label: string }) {
+  const [inspectedId, setInspectedId] = useState<string | null>(null);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
 
   // The holdings rail is a scroll container at `lg` and an ordinary block
@@ -204,13 +205,16 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
               const slice = envelope.payload;
               return nodes.length > 0 ? (
                 <GraphCanvas
+                  cameraControls
+                  inspectedId={inspectedId}
+                  onInspect={setInspectedId}
                   nodes={nodes}
                   edges={edges}
                   fill
                   canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
                   activation={activation}
-                  ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The project identity and checkouts listed alongside remain available as context.`}
-                  fallbackDescription="the project identity and checkouts beside this field remain available as a text alternative"
+                  ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The returned symbol list alongside is the accessible equivalent.`}
+                  fallbackDescription="the returned symbol list beside this field remains available as a text alternative"
                   encoding={{
                     body: 'symbol',
                     size: 'connectedness',
@@ -260,6 +264,21 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           {usage && usage.by_category.length > 0 ? (
             <ActivityByCategory categories={usage.by_category} total={usage.event_count} />
           ) : null}
+          {nodes.length > 0 ? <section aria-label="Returned symbols" className="text-xs">
+            <h2 className="font-semibold">Returned symbols ({nodes.length})</h2>
+            <ul className="mt-2 space-y-1">
+              {nodes.map((node) => <li key={node.id}>
+                <button type="button" className="td-hit w-full break-all border border-edge-subtle p-2 text-left" aria-pressed={inspectedId === node.id} onFocus={() => setInspectedId(node.id)} onClick={() => setInspectedId(node.id)} onKeyDown={(event) => { if (event.key === 'Escape') setInspectedId(null); }}>
+                  {node.label} · {node.kind}
+                </button>
+                {inspectedId === node.id ? <dl className="space-y-1 p-2 text-2xs [&>dd]:break-all">
+                  <dt>Exact symbol ID</dt><dd>{node.id}</dd>
+                  <dt>Connectedness</dt><dd>{node.degree ?? 'not measured'}</dd>
+                  <dt>Returned relationships</dt><dd>{edges.filter((edge) => edge.source === node.id || edge.target === node.id).map((edge) => `${edge.source} → ${edge.target} (${edge.kind})`).join('; ') || 'none in this slice'}</dd>
+                </dl> : null}
+              </li>)}
+            </ul>
+          </section> : null}
         </aside>
       </div>
     </div>
