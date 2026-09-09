@@ -119,7 +119,8 @@ fn candidate_admission_outcome<E>(
         RetrieverOutcome::Complete(batch)
     } else {
         tracing::debug!(
-            ?term_sources,
+            pruned_source_count = term_sources.len(),
+            source_document_frequencies = ?term_sources.iter().map(|(_, frequency)| *frequency).collect::<Vec<_>>(),
             document_frequency_budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
             "lexical candidate term sources pruned by retrieval policy"
         );
