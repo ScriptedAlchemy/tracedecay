@@ -7,6 +7,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 use tracedecay_runtime_core::storage::StoreLayout;
 
 use super::TraceDecay;
@@ -15,6 +16,13 @@ use super::TraceDecay;
 /// `tracedecay-application` owns the shape and the root engine produces exactly
 /// that type rather than a structurally identical twin.
 pub use tracedecay_application::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
+
+/// The mounted lease is stored in `canonicalize()` spelling (`/private/var`
+/// on macOS). StoreLayout keeps the caller locator (`/var`, or a `tmp/link`
+/// alias). Those are one file; byte inequality is not two stores.
+fn mounted_graph_matches_layout(mounted: &Path, locator: &Path) -> bool {
+    same_canonical_path(mounted, locator)
+}
 
 impl TraceDecay {
     pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
@@ -113,7 +121,10 @@ impl TraceDecay {
     }
 
     pub(crate) fn retained_project_store_db(&self) -> Result<Database> {
-        if self.db.canonical_database_path() != self.store_layout.graph_db_path {
+        if !mounted_graph_matches_layout(
+            self.db.canonical_database_path(),
+            &self.store_layout.graph_db_path,
+        ) {
             return Err(TraceDecayError::Config {
                 message: format!(
                     "mounted project database '{}' differs from canonical StoreLayout locator '{}'",
@@ -370,5 +381,45 @@ impl TraceDecay {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::mounted_graph_matches_layout;
+
+    /// macOS tempfile roots are `/var/folders/...` and canonicalize to
+    /// `/private/var/folders/...`. `reject_symlink_components` exempts only
+    /// the first absolute component, so a `tmp/link` store cannot be opened
+    /// — the identity check is still the owner, and this fixture is the
+    /// two-spelling pair that check must accept.
+    #[cfg(unix)]
+    #[test]
+    fn retained_project_store_accepts_symlink_alias_of_the_same_locator() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).expect("real root");
+        std::os::unix::fs::symlink(&real, &link).expect("directory alias");
+
+        let locator = link.join("projects").join("tracedecay.db");
+        let mounted = real
+            .canonicalize()
+            .expect("real root")
+            .join("projects")
+            .join("tracedecay.db");
+        assert_ne!(
+            locator, mounted,
+            "fixture must keep the caller spelling distinct from canonicalize()"
+        );
+        assert!(
+            mounted_graph_matches_layout(&mounted, &locator),
+            "symlink alias of the StoreLayout locator is the mounted database"
+        );
+        assert!(
+            !mounted_graph_matches_layout(&mounted, &real.join("other.db")),
+            "a different locator stays a different store"
+        );
     }
 }
