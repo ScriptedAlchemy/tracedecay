@@ -58,12 +58,7 @@ pub struct SourceReadContext {
 }
 
 impl SourceReadContext {
-    pub fn new(
-        project_root: PathBuf,
-        db: Database,
-        read_only: bool,
-        project_id: String,
-    ) -> Self {
+    pub fn new(project_root: PathBuf, db: Database, read_only: bool, project_id: String) -> Self {
         Self {
             project_root,
             db,
@@ -107,9 +102,7 @@ mod verified_query_test_support;
 
 #[cfg(test)]
 mod source_read_context_tests {
-    use tracedecay_runtime_core::db::{
-        Database, DatabaseAuthority, TestDatabaseRuntimeMode,
-    };
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     use super::SourceReadContext;
 
