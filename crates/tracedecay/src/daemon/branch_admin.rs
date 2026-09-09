@@ -22,9 +22,11 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
 #[cfg(unix)]
-use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
+use super::scheduler::AutomationSchedulerHandle;
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
 use crate::mcp::tools::replay_projectless_hermes_host_admission;
+#[cfg(unix)]
+use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_identity::{authority, profile_identity};
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;

@@ -193,7 +193,7 @@ fn project_open_future_sizes() {
 #[test]
 fn shared_owner_futures_stay_below_large_future_threshold() {
     let owners = [
-        ("automation admission", future_size(crate::daemon::automation_effect::AutomationEffectAuthority::prepare)),
+        ("automation admission", future_size(crate::daemon::automation_effect::prepare)),
         ("invocation admission", future_size(tracedecay_daemon_service::DaemonInvocationService::invoke_with_project_admission)),
         ("Work dispatch", future_size(tracedecay_daemon_service::invocation::execute_work_application)),
         ("observation persistence", future_size(<tracedecay_global_db::GlobalDbObservationStore as tracedecay_store::ObservationStore>::persist_observation)),

@@ -26,4 +26,12 @@ pub use recovery_index::{
     prepare_reserved_automation_effect_recovery, reconcile_prepared_automation_effects_for_project,
     recovered_partial_terminal, remove_pending_blocking,
 };
+pub use settlement::{
+    AdmittedAutomationEffectRequest, AutomationEffectAdmission, AutomationEffectAuthority,
+    AutomationLedgerObserver, DeferredProblemSettlementRequest, DeferredRunSettlementRequest,
+    DeferredSettledOutcome, DeferredSettlementOutcome, DeferredSettlementPairSubmission,
+    DeferredSettlementRequest, RetainedAutomationSettlementOutcome,
+    RetainedAutomationSettlementProjection, RetainedSettlementPairWaiter, RetainedSettlementWaiter,
+    ReusedSchedulerSkipStartError, pinned_automation_configuration_digest,
+};
 pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal};
