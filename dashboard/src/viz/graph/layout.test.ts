@@ -176,6 +176,25 @@ describe('prepareField', () => {
     );
   });
 
+  it('continues shrinking dense bodies with available area without moving nodes', () => {
+    const nodes = Array.from({ length: 5000 }, (_, index) => ({
+      id: `dense-${index}`,
+      label: `dense-${index}`,
+      kind: 'function',
+      degree: 2,
+    }));
+    const full = prepare(nodes, [], { width: 970, height: 720 });
+    const quarter = prepare(nodes, [], { width: 485, height: 360 });
+
+    expect(quarter.graph.getNodeAttribute('dense-0', 'size')).toBeCloseTo(
+      (full.graph.getNodeAttribute('dense-0', 'size') as number) / 2,
+      10,
+    );
+    for (const node of nodes) {
+      expect(position(quarter.graph, node.id)).toEqual(position(full.graph, node.id));
+    }
+  });
+
   it('records only relations whose two ends are actually drawn', () => {
     const { graph, neighborsOf, realNodes } = prepare(
       [

@@ -95,7 +95,12 @@ export function prepareField({
   // extra pass here.
   const edgeDensity = nodes.length > 0 ? (2 * edges.length) / nodes.length : 0;
   const densityShrink = Math.min(1, 1.8 / (1 + edgeDensity * 0.55));
-  const bodyScale = Math.max(0.32, density * roominess * densityShrink);
+  // The minimum must also fit the available area; a fixed floor makes
+  // thousands of otherwise shrinking bodies merge into one solid shape.
+  const bodyScale = Math.max(
+    Math.min(0.32, roominess),
+    density * roominess * densityShrink,
+  );
   // Dense Code fields need a hard screen-space ceiling in addition to the
   // relative scaling above. Relative scaling preserves rank but cannot stop
   // one high-degree hub from becoming the bright disc every neighbour
