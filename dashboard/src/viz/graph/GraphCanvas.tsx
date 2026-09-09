@@ -428,16 +428,13 @@ export function GraphCanvas({
       </GraphUnavailable>
     );
   }
-  // Scale tier guard: this Sigma canvas owns graphs up
-  // to ~5k nodes. Larger brains (the profile holds stores up to 1.6M nodes)
-  // belong to the GPU tier — render the truthful tier state, never a frozen
-  // tab pretending to cope.
+  // This canvas admits at most 5,000 nodes. Larger returned sets retain their
+  // DOM evidence; no alternate renderer is mounted for them.
   if (nodes.length > 5_000) {
     return (
       <GraphUnavailable>
-        {nodes.length.toLocaleString()} symbols exceeds this renderer's tier —
-        the GPU canvas (cosmos.gl adapter) owns brains this large; narrow the
-        neighborhood to explore here
+        {nodes.length.toLocaleString()} symbols exceeds this canvas's 5,000-symbol limit.
+        Narrow the neighborhood to draw it here.
       </GraphUnavailable>
     );
   }
