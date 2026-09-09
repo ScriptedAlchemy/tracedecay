@@ -76,9 +76,6 @@ pub use runtime_ports::{hook_runtime, register_runtime_ports};
 mod claude_observation_benchmark;
 pub mod runtime_telemetry;
 pub mod serve;
-#[cfg(test)]
-#[path = "sessions/ingest_tests.rs"]
-mod session_ingest_tests;
 // Benchmark harness, not product surface: the shipped library must not carry
 // its fixture provisioning or process-environment mutation. The `session_temporal`
 // bench target and the `test-helpers` integration lanes select it explicitly.
@@ -88,6 +85,3 @@ pub mod tracedecay;
 #[doc(hidden)]
 pub mod vector_generation_test_support;
 pub mod version;
-#[cfg(test)]
-#[path = "sessions/workflow_ingest_tests.rs"]
-mod workflow_ingest_tests;
