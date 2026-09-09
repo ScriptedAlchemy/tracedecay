@@ -125,6 +125,7 @@ pub fn spawn_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>(
     grant: PrivacyRemediationGrantV1,
     memory: Memory,
     lcm: Lcm,
+    now: impl Fn() -> UtcMicros + Send + 'static,
 ) -> bool
 where
     Memory:
@@ -133,11 +134,11 @@ where
     MemoryError: Display + Send + 'static,
     LcmError: Display + Send + 'static,
 {
-    if grant.authorize(grant.observed_at).is_err() {
+    if grant.authorize(now()).is_err() {
         return false;
     }
     spawn(Box::pin(run_at_rest_privacy_remediation(
-        project, grant, memory, lcm,
+        project, grant, memory, lcm, now,
     )))
 }
 
@@ -147,6 +148,7 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
     grant: PrivacyRemediationGrantV1,
     memory: Memory,
     lcm: Lcm,
+    now: impl Fn() -> UtcMicros + Send + 'static,
 ) where
     Memory: Future<Output = Result<PrivacyMemoryRemediationOutcomeV1, MemoryError>>,
     Lcm: Future<Output = Result<PrivacyLcmRemediationOutcomeV1, LcmError>>,
@@ -154,7 +156,7 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
     LcmError: Display,
 {
     let project = project.project_label();
-    if let Err(error) = grant.authorize(grant.observed_at) {
+    if let Err(error) = grant.authorize(now()) {
         tracing::warn!(
             event = "project_memory_privacy_remediation_failed",
             project = %project,
@@ -186,7 +188,7 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
             );
         }
     }
-    if let Err(error) = grant.authorize(grant.observed_at) {
+    if let Err(error) = grant.authorize(now()) {
         tracing::warn!(
             event = "lcm_privacy_remediation_failed",
             project = %project,
@@ -233,10 +235,13 @@ pub fn remediation_read_control() -> FactReadControl {
     FactReadControl::new(Arc::new(|| false))
 }
 
-/// Read control that fails closed when the grant is cancelled.
-pub fn granted_remediation_read_control(grant: &PrivacyRemediationGrantV1) -> FactReadControl {
-    let cancelled = Arc::clone(&grant.cancelled);
-    FactReadControl::new(Arc::new(move || cancelled.load(Ordering::Acquire)))
+/// Read control that fails closed when the grant expires or is cancelled.
+pub fn granted_remediation_read_control(
+    grant: &PrivacyRemediationGrantV1,
+    now: impl Fn() -> UtcMicros + Send + Sync + 'static,
+) -> FactReadControl {
+    let grant = grant.clone();
+    FactReadControl::new(Arc::new(move || grant.authorize(now()).is_err()))
 }
 
 /// The owner bounds every commit to one read page; the control admits each
@@ -245,15 +250,16 @@ pub fn remediation_write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
 
-/// Write control that fails closed when the grant is cancelled.
-pub fn granted_remediation_write_control(grant: &PrivacyRemediationGrantV1) -> FactWriteControl {
-    let cancelled = Arc::clone(&grant.cancelled);
+/// Recheck expiry and cancellation at the canonical commit boundary.
+pub fn granted_remediation_write_control(
+    grant: &PrivacyRemediationGrantV1,
+    now: impl Fn() -> UtcMicros + Send + Sync + Clone + 'static,
+) -> FactWriteControl {
+    let commit_grant = grant.clone();
+    let read_control = granted_remediation_read_control(grant, now.clone());
     FactWriteControl::new(
-        Arc::new({
-            let cancelled = Arc::clone(&cancelled);
-            move || cancelled.load(Ordering::Acquire)
-        }),
-        Arc::new(move || !cancelled.load(Ordering::Acquire)),
+        Arc::new(move || read_control.interrupted()),
+        Arc::new(move || commit_grant.authorize(now()).is_ok()),
     )
 }
 
@@ -304,6 +310,7 @@ mod tests {
             async {
                 Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
             },
+            || UtcMicros(1),
         );
         assert!(!spawned);
     }
@@ -324,6 +331,7 @@ mod tests {
             async {
                 Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
             },
+            || UtcMicros(1),
         );
         assert!(!spawned);
     }
@@ -343,8 +351,57 @@ mod tests {
             async {
                 Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
             },
+            || UtcMicros(1),
         );
         assert!(spawned);
+    }
+
+    #[tokio::test]
+    async fn grant_expiring_during_memory_scan_withholds_lcm() {
+        let now = Arc::new(std::sync::atomic::AtomicI64::new(1));
+        let scan_now = Arc::clone(&now);
+        let lcm_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lcm_marker = Arc::clone(&lcm_polled);
+        super::run_at_rest_privacy_remediation(
+            AdmittedPrivacyProjectV1::new(
+                ProjectId::new("project.privacy-expiry-transition").expect("project id"),
+                "/tmp/privacy-expiry-transition",
+            ),
+            PrivacyRemediationGrantV1::new(UtcMicros(20), UtcMicros(1)),
+            async move {
+                scan_now.store(20, std::sync::atomic::Ordering::Release);
+                Ok::<_, PrivacyRemediationDeniedV1>(memory_outcome())
+            },
+            async move {
+                lcm_marker.store(true, std::sync::atomic::Ordering::Release);
+                Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
+            },
+            move || UtcMicros(now.load(std::sync::atomic::Ordering::Acquire)),
+        )
+        .await;
+        assert!(!lcm_polled.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn grant_controls_recheck_expiry_and_cancellation_at_commit() {
+        let now = Arc::new(std::sync::atomic::AtomicI64::new(1));
+        let clock = {
+            let now = Arc::clone(&now);
+            move || UtcMicros(now.load(std::sync::atomic::Ordering::Acquire))
+        };
+        let grant = PrivacyRemediationGrantV1::new(UtcMicros(20), UtcMicros(1));
+        let read = super::granted_remediation_read_control(&grant, clock.clone());
+        let write = super::granted_remediation_write_control(&grant, clock);
+        assert!(!read.interrupted());
+        assert!(write.try_begin_commit());
+        now.store(20, std::sync::atomic::Ordering::Release);
+        assert!(read.interrupted());
+        assert!(write.interrupted());
+        assert!(!write.try_begin_commit());
+        now.store(1, std::sync::atomic::Ordering::Release);
+        grant.cancel();
+        assert!(read.interrupted());
+        assert!(!write.try_begin_commit());
     }
 
     fn memory_outcome() -> PrivacyMemoryRemediationOutcomeV1 {

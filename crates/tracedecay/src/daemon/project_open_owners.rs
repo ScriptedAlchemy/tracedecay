@@ -1163,21 +1163,27 @@ pub(super) async fn register_project_open_production_owners(
     // admission; it never blocks admission or retrieval.
     let privacy_graph = Arc::clone(&graph);
     let privacy_session_db = session_db.clone();
+    let privacy_grant =
+        tracedecay_privacy::PrivacyRemediationGrantV1::new(access.grant_expires_at, now_micros());
+    let privacy_read =
+        tracedecay_privacy::granted_remediation_read_control(&privacy_grant, now_micros);
+    let privacy_write =
+        tracedecay_privacy::granted_remediation_write_control(&privacy_grant, now_micros);
     let _privacy_remediation_admitted = tracedecay_privacy::spawn_at_rest_privacy_remediation(
         |task| server.spawn_background_task(task),
         tracedecay_privacy::AdmittedPrivacyProjectV1::new(
             project_id.clone(),
             project_root.display(),
         ),
-        tracedecay_privacy::PrivacyRemediationGrantV1::new(access.grant_expires_at, now_micros()),
+        privacy_grant,
         async move {
             privacy_graph
                 .project_memory_application()
                 .await?
                 .privacy_remediation_rescan(
                     tracedecay_session_memory::memory::PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
-                    &tracedecay_privacy::remediation_read_control(),
-                    &tracedecay_privacy::remediation_write_control(),
+                    &privacy_read,
+                    &privacy_write,
                 )
                 .await
                 .map(Into::into)
@@ -1189,6 +1195,7 @@ pub(super) async fn register_project_open_production_owners(
                 .await
                 .map(Into::into)
         },
+        now_micros,
     );
 
     // Once-per-project-open adoption-eligibility census over the composed
