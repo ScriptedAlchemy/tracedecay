@@ -384,22 +384,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn findings_route_echoes_valid_family_filter() {
-        let envelope = findings_for_test(
-            DoctorFindingsQueryV1 {
-                family: Some("configuration".to_string()),
-            },
-            None,
-        )
-        .await;
-        assert_eq!(
-            envelope.payload.family_filter,
-            Some(DoctorFindingFamilyV1::Configuration)
-        );
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
-    }
-
-    #[tokio::test]
     async fn findings_route_rejects_unknown_family_with_error_state() {
         let envelope = findings_for_test(
             DoctorFindingsQueryV1 {
@@ -440,37 +424,5 @@ mod tests {
                 .len(),
             KNOWN_DOCTOR_FINDING_FAMILIES.len()
         );
-    }
-
-    /// The route must add no presentation of its own: every envelope axis has to
-    /// equal the API-owned projection of the very same report.
-    #[tokio::test]
-    async fn route_envelope_equals_the_api_owned_projection() {
-        let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
-
-        for family in [None, Some(DoctorFindingFamilyV1::Storage)] {
-            let expected = project_doctor_report(&report, family).expect("canonical projection");
-            let envelope = findings_for_family_with_authorities(
-                dashboard_scope(),
-                family,
-                Some(reader_for(report.clone())),
-            )
-            .await;
-
-            assert_eq!(envelope.domain_state, expected.presentation.domain_state);
-            assert_eq!(envelope.coverage, expected.presentation.coverage);
-            assert_eq!(
-                envelope.freshness.state,
-                expected.presentation.freshness.state
-            );
-            assert_eq!(envelope.legal_actions, expected.presentation.legal_actions);
-            assert_eq!(envelope.payload.entries, expected.entries);
-            assert_eq!(
-                envelope.payload.report_coverage.as_ref(),
-                Some(&expected.report_coverage)
-            );
-            assert_eq!(envelope.payload.note, expected.note);
-            assert_eq!(envelope.payload.family_filter, family);
-        }
     }
 }

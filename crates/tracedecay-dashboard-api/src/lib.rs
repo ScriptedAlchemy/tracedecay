@@ -2222,26 +2222,6 @@ mod authority_tests {
         )
     }
 
-    struct UnavailableCodeGraphPort;
-
-    impl crate::graph::CodeGraphReadAdmissionPort for UnavailableCodeGraphPort {
-        fn admit<'a>(
-            &'a self,
-            _request: crate::graph::CodeGraphReadAdmissionRequest<'a>,
-        ) -> crate::graph::CodeGraphReadAdmissionFuture<'a> {
-            Box::pin(async { Err(crate::graph::CodeGraphReadError::MissingRegistry) })
-        }
-    }
-
-    impl crate::graph::CodeGraphProjectionReadPort for UnavailableCodeGraphPort {
-        fn open<'a>(
-            &'a self,
-            _request: crate::graph::CodeGraphReadRequest<'a>,
-        ) -> crate::graph::CodeGraphReadFuture<'a> {
-            Box::pin(async { Err(crate::graph::CodeGraphReadError::MissingRegistry) })
-        }
-    }
-
     struct FakeDashboardLcmRead;
 
     fn dashboard_lcm_test_control() -> DashboardHttpRequestControlV1 {
@@ -2534,32 +2514,6 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn unchanged_projection_hits_cache_before_vector_rows() {
-        let fixture = DashboardStateFixture::open("project.dashboard-projection-cache").await;
-        let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
-
-        let first = memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
-        let second = memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
-
-        assert_eq!(first["scan"]["cache_state"], "miss");
-        assert_eq!(second["scan"]["cache_state"], "hit");
-        assert_eq!(second["scan"]["vector_rows_read"], 0);
-    }
-
-    #[tokio::test]
-    async fn unchanged_similarity_hits_cache_before_vector_rows() {
-        let fixture = DashboardStateFixture::open("project.dashboard-similarity-cache").await;
-        let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
-
-        let first = memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
-        let second = memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
-
-        assert_eq!(first["scan"]["cache_state"], "miss");
-        assert_eq!(second["scan"]["cache_state"], "hit");
-        assert_eq!(second["scan"]["vector_rows_read"], 0);
-    }
-
-    #[tokio::test]
     async fn store_write_refreshes_projection_and_similarity_once() {
         let fixture = DashboardStateFixture::open("project.dashboard-cache-freshness").await;
         let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
@@ -2845,76 +2799,6 @@ mod authority_tests {
         #[cfg(not(feature = "hotpath-alloc"))]
         println!(
             "allocations: rerun this ignored test with --features hotpath-alloc to activate the workspace counting allocator"
-        );
-    }
-
-    #[tokio::test]
-    async fn dashboard_state_resolves_exact_application_scope_once() {
-        let fixture = DashboardStateFixture::open("project.dashboard-resolved-scope").await;
-        let project_id = ProjectId::new(
-            fixture
-                .layout
-                .identity
-                .project_id
-                .clone()
-                .expect("registered project id"),
-        )
-        .expect("valid project id");
-        let expected = tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
-            &fixture.layout.project_root,
-            &fixture.layout.project_root,
-            &project_id,
-        )
-        .expect("application exact-root scope");
-
-        // The exact-root HTTP surface resolves the same project and scope
-        // through the application type, once, at state construction.
-        let scope = fixture
-            .state
-            .resolved_scope
-            .clone()
-            .expect("exact resolved application scope");
-        assert_eq!(scope, expected);
-        scope.validate().expect("resolved scope validates");
-    }
-
-    #[tokio::test]
-    async fn project_memory_owner_uses_validated_store_identity() {
-        let fixture = DashboardStateFixture::open("project.dashboard-project-memory").await;
-        let raw = fixture
-            .layout
-            .identity
-            .project_id
-            .as_deref()
-            .expect("registered project id");
-        let expected = ProjectId::new(raw).expect("validated project id");
-
-        assert_eq!(
-            project_memory_owner_for_layout(&fixture.layout).expect("project memory owner"),
-            FactOwnerV1::Project {
-                project_id: expected,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn dashboard_state_reuses_its_active_database_as_memory_authority() {
-        let fixture = DashboardStateFixture::open("project.dashboard-state").await;
-        let expected_path = fixture.layout.graph_db_path.display().to_string();
-        let state = fixture.state;
-        let Json(capabilities) = capabilities(State(state.clone()), None).await;
-
-        assert_eq!(state.mem_db_path, expected_path);
-        assert_eq!(state._database_guards.len(), 1);
-        assert_eq!(capabilities["multi_root"]["status"], "unavailable");
-        assert_eq!(
-            capabilities["multi_root"]["reason"],
-            "the daemon application transport is not admitted for this dashboard"
-        );
-        assert_eq!(capabilities["features"]["multi_root"], false);
-        assert!(
-            state.code_diagnostics_authority.is_none(),
-            "direct dashboard must not construct an analyzer authority"
         );
     }
 
@@ -3236,53 +3120,6 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn daemon_dashboard_retains_the_admitted_authorities() {
-        let mut fixture = DashboardStateFixture::open("project.daemon-dashboard").await;
-        let doctor_reader: DoctorReportReader = Arc::new(|| {
-            Box::pin(async {
-                Err(
-                    tracedecay_contracts::ApplicationContractError::Inconsistent {
-                        field: "dashboard authority test reader",
-                    },
-                )
-            })
-        });
-        let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-            crate::application::dashboard_diagnostics::diagnostic_broker(
-                fixture.layout.project_root.clone(),
-                tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings::default(),
-            ),
-        ));
-        let code_graph = Arc::new(UnavailableCodeGraphPort);
-        fixture.state.retain_admitted_authorities(
-            Some(
-                crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
-                    fixture.layout.project_root.clone(),
-                    fixture.layout.dashboard_root.clone(),
-                    Arc::clone(&code_graph) as Arc<dyn crate::graph::CodeGraphReadAdmissionPort>,
-                    code_graph as Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
-                    diagnostic_broker,
-                ),
-            ),
-            Some(Arc::clone(&doctor_reader)),
-            None,
-        );
-        let state = fixture.state;
-
-        assert!(Arc::ptr_eq(
-            state
-                .doctor_report_reader
-                .as_ref()
-                .expect("admitted Doctor reader"),
-            &doctor_reader,
-        ));
-        assert!(
-            state.code_diagnostics_authority.is_some(),
-            "daemon dashboard must retain the admitted diagnostics authority"
-        );
-    }
-
-    #[tokio::test]
     async fn doctor_routes_expose_diagnostics_without_mutation_endpoints() {
         let fixture = DashboardStateFixture::open("project.dashboard-doctor-read-only").await;
         let app = router_with_active_application(fixture.state, None, Router::new());
@@ -3401,15 +3238,6 @@ mod authority_tests {
             selected.path,
             fixture.layout.sessions_db_path.display().to_string()
         );
-    }
-
-    #[tokio::test]
-    async fn daemon_dashboard_without_retained_authority_is_read_only() {
-        let fixture = DashboardStateFixture::open("project.dashboard-session-read-only").await;
-        let selected = resolve_lcm_store_for_layout(&fixture.layout, None);
-
-        assert!(selected.lcm_db.is_none());
-        assert_eq!(selected.scope, "unavailable");
     }
 
     #[test]

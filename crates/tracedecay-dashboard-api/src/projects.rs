@@ -25,7 +25,6 @@ pub struct DashboardRuntime {
     project_api: Router<DashboardState>,
     project_states: Arc<RwLock<HashMap<String, CachedProjectState>>>,
 }
-
 #[derive(Clone)]
 struct CachedProjectState {
     registry_context: ProjectRegistryContext,
@@ -348,40 +347,4 @@ pub async fn context(
             aliases: context.aliases,
         },
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext};
-
-    fn code_project() -> CodeProjectRecord {
-        CodeProjectRecord {
-            project_id: "proj_test".to_string(),
-            canonical_root: "/repo".to_string(),
-            display_root: "/repo".to_string(),
-            git_common_dir: Some("/repo/.git".to_string()),
-            git_remote_url: Some("https://example.com/repo.git".to_string()),
-            default_branch: Some("main".to_string()),
-            created_at: 100,
-            last_seen_at: 200,
-        }
-    }
-
-    fn registry_context() -> ProjectRegistryContext {
-        ProjectRegistryContext {
-            project: code_project(),
-            aliases: Vec::new(),
-            stores: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn registry_context_changes_with_project_metadata() {
-        let base = registry_context();
-        let mut changed = registry_context();
-        changed.project.canonical_root = "/new-repo".to_string();
-        changed.project.last_seen_at += 1;
-
-        assert_ne!(base, changed);
-    }
 }

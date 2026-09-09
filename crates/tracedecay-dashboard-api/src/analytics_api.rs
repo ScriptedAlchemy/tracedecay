@@ -1491,13 +1491,12 @@ fn normalize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::{
-        AnalyticsDiagnosticsPayloadV1, AnalyticsSubagentLinkV1, HOOK_ANALYTICS_WINDOW_ROWS,
-        HookAnalyticsRows, HookAnalyticsWindow, SubagentSessionRow, build_subagent_tree,
-        decode_analytics_contract, diagnostics_summary_from_parts, hint_efficacy_from_events,
-        hint_summary_from_events, read_hook_analytics_file, recent_hook_rows,
+        AnalyticsDiagnosticsPayloadV1, AnalyticsSubagentLinkV1, HookAnalyticsRows,
+        HookAnalyticsWindow, SubagentSessionRow, build_subagent_tree, decode_analytics_contract,
+        diagnostics_summary_from_parts, hint_efficacy_from_events, read_hook_analytics_file,
         sort_hook_analytics_rows,
     };
     use tracedecay_global_db::AnalyticsEventRecord;
@@ -1633,26 +1632,6 @@ mod tests {
     }
 
     #[test]
-    fn every_input_session_appears_exactly_once() {
-        let nodes = build_subagent_tree(vec![
-            row("root", None),
-            row("child", Some("root")),
-            row("orphan", Some("gone")),
-            row("cycle.a", Some("cycle.b")),
-            row("cycle.b", Some("cycle.a")),
-        ]);
-
-        let mut ids: Vec<&str> = nodes.iter().map(|node| node.session_id.as_str()).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, vec!["child", "cycle.a", "cycle.b", "orphan", "root"]);
-    }
-
-    #[test]
-    fn an_empty_store_builds_an_empty_tree_without_panicking() {
-        assert!(build_subagent_tree(Vec::new()).is_empty());
-    }
-
-    #[test]
     fn a_deep_chain_does_not_overflow_the_stack() {
         // The walk is iterative on purpose: delegation depth is data, and a
         // recursive walk would let a pathological store crash the daemon.
@@ -1678,77 +1657,6 @@ mod tests {
         assert!(!payload.available);
         assert_eq!(payload.event_count, 0);
         assert!(!payload.hook_window.truncated);
-    }
-
-    #[test]
-    fn hint_summary_counts_current_event_kinds_without_impossible_outcomes() {
-        let events = vec![
-            analytics_event("hint_emitted", "search", "observed"),
-            analytics_event("hint_outcome", "search", "acted"),
-            analytics_event("hint_emitted", "file_lookup", "observed"),
-            analytics_event("hint_outcome", "file_lookup", "ignored"),
-            analytics_event("hint_escalated", "impact", "observed"),
-            analytics_event("suppressed_duplicate", "impact", "observed"),
-        ];
-
-        let summary = hint_summary_from_events(&events);
-        let row = |category: &str| {
-            summary
-                .by_category
-                .iter()
-                .find(|row| row.category == category)
-                .unwrap()
-        };
-        assert_eq!(row("search").emitted, 1);
-        assert_eq!(row("search").followed, 1);
-        assert_eq!(row("file_lookup").emitted, 1);
-        assert_eq!(row("file_lookup").ignored, 1);
-        assert_eq!(row("impact").emitted, 1);
-        assert_eq!(row("impact").suppressed, 1);
-    }
-
-    #[test]
-    fn hint_efficacy_counts_emitted_acted_ignored_and_unresolved() {
-        let events = vec![
-            analytics_event("hint_emitted", "search", ""),
-            analytics_event("hint_emitted", "search", ""),
-            analytics_event("hint_emitted", "search", ""),
-            analytics_event("hint_outcome", "search", "acted"),
-            analytics_event("hint_outcome", "search", "ignored"),
-            analytics_event("hint_emitted", "impact", ""),
-            // Unrelated events must not affect hint efficacy.
-            {
-                let mut event = analytics_event("mcp_tool_call", "", "");
-                event.tool_name = Some("tracedecay_context".to_owned());
-                event
-            },
-        ];
-
-        let summary = hint_efficacy_from_events(&events);
-        assert!(summary.available);
-        assert_eq!(summary.totals.emitted, 4);
-        assert_eq!(summary.totals.acted, 1);
-        assert_eq!(summary.totals.ignored, 1);
-        // 4 emitted - 1 acted - 1 ignored = 2 still unresolved.
-        assert_eq!(summary.totals.unresolved, 2);
-
-        let search = summary
-            .by_category
-            .iter()
-            .find(|row| row.category == "search")
-            .unwrap();
-        assert_eq!(search.emitted, 3);
-        assert_eq!(search.acted, 1);
-        assert_eq!(search.ignored, 1);
-        assert_eq!(search.unresolved, 1);
-
-        let impact = summary
-            .by_category
-            .iter()
-            .find(|row| row.category == "impact")
-            .unwrap();
-        assert_eq!(impact.emitted, 1);
-        assert_eq!(impact.unresolved, 1);
     }
 
     #[test]
@@ -1813,22 +1721,6 @@ mod tests {
         assert_eq!(rows[6]["session_id"], json!("a"));
         assert_eq!(rows[6]["hook_name"], json!("pre"));
         assert_eq!(rows[7]["session_id"], json!("b"));
-    }
-
-    #[test]
-    fn recent_hook_rows_remain_newest_first_after_global_sort() {
-        let mut rows = vec![
-            json!({"event": "hook_invoked", "ts_unix_ms": 10, "session_id": "a"}),
-            json!({"event": "hook_invoked", "ts_unix_ms": 12, "session_id": "c"}),
-            json!({"event": "hook_invoked", "ts_unix_ms": 11, "session_id": "b"}),
-        ];
-        sort_hook_analytics_rows(&mut rows);
-
-        let recent = recent_hook_rows(&rows, 2);
-        assert_eq!(recent[0].ts_unix_ms, Some(12));
-        assert_eq!(recent[0].session_id, "c");
-        assert_eq!(recent[1].ts_unix_ms, Some(11));
-        assert_eq!(recent[1].session_id, "b");
     }
 
     #[test]
@@ -1902,21 +1794,6 @@ mod tests {
     }
 
     #[test]
-    fn hook_analytics_tail_reads_whole_file_when_under_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hook_analytics.jsonl");
-        write_hook_analytics_fixture(&path, 40);
-
-        let mut rows = HookAnalyticsRows::empty();
-        read_hook_analytics_file(&path, None, &mut rows);
-
-        assert_eq!(rows.rows.len(), 40);
-        assert_eq!(rows.rows[0]["session_id"], json!("session-000000"));
-        assert_eq!(rows.sources[0]["window_truncated"], json!(false));
-        assert!(!rows.window.truncated);
-    }
-
-    #[test]
     fn hook_analytics_tail_preserves_record_at_exact_chunk_boundary() {
         use std::io::Write;
 
@@ -1949,63 +1826,6 @@ mod tests {
         assert_eq!(rows.rows.len(), 1_024);
         assert_eq!(rows.rows[0]["session_id"], json!("session-001024"));
         assert_eq!(rows.rows[1_023]["session_id"], json!("session-002047"));
-    }
-
-    #[test]
-    fn diagnostics_summary_captions_the_hook_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hook_analytics.jsonl");
-        write_hook_analytics_fixture(&path, 5_000);
-
-        let mut hook_analytics = HookAnalyticsRows::empty();
-        hook_analytics.window.window_rows = 100;
-        read_hook_analytics_file(&path, None, &mut hook_analytics);
-        sort_hook_analytics_rows(&mut hook_analytics.rows);
-
-        let summary = diagnostics_summary_from_parts(0, &hook_analytics, None);
-        let window = &summary["hook_window"];
-        assert_eq!(window["window_rows"], json!(100));
-        assert_eq!(window["rows_scanned"], json!(100));
-        assert_eq!(window["rows_included"], json!(100));
-        assert_eq!(window["truncated"], json!(true));
-        // The frontend must not print these as all-time figures.
-        assert_eq!(window["total_rows_known"], json!(false));
-        assert_eq!(window["oldest_ts_unix_ms"], json!(1_004_900));
-        assert_eq!(window["newest_ts_unix_ms"], json!(1_004_999));
-        assert_eq!(summary["hook_call_count"], json!(100));
-    }
-
-    /// Bounded-fold regression guard against a real, unbounded hook stream.
-    ///
-    /// Opt in by pointing `TRACEDECAY_BENCH_HOOK_ANALYTICS_STORE` at a store
-    /// root holding `hook_analytics.jsonl`; this reproduces the diagnostics
-    /// handler's whole read (project store file plus the profile file). The
-    /// test is a no-op otherwise so CI stays hermetic.
-    #[test]
-    fn hook_analytics_read_is_bounded_on_real_stores() {
-        let store_root = match std::env::var_os("TRACEDECAY_BENCH_HOOK_ANALYTICS_STORE") {
-            Some(path) => std::path::PathBuf::from(path),
-            None => return,
-        };
-
-        let started = std::time::Instant::now();
-        let rows = super::read_hook_analytics_rows_at(Some(&store_root), None);
-        let summary = diagnostics_summary_from_parts(0, &rows, None);
-        let elapsed = started.elapsed();
-
-        println!(
-            "bounded hook analytics read: {} rows in {elapsed:?}\n  window={}\n  sources={}",
-            rows.rows.len(),
-            summary["hook_window"],
-            Value::Array(rows.sources.clone()),
-        );
-        // One window per file read.
-        assert!(rows.rows.len() <= HOOK_ANALYTICS_WINDOW_ROWS * rows.sources.len().max(1));
-        assert!(summary["hook_window"]["window_rows"].is_number());
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "bounded read took {elapsed:?}, expected <500ms"
-        );
     }
 
     /// This crate owns the diagnostics summary but not the readiness

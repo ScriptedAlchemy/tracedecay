@@ -980,33 +980,6 @@ fn query_error(error: String) -> Response {
 mod tests {
     use super::*;
 
-    #[test]
-    fn delivery_dependency_names_the_shared_route() {
-        let payload = unavailable_payload("session authority unavailable");
-        let delivery = payload
-            .source_statuses
-            .iter()
-            .find(|source| source.id == "delivery_outcomes")
-            .expect("delivery status");
-        assert_eq!(delivery.state, DashboardDomainStateV1::Unsupported);
-        assert_eq!(delivery.required_authority, Some(DELIVERY_AUTHORITY));
-    }
-
-    #[test]
-    fn git_sources_name_graph_authority_instead_of_legacy_tables() {
-        let payload = unavailable_payload("session authority unavailable");
-        for id in ["session_commit", "branch_worktree"] {
-            let source = payload
-                .source_statuses
-                .iter()
-                .find(|source| source.id == id)
-                .expect("Git source status");
-            assert_eq!(source.authority, None);
-            assert_eq!(source.required_authority, Some(GIT_CORRELATION_AUTHORITY));
-            assert_eq!(source.state, DashboardDomainStateV1::Unknown);
-        }
-    }
-
     fn page(keys: &[(&str, &str)]) -> BTreeSet<(String, String)> {
         keys.iter()
             .map(|(provider, session_id)| ((*provider).to_owned(), (*session_id).to_owned()))

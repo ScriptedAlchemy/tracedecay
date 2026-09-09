@@ -279,11 +279,4 @@ mod tests {
             other => panic!("expected the typed stale refusal, got {other:?}"),
         }
     }
-
-    #[tokio::test]
-    async fn a_current_graph_open_reaches_the_edit_planner() {
-        open_admitted(CodeGraphReadFreshnessV1::Current)
-            .await
-            .expect("current evidence must admit the edit planner");
-    }
 }

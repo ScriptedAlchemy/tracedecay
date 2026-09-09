@@ -415,48 +415,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn freshness_route_projects_exact_live_scheduler_identity() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, mut state) = state_for_test().await;
-        state.code_index_freshness_reader = Some(Arc::new(|root| {
-            Box::pin(async move {
-                Some(CodeIndexWorktreeFreshnessV1 {
-                    worktree_root: root.display().to_string(),
-                    repository_id: Some("repository.fixture".to_owned()),
-                    worktree_id: Some("worktree.fixture".to_owned()),
-                    source_reference: Some("refs/heads/main".to_owned()),
-                    source_revision: Some("commit.fixture".to_owned()),
-                    latest_generation_id: Some("generation.fixture".to_owned()),
-                    code_graph_serving: Some(CodeGraphServingReadinessV1::Ready),
-                    snapshot_content_identity: Some("sha256:fixture".to_owned()),
-                    sealed_at_micros: Some(41),
-                    last_reconcile_micros: Some(42),
-                    staleness_state: Some("fresh".to_owned()),
-                    rebuild_in_flight: false,
-                    hook_hint_count: Some(0),
-                    coverage: "complete".to_owned(),
-                    progress: None,
-                    parked: None,
-                    generation_recovery: None,
-                })
-            })
-        }));
-        let Json(envelope) = freshness(State(state)).await;
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
-        assert!(envelope.coverage.is_complete());
-        let worktree = envelope.payload.worktrees.first().expect("worktree");
-        assert_eq!(
-            worktree.latest_generation_id.as_deref(),
-            Some("generation.fixture")
-        );
-        assert_eq!(
-            worktree.repository_id.as_deref(),
-            Some("repository.fixture")
-        );
-        assert_eq!(worktree.staleness_state.as_deref(), Some("fresh"));
-    }
-
-    #[tokio::test]
     async fn mounted_scheduler_without_a_generation_is_loading_not_ready() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;

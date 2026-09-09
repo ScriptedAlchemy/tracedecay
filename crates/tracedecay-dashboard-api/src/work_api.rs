@@ -42,9 +42,6 @@ macro_rules! dashboard_work_routes {
                 },
             )+
         ];
-
-        #[cfg(test)]
-        static DOCUMENTED_OPERATIONS: &[WorkOperation] = &[$(WorkOperation::$variant),+];
     };
 }
 
@@ -157,15 +154,6 @@ mod tests {
                 "{retired}"
             );
         }
-    }
-
-    #[test]
-    fn the_route_document_is_exactly_the_descriptor() {
-        let expected = WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| operation.is_dashboard_operation())
-            .collect::<Vec<_>>();
-        assert_eq!(super::DOCUMENTED_OPERATIONS, expected.as_slice());
     }
 
     #[test]

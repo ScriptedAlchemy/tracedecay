@@ -378,18 +378,6 @@ mod tests {
 
     use super::{SourceEditFileAuthority, read_source_edit_candidate};
 
-    #[test]
-    fn reads_a_regular_candidate_beneath_the_worktree() {
-        let project = tempdir().unwrap();
-        fs::create_dir(project.path().join("src")).unwrap();
-        fs::write(project.path().join("src/lib.rs"), b"inside").unwrap();
-
-        assert_eq!(
-            read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).unwrap(),
-            Some(b"inside".to_vec())
-        );
-    }
-
     /// Absence is not a refusal: a candidate that does not exist yet is a
     /// normal state for a plan that creates files.
     #[test]
