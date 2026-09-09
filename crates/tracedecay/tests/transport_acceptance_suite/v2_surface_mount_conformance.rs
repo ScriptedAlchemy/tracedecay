@@ -95,7 +95,7 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
 
 /// The callable-code operations, mirroring the set that
 /// `http_page_projection` classifies as `HttpPageProjection::MetaCursor` in
-/// `src/application_surface.rs`.
+/// `tracedecay-daemon-service/src/application_surface.rs`.
 ///
 /// These are the operations whose decoded surface request carries callable-code
 /// metadata. CLI, MCP, and HTTP must expose the same application operations.

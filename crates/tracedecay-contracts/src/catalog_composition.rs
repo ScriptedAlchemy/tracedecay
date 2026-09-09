@@ -22,7 +22,9 @@ use tracedecay_tool_catalog::{
 
 // The default profile currently composes 403 shipped bindings. This reviewed
 // ceiling leaves 45 bindings of admission headroom while the eager-profile
-// routing and serialized discovery tests below bound the client-facing cost.
+// routing and serialized discovery assertions in the root
+// `product_surface_suite/catalog_composition_contract.rs` suite bound the
+// client-facing cost.
 const DEFAULT_PROFILE_MAXIMUM_BINDINGS: u32 = 448;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -141,8 +143,8 @@ fn assemble_application_catalog()
 /// identity is lowered to the generic tool-catalog descriptor.
 ///
 /// Contribution builders derive availability and bindings from their concrete
-/// runtime registrars. Root composition only validates the resulting
-/// use-case/schema mapping; it does not maintain a second availability list.
+/// runtime registrars. This crate validates only the resulting use-case/schema
+/// mapping; it does not maintain a second availability list.
 pub fn validate_application_catalog(
     contributions: &[CatalogContributionV1],
     handlers: &ApplicationHandlerDescriptors,

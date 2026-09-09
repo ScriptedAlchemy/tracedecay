@@ -56,7 +56,6 @@ hotpath = [
     "tracedecay-sdk/hotpath",
     "hotpath/hotpath",
     "hotpath/tokio",
-    "hotpath/axum-0-8",
     "hotpath/ureq-3",
 ]
 hotpath-alloc = [

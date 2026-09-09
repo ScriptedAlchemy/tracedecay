@@ -43,7 +43,7 @@ const PARITY_FIXTURE: &str = include_str!(
 /// `CallableCodeSurfaceMeta`, and therefore a `cursor` continuation that every
 /// transport must accept identically. Mirrors
 /// the `HttpPageProjection::MetaCursor` arm of `http_page_projection` in
-/// `src/application_surface.rs`; the
+/// `tracedecay-daemon-service/src/application_surface.rs`; the
 /// drift guard below fails as soon as one of them stops being pinned, stops
 /// binding a surface, or stops advertising its cursor over MCP.
 const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [

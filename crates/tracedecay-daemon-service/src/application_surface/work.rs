@@ -95,7 +95,7 @@ impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
 /// A missing executor remains a canonical Work runtime-unavailable response;
 /// it never becomes a transport-specific MCP error.
 #[hotpath::measure(label = "application_surface.work.invoke", future = true)]
-pub async fn invoke_work_operation(
+pub(crate) async fn invoke_work_operation(
     executor: Option<&dyn DaemonInvocationExecutor>,
     request: WorkHttpRequest,
 ) -> Response {

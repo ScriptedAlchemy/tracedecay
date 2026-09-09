@@ -85,13 +85,13 @@ default = ["production"]
 # `hotpath-alloc` installs the counting global allocator, `hotpath-cpu` adds
 # on-CPU sampling, and `hotpath-mcp` exposes the live query server (port 6771
 # by default, `HOTPATH_MCP_PORT` overrides). `hotpath/tokio` is required by
-# `hotpath::tokio_runtime!` and the tokio lock wrappers; the daemon serves its
-# HTTP application surface with axum 0.8 and reaches GitHub through ureq 3, and
-# hotpath instruments both natively, so no second HTTP stack is introduced.
+# `hotpath::tokio_runtime!` and the tokio lock wrappers, and `hotpath/ureq-3`
+# by the GitHub client reached from here, so no second HTTP stack is
+# introduced. The axum 0.8 server layer is selected by the crates that mount
+# routers — `tracedecay-daemon-service` and `tracedecay-dashboard-api`.
 hotpath = [
     "hotpath/hotpath",
     "hotpath/tokio",
-    "hotpath/axum-0-8",
     "hotpath/ureq-3",
     "tracedecay-application/hotpath",
     "tracedecay-automation-runtime/hotpath",
