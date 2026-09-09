@@ -165,6 +165,18 @@ export const useScope = create<ScopeState>((set) => ({
     }),
 }));
 
+/** A workspace destination carrying only the dashboard-wide project scope.
+ * Workspace-owned filters deliberately do not cross this boundary. */
+export function scopedWorkspacePath(scope: DashboardScope, path: string): string {
+  const pathname = `/${path}`;
+  if (scope.kind === 'all') return pathname;
+  const search = new URLSearchParams({
+    scope: scope.projectId,
+    scopeLabel: scope.label,
+  });
+  return `${pathname}?${search.toString()}`;
+}
+
 /**
  * Whether a write issued under this scope will be accepted, and what to say
  * when it will not.

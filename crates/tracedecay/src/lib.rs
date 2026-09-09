@@ -11,7 +11,6 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::wildcard_imports)]
 // Pedantic style lints allowed crate-wide (consistent with the allows above):
@@ -32,14 +31,9 @@
 #![allow(clippy::unused_async)]
 #![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::if_not_else)]
-#![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
-// Several async fns and their test drivers hold futures that cross the 16KB
-// pedantic threshold only on Windows' struct layout; boxing every await site
-// across the tree churns far more than the lint is worth here.
-#![allow(clippy::large_futures)]
 
 // Query-bench implementation for `tracedecay bench` / MCP `admin_project`
 // action `bench`. Kept off the default library graph; the CLI production

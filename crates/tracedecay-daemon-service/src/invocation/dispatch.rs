@@ -187,6 +187,8 @@ impl DaemonInvocationService {
         admitted_cancellation: Option<CancellationToken>,
         project_admission: Option<&crate::project_runtime::ProjectRuntimeRequestLeaseV1>,
     ) -> DaemonInvocationResponse {
+        // Keep the admitted dispatch frame behind one allocation for every invocation entry point.
+        Box::pin(async move {
         let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
@@ -1033,6 +1035,7 @@ impl DaemonInvocationService {
             );
         }
         response
+        }).await
     }
 }
 
