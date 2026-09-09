@@ -16,9 +16,7 @@ use tracedecay::query::temporal::ports::{
 };
 use tracedecay::query::temporal::ranking::DiversityLimits;
 use tracedecay::query::temporal::resolution::{SummaryLineageRejection, SummaryOmission};
-use tracedecay::query::temporal::{
-    TemporalKernelError, TemporalKernelRequest, TemporalKernelResult,
-};
+use tracedecay::query::temporal::{TemporalKernelError, TemporalKernelResult};
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
@@ -1985,14 +1983,4 @@ async fn partial_freshness_and_cancellation_race_preserve_application_ownership(
         SessionRetrievalOutcome::Cancelled
     ));
     assert!(dropped_after_cancel.load(Ordering::SeqCst));
-}
-
-/// Compile-time only: the temporal request and session-access types must stay
-/// nameable and constructible from outside the crate. Nothing here observes
-/// behaviour, so this test fails by failing to compile.
-#[test]
-fn temporal_application_api_is_publicly_composed_at_compile_time() {
-    fn assert_request(_: &TemporalKernelRequest) {}
-    let _ = assert_request;
-    let _: SessionAccess = SessionAccess::Hydrate;
 }

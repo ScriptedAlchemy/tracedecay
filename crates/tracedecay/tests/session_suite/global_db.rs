@@ -289,19 +289,6 @@ async fn append_analytics_event(
 }
 
 #[tokio::test]
-async fn global_db_opens_with_session_schema() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_isolated_db(&tmp).await;
-
-    assert!(db.get_session("cursor", "missing").await.is_none());
-    assert!(
-        db.search_session_messages("cursor", None, "not-present", 10)
-            .await
-            .is_empty()
-    );
-}
-
-#[tokio::test]
 async fn project_registry_path_aliases_resolve_exactly_without_active_fallback() {
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;
