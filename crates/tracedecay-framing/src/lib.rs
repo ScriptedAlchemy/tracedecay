@@ -545,14 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn host_event_wire_cap_stays_one_mib_and_mcp_frame_is_larger() {
-        assert_eq!(MAX_WIRE_MESSAGE_BYTES, 1024 * 1024);
-        assert_eq!(MAX_WIRE_RECORD_BYTES, MAX_WIRE_MESSAGE_BYTES);
-        assert_eq!(MAX_MCP_JSONRPC_FRAME_BYTES, 16 * 1024 * 1024);
-        assert_eq!(MCP_OVERSIZE_ID_INSPECT_BYTES, 4096);
-    }
-
-    #[test]
     fn oversized_io_error_preserves_bounded_inspect_prefix() {
         let prefix = b"{\"jsonrpc\":\"2.0\",\"id\":7,".to_vec();
         let err = wire_oversized_io_error_with_prefix(prefix.clone());

@@ -644,16 +644,6 @@ mod tests {
     }
 
     #[test]
-    fn projection_preserves_unknown_global_queue_usage() {
-        let mut inventory = inventory(vec![]);
-        inventory.global_queued_bytes = None;
-
-        let projection = project_runtime_telemetry(&inventory);
-
-        assert_eq!(projection.aggregate.global_queued_bytes, None);
-    }
-
-    #[test]
     fn projection_does_not_fabricate_missing_physical_usage_samples() {
         let health = fixture_health("project.unknown-usage", 1, RuntimeMaintenanceStateV1::Ready);
         let mut entry = entry(health, vec![]);

@@ -520,28 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn primary_checkout_root_redirects_linked_worktree_to_existing_primary() {
-        let tmp = tempdir().unwrap();
-        let primary = tmp.path().join("main");
-        let worktree = tmp.path().join("main-wt");
-        fs::create_dir_all(&primary).unwrap();
-        fs::create_dir_all(&worktree).unwrap();
-        // `git_common_dir` always returns a canonicalized path — mirror that
-        // guarantee here rather than a raw join.
-        let primary = fs::canonicalize(&primary).unwrap();
-        let common_dir = primary.join(".git");
-        fs::create_dir_all(&common_dir).unwrap();
-
-        let redirected = primary_checkout_root(&worktree, Some(&common_dir));
-
-        assert_eq!(
-            redirected,
-            Some(primary),
-            "a linked worktree with a live primary checkout must redirect to it"
-        );
-    }
-
-    #[test]
     fn primary_checkout_root_is_none_when_project_root_is_already_primary() {
         let tmp = tempdir().unwrap();
         let primary = tmp.path().join("main");

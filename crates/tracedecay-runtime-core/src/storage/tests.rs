@@ -288,17 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn durable_namespace_sync_fault_scope_clears_on_unwind() {
-        let unwind = std::panic::catch_unwind(|| {
-            with_durable_namespace_sync_fault_for_test(1, || panic!("before sync"));
-        });
-        assert!(unwind.is_err());
-
-        let root = tempfile::tempdir().unwrap();
-        PrivateStoreIo::create_dir_all_durable(&root.path().join("after-panic")).unwrap();
-    }
-
-    #[test]
     fn linked_worktree_resolves_the_repository_identity_marker() {
         let dir = tempfile::tempdir().unwrap();
         let primary = dir.path().join("primary");

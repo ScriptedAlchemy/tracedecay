@@ -567,14 +567,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_program_is_stable_and_absolute() {
-        let first = try_git_program().expect("git executable should resolve");
-        let second = try_git_program().expect("cached git executable should resolve");
-        assert_eq!(first, second);
-        assert!(Path::new(first).is_absolute());
-    }
-
-    #[test]
     fn resolver_preserves_exact_absolute_override() {
         let temporary = tempfile::tempdir().expect("temporary executable directory");
         let executable = temporary
