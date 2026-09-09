@@ -1142,6 +1142,10 @@ struct AdmittedRequestSnapshotsV1 {
     doctor_report: DoctorReportSnapshotV1,
 }
 
+/// Restores the product Hotpath labels on the lazy snapshot readers:
+/// `mcp.info.status.generation_census`, `runtime_ports.generation_census`,
+/// `mcp.health.runtime.doctor_report`, and (on the status handler)
+/// `mcp.info.status.code_index_freshness`.
 async fn admitted_generation_census(
     options: &ToolCallRegistryOptions<'_>,
     label: &'static str,
