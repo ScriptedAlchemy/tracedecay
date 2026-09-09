@@ -104,7 +104,7 @@ static SESSION_CAPTURE_TEST_RESIDENT_MEMORY: LazyLock<Arc<ProcessResidentMemoryV
 /// test fallback use — keeps the background CPU width consistent with any
 /// later worker-plan install in the same test process instead of poisoning
 /// it with an ad-hoc width.
-pub(crate) fn ensure_process_background_cpu_authority() -> Result<Arc<ProcessBackgroundCpuV1>> {
+pub fn ensure_process_background_cpu_authority() -> Result<Arc<ProcessBackgroundCpuV1>> {
     let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
     let installed = install_worker_plan(
         CodeIndexWorkerSelectionV1::Automatic {},
@@ -377,8 +377,9 @@ impl HostAdmissionTestRuntimeV1 {
             .map(RegisteredGlobalDb::db_path)
     }
 
-    #[cfg(test)]
-    pub(crate) fn registered_database_arc(
+    /// The registered session database lease for `scope`, or `None` for a
+    /// profile-only runtime asked for its project mount.
+    pub fn registered_database_arc(
         &self,
         scope: HostAdmissionScope,
     ) -> Option<RegisteredGlobalDbLeaseV1> {
@@ -388,8 +389,7 @@ impl HostAdmissionTestRuntimeV1 {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn session_registry_for_test(&self) -> Arc<DaemonSessionRuntimeRegistryV1> {
+    pub fn session_registry_for_test(&self) -> Arc<DaemonSessionRuntimeRegistryV1> {
         Arc::clone(&self.session_registry)
     }
 
@@ -543,24 +543,6 @@ impl HostAdmissionTestRuntimeV1 {
             operation: "decode session-temporal fixture count".to_owned(),
             message: error.to_string(),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn into_session_temporal_refresh_test_authority(
-        self,
-        scope: HostAdmissionScope,
-    ) -> Result<crate::daemon::session_runtime_tests::SessionTemporalRefreshTestAuthority> {
-        let database =
-            self.registered_database_arc(scope)
-                .ok_or_else(|| TraceDecayError::Database {
-                    operation: "bind session temporal refresh test authority".to_owned(),
-                    message: "registered session database mount is unavailable".to_owned(),
-                })?;
-        Ok(
-            crate::daemon::session_runtime_tests::SessionTemporalRefreshTestAuthority::new(
-                self, database,
-            ),
-        )
     }
 
     #[doc(hidden)]
