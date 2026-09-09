@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::TRACEDECAY_DIR;
+use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
@@ -261,4 +262,40 @@ pub fn write_repository_identity_marker(project_root: &Path, project_id: &str) -
         }
     })?;
     Ok(true)
+}
+
+/// Filters candidate roots down to the ones whose root-side evidence
+/// names exactly `project_id`: a `.git/` repository identity marker with
+/// that id, or (for roots without one) a deterministic path-derived
+/// identity equal to it.
+///
+/// This never creates or repairs a marker, so a caller that must not mount
+/// a store the profile has not enrolled — a cross-project memory reader,
+/// for one — can tell "not enrolled here" apart from "enrolled".
+pub fn enrolled_project_roots(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    project_id: &ProjectId,
+) -> Result<Vec<PathBuf>> {
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        let candidate = crate::worktree::repository_identity_root(&candidate).unwrap_or(candidate);
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if roots.contains(&canonical) {
+            continue;
+        }
+        let named_id = match read_repository_identity_marker(&canonical)? {
+            Some(marker) => marker.project_id,
+            None => super::default_profile_project_id(&canonical),
+        };
+        if named_id == project_id.as_str() {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
 }

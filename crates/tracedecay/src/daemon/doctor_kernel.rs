@@ -35,10 +35,10 @@ use tracedecay_contracts::{
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
 
-use super::maintenance::GuardedStoreTelemetryPort;
 use tracedecay_daemon_service::{
     DaemonFeedbackRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
 };
+use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
@@ -432,7 +432,7 @@ async fn collect_over_budget_store_findings(
 #[hotpath::measure(label = "daemon.doctor.code_generation_retention", future = true)]
 pub(super) async fn collect_code_generation_retention_findings(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    maintenance_observations: &super::maintenance::StoreTelemetrySamplingRegistry,
+    maintenance_observations: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     configuration: Option<
         &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     >,
@@ -458,7 +458,7 @@ pub(super) async fn collect_code_generation_retention_findings(
     let Some(configuration) = configuration else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let super::maintenance::SemanticVectorRetentionReadV1::Observed {
+    let tracedecay_maintenance::telemetry::SemanticVectorRetentionReadV1::Observed {
         receipt: semantic_census,
     } = maintenance_observations.semantic_vector_retention_read(project_root)
     else {
@@ -500,7 +500,9 @@ pub(super) async fn collect_code_generation_retention_findings(
         };
     let (vector_readable_sources, retained_vector_root_count) = vector_readable_sources;
     let semantic_backlog =
-        super::maintenance::SemanticVectorRetentionBacklogV1::from_receipt(&semantic_census);
+        tracedecay_maintenance::telemetry::SemanticVectorRetentionBacklogV1::from_receipt(
+            &semantic_census,
+        );
     if semantic_backlog.published < retained_vector_root_count {
         return DoctorStorageFamilyReadV1::Unknown;
     }
@@ -624,12 +626,6 @@ pub(super) async fn collect_code_generation_retention_findings(
         storage_family_read(findings)
     }
 }
-
-/// Live provider of the Remote Brain operational read. Every Doctor read
-/// re-observes the mounted remote authorities instead of freezing one value
-/// at project-composition time.
-pub(in crate::daemon) type RemoteOperationalReadProviderV1 =
-    Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>;
 
 /// Resolved kernel reads wired into the Doctor composer for one report.
 struct KernelDoctorSources<'a> {
@@ -788,13 +784,13 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
-    remote_operational: RemoteOperationalReadProviderV1,
+    remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
     retention: crate::config::RetentionConfig,
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
     semantic_owner_runtime: DaemonSemanticOwnerRuntimeRegistrar,
-    store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
+    store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 ) -> tracedecay_dashboard_api::DoctorReportReader {
     Arc::new(move || {
@@ -940,7 +936,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 semantic_owner,
             ) =
                 hotpath::future!(
-                    async {
+                    Box::pin(async {
                         tokio::join!(
                     graph.quick_check_report(),
                     observation_authority_audit_ok(registry.as_ref()),
@@ -989,7 +985,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                             })
                     },
                 )
-                    },
+                    }),
                     label = "daemon.doctor.collect"
                 )
                 .await;

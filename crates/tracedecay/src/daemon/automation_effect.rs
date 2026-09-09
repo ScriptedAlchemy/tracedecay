@@ -992,6 +992,8 @@ impl AutomationEffectAuthority {
         configuration_digest: ManifestDigest,
         request: AutomationRunRequestV1,
     ) -> Result<AutomationEffectAdmission> {
+        // Admission retains journal and authority state; keep that frame out of scheduler and dashboard callers.
+        Box::pin(async move {
         if !request.validate() {
             return Err(contract_error("automation run identity is empty"));
         }
@@ -1406,6 +1408,7 @@ impl AutomationEffectAuthority {
         }?;
         observe_admission_decision(&admission);
         Ok(admission)
+        }).await
     }
 
     fn terminal_for_run(

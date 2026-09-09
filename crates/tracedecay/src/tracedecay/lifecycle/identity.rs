@@ -107,43 +107,6 @@ impl TraceDecay {
         candidates
     }
 
-    /// Filters candidate roots down to the ones whose root-side evidence
-    /// names exactly `project_id`: a `.git/` repository identity marker with
-    /// that id, or (for roots without one) a deterministic path-derived
-    /// identity equal to it.
-    ///
-    /// This never creates or repairs a marker, so a caller that must not mount
-    /// a store the profile has not enrolled — a cross-project memory reader,
-    /// for one — can tell "not enrolled here" apart from "enrolled".
-    pub(crate) fn enrolled_project_roots(
-        candidates: impl IntoIterator<Item = PathBuf>,
-        project_id: &ProjectId,
-    ) -> Result<Vec<PathBuf>> {
-        let mut candidates = candidates.into_iter().collect::<Vec<_>>();
-        candidates.sort();
-        candidates.dedup();
-
-        let mut roots = Vec::new();
-        for candidate in candidates {
-            let candidate = tracedecay_runtime_core::worktree::repository_identity_root(&candidate)
-                .unwrap_or(candidate);
-            let Ok(canonical) = candidate.canonicalize() else {
-                continue;
-            };
-            if roots.contains(&canonical) {
-                continue;
-            }
-            let named_id = match storage::read_repository_identity_marker(&canonical)? {
-                Some(marker) => marker.project_id,
-                None => storage::default_profile_project_id(&canonical),
-            };
-            if named_id == project_id.as_str() {
-                roots.push(canonical);
-            }
-        }
-        Ok(roots)
-    }
-
     #[hotpath::measure(label = "lifecycle.enrollment_roots", future = true)]
     pub(crate) async fn registered_enrollment_roots(
         project_root: &Path,
@@ -162,7 +125,7 @@ impl TraceDecay {
             candidates.extend(Self::registry_context_candidate_roots(&context));
         }
 
-        let mut roots = Self::enrolled_project_roots(candidates, project_id)?;
+        let mut roots = storage::enrolled_project_roots(candidates, project_id)?;
         // Self-heal the sanctioned `.git/`-side anchor: a session mount for a
         // registered project rewrites a missing repository identity marker in
         // place (re-adoption after loss, first mount, or a moved checkout).

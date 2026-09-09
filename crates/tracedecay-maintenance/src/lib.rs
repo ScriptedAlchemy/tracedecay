@@ -45,5 +45,18 @@
 #![allow(clippy::large_futures)]
 #![allow(unreachable_pub)]
 
+pub mod clock;
+pub mod compaction_receipt;
+pub mod generation;
+pub mod lease;
+pub mod loop_run;
 pub mod profile_backup;
 pub mod retention;
+pub mod store_maintenance;
+pub mod telemetry;
+pub mod tick;
+
+/// Operator-log line for a maintenance kernel. Callers supply structured fields.
+pub fn log_maintenance_event(event: &str, fields: &[(&str, String)]) {
+    tracing::info!(target: "tracedecay_maintenance", event, ?fields, "maintenance event");
+}

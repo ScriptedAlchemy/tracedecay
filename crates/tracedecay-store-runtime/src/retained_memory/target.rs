@@ -158,7 +158,7 @@ async fn open_selected_project_read_only(
     if context.project.project_id.as_str() != selected_project_id.as_str() {
         return denied();
     }
-    let roots = enrolled_project_roots(
+    let roots = storage::enrolled_project_roots(
         registry_context_candidate_roots(&context),
         selected_project_id,
     )
@@ -198,35 +198,6 @@ fn registry_context_candidate_roots(context: &ProjectRegistryContext) -> Vec<Pat
             .map(|alias| PathBuf::from(&alias.alias_path)),
     );
     candidates
-}
-
-fn enrolled_project_roots(
-    candidates: impl IntoIterator<Item = PathBuf>,
-    project_id: &ProjectId,
-) -> Result<Vec<PathBuf>, tracedecay_domain::errors::TraceDecayError> {
-    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
-    candidates.sort();
-    candidates.dedup();
-
-    let mut roots = Vec::new();
-    for candidate in candidates {
-        let candidate = tracedecay_runtime_core::worktree::repository_identity_root(&candidate)
-            .unwrap_or(candidate);
-        let Ok(canonical) = candidate.canonicalize() else {
-            continue;
-        };
-        if roots.contains(&canonical) {
-            continue;
-        }
-        let named_id = match storage::read_repository_identity_marker(&canonical)? {
-            Some(marker) => marker.project_id,
-            None => storage::default_profile_project_id(&canonical),
-        };
-        if named_id == project_id.as_str() {
-            roots.push(canonical);
-        }
-    }
-    Ok(roots)
 }
 
 fn denied<T>() -> Result<T, RetainedSurfaceExecutionErrorV1> {
