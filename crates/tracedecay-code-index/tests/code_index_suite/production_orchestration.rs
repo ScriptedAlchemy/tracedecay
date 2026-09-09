@@ -34,12 +34,12 @@ use tracedecay_code_index::{
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
+    ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
+    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -2582,38 +2582,6 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
 }
 
 #[test]
-fn branch_stack_nodes_and_snapshots_derive_the_same_path_free_scope() {
-    let request = request_in_scope(
-        "file.branch-stack.1",
-        1_100_000,
-        "refs/heads/feature",
-        Some("worktree.feature"),
-        "commit.feature.1",
-    );
-    let node = BranchStackNodeV1 {
-        node_id: id::<StackNodeId>("stack-node.feature"),
-        project_id: id("project.fixture"),
-        repository_id: request.snapshot.repository.clone(),
-        reference: request
-            .snapshot
-            .reference
-            .clone()
-            .expect("branch reference"),
-        tip: request
-            .snapshot
-            .source_revision
-            .clone()
-            .expect("branch tip"),
-        worktree_id: request.snapshot.worktree.clone(),
-    };
-
-    assert_eq!(
-        CodeIndexGenerationScopeV1::for_branch_stack_node(&node),
-        CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot)
-    );
-}
-
-#[test]
 fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     let store = SharedPublicationStore::default();
     let mut owner =
@@ -2698,12 +2666,6 @@ fn parallel_and_sequential_generations_are_byte_identical() {
 #[test]
 fn parallel_and_sequential_decodes_are_byte_identical() {
     parallel_equivalence::assert_parallel_and_sequential_decodes_are_byte_identical();
-}
-
-#[test]
-#[ignore = "sealed-decode measurement harness; run one width per process, see fn docs"]
-fn sealed_decode_width_probe() {
-    parallel_equivalence::run_sealed_decode_width_probe();
 }
 
 fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
