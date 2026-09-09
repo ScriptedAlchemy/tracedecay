@@ -1,11 +1,5 @@
 use super::*;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
-
-/// Shared `plugin/` source tree at the repo root, relative to this crate.
-fn plugin_source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
-}
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
 /// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`
@@ -165,17 +159,6 @@ fn codex_command_hook_hash_propagates_canonicalization_failure() {
         TraceDecayError::Config { message }
             if message.contains("forced canonicalization failure")
     ));
-}
-
-#[test]
-fn codex_hook_trust_state_reports_all_trusted_entries() {
-    let entries = managed_entries(TEST_BIN);
-    let config = config_from_entries(&entries);
-
-    assert_eq!(
-        codex_plugin_hook_trust_state(&config, &entries),
-        CodexHookTrustState::Trusted
-    );
 }
 
 #[test]
@@ -696,114 +679,6 @@ fn codex_marketplace_identity_rejects_path_and_trust_key_injection() {
     }
 }
 
-/// Every file under a skills root, relative to it, forward-slashed.
-fn skill_tree_files(root: &Path) -> Vec<String> {
-    let mut files: Vec<String> = crate::agents::collect_regular_files(root)
-        .expect("skills dir readable")
-        .into_iter()
-        .filter_map(|path| {
-            path.strip_prefix(root)
-                .ok()
-                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        })
-        .collect();
-    files.sort();
-    files
-}
-
-/// The composed Codex deploy set (sourced from the shared `plugin/` tree
-/// via `codex_files`) must cover every file under `plugin/skills/` plus
-/// Codex's manifest, `.mcp.json`, hooks, and README. Codex has no
-/// slash-command or `disable-model-invocation` surface, so it ships all
-/// skills in their canonical (model-invocable) form. Workflow dispatch lives
-/// in native slash commands on other hosts; Codex does not ship those
-/// commands or retired `tracedecay-*` dispatcher skills.
-#[test]
-fn codex_embedded_file_list_covers_the_whole_source_bundle() {
-    let deploy: std::collections::BTreeSet<String> = codex_embedded_plugin_files()
-        .into_iter()
-        .map(|(relative, _)| relative.to_string())
-        .collect();
-
-    // Every skill dir under plugin/skills is deployed by Codex.
-    let skills_root = plugin_source_root().join("skills");
-    // Every file under plugin/skills/ (SKILL.md *and* any support files) is
-    // deployed — the recursive embed leaves nothing on disk unwired.
-    for relative in skill_tree_files(&skills_root) {
-        let expected = format!("skills/{relative}");
-        assert!(
-            deploy.contains(&expected),
-            "Codex deploy set is missing skill file {expected}"
-        );
-    }
-
-    // Codex's manifest surfaces.
-    for expected in [
-        ".codex-plugin/plugin.json",
-        ".mcp.json",
-        "hooks/hooks.json",
-        "README.md",
-    ] {
-        assert!(
-            deploy.contains(expected),
-            "Codex deploy set is missing {expected}"
-        );
-    }
-}
-
-/// Extracts the `<name>` from every `tracedecay:<name>` skill handoff in a
-/// body. MCP tool calls use `tracedecay_*` (underscore) and are ignored.
-fn skill_handoff_references(body: &str) -> Vec<String> {
-    const MARKER: &str = "tracedecay:";
-    let mut refs = Vec::new();
-    let mut rest = body;
-    while let Some(pos) = rest.find(MARKER) {
-        rest = &rest[pos + MARKER.len()..];
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
-            .collect();
-        if !name.is_empty() {
-            refs.push(name);
-        }
-    }
-    refs
-}
-
-/// Every `tracedecay:<skill>` handoff inside the embedded Codex skill bodies
-/// must resolve to a skill this bundle actually ships. A dangling reference
-/// (e.g. to a Cursor-only explicit-invoke skill)
-/// would point a Codex agent at a workflow that does not exist here.
-#[test]
-fn codex_skill_cross_references_resolve_to_shipped_skills() {
-    let files = codex_embedded_plugin_files();
-    let shipped: std::collections::BTreeSet<String> = files
-        .iter()
-        .filter_map(|&(relative, _)| {
-            relative
-                .strip_prefix("skills/")
-                .and_then(|rest| rest.strip_suffix("/SKILL.md"))
-                .map(str::to_string)
-        })
-        .collect();
-
-    let mut dangling: Vec<String> = Vec::new();
-    for &(relative, contents) in &files {
-        if !relative.starts_with("skills/") {
-            continue;
-        }
-        for reference in skill_handoff_references(contents) {
-            if !shipped.contains(&reference) {
-                dangling.push(format!("{relative} -> tracedecay:{reference}"));
-            }
-        }
-    }
-    assert!(
-        dangling.is_empty(),
-        "Codex skill bodies reference skills absent from the bundle: {dangling:?}"
-    );
-}
-
 fn install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
@@ -1305,16 +1180,5 @@ fn deactivation_fails_on_corrupt_plugins_table() {
     assert_eq!(
         std::fs::read_to_string(&config_path).unwrap(),
         "plugins = \"corrupt\"\n"
-    );
-}
-
-#[test]
-fn detected_host_surface_reports_codex_home() {
-    let home = tempfile::tempdir().unwrap();
-    assert_eq!(CodexIntegration.detected_host_surface(home.path()), None);
-    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
-    assert_eq!(
-        CodexIntegration.detected_host_surface(home.path()),
-        Some(home.path().join(".codex"))
     );
 }

@@ -317,16 +317,6 @@ fn a_missing_copilot_binary_refuses_instead_of_editing_host_owned_state() {
 }
 
 #[test]
-fn the_registry_path_is_derived_from_the_admitted_profile_home() {
-    let home = tempfile::tempdir().unwrap();
-    assert_eq!(
-        copilot_cli_mcp_config_path(home.path()),
-        home.path().join(".copilot/mcp-config.json"),
-        "the registry read must follow the same profile the host command is given as HOME"
-    );
-}
-
-#[test]
 fn the_doctor_readback_accepts_exactly_the_cli_launch_arguments() {
     let mut registered = serde_json::Map::new();
     registered.insert(

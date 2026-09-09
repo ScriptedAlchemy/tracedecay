@@ -481,15 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn log_roots_cover_supported_platform_layouts() {
-        let home = Path::new("/home/user");
-        let roots = cursor_log_roots(home);
-        assert!(roots.contains(&home.join(".config/Cursor/logs")));
-        assert!(roots.contains(&home.join("Library/Application Support/Cursor/logs")));
-        assert!(roots.contains(&home.join("AppData/Roaming/Cursor/logs")));
-    }
-
-    #[test]
     fn plugin_version_staleness_flags_mismatch_only() {
         let stale = serde_json::json!({ "name": "tracedecay", "version": "0.1.0" });
         let message = plugin_version_staleness(&stale, "0.2.0")

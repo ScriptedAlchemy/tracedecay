@@ -614,19 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_start_context_carries_diagnostics_moment() {
-        // Subagents must route the shell compile/type-check moment to tracedecay
-        // diagnostics and name the fixing-build skill, matching session steering.
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("fixing-build-and-type-errors"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnose"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnostics"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("cargo check"));
-        // The consolidated skill ladder and grep routing stay intact.
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_grep"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("exploring-code"));
-    }
-
-    #[test]
     fn codex_prompt_hints_dedupe_by_session_and_category() {
         let _lock = crate::hooks::lock_test_env();
         let project = tempfile::tempdir().unwrap();

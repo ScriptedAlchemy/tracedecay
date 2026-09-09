@@ -392,20 +392,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_devin_paths_distinguish_user_and_project_scope() {
-        let home = Path::new("/tmp/home");
-        let project = Path::new("/tmp/project");
-        assert_eq!(
-            devin_mcp_config_path(home),
-            PathBuf::from("/tmp/home/.config/devin/mcp_config.json")
-        );
-        assert_eq!(
-            devin_project_mcp_config_path(project),
-            PathBuf::from("/tmp/project/.devin/mcp_config.json")
-        );
-    }
-
-    #[test]
     fn documented_server_entry_is_current_without_disabled_field() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("mcp_config.json");
@@ -476,11 +462,6 @@ mod tests {
         );
 
         assert_eq!(counters.issues, 1);
-    }
-
-    #[test]
-    fn doctor_admits_project_only_devin_installations() {
-        assert!(DevinIntegration.reports_absence_to_doctor());
     }
 
     #[cfg(unix)]

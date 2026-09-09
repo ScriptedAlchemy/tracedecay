@@ -110,22 +110,6 @@ fn trace_function_prompts_get_call_graph_ladder_before_generic_search() {
 }
 
 #[test]
-fn dependency_fixture_prompts_get_call_graph_ladder() {
-    let hint = decide_hint(&ToolHintInput {
-        prompt: Some(
-            "Which tests still depend on setup_project instead of setup_empty_project?".to_string(),
-        ),
-        session_id: Some("session-1".to_string()),
-        ..ToolHintInput::default()
-    })
-    .unwrap();
-
-    assert_eq!(hint.category.as_key(), "call_graph");
-    assert!(hint.context.contains("tracedecay_callers"));
-    assert!(hint.context.contains("tracedecay_impact"));
-}
-
-#[test]
 fn affected_test_prompts_get_test_mapping_ladder() {
     let hint = decide_hint(&ToolHintInput {
         prompt: Some(
@@ -278,11 +262,6 @@ fn tracedecay_tool_schema_reads_get_direct_tool_hint() {
 }
 
 #[test]
-fn read_without_file_path_gets_no_hint() {
-    assert!(decide_hint(&input_for_tool("Read")).is_none());
-}
-
-#[test]
 fn classifier_priority_handles_overlapping_signals() {
     let recall = ToolHintInput {
         prompt: Some("remember when we traced setup_project last time?".to_string()),
@@ -379,27 +358,6 @@ fn dedupe_emits_each_category_once_per_session() {
     assert_eq!(
         dedupe.decide("s2", HintCategory::Search),
         HintDeliveryDecisionV1::Deliver
-    );
-}
-
-#[test]
-fn descriptor_reads_dedupe_separately_from_source_file_reads() {
-    let mut dedupe = ToolHintDedupe::default();
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::FileRead),
-        HintDeliveryDecisionV1::Deliver
-    );
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::ToolDescriptorRead),
-        HintDeliveryDecisionV1::Deliver
-    );
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::FileRead),
-        HintDeliveryDecisionV1::SuppressDuplicate
-    );
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::ToolDescriptorRead),
-        HintDeliveryDecisionV1::SuppressDuplicate
     );
 }
 

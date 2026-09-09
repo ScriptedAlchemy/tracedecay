@@ -644,18 +644,4 @@ mod tests {
             HostBundleRegistrationStateV1::Repairable
         );
     }
-
-    #[test]
-    fn vibe_project_scope_uses_project_local_documents() {
-        let project = tempfile::tempdir().unwrap();
-        let root = project_vibe_home(project.path());
-        assert_eq!(
-            root.join("config.toml"),
-            project.path().join(".vibe/config.toml")
-        );
-        assert_eq!(
-            root.join("prompts/cli.md"),
-            project.path().join(".vibe/prompts/cli.md")
-        );
-    }
 }

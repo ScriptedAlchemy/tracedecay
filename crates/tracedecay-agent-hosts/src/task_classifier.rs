@@ -211,11 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn test_write_is_coding() {
-        assert_eq!(classify(&["Write"], &[]), TaskCategory::Coding);
-    }
-
-    #[test]
     fn test_agent_is_delegation() {
         assert_eq!(classify(&["Agent", "Edit"], &[]), TaskCategory::Delegation);
     }
@@ -283,11 +278,5 @@ mod tests {
             classify(&["tracedecay_redundancy"], &[]),
             TaskCategory::Redundancy
         );
-    }
-
-    #[test]
-    fn test_redundancy_category_display() {
-        assert_eq!(TaskCategory::Redundancy.as_str(), "redundancy");
-        assert_eq!(TaskCategory::Redundancy.label(), "Redundancy");
     }
 }

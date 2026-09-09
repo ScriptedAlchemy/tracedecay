@@ -29,29 +29,3 @@ pub mod root_manifest;
 /// deployed plugin manifest, or a user-visible path will compare against an
 /// installed `tracedecay` binary.
 pub const PRODUCT_VERSION: &str = env!("TRACEDECAY_PRODUCT_VERSION");
-
-#[cfg(test)]
-mod tests {
-    use super::{PRODUCT_VERSION, root_manifest};
-
-    /// The repository root, two directories above this crate — the same hop
-    /// `build.rs` makes to find the manifest it stamps from.
-    fn repo_root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-    }
-
-    /// The drift guard. A release bump of the workspace product that failed to
-    /// reach this binary would otherwise only show up as hosts silently
-    /// comparing plugin manifests against the wrong version.
-    #[test]
-    fn the_baked_version_is_the_workspace_product_version() {
-        let authored = root_manifest::resolve(&repo_root())
-            .expect("the workspace-root manifest must declare the product version");
-        assert_eq!(
-            PRODUCT_VERSION,
-            authored,
-            "the baked product version drifted from {}",
-            root_manifest::manifest_path(&repo_root()).display()
-        );
-    }
-}

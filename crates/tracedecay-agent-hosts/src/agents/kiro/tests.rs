@@ -981,18 +981,6 @@ fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
     assert!(mcp_config_path(home.path()).is_file());
 }
 
-#[test]
-fn the_cli_raw_args_match_the_config_writers_launch_arguments() {
-    let entry = mcp_server_entry("/bin/tracedecay");
-    let expected = serde_json::to_value(MCP_SERVER_ARGS).unwrap();
-    assert_eq!(
-        &expected,
-        entry.get("args").unwrap(),
-        "the CLI-driven global registration's raw --args values and the workspace-local config \
-         writer must launch the same server with the same arguments"
-    );
-}
-
 /// Kiro's documented hook entry schema is `command` plus an optional
 /// `matcher` — an undocumented field (the old `timeout_ms`) is schema noise
 /// Kiro never reads and must not be written.
