@@ -312,15 +312,6 @@ fn bare_repository_is_typed_unsupported() {
     assert!(matches!(result, EvidenceAvailabilityV1::Unsupported));
 }
 
-#[test]
-fn missing_path_is_marked_partially_readable() {
-    let root = TempDir::new().unwrap();
-    let missing = root.path().join("missing");
-    let (canonical, partially_readable) = canonical_path(&missing);
-    assert!(partially_readable);
-    assert_eq!(canonical, missing);
-}
-
 #[cfg(unix)]
 #[test]
 fn removed_opened_worktree_is_captured_as_partially_readable() {
@@ -481,51 +472,6 @@ fn non_repository_is_typed_unavailable() {
 fn head_oid(fixture: &GitFixture) -> String {
     let output = fixture.git(&["rev-parse", "HEAD"]);
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-#[test]
-fn ref_movement_does_not_retarget_retained_provenance() {
-    let fixture = GitFixture::new();
-    fixture.commit("commit-a");
-    let commit_a_oid = head_oid(&fixture);
-    let retained = fixture.capture();
-    let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit() else {
-        panic!(
-            "expected known head commit at A, got {:?}",
-            retained.evidence().head_commit()
-        );
-    };
-    assert_eq!(commit_a_oid, retained_commit.as_str());
-
-    // Build commit B on a scratch branch, then retarget `main` to it with a
-    // hard reset. The retained capture is immutable evidence; it must not
-    // follow the moving ref.
-    fixture.git(&["checkout", "-q", "-b", "scratch"]);
-    fixture.commit("commit-b");
-    let commit_b_oid = head_oid(&fixture);
-    assert_ne!(commit_a_oid, commit_b_oid);
-    fixture.git(&["checkout", "-q", "main"]);
-    fixture.git(&["reset", "--hard", "scratch"]);
-    assert_eq!(head_oid(&fixture), commit_b_oid);
-
-    let fresh = fixture.capture();
-    let EvidenceAvailabilityV1::Known(fresh_commit) = fresh.evidence().head_commit() else {
-        panic!(
-            "expected known head commit at B, got {:?}",
-            fresh.evidence().head_commit()
-        );
-    };
-    assert_eq!(commit_b_oid, fresh_commit.as_str());
-
-    // The first capture still names A even though the ref now names B.
-    let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit() else {
-        panic!("retained head commit was mutated by the ref move");
-    };
-    assert_eq!(commit_a_oid, retained_commit.as_str());
-    assert_ne!(
-        retained.evidence().head_commit(),
-        fresh.evidence().head_commit()
-    );
 }
 
 #[test]

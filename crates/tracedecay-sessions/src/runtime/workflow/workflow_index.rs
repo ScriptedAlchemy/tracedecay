@@ -719,27 +719,6 @@ async fn runs_for_git_scope(
     Ok(runs)
 }
 
-#[cfg(test)]
-fn workflow_scope_exists_predicate(
-    filter: &WorkflowScopeFilter,
-    message_source_path_col: &str,
-    message_session_id_col: &str,
-) -> (String, Vec<Value>) {
-    let mut params = vec![Value::Text(filter.run_id.clone())];
-    let mut predicate = format!(
-        "EXISTS (SELECT 1 FROM workflow_agents wa \
-         WHERE wa.run_id = ?1 \
-           AND (wa.transcript_path = {message_source_path_col} \
-                OR wa.agent_session_id = {message_session_id_col})"
-    );
-    if let Some(label) = &filter.agent_label {
-        params.push(Value::Text(label.clone()));
-        let _ = write!(predicate, " AND wa.agent_label = ?{}", params.len());
-    }
-    predicate.push(')');
-    (predicate, params)
-}
-
 mod port;
 pub use port::{WorkflowIngestSink, WorkflowIngestWriteTxn};
 

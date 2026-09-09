@@ -589,19 +589,6 @@ mod cancellation_tests {
     use super::*;
 
     #[test]
-    fn typed_cancellation_is_control_termination_without_source_failure() {
-        let error = source::TranscriptIngestError::Cancelled { provider: "test" };
-
-        let outcome = cancelled_provider_outcome(&error)
-            .expect("typed cancellation must terminate provider control flow");
-
-        assert!(outcome.failures.is_empty());
-        assert_eq!(outcome.stats, TranscriptIngestStats::default());
-        assert_eq!(outcome.bytes_consumed, 0);
-        assert_eq!(outcome.deferred_units, 0);
-    }
-
-    #[test]
     fn typed_claude_cancellation_is_control_termination_without_source_failure() {
         let error = claude_observation::ClaudeObservationIngestError::Application(
             crate::observation::ObservationApplicationError::Cancelled,

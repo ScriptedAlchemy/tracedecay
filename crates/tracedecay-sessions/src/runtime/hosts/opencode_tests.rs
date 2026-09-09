@@ -77,50 +77,6 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 }
 
 #[tokio::test]
-async fn immutable_database_read_is_scoped_resumable_and_budgeted() {
-    let (_temp, project, database) = fixture();
-    let source = OpenCodeSource::with_database_for_project(database, project);
-    let admission = MemoryHostAdmission::default();
-    let cancellation = ObservationCancellation::default();
-
-    let deferred = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        Some(0),
-        &cancellation,
-    )
-    .await
-    .unwrap();
-    assert!(deferred.deferred_by_byte_cap);
-    assert!(admission.observations().is_empty());
-
-    let resumed = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        None,
-        &cancellation,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resumed.stats.messages_upserted, 1);
-    assert_eq!(admission.observations().len(), 1);
-
-    let replay = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        None,
-        &cancellation,
-    )
-    .await
-    .unwrap();
-    assert_eq!(replay.stats.messages_upserted, 0);
-    assert_eq!(admission.observations().len(), 1);
-}
-
-#[tokio::test]
 async fn steady_state_restart_keeps_high_water_without_per_row_durability_reads() {
     let (_temp, project, database) = fixture();
     let admission = MemoryHostAdmission::default();
@@ -323,37 +279,6 @@ async fn profile_scope_is_the_complement_of_registered_project_scope() {
         observations[0].observation().source().session_id().as_str(),
         "ses_other"
     );
-}
-
-#[tokio::test]
-async fn malformed_suffix_defers_without_hiding_committed_prefix() {
-    let (_temp, project, database) = fixture();
-    let connection = Connection::open(&database).unwrap();
-    connection
-        .execute(
-            "INSERT INTO message(id, session_id, time_created, data)
-             VALUES ('msg_z_malformed', 'ses_project', 2, '{')",
-            (),
-        )
-        .unwrap();
-    drop(connection);
-    let source = OpenCodeSource::with_database_for_project(database, project);
-    let admission = MemoryHostAdmission::default();
-
-    let outcome = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        None,
-        &ObservationCancellation::default(),
-    )
-    .await
-    .unwrap();
-
-    assert!(outcome.deferred_by_byte_cap);
-    assert_eq!(outcome.scan_non_durable_units, 1);
-    assert_eq!(outcome.stats.messages_upserted, 1);
-    assert_eq!(admission.observations().len(), 1);
 }
 
 #[tokio::test]

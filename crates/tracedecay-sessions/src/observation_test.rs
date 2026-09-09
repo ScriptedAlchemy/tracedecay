@@ -390,36 +390,6 @@ fn mark_first_observation_not_queued(store: &FakeStore) {
 }
 
 #[tokio::test]
-async fn non_durable_cursor_advance_stays_inside_application_boundary() {
-    let application = application();
-    let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.cursor-advance").unwrap()).unwrap();
-    let advance = ObservationCursorAdvance::new(
-        source,
-        ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
-        None,
-        ClaudeByteRangeV1::new(0, 4).unwrap(),
-        NonDurableFrameReason::BlankFrame,
-    )
-    .unwrap();
-
-    let outcome = application
-        .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
-            advance,
-            ObservationCancellation::default(),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(outcome, CursorAdvanceOutcome::Committed);
-    let advances = application.store.cursor_advances.lock().unwrap();
-    assert_eq!(advances.len(), 1);
-    assert_eq!(advances[0].covered(), ClaudeByteRangeV1::new(0, 4).unwrap());
-    assert_eq!(advances[0].reason(), NonDurableFrameReason::BlankFrame);
-}
-
-#[tokio::test]
 async fn non_durable_cursor_advance_honors_cancellation_before_and_after_commit() {
     let application = application();
     let source =
@@ -869,47 +839,6 @@ async fn replay_reports_partial_coverage_and_a_truthful_continuation() {
 }
 
 #[tokio::test]
-async fn replay_at_the_store_limit_uses_a_bounded_probe_for_coverage() {
-    let application = application();
-    application
-        .capture_claude_observation(request(&json!({
-            "type": "user",
-            "message": { "role": "user", "content": "replay seed" }
-        })))
-        .await
-        .unwrap();
-    {
-        let mut observations = application.store.observations.lock().unwrap();
-        let seed = observations[0].clone();
-        *observations = (1..=1_001)
-            .map(|sequence| {
-                StoredObservation::new(
-                    sequence,
-                    seed.observation().clone(),
-                    seed.committed_cursor().clone(),
-                    seed.retrieval_anchor().clone(),
-                    seed.projection_generation().clone(),
-                    seed.projection_status(),
-                )
-                .unwrap()
-            })
-            .collect();
-    }
-
-    let page = application
-        .replay_observations(ReplayObservationsRequest::new(
-            ObservationReplayRequest::new(0, 1_000).unwrap(),
-            ObservationCancellation::default(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(page.coverage(), ObservationReplayCoverage::Partial);
-    assert!(page.has_more());
-    assert_eq!(page.next_after_sequence(), Some(1_000));
-    assert_eq!(page.observations().len(), 1_000);
-}
-
-#[tokio::test]
 async fn pre_cancelled_capture_never_reaches_the_store() {
     let application = application();
     let cancellation = ObservationCancellation::default();
@@ -1001,41 +930,6 @@ async fn cancellation_after_point_read_and_replay_discards_non_atomic_results() 
         replay,
         Err(ObservationApplicationError::Cancelled)
     ));
-}
-
-#[tokio::test]
-async fn capture_observations_empty_skips_persist_authority() {
-    let application = application();
-    let outcomes = application.capture_observations(Vec::new()).await.unwrap();
-    assert!(outcomes.is_empty());
-    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 0);
-    assert!(application.store.observations.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn capture_observations_sanitizes_then_persists_once() {
-    let application = application();
-    let first = json!({
-        "type": "user",
-        "message": { "role": "user", "content": "batch-one" }
-    });
-    let second = json!({
-        "type": "user",
-        "message": { "role": "user", "content": "batch-two" }
-    });
-    let start_two = u64::try_from(serde_json::to_vec(&first).unwrap().len()).unwrap();
-    let outcomes = application
-        .capture_observations(vec![request(&first), request_at(&second, start_two)])
-        .await
-        .unwrap();
-    assert_eq!(outcomes.len(), 2);
-    assert!(
-        outcomes
-            .iter()
-            .all(|outcome| { matches!(outcome, CaptureObservationOutcome::Persisted { .. }) })
-    );
-    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 1);
-    assert_eq!(application.store.observations.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

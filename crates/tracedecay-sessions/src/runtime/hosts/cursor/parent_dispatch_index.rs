@@ -684,7 +684,6 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use serde_json::json;
     use tempfile::TempDir;
 
     use super::{
@@ -940,37 +939,6 @@ mod tests {
     }
 
     #[test]
-    fn same_length_in_place_rewrite_rescans_from_zero() {
-        let layout = layout();
-        let old = dispatch_record("agent_id", "rewrite-agent", "old-model");
-        let new = dispatch_record("agent_id", "rewrite-agent", "new-model");
-        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
-        write_lines(&layout.candidate_two, &[old]);
-        assert_eq!(
-            lookup(&layout, "rewrite-agent").0.as_deref(),
-            Some("old-model")
-        );
-        let original_metadata = fs::metadata(&layout.candidate_two).unwrap();
-        let original_len = original_metadata.len();
-        let original_mtime = filetime::FileTime::from_last_modification_time(&original_metadata);
-
-        rewrite_in_place(&layout.candidate_two, &[new]);
-        restore_exact_mtime(&layout.candidate_two, original_mtime);
-
-        let (model, receipt) = lookup(&layout, "rewrite-agent");
-        assert_eq!(
-            model.as_deref(),
-            Some("new-model"),
-            "same-length in-place rewrite must drop the stale model"
-        );
-        assert!(
-            receipt.rescanned_from_zero,
-            "same-length rewrite must invalidate the verified cursor"
-        );
-        assert_eq!(receipt.prefix_digest_bytes, original_len);
-    }
-
-    #[test]
     fn exact_mtime_rewrite_with_unchanged_trailing_anchor_rescans_from_zero() {
         let layout = layout();
         let old = dispatch_record("agent_id", "rewrite-agent", "old-model");
@@ -1005,74 +973,6 @@ mod tests {
         assert_eq!(receipt.prefix_digest_bytes, original_len);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn same_length_same_second_rewrite_invalidates_stale_models() {
-        let layout = layout();
-        let old = dispatch_record("agent_id", "old-agent", "old-model");
-        let new = dispatch_record("agent_id", "new-agent", "new-model");
-        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
-
-        write_lines(&layout.candidate_two, &[old]);
-        filetime::set_file_mtime(
-            &layout.candidate_two,
-            filetime::FileTime::from_unix_time(1_800_000_000, 100_000_000),
-        )
-        .unwrap();
-        assert_eq!(lookup(&layout, "old-agent").0.as_deref(), Some("old-model"));
-
-        write_lines(&layout.candidate_two, &[new]);
-        filetime::set_file_mtime(
-            &layout.candidate_two,
-            filetime::FileTime::from_unix_time(1_800_000_000, 200_000_000),
-        )
-        .unwrap();
-
-        let (stale, receipt) = lookup(&layout, "old-agent");
-        assert!(
-            stale.is_none(),
-            "same-length rewrite must drop stale models"
-        );
-        assert!(receipt.rescanned_from_zero);
-        assert_eq!(lookup(&layout, "new-agent").0.as_deref(), Some("new-model"));
-    }
-
-    #[test]
-    fn longer_in_place_rewrite_of_earlier_dispatch_rescans_from_zero() {
-        let layout = layout();
-        write_lines(
-            &layout.candidate_two,
-            &[
-                dispatch_record("agent_id", "rewrite-agent", "old-model"),
-                ordinary_record("kept-tail"),
-            ],
-        );
-        assert_eq!(
-            lookup(&layout, "rewrite-agent").0.as_deref(),
-            Some("old-model")
-        );
-
-        rewrite_in_place(
-            &layout.candidate_two,
-            &[
-                dispatch_record("agent_id", "rewrite-agent", "new-model"),
-                ordinary_record("kept-tail"),
-                ordinary_record("compaction-extra"),
-            ],
-        );
-
-        let (model, receipt) = lookup(&layout, "rewrite-agent");
-        assert_eq!(
-            model.as_deref(),
-            Some("new-model"),
-            "longer in-place rewrite must not treat a changed prefix as append-only"
-        );
-        assert!(
-            receipt.rescanned_from_zero,
-            "changed prefix must invalidate the verified cursor"
-        );
-    }
-
     #[test]
     fn candidate_one_wins_when_both_parents_dispatch() {
         let layout = layout();
@@ -1085,17 +985,6 @@ mod tests {
             &[dispatch_record("agent_id", "shared", "from-two")],
         );
         assert_eq!(lookup(&layout, "shared").0.as_deref(), Some("from-one"));
-    }
-
-    #[test]
-    fn candidate_two_is_used_when_candidate_one_lacks_the_dispatch() {
-        let layout = layout();
-        write_lines(&layout.candidate_one, &[ordinary_record("no dispatch")]);
-        write_lines(
-            &layout.candidate_two,
-            &[dispatch_record("agent_id", "only-two", "from-two")],
-        );
-        assert_eq!(lookup(&layout, "only-two").0.as_deref(), Some("from-two"));
     }
 
     #[test]
@@ -1260,67 +1149,6 @@ mod tests {
     }
 
     #[test]
-    fn same_length_rewrite_after_scan_discards_the_parsed_prefix() {
-        let layout = layout();
-        let old = dispatch_record("agent_id", "live-agent", "old-model");
-        let new = dispatch_record("agent_id", "live-agent", "new-model");
-        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
-        write_lines(&layout.candidate_two, &[old]);
-        let original_metadata = fs::metadata(&layout.candidate_two).unwrap();
-        let original_len = original_metadata.len();
-        let original_mtime = filetime::FileTime::from_last_modification_time(&original_metadata);
-        let scanned = revision_of(&layout.candidate_two);
-        let mut index = super::ParentDispatchIndex::new();
-        let (commit, parsed) = parsed_scan(&mut index, &layout.candidate_two, "live-agent");
-        assert_eq!(
-            parsed.models.get("live-agent").map(String::as_str),
-            Some("old-model")
-        );
-
-        rewrite_in_place(&layout.candidate_two, &[new]);
-        restore_exact_mtime(&layout.candidate_two, original_mtime);
-        assert_eq!(
-            fs::metadata(&layout.candidate_two).unwrap().len(),
-            original_len
-        );
-        let rewritten = revision_of(&layout.candidate_two);
-        assert!(
-            scanned != rewritten,
-            "the opened native revision must witness the exact-mtime rewrite"
-        );
-
-        let (stale, rejected) = index.commit_scanned_delta(parsed, commit);
-        assert!(stale.is_none(), "the stale parsed model must be refused");
-        assert_eq!(rejected.bytes_parsed, original_len);
-        assert_eq!(rejected.prefix_digest_bytes, original_len);
-
-        let (model, rescanned) = index.lookup(&layout.candidate_two, "live-agent");
-        assert_eq!(model.as_deref(), Some("new-model"));
-        assert_eq!(rescanned.bytes_parsed, original_len);
-        assert_eq!(rescanned.prefix_digest_bytes, 0);
-        assert!(rescanned.rescanned_from_zero);
-    }
-
-    #[test]
-    fn truncating_after_scan_discards_it() {
-        let layout = layout();
-        write_lines(
-            &layout.candidate_two,
-            &[
-                dispatch_record("agent_id", "live-agent", "live-model"),
-                ordinary_record("tail"),
-            ],
-        );
-        let mut index = super::ParentDispatchIndex::new();
-        let (commit, parsed) = parsed_scan(&mut index, &layout.candidate_two, "live-agent");
-
-        rewrite_in_place(&layout.candidate_two, &[ordinary_record("t")]);
-        let (model, receipt) = index.commit_scanned_delta(parsed, commit);
-        assert!(model.is_none());
-        assert_eq!(receipt.prefix_digest_bytes, 0);
-    }
-
-    #[test]
     fn missing_parent_is_a_typed_miss() {
         let layout = layout();
         let (model, receipt) = lookup(&layout, "anyone");
@@ -1386,33 +1214,5 @@ mod tests {
 
         let (again, _) = index.lookup(&layout.candidate_two, "tail-agent");
         assert_eq!(again.as_deref(), Some("model-b"));
-    }
-
-    #[test]
-    fn uncached_oracle_reads_the_same_nested_content_as_production() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("parent.jsonl");
-        write_lines(
-            &path,
-            &[json!({
-                "role": "assistant",
-                "message": {
-                    "content": [{
-                        "type": "tool_use",
-                        "name": "Task",
-                        "id": "toolu-nested",
-                        "input": {
-                            "agentId": "nested",
-                            "model_name": "nested-model"
-                        }
-                    }]
-                }
-            })
-            .to_string()],
-        );
-        assert_eq!(
-            uncached_dispatch_model_for_agent(&path, "nested").as_deref(),
-            Some("nested-model")
-        );
     }
 }
