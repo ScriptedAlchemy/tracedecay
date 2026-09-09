@@ -32,9 +32,7 @@ pub struct CodeGraphSourceBindRequest<'a> {
 
 pub type CodeGraphSourceBindFuture<'a> = Pin<
     Box<
-        dyn Future<Output = std::result::Result<SourceReadContext, CodeGraphReadError>>
-            + Send
-            + 'a,
+        dyn Future<Output = std::result::Result<SourceReadContext, CodeGraphReadError>> + Send + 'a,
     >,
 >;
 
@@ -75,10 +73,7 @@ impl AdmittedSourceAuthority {
     /// Freezes the runtime's answers after validating its claimed identity
     /// against the admitted scope. Identity is denied before any other
     /// runtime surface is consulted.
-    pub(crate) fn capture(
-        context: &RequestContext,
-        source: SourceReadContext,
-    ) -> Result<Self> {
+    pub(crate) fn capture(context: &RequestContext, source: SourceReadContext) -> Result<Self> {
         if source.project_id() != context.scope().project_id.as_str() {
             return Err(graph_source_scope_mismatch());
         }
