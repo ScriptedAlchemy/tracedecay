@@ -1,8 +1,8 @@
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 
 use tracedecay_domain::{
-    ExactClass, FreshnessCompatibilityV1, FusedCandidate, RankingDecision, RetrievalAnchorId,
-    SourceOccurrenceId,
+    ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusedCandidate, RankingDecision,
+    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId,
 };
 
 use super::stage_counters;
@@ -36,6 +36,7 @@ pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Or
         .cmp(&exact_class_rank(right.exact_class))
         .then_with(|| right.utility_micros.cmp(&left.utility_micros))
         .then_with(|| source_validity_rank(right).cmp(&source_validity_rank(left)))
+        .then_with(|| ordered_domain_scores(left).cmp(&ordered_domain_scores(right)))
         .then_with(|| {
             ordered_retriever_evidence_anchors(left).cmp(&ordered_retriever_evidence_anchors(right))
         })
@@ -106,4 +107,26 @@ pub(super) fn ordered_occurrence_ids(candidate: &FusedCandidate) -> Vec<SourceOc
         .into_iter()
         .cloned()
         .collect()
+}
+
+/// Preserve measured score differences when calibration rounds or saturates.
+/// Domain tags prevent comparing numbers from unrelated score scales.
+pub(super) fn ordered_domain_scores(
+    candidate: &FusedCandidate,
+) -> Vec<(RetrieverKind, &ScoreDomainId, Reverse<FixedPointScore>)> {
+    let mut scores = candidate
+        .contributions
+        .iter()
+        .filter(|contribution| contribution.weight_micros > 0)
+        .map(|contribution| {
+            (
+                contribution.retriever,
+                &contribution.score_domain,
+                Reverse(contribution.raw_score),
+            )
+        })
+        .collect::<Vec<_>>();
+    scores.sort();
+    scores.dedup();
+    scores
 }
