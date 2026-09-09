@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -660,16 +660,11 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     drop(source);
 }
 
-/// One file exceeding the bounded per-file parse budget must never fail the
-/// whole build: the generation still completes, publishes, and serves, with
-/// the slow file recorded as a typed unsupported document (with a reason) and
-/// truthful coverage accounting.
+/// Expired parse quanta resume while the operation remains admitted; scheduling
+/// does not turn a valid source file into a durable unsupported document.
 #[test]
-fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
-    // The retained parser's deadline is only observed every ~100 Tree-sitter
-    // parse operations, so the tiny file completes before the first progress
-    // check while the generated file reliably crosses many of them. A 1ns
-    // budget therefore deterministically times out exactly the large file.
+fn resumed_parse_quanta_publish_the_same_complete_generation() {
+    // One nanosecond forces every Tree-sitter progress checkpoint to suspend.
     let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
         document: ParseLimits {
             max_parse_time: Duration::from_nanos(1),
@@ -736,45 +731,111 @@ fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
         target_projection_key: projection_key(),
     };
 
+    let cold_request = request.clone();
     let generation = owner
         .build_and_publish(request, &ActiveControl)
-        .expect("a slow-parse file must not fail the whole generation");
-
-    // Truthful coverage: both files eligible, exactly the slow one omitted.
+        .expect("admitted parsing resumes to completion");
     assert_eq!(generation.coverage().files_eligible, 2);
-    assert_eq!(generation.coverage().files_unsupported, 1);
-
-    // The generation serves: the fast file's chunks are admitted, and no
-    // chunk was invented for the timed-out file.
-    let admitted = generation
-        .admitted_chunks()
-        .expect("published generation admits exact chunks");
-    assert!(!admitted.is_empty());
+    assert_eq!(generation.coverage().files_unsupported, 0);
+    let admitted = generation.admitted_chunks().expect("published chunks");
     assert!(
         admitted
             .iter()
-            .all(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str() == "file.fast")
+            .any(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str() == "file.slow")
     );
+    let mut cold_owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("cold production owner");
+    let cold = cold_owner
+        .build_and_publish(cold_request, &ActiveControl)
+        .expect("cold generation");
+    assert_eq!(
+        generation.encode_sealed().expect("resumed seal"),
+        cold.encode_sealed().expect("cold seal")
+    );
+}
 
-    // The omission is a typed per-file document state with a reason, durable
-    // through sealing.
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let value: serde_json::Value = serde_json::from_slice(&sealed).expect("sealed JSON");
-    let slow_document = value["generation"]["files"]
-        .as_array()
-        .expect("sealed files")
-        .iter()
-        .map(|file| &file["artifacts"]["chunks"]["document"])
-        .find(|document| document["file_occurrence_id"] == "file.slow")
-        .expect("slow file document is retained in the generation");
-    assert_eq!(slow_document["eligibility"]["eligibility"], "unsupported");
-    let reason = slow_document["eligibility"]["reason"]["reason"]
-        .as_str()
-        .expect("typed omission carries a reason");
-    assert!(
-        reason.contains("parse budget"),
-        "unexpected omission reason: {reason}"
-    );
+#[test]
+fn resumed_parse_aborts_without_publication_when_operation_control_expires() {
+    struct DuringParseControl {
+        checks: AtomicUsize,
+        deadline: bool,
+    }
+    impl CodeIndexExecutionControlV1 for DuringParseControl {
+        fn is_cancelled(&self) -> bool {
+            !self.deadline && self.checks.fetch_add(1, Ordering::Relaxed) >= 100
+        }
+        fn is_deadline_exceeded(&self) -> bool {
+            self.deadline && self.checks.fetch_add(1, Ordering::Relaxed) >= 100
+        }
+    }
+    let source = (0..2_000)
+        .map(|n| format!("fn item_{n}() -> u64 {{ {n} }}\n"))
+        .collect::<String>();
+    for deadline in [false, true] {
+        let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
+            document: ParseLimits {
+                max_parse_time: Duration::from_nanos(1),
+                ..ParseLimits::default()
+            },
+            ..RetainedParsePoolLimits::default()
+        })
+        .expect("parse pool");
+        let store = SharedPublicationStore::default();
+        let mut owner =
+            CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+                .expect("owner")
+                .with_retained_parse_pool(pool.clone());
+        let request = request_with_source(
+            "file.interrupted-parse",
+            1_100_000,
+            "commit.parse",
+            "tree.parse",
+            &source,
+        );
+        let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
+        let error = owner
+            .build_and_publish(
+                request.clone(),
+                &DuringParseControl {
+                    checks: AtomicUsize::new(0),
+                    deadline,
+                },
+            )
+            .expect_err("interrupted parse cannot publish");
+        let expected = if deadline {
+            CodeIndexInterruptionV1::DeadlineExceeded
+        } else {
+            CodeIndexInterruptionV1::Cancelled
+        };
+        assert!(
+            matches!(error, CodeIndexProductionErrorV1::Interrupted(reason) if reason == expected)
+        );
+        assert_eq!(
+            pool.stats().failed_parses,
+            1,
+            "control expires inside the retained parser"
+        );
+        assert!(
+            store
+                .load_active(&scope)
+                .expect("publication state")
+                .is_none()
+        );
+        let recovered = owner
+            .build_and_publish(request, &ActiveControl)
+            .expect("retry after cancellation resets parser");
+        assert_eq!(recovered.coverage().files_unsupported, 0);
+        assert!(
+            !recovered
+                .admitted_chunks()
+                .expect("admitted chunks")
+                .is_empty()
+        );
+    }
 }
 
 #[test]
@@ -1521,24 +1582,9 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
             "pub fn bounded_item_{ordinal}() -> u32 {{ {ordinal} }}\n"
         ));
     }
-    // This test is about paging and cancellation resume, not about the parse
-    // budget, so the fixture must parse completely every time. A 1.5 MB file
-    // sits close enough to the 250ms default budget that a busy machine can
-    // time it out, publish a typed unsupported document, and fail this test
-    // for a reason it does not test. Pin a generous budget the same way the
-    // sibling budget test pins a 1ns one — deterministic in both directions.
-    let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
-        document: ParseLimits {
-            max_parse_time: Duration::from_secs(60),
-            ..ParseLimits::default()
-        },
-        ..RetainedParsePoolLimits::default()
-    })
-    .expect("retained parse pool");
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner")
-        .with_retained_parse_pool(pool);
+        .expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
