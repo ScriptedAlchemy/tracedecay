@@ -320,3 +320,52 @@ fn fused_order_ignores_generation_scoped_ids_among_equal_utilities() {
         ]
     );
 }
+
+#[test]
+fn comparator_record_retains_the_actual_evidence_tie_break() {
+    let fusion = DeterministicFixedPointFusion::new(id("ranking.fixture.v1"));
+    let mut left = generation_scoped_hit("alpha", "a", "zzz");
+    let right = generation_scoped_hit("zeta", "b", "aaa");
+    let mut other = left.occurrences[0].clone();
+    other.retriever_evidence_anchor = id("code-lexical:lexical:chunk.omega");
+    left.occurrences
+        .extend([other, left.occurrences[0].clone()]);
+    left.occurrences.reverse();
+    let record = fusion.comparator_record(&left);
+    assert_eq!(
+        record.retriever_evidence_anchors,
+        vec![
+            id("code-lexical:lexical:chunk.alpha"),
+            id("code-lexical:lexical:chunk.omega"),
+        ]
+    );
+    assert_eq!(
+        compare_fused(&left, &right),
+        record
+            .retriever_evidence_anchors
+            .cmp(&fusion.comparator_record(&right).retriever_evidence_anchors)
+    );
+    let output = compose_corpus(&no_caps());
+    for (record, ranked) in output
+        .comparator_records
+        .iter()
+        .zip(&output.ranked_candidates)
+    {
+        let detail = &ranked
+            .candidate
+            .decisions
+            .iter()
+            .find(|decision| decision.kind == RankingDecisionKind::ComparatorProvenance)
+            .unwrap()
+            .detail;
+        let anchors = record
+            .retriever_evidence_anchors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(detail.contains(&format!("evidence_anchors=[{anchors}]")));
+        assert!(!detail.contains(";anchor="));
+        assert!(!detail.contains(";logical="));
+    }
+}

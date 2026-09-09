@@ -413,13 +413,13 @@ fn compare_graph_candidates(
         .cmp(&left.0.raw_score)
         .then_with(|| {
             left.0
-                .source_occurrence_id
-                .cmp(&right.0.source_occurrence_id)
+                .retriever_evidence_anchor
+                .cmp(&right.0.retriever_evidence_anchor)
         })
         .then_with(|| {
             left.0
-                .retriever_evidence_anchor
-                .cmp(&right.0.retriever_evidence_anchor)
+                .source_occurrence_id
+                .cmp(&right.0.source_occurrence_id)
         })
 }
 

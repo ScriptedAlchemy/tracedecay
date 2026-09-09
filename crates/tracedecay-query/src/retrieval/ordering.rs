@@ -42,10 +42,9 @@ pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Or
         .then_with(|| ordered_occurrence_id_refs(left).cmp(&ordered_occurrence_id_refs(right)))
 }
 
-/// Lexical/exact candidate() already stamps `code-lexical:{lane}:{chunk_id}`
-/// here. `CodeSearchChunkId` is generation-free, so this is the stable
-/// tie-break among equal utilities. Generation-scoped occurrence ids stay
-/// last.
+/// Source-bound lexical/exact and graph evidence anchors are generation-free.
+/// Generation-scoped occurrence IDs remain the final discriminator only when
+/// the available source identity cannot distinguish otherwise equal evidence.
 pub(super) fn ordered_retriever_evidence_anchors(
     candidate: &FusedCandidate,
 ) -> Vec<&RetrievalAnchorId> {

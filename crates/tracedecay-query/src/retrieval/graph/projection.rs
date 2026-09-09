@@ -10,7 +10,7 @@ use tracedecay_domain::{
     CanonicalRelationEdgeV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
     FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId, UtcMicros,
+    SourceOccurrenceId, UtcMicros, canonical_sha256,
 };
 
 use super::{GraphExecutionControl, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
@@ -126,7 +126,20 @@ fn project_graph_batch(
             raw_score: FixedPointScore(raw_candidate.score_micros),
             ordinal_rank: ordinal as u32,
             exact_admission_proof: None,
-            retriever_evidence_anchor: retrieval_anchor(format!("evidence.{occurrence}"))?,
+            // Bind ranking evidence to the source, not the generation-scoped
+            // symbol occurrence used by hydration. Missing source coordinates
+            // may tie; the comparator retains occurrence IDs as its last key.
+            retriever_evidence_anchor: retrieval_anchor(match &raw_candidate.binding.chunk {
+                Some(chunk) => format!("code-graph:chunk:{chunk}"),
+                None => format!(
+                    "code-graph:source:{}",
+                    canonical_sha256(&(
+                        &raw_candidate.binding.logical_path,
+                        &raw_candidate.binding.source_span,
+                    ))
+                    .map_err(contract_error)?
+                ),
+            })?,
             freshness: reader.freshness().clone(),
         };
         let evidence = GraphLaneEvidence {
