@@ -649,6 +649,10 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
 }
 
 #[hotpath::measure(label = "mcp.dashboard.open.total")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Dashboard mounting composes independently optional provider authorities; their absence must remain explicit"
+)]
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,

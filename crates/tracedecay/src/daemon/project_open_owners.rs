@@ -1232,6 +1232,10 @@ pub(super) async fn install_semantic_activation_runtime_owner(
 }
 
 #[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Composition supplies distinct capability, database, analyzer and diagnostic owners without merging their authority."
+)]
 async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
