@@ -494,7 +494,7 @@ pub(super) async fn register_project_open_production_owners(
     // Project-open has no authenticated GitHub response or persisted source
     // record. It mounts policy and delivery only; the review refresh owner is
     // the sole producer of canonical provider observations and anchors.
-    if crate::tracedecay::git_remote_url(project_root)
+    if tracedecay_runtime_core::git::git_remote_url(project_root)
         .as_deref()
         .and_then(github_repository_from_remote)
         .is_some()
