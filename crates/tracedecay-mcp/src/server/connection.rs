@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
@@ -125,6 +127,36 @@ where
         if enabled {
             Arc::clone(&self.context).shutdown().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    use super::QueuedRequestLine;
+
+    #[test]
+    fn queued_request_depth_is_released_on_dequeue_and_connection_drop() {
+        let queued = Arc::new(AtomicIsize::new(0));
+        let mut pending = std::collections::VecDeque::new();
+        pending.push_back(QueuedRequestLine::new_observed(
+            "first".to_owned(),
+            Arc::clone(&queued),
+        ));
+        pending.push_back(QueuedRequestLine::new_observed(
+            "second".to_owned(),
+            Arc::clone(&queued),
+        ));
+        assert_eq!(queued.load(Ordering::Acquire), 2);
+
+        let first = pending.pop_front().expect("first queued line").into_line();
+        assert_eq!(first, "first");
+        assert_eq!(queued.load(Ordering::Acquire), 1);
+
+        drop(pending);
+        assert_eq!(queued.load(Ordering::Acquire), 0);
     }
 }
 

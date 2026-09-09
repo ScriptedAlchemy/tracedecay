@@ -54,7 +54,6 @@ mod lifecycle;
 mod live_transcript_refresh;
 mod project_open_access;
 mod project_registry;
-mod read_coalescing;
 mod requests;
 mod rmcp;
 mod routing;
@@ -73,7 +72,6 @@ pub(crate) use lifecycle::VersionCheckState;
 pub(crate) use live_transcript_refresh::{
     LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
 };
-use read_coalescing::*;
 pub(crate) use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
     RmcpWorkDeliverySettlement,
@@ -83,8 +81,8 @@ pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
 pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
 use tracedecay_mcp::server::{
-    McpBackgroundTaskOwner, McpDispatchRequest, RetainedDispatchAuthority, StartupCatchUpMachineV1,
-    ToolCallParams,
+    IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest, RetainedDispatchAuthority,
+    StartupCatchUpMachineV1, ToolCallParams,
 };
 pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 

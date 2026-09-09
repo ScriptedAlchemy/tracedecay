@@ -3,7 +3,7 @@
 use super::*;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
-use super::super::read_coalescing::{ReadFlightClaim, tool_allows_identical_read_coalescing};
+use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
 impl McpServer {
     #[hotpath::skip]
@@ -258,7 +258,11 @@ impl McpServer {
         application_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
-        let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
+        let read_flight = tool_allows_identical_read_coalescing(tool_name, |tool_name| {
+            crate::mcp::tools::mcp_dispatch_contract(tool_name)
+                .is_ok_and(|contract| contract.read_only())
+        })
+        .then(|| {
             self.identical_read_coalescer.claim(
                 engine_identity.to_string_lossy().as_ref(),
                 tool_name,

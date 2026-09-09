@@ -3,6 +3,7 @@
 mod connection;
 mod dispatch;
 mod protocol;
+mod read_coalescing;
 mod rmcp;
 mod settlement;
 
@@ -16,6 +17,10 @@ pub use dispatch::{
     McpDispatchParams, McpDispatchRequest, ToolCallParams, dispatch_is_independent_read,
 };
 pub use protocol::{McpMethod, classify_mcp_method, initialize_result, resources_list_result};
+pub use read_coalescing::{
+    IdenticalReadCoalescer, ReadCoalescingSnapshot, ReadFlight, ReadFlightClaim, ReadFlightLeader,
+    tool_allows_identical_read_coalescing,
+};
 pub use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
     RmcpWorkDeliverySettlement, await_dispatch_with_cancellation, project_server_retired_error,
