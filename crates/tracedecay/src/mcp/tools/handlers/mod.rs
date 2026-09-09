@@ -71,7 +71,6 @@ pub mod graph;
 pub mod health;
 pub mod hook_runtime;
 pub mod info;
-pub mod redundancy;
 pub(crate) mod retained_catalog;
 #[cfg(test)]
 #[allow(

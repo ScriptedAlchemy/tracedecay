@@ -7,10 +7,11 @@ use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::super::ToolCallRegistryOptions;
-use super::super::{health, redundancy};
+use super::super::health;
 use super::admitted_graph_query;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::health as portable_health;
+use tracedecay_mcp::handlers::redundancy as portable_redundancy;
 
 /// Dispatch code-health and session-baseline tools (`tracedecay_health`,
 /// `tracedecay_test_risk`, `tracedecay_runtime`, ...).
@@ -42,7 +43,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
         }
         "tracedecay_redundancy" => {
             let graph = admitted_graph_query(cg, &options, "redundancy").await?;
-            redundancy::handle_redundancy(cg, &graph, args, scope_prefix).await
+            portable_redundancy::handle_redundancy(&graph, args, scope_prefix).await
         }
         "tracedecay_runtime" => {
             health::handle_runtime(

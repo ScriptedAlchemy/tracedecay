@@ -16,6 +16,7 @@ pub mod grep;
 pub mod health;
 pub mod info;
 mod multi_root;
+pub mod redundancy;
 mod retained_response;
 pub mod support;
 
