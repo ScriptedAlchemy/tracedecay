@@ -6737,6 +6737,7 @@ dependencies = [
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

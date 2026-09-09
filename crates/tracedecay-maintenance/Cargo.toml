@@ -49,6 +49,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 libc = "0.2"
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
