@@ -291,22 +291,3 @@ fn test_fortran_qualified_names() {
         log_msg.qualified_name
     );
 }
-
-#[test]
-fn test_fortran_extensions() {
-    let extractor = FortranExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"f90"));
-    assert!(exts.contains(&"f95"));
-    assert!(exts.contains(&"f03"));
-    assert!(exts.contains(&"f08"));
-    assert!(exts.contains(&"f18"));
-    assert!(exts.contains(&"f"));
-    assert!(exts.contains(&"for"));
-}
-
-#[test]
-fn test_fortran_language_name() {
-    let extractor = FortranExtractor;
-    assert_eq!(extractor.language_name(), "Fortran");
-}

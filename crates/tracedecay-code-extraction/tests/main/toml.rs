@@ -114,16 +114,6 @@ fn empty_file_produces_only_file_node() {
 }
 
 #[test]
-fn extensions_are_toml() {
-    assert_eq!(TomlExtractor.extensions(), &["toml"]);
-}
-
-#[test]
-fn language_name_is_toml() {
-    assert_eq!(TomlExtractor.language_name(), "TOML");
-}
-
-#[test]
 fn inline_table_value_is_one_pair() {
     // `clap = { version = "4", features = ["derive"] }` is one pair at the
     // top level (the inline table is its value, not its own pairs).

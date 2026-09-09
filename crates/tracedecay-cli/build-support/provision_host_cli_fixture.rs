@@ -48,16 +48,3 @@ pub fn install_compiled_host_cli_fixture(dir: &Path, program: &str) -> PathBuf {
     });
     dest
 }
-
-pub fn looks_like_native_executable(bytes: &[u8]) -> bool {
-    if bytes.starts_with(b"#!") || bytes.starts_with(b"@echo") {
-        return false;
-    }
-    bytes.starts_with(&[0x7f, b'E', b'L', b'F'])
-        || bytes.starts_with(&[0x4d, 0x5a])
-        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xce])
-        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
-        || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
-        || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
-        || bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe])
-}

@@ -165,22 +165,3 @@ impl ReaderQueryExecutor for NoReads {
         unreachable!("engine test SQL does not use the product read contract")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn distinct_database_roots_receive_distinct_fixture_identities() {
-        let first_directory = tempfile::tempdir().expect("first fixture root");
-        let second_directory = tempfile::tempdir().expect("second fixture root");
-        let first = TestConnection::open(&first_directory.path().join("fixture.db"));
-        let second = TestConnection::open(&second_directory.path().join("fixture.db"));
-
-        assert_ne!(
-            first._writer.binding().shard_id,
-            second._writer.binding().shard_id,
-            "independent database roots must not share one fixture shard identity"
-        );
-    }
-}

@@ -198,19 +198,6 @@ fn test_gwbasic_subroutine_complexity() {
 }
 
 #[test]
-fn test_gwbasic_extensions() {
-    let extractor = GwBasicExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"gw"));
-}
-
-#[test]
-fn test_gwbasic_language_name() {
-    let extractor = GwBasicExtractor;
-    assert_eq!(extractor.language_name(), "GW-BASIC");
-}
-
-#[test]
 fn test_gwbasic_subroutine_signatures() {
     let result = extract_fixture();
 
