@@ -1,4 +1,3 @@
-use super::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use crate::runtime_ports::compose_application_catalog_snapshot;
 use tracedecay_application::git_intelligence::NativeGitIntelligence;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -8,6 +7,7 @@ use tracedecay_contracts::{
     DisclosureClass, GitIndexOperationBindingV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,
     IdempotencyKey, OperationTermination, PolicyDecisionRef, RequestContext, RequestId,
 };
+use tracedecay_daemon_service::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use tracedecay_domain::git::{
     GitDiffScopeV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
     GitIndexTransactionOperationV1, GitIndexUnsupportedStateV1,

@@ -995,7 +995,6 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                                 project.path().to_path_buf(),
                                 scope.clone(),
                                 Arc::clone(graph.configuration_runtime()),
-                                crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
                             )),
                         ),
                     )
@@ -1042,7 +1041,6 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                     project.path().to_path_buf(),
                     scope.clone(),
                     Arc::clone(graph.configuration_runtime()),
-                    crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
                 )),
             )
             .await;
@@ -1130,7 +1128,6 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                     publisher_root,
                     publisher_scope,
                     publisher_configuration,
-                    crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
                 )),
             )
             .await

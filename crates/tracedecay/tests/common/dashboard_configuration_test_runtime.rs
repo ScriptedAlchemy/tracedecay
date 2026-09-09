@@ -25,6 +25,7 @@ use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use tracedecay_daemon_service::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
+    daemon_owned_project_source_access_at,
 };
 use tracedecay_dashboard_api::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
@@ -399,15 +400,11 @@ pub(crate) async fn register_dashboard_test_retained_runtime(
         .map_err(|error| TraceDecayError::Config {
             message: format!("dashboard test retained configuration is unavailable: {error}"),
         })?;
-    let retained_access = super::project_open_owners::daemon_owned_project_source_access_at(
-        &scope,
-        &project_root,
-        &configuration,
-        observed_at,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("dashboard test retained access is invalid: {error}"),
-    })?;
+    let retained_access =
+        daemon_owned_project_source_access_at(&scope, &project_root, &configuration, observed_at)
+            .map_err(|error| TraceDecayError::Config {
+            message: format!("dashboard test retained access is invalid: {error}"),
+        })?;
     let retained_grant =
         super::project_open_owners::project_open_retained_grant(&retained_access, observed_at)
             .map_err(|error| TraceDecayError::Config {

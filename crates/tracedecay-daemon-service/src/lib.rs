@@ -74,7 +74,8 @@ mod shutdown_coordination;
 mod multi_root;
 
 pub use callable_code_authorization::{
-    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission,
+    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission, GRANT_HORIZON,
+    daemon_owned_project_source_access_at, project_open_source_access_authority,
 };
 pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
 #[cfg(any(test, feature = "test-helpers"))]
