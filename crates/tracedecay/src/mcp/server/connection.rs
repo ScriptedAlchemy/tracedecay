@@ -152,7 +152,7 @@ impl McpServer {
             .await
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     #[hotpath::skip]
     pub(crate) async fn run_with_shutdown_policy(
         self: &Arc<Self>,
@@ -176,11 +176,19 @@ impl McpServer {
     #[cfg(any(test, feature = "test-transport"))]
     #[hotpath::skip]
     pub async fn handle_and_write(
-        self: &Arc<Self>,
+        &self,
         line: &str,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
     ) -> Result<()> {
-        self.connection_server()
+        let server = self.dispatch_authority.server().upgrade().ok_or_else(|| {
+            TraceDecayError::project_route(
+                "tool_dispatch_shutdown",
+                true,
+                "MCP server was released before direct request dispatch",
+            )
+        })?;
+        server
+            .connection_server()
             .handle_and_write(line, transport)
             .await
     }
