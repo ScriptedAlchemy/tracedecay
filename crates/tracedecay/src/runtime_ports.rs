@@ -347,19 +347,13 @@ mod tests {
             .canonicalize()
             .expect("canonical checkout");
 
-        assert!(!runtime.is_project_initialized(&checkout));
+        assert!(!(runtime.project_initialization_gate)(&checkout));
+        assert!((runtime.project_root_resolver)(&checkout).await.is_none());
         assert!(
-            runtime
-                .resolve_project_root_with_identity(&checkout)
-                .await
-                .is_none()
-        );
-        assert!(
-            runtime.hook_timings_enabled(&checkout).is_none(),
+            (runtime.timing_gate)(&checkout).is_none(),
             "an unregistered checkout has no published telemetry override"
         );
-        let layout = runtime
-            .resolve_store_layout(&checkout)
+        let layout = (runtime.store_layout_resolver)(&checkout)
             .await
             .expect("the root resolves a canonical layout for any checkout");
         assert_eq!(layout.project_root, checkout);

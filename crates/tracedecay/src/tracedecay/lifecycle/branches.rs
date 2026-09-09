@@ -4,16 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::config::{
-    db_filename, install_usecase_runtime_configuration_authority,
+    install_usecase_runtime_configuration_authority,
     open_runtime_configuration_for_registered_database_read_only,
 };
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::branch;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::DatabaseAccessMode;
-use tracedecay_runtime_core::storage::StoreLayout;
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
@@ -32,49 +31,10 @@ impl TraceDecay {
         tracedecay_dir: &Path,
         branch: Option<&str>,
     ) -> (PathBuf, Option<String>, Option<String>) {
-        let default_db = tracedecay_dir.join(db_filename(tracedecay_dir));
-
-        let Some(meta) = branch_meta::load_branch_meta(tracedecay_dir) else {
-            // No branch metadata — single-DB mode (backward compat)
-            return (default_db, None, None);
-        };
-
-        let Some(branch) = branch else {
-            // Detached HEAD — serve the default branch's provenance
-            return (
-                default_db,
-                Some(meta.default_branch.clone()),
-                Some("detached HEAD — using default branch index".to_string()),
-            );
-        };
-
-        // Exact match: branch is tracked
-        if meta.is_tracked(branch) {
-            return (default_db, Some(branch.to_string()), None);
-        }
-
-        // Fallback: find nearest tracked ancestor
-        if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta) {
-            return (
-                default_db,
-                Some(ancestor.clone()),
-                Some(format!(
-                    "branch '{branch}' is not tracked — serving from '{ancestor}'. \
-                             Run `tracedecay branch add {branch}` to track it."
-                )),
-            );
-        }
-
-        // Last resort: default branch provenance
-        let serving = meta.default_branch.clone();
-        (
-            default_db,
-            Some(serving),
-            Some(format!(
-                "branch '{branch}' is not tracked — serving from '{}'. \
-                 Run `tracedecay branch add {branch}` to track it.",
-                meta.default_branch
-            )),
+        tracedecay_application::tracedecay::resolve_db_for_branch(
+            project_root,
+            tracedecay_dir,
+            branch,
         )
     }
 
@@ -147,12 +107,12 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
+        let project_id = storage::registered_project_id(&store_layout)?;
+        let enrollment_roots = registered_enrollment_roots(
+            profile_database.as_ref(),
             project_root,
             &store_layout,
             &project_id,
-            profile_database.as_ref(),
         )
         .await?;
         let configuration_database = runtime_registry

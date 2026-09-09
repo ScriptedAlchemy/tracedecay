@@ -7,12 +7,12 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         request: tracedecay_lcm::LcmCompressionRequest,
     ) -> std::result::Result<tracedecay_lcm::LcmCompressionResponse, tracedecay_lcm::LcmError> {
-        lcm_compress(
+        Box::pin(lcm_compress(
             self.project_registered
                 .clone()
                 .unwrap_or_else(|| self.profile_registered.clone()),
             request,
-        )
+        ))
         .await
     }
 

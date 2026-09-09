@@ -27,8 +27,8 @@ const sigmaState = vi.hoisted(() => ({
   killCount: 0,
 }));
 
-vi.mock('graphology-layout-forceatlas2', () => ({
-  default: { inferSettings: () => ({ gravity: 1 }), assign: () => undefined },
+vi.mock('./emergentLayout.ts', () => ({
+  settleEmergentOffThread: async () => true,
 }));
 
 vi.mock('sigma', () => {

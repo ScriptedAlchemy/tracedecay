@@ -1,7 +1,9 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
-use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1};
+use tracedecay::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
+};
 use tracedecay_domain::{
     SessionId, SessionRefreshKeyV1, SessionRefreshSourceTargetV1, SessionSourceFrontierV1,
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,

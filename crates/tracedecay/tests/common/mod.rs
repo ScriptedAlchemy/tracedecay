@@ -25,7 +25,7 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};

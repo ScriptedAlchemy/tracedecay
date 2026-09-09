@@ -112,3 +112,22 @@ it('keeps dense event hit regions from covering adjacent event centers', () => {
   fireEvent.click(targetRect);
   expect(onSelect).toHaveBeenCalledWith('event-100');
 });
+
+
+it('maps the visible vertical session window into the minimap and supports keyboard navigation', () => {
+  renderCanvas();
+  const viewport = screen.getByRole('region', { name: 'Session lane viewport' });
+  Object.defineProperties(viewport, { scrollHeight: { value: 1000 }, clientHeight: { value: 200 }, scrollTop: { value: 100, writable: true } });
+  const scrollBy = vi.fn();
+  viewport.scrollBy = scrollBy;
+  fireEvent.scroll(viewport);
+  const minimap = screen.getByRole('group', { name: 'Session hierarchy minimap' });
+  const window = minimap.querySelector('[data-session-viewport]')!;
+  const earlier = Number(window.getAttribute('y'));
+  expect(Number(window.getAttribute('height'))).toBeLessThan(64);
+  viewport.scrollTop = 500;
+  fireEvent.scroll(viewport);
+  expect(Number(window.getAttribute('y'))).toBeGreaterThan(earlier);
+  fireEvent.keyDown(minimap, { key: 'ArrowDown' });
+  expect(scrollBy).toHaveBeenCalledWith({ top: 150 });
+});

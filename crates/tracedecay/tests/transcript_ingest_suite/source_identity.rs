@@ -4,7 +4,7 @@
 //! collapsed into a Cursor project-filter miss or a Codex v2 cursor miss.
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     ClineTranscriptStream, ObservationSourceIdentityV1, ProviderId, SessionId,
 };

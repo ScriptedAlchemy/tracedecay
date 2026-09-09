@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_lcm::payload::DeleteOpts;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use tracedecay_lcm::{
