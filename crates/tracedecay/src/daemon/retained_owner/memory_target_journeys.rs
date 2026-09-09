@@ -5,7 +5,9 @@ use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_store::StoreShardScopeV1;
-use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
+use tracedecay_store_runtime::retained_memory::{
+    MemoryTargetAccessV1, RetainedMemoryTargetAuthorityV1,
+};
 
 use crate::daemon::retained_owner::open_project_retained_memory_target;
 use crate::tracedecay::TraceDecay;
@@ -152,4 +154,35 @@ async fn missing_unenrolled_and_write_selected_targets_share_one_denial() {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         ));
     }
+}
+
+#[tokio::test]
+async fn same_project_open_denies_when_store_identity_disagrees() {
+    let (_tmp, active, selected, _sibling) = project_pair().await;
+    let active_id = project_id(&active);
+    let selected_id = project_id(&selected);
+    let authority = RetainedMemoryTargetAuthorityV1 {
+        registry: active.retained_store_runtime_registry(),
+        profile_database: active.profile_database().clone(),
+        project_root: active.project_root().to_path_buf(),
+        project_id: active_id.clone(),
+        store_layout_project_id: selected_id,
+        served_project_root: active.project_root().to_path_buf(),
+    };
+
+    let error = tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(
+        &authority,
+        active.project_root(),
+        &active_id,
+        Some(MemoryScopeV1::Project),
+        None,
+        MemoryTargetAccessV1::Read,
+    )
+    .await
+    .err()
+    .expect("store identity drift must deny");
+    assert!(matches!(
+        error,
+        RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
+    ));
 }

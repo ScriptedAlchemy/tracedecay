@@ -11,7 +11,8 @@ use tracedecay_contracts::retained_surfaces::{
 };
 use tracedecay_contracts::{RetainedSurfaceExecutionErrorV1, RetainedSurfacePortsV1};
 use tracedecay_daemon_service::DaemonInvocationService;
-use tracedecay_domain::{ManifestDigest, ProjectId};
+use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProjectId};
+use tracedecay_session_runtime::retained::map_execution_error;
 use tracedecay_store_runtime::retained_memory::{
     RetainedMemoryTargetAuthorityV1, RetainedMemoryTargetV1,
 };
@@ -58,23 +59,40 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) invocation_service: Option<DaemonInvocationService>,
 }
 
+fn served_store_identity(cg: &TraceDecay) -> Option<(PathBuf, ProjectId)> {
+    match cg.project_memory_owner() {
+        Ok(FactOwnerV1::Project { project_id }) => {
+            Some((cg.project_root().to_path_buf(), project_id))
+        }
+        Ok(FactOwnerV1::Profile) | Err(_) => None,
+    }
+}
+
 pub(crate) fn retained_surface_ports(
     authorities: ProductionRetainedAuthoritiesV1,
 ) -> Arc<RetainedSurfacePortsV1<'static>> {
-    let memory_authority = RetainedMemoryTargetAuthorityV1 {
-        registry: authorities.store_runtime_registry,
-        profile_database: authorities.profile_database,
-        project_root: authorities.project_root.clone(),
-        project_id: authorities.project_id.clone(),
-        store_layout_project_id: authorities.project_id.clone(),
-        served_project_root: authorities.project_root.clone(),
-    };
-    let mut ports = RetainedSurfacePortsV1::default().with_memory(Arc::new(
-        tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::project(
-            memory_authority,
-            authorities.configuration_digest.clone(),
-        ),
-    ));
+    let mut ports = RetainedSurfacePortsV1::default();
+    if let Some((served_project_root, store_layout_project_id)) = authorities
+        .cg
+        .try_read()
+        .ok()
+        .as_deref()
+        .and_then(|graph| served_store_identity(graph.as_ref()))
+    {
+        ports = ports.with_memory(Arc::new(
+            tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::project(
+                RetainedMemoryTargetAuthorityV1 {
+                    registry: Arc::clone(&authorities.store_runtime_registry),
+                    profile_database: authorities.profile_database.clone(),
+                    project_root: authorities.project_root.clone(),
+                    project_id: authorities.project_id.clone(),
+                    store_layout_project_id,
+                    served_project_root,
+                },
+                authorities.configuration_digest.clone(),
+            ),
+        ));
+    }
     if let Some(invocation_service) = authorities.invocation_service.clone() {
         ports = ports.with_automation(Arc::new(AssembledRetainedAutomation {
             cg: Arc::clone(&authorities.cg),
@@ -165,13 +183,20 @@ pub(crate) async fn open_project_retained_memory_target(
     selector: Option<&RetainedProjectSelectorV1>,
     access: MemoryTargetAccessV1,
 ) -> Result<RetainedMemoryTargetV1<'static>, RetainedSurfaceExecutionErrorV1> {
+    let (served_project_root, store_layout_project_id) = match cg.project_memory_owner() {
+        Ok(FactOwnerV1::Project { project_id }) => (cg.project_root().to_path_buf(), project_id),
+        Ok(FactOwnerV1::Profile) => {
+            return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+        }
+        Err(error) => return Err(map_execution_error(error)),
+    };
     let authority = RetainedMemoryTargetAuthorityV1 {
         registry: cg.retained_store_runtime_registry(),
         profile_database: cg.profile_database().clone(),
         project_root: cg.project_root().to_path_buf(),
         project_id: admitted_project_id.clone(),
-        store_layout_project_id: admitted_project_id.clone(),
-        served_project_root: cg.project_root().to_path_buf(),
+        store_layout_project_id,
+        served_project_root,
     };
     tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(
         &authority,

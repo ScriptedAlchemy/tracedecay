@@ -116,13 +116,17 @@ pub async fn open_project_retained_memory_target(
     }
     let selected_project_id = selector.map_or(admitted_project_id, |value| &value.project_id);
     if selected_project_id == admitted_project_id {
-        if authority.project_root != registered_root {
+        if authority.served_project_root != registered_root {
             return denied();
         }
         let owner = FactOwnerV1::Project {
-            project_id: admitted_project_id.clone(),
+            project_id: authority.store_layout_project_id.clone(),
         };
-        if authority.project_id != *admitted_project_id {
+        if owner
+            != (FactOwnerV1::Project {
+                project_id: admitted_project_id.clone(),
+            })
+        {
             return denied();
         }
         let database = authority
