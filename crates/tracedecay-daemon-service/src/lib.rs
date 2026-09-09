@@ -5,6 +5,12 @@
 //! usecases, application, agent-hosts, and code-index-runtime, and below the
 //! composition root. OS lifecycle management (install/start/stop/probe) lives
 //! in `tracedecay-daemon-control`.
+//!
+//! [`application_surface`] is the transport adaptation shared by HTTP, MCP,
+//! and the CLI: it resolves catalog bindings, normalizes request controls, and
+//! projects canonical application envelopes. Route descriptors and encoding
+//! stay in `tracedecay-api`; the composition root only injects the
+//! authenticated executor into the routers assembled here.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -50,9 +56,14 @@
 /// crate remains the cycle-free owner shared with code-index runtime.
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
 
+pub mod application_surface;
 pub mod invocation;
+mod mcp_project_registry;
+mod mcp_workflow_index;
+pub mod project_owner_registration;
 pub mod project_runtime;
 pub mod request_cancellation;
+mod shutdown_coordination;
 
 mod multi_root;
 
@@ -88,6 +99,8 @@ pub use invocation::{
     callable_code_request_context, daemon_operation_event_authority,
     register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
+pub use mcp_project_registry::DaemonProjectRegistryReadService;
+pub use mcp_workflow_index::DaemonWorkflowIndexReadService;
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
     ProjectRuntimePublicationAttemptV1, ProjectRuntimePublicationStateV1,
@@ -98,6 +111,7 @@ pub use project_runtime::{
     StoreObservabilityRegistryV1,
 };
 pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
+pub use shutdown_coordination::{ShutdownCoordinatorV1, ShutdownStatus};
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
     DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,

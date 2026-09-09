@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use tracedecay::application_surface::ApplicationSurfaceRequest;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
@@ -12,6 +11,7 @@ use tracedecay_contracts::{
     ConfigurationWireRequestV1,
 };
 use tracedecay_daemon_protocol::{RequestedOutputFormat, invocation_now_micros};
+use tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
@@ -79,7 +79,7 @@ fn configuration_deadline(
         tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
             .map_err(|error| configuration_error(error.to_string()))?
             .ok_or_else(|| configuration_error("configuration operation is not cataloged"))?;
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .map_err(|error| configuration_error(error.to_string()))?;
     let maximum_millis = catalog
         .capability(application_operation.capability_id())

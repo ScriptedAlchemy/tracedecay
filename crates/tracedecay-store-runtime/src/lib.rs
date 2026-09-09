@@ -26,6 +26,7 @@
 //! severed through an existing recovery port.
 
 pub mod remote_credentials;
+pub mod remote_query;
 pub mod remote_replay_transaction;
 pub mod session_registry;
 pub mod store_locator_resolver;
@@ -37,6 +38,7 @@ pub use remote_credentials::{
     DaemonRemoteCredentialRegistryErrorV1, MAX_REGISTERED_REMOTE_NODES,
     RegisteredRemoteNodeStoreV1,
 };
+pub use remote_query::DaemonRemoteExactObservationQueryPortV1;
 pub use remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 pub use schema::register_registered_schema_installer;
 #[cfg(any(test, feature = "test-helpers"))]

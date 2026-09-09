@@ -301,7 +301,9 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
         let graph = opened.server.cg().await;
         let replay_root = graph.hook_store_layout().data_root.clone();
         assert!(
-            crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(&replay_root),
+            crate::daemon::hook_v2_replay_consumer::hook_v2_replay_consumer_registered(
+                &replay_root
+            ),
             "an open project must retain its Hook V2 replay consumer"
         );
         replay_roots.push((opened.canonical_project_path.clone(), replay_root));
@@ -335,7 +337,7 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     );
     for (project, replay_root) in &replay_roots {
         assert_eq!(
-            crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(replay_root),
+            crate::daemon::hook_v2_replay_consumer::hook_v2_replay_consumer_registered(replay_root),
             initial_cached_projects.contains(project),
             "Hook V2 replay liveness must match exact project-server retention for {}",
             project.display()
@@ -390,7 +392,7 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
         );
         let graph = opened.server.cg().await;
         assert!(
-            crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(
+            crate::daemon::hook_v2_replay_consumer::hook_v2_replay_consumer_registered(
                 &graph.hook_store_layout().data_root,
             ),
             "reopening a retired project must restore its Hook V2 replay consumer"

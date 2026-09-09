@@ -9,7 +9,10 @@
 //!
 //! Dependencies stay limited to `tracedecay-domain`, `tracedecay-policy`, and
 //! `tracedecay-tool-catalog`. This crate owns no storage, transport, provider
-//! runtime, UI, model runtime, Git mutation, scheduler, or root composition.
+//! runtime, UI, model runtime, Git mutation, scheduler, or process composition.
+//! [`catalog_composition`] assembles the capability catalog from the operation
+//! descriptors declared here, which is metadata assembly rather than
+//! dependency construction.
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +20,7 @@ pub mod advisory;
 pub mod authorization;
 mod bearer_token;
 pub mod branch_snapshots;
+pub mod catalog_composition;
 pub mod clock;
 pub mod configuration;
 mod configuration_wire;

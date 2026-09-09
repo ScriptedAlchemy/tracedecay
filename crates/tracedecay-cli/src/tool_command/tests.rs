@@ -1,13 +1,13 @@
 use super::*;
 use serde_json::{Value, json};
-use tracedecay::application_surface::retained::decode_request as decode_retained_request;
-use tracedecay::application_surface::{
-    parse_http_application_surface_request, resolve_application_surface_dispatch_with_controls,
-    resolve_catalog_tool_binding,
-};
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, OpaqueCursor, PageRequest, RequestId,
     ResultContractRef, SafeDiagnostic,
+};
+use tracedecay_daemon_service::application_surface::retained::decode_request as decode_retained_request;
+use tracedecay_daemon_service::application_surface::{
+    parse_http_application_surface_request, resolve_application_surface_dispatch_with_controls,
+    resolve_catalog_tool_binding,
 };
 use tracedecay_tool_catalog::{BindingId, BindingSurface, SchemaId};
 

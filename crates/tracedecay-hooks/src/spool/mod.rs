@@ -418,6 +418,14 @@ impl HookSpoolV1 {
         self.lease
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn config(&self) -> HookSpoolConfigV1 {
+        self.config
+    }
+
     /// Return the durable pending envelope for an exact provider event ID.
     /// Callers use this only to preserve a prior transport attempt's envelope
     /// on retry; it does not grant replay or acknowledgement authority.

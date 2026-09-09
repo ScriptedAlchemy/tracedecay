@@ -205,6 +205,20 @@ async fn replay_projectless_hermes_receipts(
     for seq in retained_leases.into_iter().rev() {
         replay.defer(seq).await?;
     }
+    if target_outcome.is_none()
+        && let Some(seq) = target_seq
+    {
+        // The concurrent profile worker may have already committed this
+        // seq. `HostAdmissionRuntime::commit` returns Ok(0) when
+        // `seq <= committed_through` without requiring a lease; that is
+        // the spool watermark, not an inferred ExactDuplicate. Any other
+        // commit result is the broker's typed failure (lost / never
+        // committed). `accepted_for_replay` stays only for a full drain.
+        target_outcome = Some(match replay.commit(seq).await {
+            Ok(_) => HostAdmissionOutcome::replay_completed(true, false),
+            Err(outcome) => outcome,
+        });
+    }
     Ok(terminal_outcome
         .or(target_outcome)
         .or(retained_outcome)

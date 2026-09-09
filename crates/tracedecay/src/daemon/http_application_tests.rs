@@ -287,9 +287,12 @@ async fn service_with_canonical_application(
         tracedecay_daemon_protocol::DaemonConnection::new(broker_endpoint, None),
         handshake,
     );
-    let canonical =
-        crate::application_surface::http_application_router(client, authority, project_id.clone())
-            .expect("canonical HTTP application router");
+    let canonical = tracedecay_daemon_service::application_surface::http_application_router(
+        client,
+        authority,
+        project_id.clone(),
+    )
+    .expect("canonical HTTP application router");
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .mount(project_id.as_str(), canonical)
