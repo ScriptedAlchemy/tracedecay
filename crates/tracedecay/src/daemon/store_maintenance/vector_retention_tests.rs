@@ -32,7 +32,7 @@ use tracedecay_semantic_contracts::{
 
 use super::{
     CodeGenerationRetentionOutcomeV1, VectorRetentionInventoryV1, apply_code_generation_retention,
-    classify_vector_readable_sources, code_index_store_root, resolve_vector_retention_inventory,
+    classify_vector_readable_sources, resolve_vector_retention_inventory,
     run_code_generation_retention, run_semantic_vector_generation_retention,
 };
 
