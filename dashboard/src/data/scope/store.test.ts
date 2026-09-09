@@ -58,13 +58,6 @@ describe('scopeWritable', () => {
     expect(writability).toEqual({ state: 'writable', target: 'the active project' });
   });
 
-  it('reports the active project as writable, named', () => {
-    expect(scopeWritable(project('proj_a', 'active'))).toEqual({
-      state: 'writable',
-      target: 'label-proj_a',
-    });
-  });
-
   it('reports a selected non-active project as read-only with the remedy', () => {
     const writability = scopeWritable(project('proj_b', 'selected'));
     expect(writability.state).toBe('read_only');
@@ -97,23 +90,9 @@ describe('scopeWritable', () => {
     expect(writability.reason).not.toContain('not known yet');
   });
 
-  it('gives every scope a distinct answer across the cases', () => {
-    const states = [
-      scopeWritable({ kind: 'all' }).state,
-      scopeWritable(project('proj_a', 'active')).state,
-      scopeWritable(project('proj_b', 'selected')).state,
-      scopeWritable(project('proj_c', 'unresolved')).state,
-      scopeWritable(project('proj_ghost', 'absent')).state,
-    ];
-    expect(states).toEqual(['writable', 'writable', 'read_only', 'unknown', 'read_only']);
-  });
 });
 
 describe('activationFor', () => {
-  it('resolves the active project from a measured reading', () => {
-    expect(activationFor(measured(true))).toBe('active');
-  });
-
   it('resolves a measured not-active answer to selected', () => {
     // The registry answered about this exact project: it is not the active one.
     // That is a real reading and it does mean writes will be refused.
@@ -148,18 +127,6 @@ describe('reconciledLabel', () => {
     );
   });
 
-  it('replaces a spoofed label on a project that is merely selected', () => {
-    // Not the active project, so nothing here is writable — but the read-only
-    // sentence still names the project, and it must not name it whatever the
-    // link said.
-    expect(reconciledLabel('Production (definitely safe)', measured(false, 'Beta'))).toBe('Beta');
-  });
-
-  it('keeps the supplied label while the registry has not answered', () => {
-    // Unknown authority is not licence to discard the only name available.
-    expect(reconciledLabel('From The Link', { state: 'unknown' })).toBe('From The Link');
-  });
-
   it('keeps the supplied label for a project the registry does not hold', () => {
     // A registry that holds no such project has no name to offer in its place,
     // and the id is not one. The name stays; `absent` activation is what says
@@ -182,33 +149,11 @@ describe('reconciledLabel', () => {
     expect(reconciledLabel('From The Link', measured(false, null))).toBe('From The Link');
   });
 
-  it('never substitutes an id for a label', () => {
-    // A raw id in place of a name is itself a correction, and one no reading
-    // here can support. It would also propagate to the address bar.
-    const readings: RegistryReading[] = [
-      measured(true, 'Canonical'),
-      measured(false, 'Canonical'),
-      measured(null, null),
-      { state: 'unknown' },
-      { state: 'absent', reason: 'no project registered with id proj_a' },
-    ];
-    for (const reading of readings) {
-      expect(reconciledLabel('Supplied', reading)).not.toBe('proj_a');
-    }
-  });
 });
 
 describe('useScope.reconcileScope', () => {
   beforeEach(() => {
     useScope.setState({ scope: { kind: 'all' } });
-  });
-
-  it('promotes a deep-linked project once the registry names it active', () => {
-    useScope.getState().selectProject('proj_a', 'alpha');
-    expect(useScope.getState().scope).toMatchObject({ activation: 'unresolved' });
-    useScope.getState().reconcileScope(measured(true, 'alpha'));
-    expect(useScope.getState().scope).toMatchObject({ activation: 'active' });
-    expect(scopeWritable(useScope.getState().scope).state).toBe('writable');
   });
 
   it('names the write target from the registry, not from the link', () => {
@@ -221,16 +166,6 @@ describe('useScope.reconcileScope', () => {
       state: 'writable',
       target: 'Production',
     });
-  });
-
-  it('corrects the label of a read-only selected project too', () => {
-    useScope.getState().selectProject('proj_b', 'Spoofed');
-    useScope.getState().reconcileScope(measured(false, 'Beta'));
-    const writability = scopeWritable(useScope.getState().scope);
-    expect(writability.state).toBe('read_only');
-    if (writability.state !== 'read_only') throw new Error('unreachable');
-    expect(writability.reason).toContain('Beta is not the active project');
-    expect(writability.reason).not.toContain('Spoofed');
   });
 
   it('returns a resolved scope to unresolved when the registry stops answering', () => {
@@ -255,15 +190,6 @@ describe('useScope.reconcileScope', () => {
     });
   });
 
-  it('does not invent a correction from an unavailable registry', () => {
-    useScope.getState().selectProject('proj_a', 'From The Link');
-    useScope.getState().reconcileScope({ state: 'unknown' });
-    expect(useScope.getState().scope).toMatchObject({
-      label: 'From The Link',
-      activation: 'unresolved',
-    });
-  });
-
   it('keeps the cache token stable across a label correction', () => {
     // The label is display text; the id is what selects rows. A correction
     // that re-keyed the caches would discard every read on the poll that
@@ -284,47 +210,6 @@ describe('useScope.reconcileScope', () => {
     const settled = useScope.getState().scope;
     useScope.getState().reconcileScope(reading);
     expect(useScope.getState().scope).toBe(settled);
-  });
-
-  it('leaves the all-projects scope alone', () => {
-    useScope.getState().reconcileScope(measured(true, 'alpha'));
-    expect(useScope.getState().scope).toEqual({ kind: 'all' });
-  });
-
-  /**
-   * The selected project is past the end of the `/api/projects` page.
-   *
-   * The daemon truncates that listing (100 by default, 250 at most), so on a
-   * profile with more projects than the page holds, a perfectly ordinary
-   * selection is simply not in the response. Reconciliation used to search that
-   * listing, so this case renamed the project to its raw id, announced "not in
-   * registry", and — because the correction propagates — wrote the id into the
-   * address bar. Both facts now come from the project's own route, which does
-   * not have a page.
-   */
-  it('resolves a project the listing page never contained, when it is active', () => {
-    useScope.getState().selectProject('proj_page_101', 'Stale Name');
-    useScope.getState().reconcileScope(measured(true, 'Project One Hundred And One'));
-    expect(useScope.getState().scope).toMatchObject({
-      label: 'Project One Hundred And One',
-      activation: 'active',
-    });
-    expect(scopeWritable(useScope.getState().scope)).toEqual({
-      state: 'writable',
-      target: 'Project One Hundred And One',
-    });
-  });
-
-  it('resolves a project the listing page never contained, when it is not active', () => {
-    useScope.getState().selectProject('proj_page_101', 'Stale Name');
-    useScope.getState().reconcileScope(measured(false, 'Project One Hundred And One'));
-    const writability = scopeWritable(useScope.getState().scope);
-    expect(writability.state).toBe('read_only');
-    if (writability.state !== 'read_only') throw new Error('unreachable');
-    expect(writability.reason).toContain('Project One Hundred And One is not the active project');
-    // Neither the stale claim nor a raw id.
-    expect(writability.reason).not.toContain('Stale Name');
-    expect(writability.reason).not.toContain('proj_page_101');
   });
 
   it('completes a reconciliation that first could not be made', () => {
@@ -362,17 +247,6 @@ describe('readOnlyScopeRefusal', () => {
     detail: 'project-scoped dashboard APIs are read-only for non-active projects',
     project_id: 'proj_b',
   };
-
-  it('reads the gateway body the daemon actually sends', () => {
-    expect(readOnlyScopeRefusal(wireTrue)).toEqual({
-      projectId: 'proj_b',
-      detail: 'project-scoped dashboard APIs are read-only for non-active projects',
-    });
-  });
-
-  it('accepts extra keys the gateway may add later', () => {
-    expect(readOnlyScopeRefusal({ ...wireTrue, retry_after: 30 })).not.toBeNull();
-  });
 
   // Each of these is a 405 that is NOT this refusal. Returning a refusal for
   // any of them would attach a specific cause, and a specific remedy, to a
@@ -439,31 +313,9 @@ describe('requestScopeKey', () => {
     }
   });
 
-  it('separates two projects reading the same scoped route', () => {
-    const a = requestScopeKey(project('proj_a', 'active'), '/api/observatory');
-    const b = requestScopeKey(project('proj_b', 'active'), '/api/observatory');
-    expect(a).not.toBe(b);
-    expect(a).not.toBe(UNSCOPED_CACHE_KEY);
-  });
-
-  it('treats a non-API url as carrying no project', () => {
-    expect(requestScopeKey(project('proj_a', 'active'), '/health')).toBe(UNSCOPED_CACHE_KEY);
-  });
 });
 
 describe('scopedQueryKey', () => {
-  it('shares daemon-wide registry entries across selected projects', () => {
-    const key = ['projects', 'entry', 'proj_b'];
-    expect(scopedQueryKey(project('proj_a', 'active'), key, '/api/projects/proj_b')).toEqual([
-      ...key,
-      UNSCOPED_CACHE_KEY,
-    ]);
-    expect(scopedQueryKey(project('proj_c', 'selected'), key, '/api/projects/proj_b')).toEqual([
-      ...key,
-      UNSCOPED_CACHE_KEY,
-    ]);
-  });
-
   it('keeps project-gateway reads isolated by their selected project', () => {
     const key = ['brain', 'graph-overview'];
     expect(

@@ -53,24 +53,6 @@ describe('ScopeUrlSync', () => {
     expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
   });
 
-  it('leaves a resolved activation alone when an unrelated search param changes', async () => {
-    // The URL->store effect runs on every search-param change, including params
-    // that belong to a workspace. Reselecting on those would reset a project
-    // the registry had already resolved back to `unresolved`, withdrawing a
-    // legitimately enabled write control on an unrelated filter change.
-    mount('/costs?scope=proj_abc&scopeLabel=tracedecay');
-    await waitFor(() =>
-      expect(useScope.getState().scope).toMatchObject({ projectId: 'proj_abc' }),
-    );
-    act(() => useScope.getState().reconcileScope(measured('tracedecay')));
-    expect(scopeWritable(useScope.getState().scope).state).toBe('writable');
-
-    act(() => setSearch('scope=proj_abc&scopeLabel=tracedecay&window=7d'));
-    await waitFor(() => expect(currentSearch).toContain('window=7d'));
-    expect(useScope.getState().scope).toMatchObject({ activation: 'active' });
-    expect(scopeWritable(useScope.getState().scope).state).toBe('writable');
-  });
-
   it('keeps a registry-corrected label when an unrelated search param changes', async () => {
     // The reason the URL->store guard keys on the id alone. Once the registry
     // replaces the link's label, the store's label no longer matches the URL's

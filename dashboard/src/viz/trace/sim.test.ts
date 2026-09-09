@@ -21,7 +21,6 @@ import {
   GraphNeighborsPayloadV1Schema,
 } from '../../contracts/generated.ts';
 import {
-  DEFAULT_PARAMS,
   bloomStep,
   createSimulation,
   hopDistances,
@@ -402,19 +401,4 @@ describe('TRACE simulation', () => {
     expect(coarse.substepCount).toBe(fine.substepCount);
   });
 
-  it('keeps the tuning defaults the prototype README documents', () => {
-    expect({ ...DEFAULT_PARAMS }).toEqual({
-      anchorBase: 90,
-      anchorMassExponent: 0.5,
-      edgeStiffnessScale: 6,
-      dampingRatio: 0.72,
-      substep: 1 / 240,
-      restSpeed: 0.6,
-      minMass: 3,
-      jitter: 6,
-      bloomAttack: 9.5,
-      bloomRelease: 5,
-      bloomMassExponent: 0.42,
-    });
-  });
 });

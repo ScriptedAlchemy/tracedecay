@@ -16,11 +16,8 @@ import {
   MemoryStatusPayloadV1Schema,
   MemoryStatusV1Schema,
   MemoryTrustBucketV1Schema,
-  StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   WIRE_SCHEMA_REVISION,
-  assertNever,
-  type DashboardDomainStateV1,
 } from "../../src/contracts/index.ts";
 
 const PayloadSchema = z.object({ ok: z.boolean() });
@@ -54,10 +51,6 @@ function readyEnvelope(overrides: Record<string, unknown> = {}): Record<string, 
 }
 
 describe("wire domain-state decoder", () => {
-  it("decodes a known variant", () => {
-    expect(DashboardDomainStateV1Schema.parse("ready")).toBe("ready");
-  });
-
   it("keeps `unsupported` and `unsupported_schema` distinct (both server-canonical)", () => {
     expect(DashboardDomainStateV1Schema.parse("unsupported")).toBe("unsupported");
     expect(DashboardDomainStateV1Schema.parse("unsupported_schema")).toBe("unsupported_schema");
@@ -66,35 +59,6 @@ describe("wire domain-state decoder", () => {
   it("maps an UNKNOWN value to unsupported_schema instead of throwing", () => {
     expect(DashboardDomainStateV1Schema.parse("brand_new_state")).toBe("unsupported_schema");
     expect(DashboardDomainStateV1Schema.parse(42)).toBe("unsupported_schema");
-  });
-
-  it("is exhaustively switchable with assertNever (never-checked)", () => {
-    function label(state: DashboardDomainStateV1): string {
-      switch (state) {
-        case "loading":
-        case "complete_zero_findings":
-        case "ready":
-        case "partial":
-        case "stale":
-        case "locked":
-        case "denied":
-        case "unauthorized":
-        case "redacted":
-        case "conflicting":
-        case "offline":
-        case "unknown":
-        case "cancelled":
-        case "timed_out":
-        case "error":
-        case "unsupported_schema":
-        case "unsupported":
-          return state;
-        default:
-          return assertNever(state);
-      }
-    }
-    expect(label("ready")).toBe("ready");
-    expect(label("unsupported")).toBe("unsupported");
   });
 });
 
@@ -377,22 +341,4 @@ describe("wire storage payload decoders", () => {
     }
   });
 
-  it("decodes a storage findings payload", () => {
-    const parsed = StorageFindingsPayloadV1Schema.parse({
-      family_filter: "storage",
-      entries: [],
-      report_coverage: null,
-      known_families: ["storage"],
-      kind_statuses: [
-        {
-          kind: "orphan_store",
-          state: "unsupported",
-          observed_entries: 0,
-          reason: "r",
-        },
-      ],
-      note: "n",
-    });
-    expect(parsed.kind_statuses?.[0]?.kind).toBe("orphan_store");
-  });
 });

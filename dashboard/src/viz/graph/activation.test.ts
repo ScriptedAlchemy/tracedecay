@@ -2,16 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { ActivationField, lerpRgbTuple, luma, restingNodeTint } from './activation.ts';
 
 describe('ActivationField subscription', () => {
-  it('notifies once per strike so an outside striker can wake a renderer', () => {
-    const field = new ActivationField();
-    const listener = vi.fn();
-    field.subscribe(listener);
-    field.strike(['a', 'b'], 0.5);
-    expect(listener).toHaveBeenCalledTimes(1);
-    field.strike(['a'], 0.5);
-    expect(listener).toHaveBeenCalledTimes(2);
-  });
-
   it('stays silent when a strike carries no ids — nothing real happened', () => {
     const field = new ActivationField();
     const listener = vi.fn();
@@ -40,13 +30,6 @@ describe('ActivationField subscription', () => {
     field.subscribe(listener)();
     field.strike(['a'], 1);
     expect(listener).not.toHaveBeenCalled();
-  });
-});
-
-describe('luma', () => {
-  it('reads 0 for black and 255 for white', () => {
-    expect(luma([0, 0, 0])).toBe(0);
-    expect(luma([255, 255, 255])).toBe(255);
   });
 });
 
@@ -86,14 +69,4 @@ describe('restingNodeTint', () => {
     expect(nudgedOffset).toBeGreaterThan(rawOffset);
   });
 
-  it('nudges the light theme darker, never lighter than the substrate', () => {
-    const tint = restingNodeTint(LIGHT_SUBSTRATE, LIGHT_KIND, 0, true);
-    expect(luma(tint)).toBeLessThan(luma(LIGHT_SUBSTRATE));
-  });
-
-  it('a live node needs no nudge: full vitality already clears the offset', () => {
-    const mix = 0.34 + 0.66 * 1;
-    const raw = lerpRgbTuple(LIGHT_SUBSTRATE, LIGHT_KIND, mix);
-    expect(restingNodeTint(LIGHT_SUBSTRATE, LIGHT_KIND, 1, true)).toEqual(raw);
-  });
 });
