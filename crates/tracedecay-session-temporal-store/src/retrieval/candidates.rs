@@ -391,6 +391,13 @@ pub(super) async fn query_candidate_clause(
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
+    let filter = snapshot_request.semantic_filter();
+    let direct_user = SqlValue::Integer(i64::from(
+        filter.message_type
+            == tracedecay_temporal_query::ports::TemporalMessageTypeFilterV1::DirectUser,
+    ));
+    let filter_start = filter.start_time.map_or(SqlValue::Null, SqlValue::Integer);
+    let filter_end = filter.end_time.map_or(SqlValue::Null, SqlValue::Integer);
     let occurrence_fts_query = if clause.channel == CandidateChannel::Lexical {
         fts_any_terms(&clause.value)
     } else {
@@ -441,6 +448,9 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(stable_cap),
                 SqlValue::Integer(exact_source_cap),
                 SqlValue::Integer(limit),
+                direct_user.clone(),
+                filter_start.clone(),
+                filter_end.clone(),
             ],
         ),
         (
@@ -463,6 +473,9 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(item_cap),
                 SqlValue::Integer(stable_cap),
                 SqlValue::Integer(limit),
+                direct_user,
+                filter_start,
+                filter_end,
             ],
         ),
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Time) => {

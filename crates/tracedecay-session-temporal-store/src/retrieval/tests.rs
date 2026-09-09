@@ -572,7 +572,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 (
                     'observation-plan-inside', 'sha256:plan-inside',
                     'receipt-plan-inside',
-                    '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
+                    '{\"identity\":{\"source\":{\"provider\":\"claude\"}},\"payload\":{\"facts\":[{\"kind\":\"message\",\"role\":\"user\",\"content\":{\"text\":\"needle candidate\"},\"timestamp\":42}]}}', '{}'
                 ),
                 (
                     'observation-plan-outside', 'sha256:plan-outside',
@@ -1203,6 +1203,97 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
 }
 
 #[tokio::test]
+async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    Executor::execute_batch(
+        &database
+            .writer_connection()
+            .expect("registered profile writer"),
+        "INSERT INTO sanitization_receipts (
+             receipt_id, sanitizer_version, payload_digest, receipt_json
+         ) VALUES ('receipt-common-tool', 'fixture', 'sha256:common-tool', '{}');
+         INSERT INTO observations (
+             observation_id, payload_digest, receipt_id, observation_json,
+             committed_cursor_json
+         ) VALUES (
+             'observation-common-tool', 'sha256:common-tool', 'receipt-common-tool',
+             '{\"payload\":{\"facts\":[{\"kind\":\"message\",\"role\":\"user\",\"content\":{\"text\":\"common\"},\"timestamp\":42},{\"kind\":\"tool_result\",\"content\":{\"text\":\"common\"}}]}}',
+             '{}'
+         );
+         INSERT INTO retrieval_anchors (
+             anchor_id, anchor_json, owner_json, projection_generation
+         ) VALUES ('anchor-common-tool', '{}', '{\"kind\":\"profile\"}', 'fixture');
+         WITH RECURSIVE excluded(n) AS (
+             VALUES(1) UNION ALL SELECT n + 1 FROM excluded WHERE n < 320
+         )
+         INSERT INTO session_occurrences (
+             session_id, generation, occurrence_id, source_observation_id,
+             source_provider, projection_output_ordinal, retrieval_anchor_id,
+             role, knowledge_at, valid_time_json, evidence_json,
+             sanitized_content_digest, sanitized_content_bytes, snippet_text, index_text
+         )
+         SELECT 'session-plan-inside', 1, printf('occurrence-common-tool-%03d', n),
+                'observation-common-tool', 'claude', n, 'anchor-common-tool',
+                'user', 1000 + n, '{\"kind\":\"known\",\"valid_at\":42}', '{}',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                6, 'common', 'common'
+         FROM excluded;
+         INSERT INTO session_occurrences (
+             session_id, generation, occurrence_id, source_observation_id,
+             source_provider, projection_output_ordinal, retrieval_anchor_id,
+             role, knowledge_at, valid_time_json, evidence_json,
+             sanitized_content_digest, sanitized_content_bytes, snippet_text, index_text
+         ) VALUES (
+             'session-plan-inside', 1, 'occurrence-common-user',
+             'observation-plan-inside', 'claude', 321, 'anchor-plan-inside',
+             'user', 20, '{\"kind\":\"known\",\"valid_at\":42}', '{}',
+             '0000000000000000000000000000000000000000000000000000000000000000',
+             6, 'common', 'common'
+         );",
+    )
+    .await
+    .expect("common-term fixture");
+    let read = runtime.retrieval_read_for_test().await;
+    let params = |direct_user| {
+        vec![
+            SqlValue::Text("user".to_string()),
+            SqlValue::Null,
+            SqlValue::Text(fts_phrase("common")),
+            SqlValue::Integer(i64::MAX),
+            SqlValue::Text(String::new()),
+            SqlValue::Text(String::new()),
+            SqlValue::Integer(128),
+            SqlValue::Integer(128),
+            SqlValue::Integer(128),
+            SqlValue::Integer(1_024),
+            SqlValue::Integer(128),
+            SqlValue::Integer(1),
+            SqlValue::Integer(direct_user),
+            SqlValue::Integer(40),
+            SqlValue::Integer(50),
+        ]
+    };
+
+    assert!(
+        read.text_column(ROOT_OCCURRENCE_FTS_QUERY, params(0), 0)
+            .await[0]
+            .starts_with("occurrence-common-tool-")
+    );
+    assert_eq!(
+        read.text_column(ROOT_OCCURRENCE_FTS_QUERY, params(1), 0)
+            .await,
+        ["occurrence-common-user"]
+    );
+}
+
+#[tokio::test]
 async fn frozen_generation_survives_rotation_while_a_new_snapshot_observes_drift() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1484,6 +1575,9 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(1_024),
         SqlValue::Integer(128),
         SqlValue::Integer(10),
+        SqlValue::Integer(0),
+        SqlValue::Null,
+        SqlValue::Null,
     ];
     assert_eq!(
         read.text_column(ROOT_OCCURRENCE_FTS_QUERY, root_fts_params.clone(), 0)
@@ -1516,6 +1610,9 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(128),
         SqlValue::Integer(i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap")),
         SqlValue::Integer(10),
+        SqlValue::Integer(0),
+        SqlValue::Null,
+        SqlValue::Null,
     ];
     assert_eq!(
         read.text_column(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone(), 0)
