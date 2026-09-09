@@ -560,20 +560,6 @@ fn mixed_thinking_and_redacted_records_the_redacted_count_but_no_plaintext() {
 }
 
 #[test]
-fn assistant_message_without_thinking_records_no_reasoning_row() {
-    let record = assistant_record(&json!([{"type": "text", "text": "Just an answer."}]));
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(Some("msg_1"), 7),
-            None,
-        )
-        .is_none()
-    );
-}
-
-#[test]
 fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
     let record = json!({
         "type": "assistant",

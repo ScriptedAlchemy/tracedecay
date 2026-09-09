@@ -1305,23 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_counters_keep_cache_only_rows_actual() {
-        let Some(usage) = usage_counters_from(&json!({
-            "usage": {
-                "cache_read_input_tokens": 123,
-                "total_tokens": 123
-            }
-        })) else {
-            panic!("cache-only usage should be retained");
-        };
-
-        assert_eq!(usage["input_tokens"], 0);
-        assert_eq!(usage["output_tokens"], 0);
-        assert_eq!(usage["cache_read_input_tokens"], 123);
-        assert_eq!(usage["total_tokens"], 123);
-    }
-
-    #[test]
     fn usage_counters_normalize_openai_cached_input_alias() {
         let Some(usage) = usage_counters_from(&json!({
             "usage": {

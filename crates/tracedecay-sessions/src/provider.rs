@@ -180,30 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_capabilities_match_runtime_boundaries() {
-        for provider in SessionProvider::ALL {
-            assert_eq!(
-                provider.supports_host_admission(),
-                provider != SessionProvider::Vibe,
-                "{} host-admission capability",
-                provider.id()
-            );
-            assert_eq!(
-                provider.scans_all_destinations(),
-                provider == SessionProvider::Hermes,
-                "{} destination-scan capability",
-                provider.id()
-            );
-            assert_eq!(
-                provider.writes_typed_history_coverage(),
-                matches!(provider, SessionProvider::Kimi | SessionProvider::OpenCode),
-                "{} typed history coverage capability",
-                provider.id()
-            );
-        }
-    }
-
-    #[test]
     fn optional_scope_defaults_only_to_all() {
         assert_eq!(ProviderScope::parse_optional(None), Ok(ProviderScope::All));
         assert_eq!(

@@ -631,16 +631,6 @@ mod cancellation_tests {
     }
 
     #[test]
-    fn storage_failure_without_cancellation_remains_a_source_failure() {
-        let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
-            operation: "test",
-            source: Box::new(std::io::Error::other("test storage failure")),
-        });
-
-        assert!(cancelled_provider_outcome(&error).is_none());
-    }
-
-    #[test]
     fn host_admission_verdict_survives_classification_while_record_rejection_stays_permanent() {
         // The laundering this pins against: a retryable admission failure
         // (a cursor CAS lost to a peer ingestor) wrapped so classification

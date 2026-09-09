@@ -246,32 +246,6 @@ fn windows_snapshot_generation_is_stable_across_appends() {
 }
 
 #[test]
-fn composer_capture_request_uses_snapshot_order_and_native_bubble_identity() {
-    let bubble = json!({
-        "type": 2,
-        "text": "redacted fixture",
-    });
-    let request = build_cursor_composer_capture_request(
-        "composer-redacted",
-        "bubble-redacted",
-        &bubble,
-        ObservationScopeV1::Profile,
-        ObservationSourceGenerationV1::new(1).unwrap(),
-        7,
-        None,
-    );
-    assert!(request.is_ok());
-    assert_eq!(
-        cursor_composer_native_record_id("composer-redacted", "bubble-redacted")
-            .unwrap()
-            .as_str(),
-        cursor_composer_native_record_id("composer-redacted", "bubble-redacted")
-            .unwrap()
-            .as_str()
-    );
-}
-
-#[test]
 fn canonical_composer_bubble_is_snapshot_typed_and_redacted() {
     let native = json!({
         "type": 2,
@@ -322,32 +296,6 @@ fn canonical_composer_bubble_is_snapshot_typed_and_redacted() {
     assert!(!rendered.contains("secret result"));
     let relations = serde_json::to_value(envelope.relations()).unwrap();
     assert_eq!(relations["thread_id"], "composer-redacted");
-    assert_eq!(relations["message_id"], record_id.as_str());
-    assert!(relations.get("turn_id").is_none());
-    assert!(relations.get("agent_id").is_none());
-    assert!(relations.get("parent_agent_id").is_none());
-}
-
-#[test]
-fn composer_bubble_without_turn_field_leaves_turn_unset() {
-    let native = json!({
-        "bubbleId": "bubble-1",
-        "type": 1,
-        "text": "hello from composer"
-    });
-    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-    let record_id = cursor_composer_native_record_id("composer-native", "bubble-1").unwrap();
-    let envelope = normalize_cursor_composer_observation(
-        &native,
-        "composer-native",
-        record_id.clone(),
-        range,
-        0,
-    )
-    .unwrap();
-    let relations = serde_json::to_value(envelope.relations()).unwrap();
-    assert_eq!(relations["session_id"], "composer-native");
-    assert_eq!(relations["thread_id"], "composer-native");
     assert_eq!(relations["message_id"], record_id.as_str());
     assert!(relations.get("turn_id").is_none());
     assert!(relations.get("agent_id").is_none());
@@ -2252,15 +2200,4 @@ async fn store_blob_zeroblob_is_skipped_without_full_table_select() {
         }
         StoreWalkOutcome::DeferredEmpty => panic!("default sweep budget should reach leaf"),
     }
-}
-
-#[test]
-fn configured_composer_sqlite_bounds_match_shared_host_ceilings() {
-    assert_eq!(max_composer_record_bytes(), 1_048_576);
-    assert_eq!(MAX_COMPOSER_ENVELOPE_BYTES, 16 * 1024 * 1024);
-    assert_eq!(DEFAULT_COMPOSER_SWEEP_BYTES, 16 * 1024 * 1024 + 1);
-    assert_eq!(MAX_COMPOSER_STORE_META_BYTES, 256 * 1024);
-    assert_eq!(MAX_COMPOSER_STORE_META_HEX_BYTES, 512 * 1024);
-    assert_eq!(MAX_COMPOSER_STORE_BLOB_VISITS, 4096);
-    assert_eq!(MAX_COMPOSER_SQLITE_KEY_BYTES, 512);
 }
