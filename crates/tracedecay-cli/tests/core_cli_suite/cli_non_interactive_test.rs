@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::common::{
@@ -668,31 +669,34 @@ fn write_branch_meta(
     .unwrap();
 }
 
-fn child_output(mut child: Child, status: ExitStatus) -> Output {
-    let stdout = child
-        .stdout
-        .take()
-        .map(|mut out| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut out, &mut buf)
-                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
-            buf
-        })
-        .unwrap_or_default();
-    let stderr = child
-        .stderr
-        .take()
-        .map(|mut err| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut err, &mut buf)
-                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
-            buf
-        })
-        .unwrap_or_default();
+/// Drains one child pipe on its own thread so the child can never block on a
+/// full pipe: `branch list` alone writes hundreds of stderr lines, and a child
+/// stalled in `eprintln!` never exits, so polling `try_wait` without readers
+/// turned machine-wide pipe pressure into a 90 s "hang" with the daemon's
+/// answer already written.
+fn drain_pipe<R: std::io::Read + Send + 'static>(mut pipe: R) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        pipe.read_to_end(&mut buf)
+            .unwrap_or_else(|e| panic!("failed to drain child pipe: {e}"));
+        buf
+    })
+}
+
+fn child_output(
+    status: ExitStatus,
+    stdout: Option<JoinHandle<Vec<u8>>>,
+    stderr: Option<JoinHandle<Vec<u8>>>,
+) -> Output {
+    let join = |handle: Option<JoinHandle<Vec<u8>>>| {
+        handle
+            .map(|handle| handle.join().expect("child pipe drain thread panicked"))
+            .unwrap_or_default()
+    };
     Output {
         status,
-        stdout,
-        stderr,
+        stdout: join(stdout),
+        stderr: join(stderr),
     }
 }
 
@@ -700,20 +704,22 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
     let mut child = command
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
+    let stdout = child.stdout.take().map(drain_pipe);
+    let stderr = child.stderr.take().map(drain_pipe);
     let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
             .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
         {
-            return child_output(child, status);
+            return child_output(status, stdout, stderr);
         }
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let status = child
                 .wait()
                 .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
-            let output = child_output(child, status);
+            let output = child_output(status, stdout, stderr);
             panic!(
                 "tracedecay hung with stdin closed after {:?}\nstdout:\n{}\nstderr:\n{}",
                 started.elapsed(),

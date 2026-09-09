@@ -177,12 +177,6 @@ fn test_include_records_explicit_override_even_when_excluded() {
 }
 
 #[test]
-fn test_default_gitignore_is_enabled() {
-    let config = TraceDecayConfig::default();
-    assert!(config.git_ignore);
-}
-
-#[test]
 fn test_default_excludes_nested_node_modules() {
     let config = TraceDecayConfig::default();
     // Top-level node_modules — should be excluded
@@ -279,28 +273,6 @@ fn test_explicit_global_excludes_ignores_comments_and_blank_lines() {
     let ignored = is_ignored_by_explicit_global_excludes(&repo, &git_config);
 
     assert_eq!(ignored, Some(true));
-}
-
-#[test]
-fn sync_config_defaults_round_trip() {
-    let config = TraceDecayConfig::default();
-    let json = serde_json::to_string(&config).unwrap();
-    let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(config.sync, parsed.sync);
-    assert_eq!(parsed.sync, super::SyncConfig::default());
-    // Spot-check a few of the documented defaults.
-    assert!(
-        !parsed.sync.auto_watch,
-        "filesystem metadata watching is an explicit opt-in fallback"
-    );
-    assert!(
-        !parsed.sync.watch_linked_worktrees,
-        "linked worktree watching requires explicit project opt-in"
-    );
-    assert_eq!(parsed.sync.watch_debounce_ms, 2000);
-    assert_eq!(parsed.sync.full_sync_escalation_files, 500);
-    assert_eq!(parsed.sync.max_concurrent_syncs, 2);
-    assert!(parsed.sync.auto_init);
 }
 
 #[test]

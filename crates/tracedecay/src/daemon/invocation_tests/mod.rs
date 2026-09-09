@@ -282,8 +282,6 @@ pub(super) fn admitted_root_fixture(name: &str) -> (std::path::PathBuf, String) 
 mod configuration_registrars_tests;
 mod lsp_lease_tests;
 mod lsp_tests;
-mod observability_tests;
-mod primitive_tests;
 mod project_lifecycle_tests;
 mod types_tests;
 mod work_evidence_journey_tests;

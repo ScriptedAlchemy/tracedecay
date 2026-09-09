@@ -20,7 +20,7 @@ pub(super) fn def_search() -> ToolDefinition {
     def_always_load(
         "tracedecay_search",
         "Search Symbols",
-        "Search for symbols (functions, structs, traits, etc.) in the active project's code graph by name or keyword. Every response starts with a `freshness: fresh | possibly_stale` line derived from the served generation, so results can be used without a status preflight. Pass exact identifiers you already know as `lexical_anchors` (each is its own ranked route fused with the query) and set `prefer_symbol` to add a symbol-name route for the identifier-shaped words of the query.",
+        "Semantic code search over the active project's code graph: find symbols (functions, structs, traits, etc.) by name, keyword, or concept, fusing semantic and lexical routes (lexical-only when semantic retrieval is unavailable). Every response opens with a `freshness: fresh | possibly_stale` line, so no status preflight is needed. Pass known identifiers as `lexical_anchors` (each an extra ranked route) and set `prefer_symbol` to add a symbol-name route for identifier-shaped query words.",
         json!({
             "type": "object",
             "properties": {

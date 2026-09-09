@@ -40,7 +40,6 @@ pub(super) fn validate() {
     super::baseline::validate(&manifest.provider_baselines);
 }
 
-#[cfg(test)]
 pub(super) fn accepts_value(value: Value) -> bool {
     serde_json::from_value::<WorkloadManifest>(value).is_ok_and(|manifest| manifest == expected())
 }

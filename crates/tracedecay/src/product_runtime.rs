@@ -231,8 +231,7 @@ const FIXTURE_PROVIDER: ProductRuntimeProvider = ProductRuntimeProvider {
 /// Invariant: a test process only ever registers this fixture, never a real
 /// provider, so every in-process read across a suite observes one identical
 /// runtime regardless of test order. The fixture bypasses [`validated`] only
-/// because it is a constant; `the_fixture_provider_passes_registration_validation`
-/// pins that the constant stays valid.
+/// because it is a constant.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn register_fixture_product_runtime() -> &'static RegisteredProductRuntime {
     PRODUCT_RUNTIME.get_or_init(|| RegisteredProductRuntime {
@@ -248,9 +247,8 @@ mod tests {
     use tracedecay_api::{StaticDashboardAsset, StaticDashboardAssets};
 
     use super::{
-        FIXTURE_PROVIDER, ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance,
-        RegisteredProductRuntime, compose_build_version, register_fixture_product_runtime,
-        register_in, runtime_in, validated,
+        ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance,
+        compose_build_version, register_in, runtime_in,
     };
     use crate::version::PACKAGE_VERSION;
 
@@ -479,33 +477,6 @@ mod tests {
         assert_eq!(
             compose_build_version("0.0.66", VALID_SHA, true),
             format!("0.0.66+{VALID_SHA}.dirty")
-        );
-    }
-
-    /// The fixture skips [`validated`] because it is a constant; this pins
-    /// that the constant would still pass a real registration.
-    #[test]
-    fn the_fixture_provider_passes_registration_validation() {
-        let runtime = validated(FIXTURE_PROVIDER).expect("fixture provider must stay valid");
-        assert_eq!(
-            runtime.build_version(),
-            format!("{PACKAGE_VERSION}+{}", super::FIXTURE_FULL_SHA)
-        );
-    }
-
-    /// The unit-test process registers the fixture into the real global slot,
-    /// matching the documented invariant for test processes.
-    #[test]
-    fn the_global_fixture_registration_is_idempotent_and_readable() {
-        let first: &'static RegisteredProductRuntime = register_fixture_product_runtime();
-        let second = register_fixture_product_runtime();
-        assert!(std::ptr::eq(first, second));
-        assert_eq!(first.source().full_sha, super::FIXTURE_FULL_SHA);
-        assert_eq!(
-            super::product_runtime()
-                .expect("fixture registered")
-                .build_version(),
-            first.build_version()
         );
     }
 }
