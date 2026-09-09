@@ -555,7 +555,9 @@ fn evaluate_semantic(
             },
         )),
         RetrieverOutcome::Unavailable(
-            RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. },
+            RetrievalFailure::InvalidRequest { .. }
+            | RetrievalFailure::Internal { .. }
+            | RetrievalFailure::CandidateSourcesPruned { .. },
         ) => Err(SemanticNativeEvaluationErrorV1::Contract(
             "production exact-flat semantic execution failed".to_owned(),
         )),
