@@ -43,8 +43,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.19", default-features = false }
 toml = "1"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite"] }
@@ -62,6 +64,7 @@ tracing = "0.1"
 tree-sitter = { version = "0.26", optional = true }
 
 [dev-dependencies]
+rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0", features = ["test-helpers"] }

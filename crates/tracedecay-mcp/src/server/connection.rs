@@ -37,10 +37,11 @@ pub trait McpResponseLease: Send + 'static {
 }
 
 /// Per-connection routing state owned by the production request context.
-pub trait McpConnectionState: Send + 'static {
+pub trait McpConnectionState: Send + Sync + 'static {
     type ResponseLease: McpResponseLease;
 
     fn memory_request_scope(&self) -> &str;
+    fn fork_for_independent_read(&self) -> Self;
     fn fork_for_connection_owned_read(&self) -> Self;
     fn take_selected_response_lease(&mut self) -> Option<Self::ResponseLease>;
 }
@@ -51,6 +52,7 @@ pub trait McpConnectionContext: Send + Sync + 'static {
 
     fn new_connection(&self) -> Result<Self::Connection>;
     fn timings_enabled(&self) -> bool;
+    fn build_version(&self) -> Result<&'static str>;
     fn max_concurrent_reads(&self) -> usize;
     fn tool_is_read_only(&self, tool_name: &str) -> bool;
     fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool;
@@ -67,13 +69,13 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     fn cancel_request(&self, id: &Value, connection_scope: &str) -> bool;
     fn cancellation_registered(&self) -> &tokio::sync::Notify;
     fn take_pending_notifications(&self) -> Vec<Value>;
-    fn run_in_connection_admission<T, F>(
-        &self,
+    fn run_in_connection_admission<'a, T, F>(
+        &'a self,
         future: F,
-    ) -> Pin<Box<dyn Future<Output = T> + Send>>
+    ) -> Pin<Box<dyn Future<Output = T> + Send + 'a>>
     where
-        T: Send + 'static,
-        F: Future<Output = T> + Send + 'static;
+        T: Send + 'a,
+        F: Future<Output = T> + Send + 'a;
     fn shutdown(self: Arc<Self>) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
@@ -1129,17 +1131,18 @@ where
                         }
                         active_cancellations.insert(request_key.clone(), cancellation.clone());
                     }
-                    active_reads.spawn(self.context.run_in_connection_admission(
-                        dispatch_independent_read(
-                            Arc::clone(self),
-                            request.clone(),
-                            timings_enabled,
-                            connection_route.fork_for_connection_owned_read(),
-                            request_activity,
-                            cancellation,
-                            connection_shutdown.clone(),
-                        ),
-                    ));
+                    let context = Arc::clone(&self.context);
+                    let dispatch = dispatch_independent_read(
+                        Arc::clone(self),
+                        request.clone(),
+                        timings_enabled,
+                        connection_route.fork_for_connection_owned_read(),
+                        request_activity,
+                        cancellation,
+                        connection_shutdown.clone(),
+                    );
+                    active_reads
+                        .spawn(async move { context.run_in_connection_admission(dispatch).await });
                     continue;
                 }
             }

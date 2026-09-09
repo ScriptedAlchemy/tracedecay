@@ -212,13 +212,17 @@ impl McpShutdownState {
 ///
 /// It borrows the already-constructed server authorities; it does not own a
 /// registry, route cache, or cancellation table of its own.
-struct ProductionMcpConnectionContext {
+pub(crate) struct ProductionMcpConnectionContext {
     server: Arc<McpServer>,
+    admission: Option<Arc<crate::daemon::ParkableConnectionAdmission>>,
 }
 
 impl ProductionMcpConnectionContext {
-    fn new(server: Arc<McpServer>) -> Arc<Self> {
-        Arc::new(Self { server })
+    pub(crate) fn new(server: Arc<McpServer>) -> Arc<Self> {
+        Arc::new(Self {
+            server,
+            admission: crate::daemon::current_connection_admission(),
+        })
     }
 }
 
@@ -231,6 +235,12 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
 
     fn timings_enabled(&self) -> bool {
         self.server.timings_enabled()
+    }
+
+    fn build_version(&self) -> Result<&'static str> {
+        crate::version::build_version().map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })
     }
 
     fn max_concurrent_reads(&self) -> usize {
@@ -285,16 +295,16 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
             .collect()
     }
 
-    fn run_in_connection_admission<T, F>(
-        &self,
+    fn run_in_connection_admission<'a, T, F>(
+        &'a self,
         future: F,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
     where
-        T: Send + 'static,
-        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'a,
+        F: std::future::Future<Output = T> + Send + 'a,
     {
         Box::pin(crate::daemon::in_connection_admission(
-            crate::daemon::current_connection_admission(),
+            self.admission.clone(),
             future,
         ))
     }

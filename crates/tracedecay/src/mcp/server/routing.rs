@@ -50,10 +50,6 @@ impl SelectedProjectResponseLease {
     pub(crate) fn revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
         &self.revoked
     }
-
-    pub(crate) fn is_revoked(&self) -> bool {
-        self.revoked.is_cancelled()
-    }
 }
 
 impl McpResponseLease for SelectedProjectResponseLease {
@@ -173,6 +169,10 @@ impl McpConnectionState for ConnectionRouteState {
 
     fn memory_request_scope(&self) -> &str {
         ConnectionRouteState::memory_request_scope(self)
+    }
+
+    fn fork_for_independent_read(&self) -> Self {
+        ConnectionRouteState::fork_for_independent_read(self)
     }
 
     fn fork_for_connection_owned_read(&self) -> Self {

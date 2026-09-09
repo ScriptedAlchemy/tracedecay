@@ -57,10 +57,14 @@ impl McpConnectionState for TestConnection {
         &self.scope
     }
 
-    fn fork_for_connection_owned_read(&self) -> Self {
+    fn fork_for_independent_read(&self) -> Self {
         Self {
             scope: self.scope.clone(),
         }
+    }
+
+    fn fork_for_connection_owned_read(&self) -> Self {
+        self.fork_for_independent_read()
     }
 
     fn take_selected_response_lease(&mut self) -> Option<Self::ResponseLease> {
@@ -101,6 +105,10 @@ impl McpConnectionContext for TestContext {
 
     fn timings_enabled(&self) -> bool {
         false
+    }
+
+    fn build_version(&self) -> tracedecay_domain::errors::Result<&'static str> {
+        Ok("test")
     }
 
     fn max_concurrent_reads(&self) -> usize {
@@ -150,13 +158,13 @@ impl McpConnectionContext for TestContext {
         Vec::new()
     }
 
-    fn run_in_connection_admission<T, F>(
-        &self,
+    fn run_in_connection_admission<'a, T, F>(
+        &'a self,
         future: F,
-    ) -> Pin<Box<dyn Future<Output = T> + Send>>
+    ) -> Pin<Box<dyn Future<Output = T> + Send + 'a>>
     where
-        T: Send + 'static,
-        F: Future<Output = T> + Send + 'static,
+        T: Send + 'a,
+        F: Future<Output = T> + Send + 'a,
     {
         Box::pin(future)
     }
