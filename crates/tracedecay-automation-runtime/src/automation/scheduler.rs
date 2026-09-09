@@ -221,7 +221,12 @@ impl AutomationTaskLock {
         stale_after_secs: Option<u64>,
         now_secs: i64,
     ) -> Result<Option<Self>> {
-        let lock_dir = dashboard_root.join("automation_locks");
+        // cap-std ambient opens walk each component. On macOS `/var` is a
+        // firmlink to `/private/var`; opening the unresolved tempfile spelling
+        // can ENOENT under concurrent create. Resolve the existing prefix first.
+        let lock_dir = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(
+            &dashboard_root.join("automation_locks"),
+        );
         let path = lock_dir.join(format!("{key}.lock"));
         let ownership_token = new_automation_task_lock_token()?;
         let error_path = path.clone();
@@ -820,21 +825,22 @@ fn try_acquire_task_lock_blocking(
     stale_after_secs: Option<u64>,
     now_secs: i64,
 ) -> std::io::Result<Option<AutomationTaskLock>> {
+    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
     if let Some(parent) = path.parent() {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    let coordination = acquire_task_lock_coordination(path)?;
+    let coordination = acquire_task_lock_coordination(&path)?;
     for attempt in 0..2 {
-        match create_task_lock_file(path, ownership_token, now_secs) {
+        match create_task_lock_file(&path, ownership_token, now_secs) {
             Ok(task_lock) => return Ok(Some(task_lock)),
             Err(TaskLockPublicationError::Definite(error))
                 if error.kind() == std::io::ErrorKind::AlreadyExists =>
             {
-                let Some(snapshot) = read_task_lock_snapshot(path)? else {
+                let Some(snapshot) = read_task_lock_snapshot(&path)? else {
                     continue;
                 };
                 if attempt == 0 && task_lock_is_reclaimable(&snapshot, stale_after_secs, now_secs) {
-                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)?;
+                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&path)?;
                     continue;
                 }
                 return Ok(None);
@@ -973,7 +979,8 @@ fn prepare_task_lock_publication(
     ownership_token: &str,
     now_secs: i64,
 ) -> std::result::Result<PreparedTaskLockPublication, TaskLockStagingCreationError> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lock")?;
+    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -990,7 +997,7 @@ fn prepare_task_lock_publication(
             )
         })?;
     let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
-    let staging_path = task_lock_staging_path(path, ownership_token)?;
+    let staging_path = task_lock_staging_path(&path, ownership_token)?;
     let staging_name = staging_path
         .file_name()
         .map(std::ffi::OsStr::to_os_string)
@@ -1169,7 +1176,8 @@ fn remove_owned_task_lock_blocking(path: &Path, ownership_token: &str) -> std::i
 }
 
 fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File> {
-    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(path);
+    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&path);
     tracedecay_runtime_core::storage::reject_symlink_components(
         &coordination_path,
         "automation task-lock coordination",
@@ -1225,7 +1233,8 @@ struct AutomationTaskLockSnapshot {
 }
 
 fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTaskLockSnapshot>> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lock")?;
+    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -2670,5 +2679,40 @@ evidence about it",
         .expect("dropping the guard inside spawn_blocking must not panic");
 
         assert_lock_released(&lock_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_task_locks_acquire_through_symlinked_dashboard_prefix() {
+        // cap-std ambient opens walk each component. A prefix symlink
+        // (`tmp/link` → `tmp/real`, or macOS `/var` → `/private/var`) must
+        // resolve before Dir::open_ambient_dir or concurrent acquires ENOENT.
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dashboard_root = link.join("dashboard");
+
+        let first_root = dashboard_root.clone();
+        let second_root = dashboard_root;
+        let first = tokio::spawn(async move {
+            AutomationTaskLock::try_acquire_keyed(&first_root, "concurrent-a", Some(10), 100).await
+        });
+        let second = tokio::spawn(async move {
+            AutomationTaskLock::try_acquire_keyed(&second_root, "concurrent-b", Some(10), 100).await
+        });
+        let first = first
+            .await
+            .expect("join first lock")
+            .expect("first lock acquire through prefix symlink");
+        let second = second
+            .await
+            .expect("join second lock")
+            .expect("second lock acquire through prefix symlink");
+        assert!(
+            first.is_some() && second.is_some(),
+            "distinct keys under a shared lock dir must both acquire"
+        );
     }
 }
