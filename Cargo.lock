@@ -5866,7 +5866,6 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "serde_path_to_error",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
@@ -6164,6 +6163,7 @@ dependencies = [
  "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
+ "tracedecay-daemon-service",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6286,6 +6286,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-graph-query",
  "tracedecay-lsp",
  "tracedecay-policy",
  "tracedecay-privacy",
@@ -6405,6 +6406,7 @@ dependencies = [
 name = "tracedecay-daemon-service"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -6412,10 +6414,13 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-stream",
+ "tower",
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
@@ -6439,6 +6444,7 @@ dependencies = [
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
  "tracedecay-sessions",
+ "tracedecay-source-edit",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
@@ -6573,6 +6579,7 @@ name = "tracedecay-graph-query"
 version = "0.1.0"
 dependencies = [
  "hotpath",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
@@ -6583,6 +6590,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-privacy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
  "tracedecay-tool-catalog",
@@ -6598,8 +6606,10 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.19",
+ "tokio",
  "tracedecay-domain",
  "tracedecay-private-fs",
+ "tracing",
 ]
 
 [[package]]
@@ -6717,14 +6727,17 @@ dependencies = [
  "hotpath",
  "ignore",
  "libc",
+ "rmcp 3.1.1",
  "schemars",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "toml",
  "tracedecay-api",
+ "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-contracts",
@@ -7101,6 +7114,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "gix",
  "hotpath",
  "same-file",
  "serde",
@@ -7108,6 +7122,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-contracts",
  "tracedecay-domain",
@@ -7117,6 +7132,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-tool-catalog",
  "tracing",
+ "tree-sitter",
 ]
 
 [[package]]
@@ -7165,6 +7181,7 @@ dependencies = [
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-tool-catalog",
  "tracing",
  "windows-sys 0.61.2",
 ]

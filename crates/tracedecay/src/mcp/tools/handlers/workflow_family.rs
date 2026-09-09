@@ -51,7 +51,7 @@ pub(super) async fn handle_workflow(
             (operation, request_id, controls)
         });
     let response = hotpath::future!(
-        crate::application_surface::invoke_workflow_operation(
+        tracedecay_daemon_service::application_surface::invoke_workflow_operation(
             executor,
             WorkflowHttpRequest {
                 operation,

@@ -141,6 +141,25 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// Query lanes a terminal code-index answer must report as `"complete"`.
+/// Daemon journeys and the MCP readiness wait share this set.
+pub const CODE_INDEX_QUERY_COVERAGE_LANES: [&str; 3] = ["exact", "lexical", "graph"];
+
+fn code_index_lane_is_complete(value: &Value) -> bool {
+    value == "complete" || value["status"] == "complete"
+}
+
+/// Lanes whose search `coverage.<lane>` marker is not complete.
+///
+/// Search renders a complete lane as the string `"complete"`; the primitive
+/// context surface uses `{ "status": "complete" }`. Both are terminal.
+pub fn incomplete_code_index_query_lanes(search: &Value) -> Vec<&'static str> {
+    CODE_INDEX_QUERY_COVERAGE_LANES
+        .into_iter()
+        .filter(|lane| !code_index_lane_is_complete(&search["coverage"][*lane]))
+        .collect()
+}
+
 /// Env var pinning the global DB path; tests that set it serialize on
 /// [`GLOBAL_DB_ENV_LOCK`].
 pub const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";

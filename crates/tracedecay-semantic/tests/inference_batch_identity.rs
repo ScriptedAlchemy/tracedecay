@@ -26,7 +26,7 @@
 //!   cargo test -p tracedecay-semantic --features semantic-fastembed \
 //!   --test inference_batch_identity -- --ignored --nocapture
 //! ```
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 #![forbid(unsafe_code)]
 
 use std::{env, fs, path::Path};

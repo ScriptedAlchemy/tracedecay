@@ -33,7 +33,7 @@ use super::dedupe::{DedupeDecisionV1, DeterministicDedupe};
 use super::diversity::{DeterministicDiversity, DiversityDecisionV1, DiversityStageError};
 use super::ordering::{
     OrderedFusedCandidates, decision_cmp, exact_class_rank, ordered_occurrence_ids,
-    source_validity_rank,
+    ordered_retriever_evidence_anchors, source_validity_rank,
 };
 use super::stage_counters;
 
@@ -507,8 +507,11 @@ pub struct FusionComparatorRecordV1 {
     pub exact_class: ExactClass,
     pub utility_micros: u64,
     pub source_validity_rank: u8,
+    /// Identity for matching survivors after deduplication, not a sorting key.
     pub anchor_id: RetrievalAnchorId,
+    /// Identity for matching survivors after deduplication, not a sorting key.
     pub logical_evidence_id: LogicalEvidenceId,
+    pub retriever_evidence_anchors: Vec<RetrievalAnchorId>,
     pub source_occurrence_ids: Vec<SourceOccurrenceId>,
     pub comparator_revision: ComponentRevision,
 }
@@ -1029,12 +1032,12 @@ impl DeterministicFixedPointFusion {
                         .first()
                         .map(|occurrence| occurrence.retriever_evidence_anchor.clone()),
                     detail: format!(
-                        "exact={:?};utility={};source_validity={};anchor={};logical={};occurrences=[{}];revision={}",
+                        "exact={:?};utility={};source_validity={};evidence_anchors=[{}];occurrences=[{}];revision={}",
                         record.exact_class,
                         record.utility_micros,
                         record.source_validity_rank,
-                        record.anchor_id,
-                        record.logical_evidence_id,
+                        record.retriever_evidence_anchors.iter()
+                            .map(ToString::to_string).collect::<Vec<_>>().join(","),
                         record
                             .source_occurrence_ids
                             .iter()
@@ -1059,6 +1062,10 @@ impl DeterministicFixedPointFusion {
             source_validity_rank: source_validity_rank(candidate),
             anchor_id: candidate.anchor_id.clone(),
             logical_evidence_id: candidate.logical_evidence_id.clone(),
+            retriever_evidence_anchors: ordered_retriever_evidence_anchors(candidate)
+                .into_iter()
+                .cloned()
+                .collect(),
             source_occurrence_ids: ordered_occurrence_ids(candidate),
             comparator_revision: self.comparator_revision.clone(),
         }

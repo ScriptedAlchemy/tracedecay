@@ -83,6 +83,7 @@ pub mod observability;
 pub mod observation;
 pub mod operation_stream;
 pub mod primitives;
+pub mod project_open_authorization;
 pub mod semantic_runtime;
 pub mod settings_control;
 pub mod source_authorization;
