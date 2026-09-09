@@ -51,7 +51,8 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
             }
         }
         assert_eq!(
-            &projected, canonical,
+            projected,
+            tracedecay_mcp::mcp_input_schema(canonical),
             "{tool_name} must project its canonical executable request schema before MCP transport fields",
         );
     }
@@ -230,8 +231,8 @@ fn work_definitions_cover_the_canonical_operation_registry() {
             .and_then(|availability| availability.binding())
             .expect("canonical Work operation must be executable");
         assert_eq!(
-            &definition.input_schema,
-            binding.request_schema().body(),
+            definition.input_schema,
+            tracedecay_mcp::mcp_input_schema(binding.request_schema().body()),
             "{tool_name} must expose the exact executable request schema",
         );
     }
