@@ -260,7 +260,7 @@ impl McpServer {
         let engine_identity = cg.db_path();
         let read_flight = tool_allows_identical_read_coalescing(tool_name, |tool_name| {
             crate::mcp::tools::mcp_dispatch_contract(tool_name)
-                .is_ok_and(|contract| contract.read_only())
+                .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
         })
         .then(|| {
             self.identical_read_coalescer.claim(

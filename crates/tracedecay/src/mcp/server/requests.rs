@@ -1574,7 +1574,7 @@ impl McpServer {
         let PreparedDispatchControl {
             request_id: application_request_id,
             control,
-            _registration,
+            registration: _registration,
         } = match self.prepare_dispatch_control(
             &id,
             &tool_name,

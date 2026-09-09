@@ -445,7 +445,7 @@ impl Drop for ApplicationCancellationRegistration<'_> {
 pub struct PreparedDispatchControl<'a> {
     pub request_id: Option<tracedecay_contracts::RequestId>,
     pub control: DispatchControl,
-    pub _registration: ApplicationCancellationRegistration<'a>,
+    pub registration: ApplicationCancellationRegistration<'a>,
 }
 
 #[derive(Clone)]
@@ -556,7 +556,7 @@ impl<S> RetainedDispatchAuthority<S> {
         Ok(PreparedDispatchControl {
             request_id,
             control,
-            _registration: registration,
+            registration,
         })
     }
 }

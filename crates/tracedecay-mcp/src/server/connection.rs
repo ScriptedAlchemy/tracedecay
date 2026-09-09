@@ -43,7 +43,9 @@ pub trait McpConnectionState: Send + Sync + 'static {
     type ResponseLease: McpResponseLease;
 
     fn memory_request_scope(&self) -> &str;
+    #[must_use]
     fn fork_for_independent_read(&self) -> Self;
+    #[must_use]
     fn fork_for_connection_owned_read(&self) -> Self;
     fn take_selected_response_lease(&mut self) -> Option<Self::ResponseLease>;
 }
@@ -127,36 +129,6 @@ where
         if enabled {
             Arc::clone(&self.context).shutdown().await;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicIsize, Ordering};
-
-    use super::QueuedRequestLine;
-
-    #[test]
-    fn queued_request_depth_is_released_on_dequeue_and_connection_drop() {
-        let queued = Arc::new(AtomicIsize::new(0));
-        let mut pending = std::collections::VecDeque::new();
-        pending.push_back(QueuedRequestLine::new_observed(
-            "first".to_owned(),
-            Arc::clone(&queued),
-        ));
-        pending.push_back(QueuedRequestLine::new_observed(
-            "second".to_owned(),
-            Arc::clone(&queued),
-        ));
-        assert_eq!(queued.load(Ordering::Acquire), 2);
-
-        let first = pending.pop_front().expect("first queued line").into_line();
-        assert_eq!(first, "first");
-        assert_eq!(queued.load(Ordering::Acquire), 1);
-
-        drop(pending);
-        assert_eq!(queued.load(Ordering::Acquire), 0);
     }
 }
 
@@ -535,6 +507,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "mcp.server.request_cancellable", future = true)]
     async fn handle_cancellable_application_request(
         &self,
@@ -1014,8 +987,8 @@ where
             };
 
             let line = match event {
-                ConnectionLoopEvent::Queued(line) => Some(line),
-                ConnectionLoopEvent::Incoming(Ok(Some(line))) => Some(line),
+                ConnectionLoopEvent::Queued(line)
+                | ConnectionLoopEvent::Incoming(Ok(Some(line))) => Some(line),
                 ConnectionLoopEvent::Incoming(Ok(None)) => {
                     input_closed = true;
                     peer_close_check = Some(Box::pin(transport.peer_fully_closed_after_eof()));
@@ -1297,5 +1270,35 @@ where
 
         self.shutdown_if(shutdown_on_exit).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    use super::QueuedRequestLine;
+
+    #[test]
+    fn queued_request_depth_is_released_on_dequeue_and_connection_drop() {
+        let queued = Arc::new(AtomicIsize::new(0));
+        let mut pending = std::collections::VecDeque::new();
+        pending.push_back(QueuedRequestLine::new_observed(
+            "first".to_owned(),
+            Arc::clone(&queued),
+        ));
+        pending.push_back(QueuedRequestLine::new_observed(
+            "second".to_owned(),
+            Arc::clone(&queued),
+        ));
+        assert_eq!(queued.load(Ordering::Acquire), 2);
+
+        let first = pending.pop_front().expect("first queued line").into_line();
+        assert_eq!(first, "first");
+        assert_eq!(queued.load(Ordering::Acquire), 1);
+
+        drop(pending);
+        assert_eq!(queued.load(Ordering::Acquire), 0);
     }
 }

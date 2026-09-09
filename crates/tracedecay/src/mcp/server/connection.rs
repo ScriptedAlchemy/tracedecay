@@ -47,7 +47,7 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
 
     fn tool_is_read_only(&self, tool_name: &str) -> bool {
         crate::mcp::tools::mcp_dispatch_contract(tool_name)
-            .is_ok_and(|contract| contract.read_only())
+            .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
     }
 
     fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool {
