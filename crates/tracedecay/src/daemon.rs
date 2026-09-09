@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use serde_json::json;
 #[cfg(unix)]
@@ -261,9 +261,6 @@ pub(crate) mod retained_test_support;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod shutdown_watchdog;
-#[cfg(feature = "hotpath")]
-pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
-mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
@@ -273,6 +270,8 @@ pub(crate) use core_lifecycle::*;
 pub use core_logging::*;
 pub use core_proxy::*;
 pub(crate) use shutdown_coordination::ShutdownStatus;
+#[cfg(feature = "hotpath")]
+pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;
@@ -310,9 +309,6 @@ use lsp_sessions::{
     settle_pending_lsp_workspace_mutation, update_connection_lsp_sessions,
 };
 mod maintenance;
-mod maintenance_tasks;
-pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
-use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 pub mod pr_autotrack;
 mod production_harness;
 mod store_maintenance;
@@ -320,7 +316,6 @@ mod store_maintenance;
 pub use production_harness::ProductionProjectCompositionHarnessV1;
 #[cfg(all(unix, feature = "test-transport"))]
 pub use production_harness::capture_exact_git_snapshot_for_test;
-mod profile_host_admission_replay;
 mod projectless;
 mod remote_deletion;
 #[cfg(test)]
@@ -398,7 +393,6 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
-mod store_writer_gate;
 mod wire_io;
 #[cfg(test)]
 mod work_evidence_retrieval_tests;

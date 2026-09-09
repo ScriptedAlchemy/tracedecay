@@ -1296,7 +1296,7 @@ impl ProjectOpenInputs<'_> {
             let remote_credentials = core.graph_runtime.remote_credential_authority();
             Arc::new(move || remote_credentials.operational_status())
         };
-        let remote_operational_read: doctor_kernel::RemoteOperationalReadProviderV1 = {
+        let remote_operational_read = {
             let remote_operational_status = Arc::clone(&remote_operational_status);
             Arc::new(move || remote_operational_status().doctor_read())
         };
@@ -1976,7 +1976,7 @@ fn project_dashboard_pr_autotrack_reader()
 /// the sampling authority. An unavailable registration is recorded and skipped,
 /// never fatal: telemetry must not fail an otherwise healthy project open.
 fn register_route_store_telemetry(
-    sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    sampling: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     cg: &Arc<crate::tracedecay::TraceDecay>,
     scope: &tracedecay_contracts::ResolvedScope,
     session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],
