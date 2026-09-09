@@ -6,6 +6,95 @@ const MAINTENANCE_TEST_DEADLINE: std::time::Duration = std::time::Duration::from
 
 #[cfg(unix)]
 #[tokio::test]
+async fn pr_autotrack_is_cancelled_before_invocation_join() {
+    let engine = DaemonEngine::default();
+    let task = crate::daemon::pr_autotrack::spawn_with_administration(
+        engine.store_administration.clone(),
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+    );
+    let cancellation = task.cancellation();
+    let engine = engine.with_pr_autotrack_task(task).await;
+
+    let owner_phases = engine.shutdown_owner_phases().await;
+    assert!(!cancellation.is_cancelled());
+
+    let prepared =
+        crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(owner_phases);
+    assert!(
+        cancellation.is_cancelled(),
+        "PR auto-track must be cancelled before invocation join begins"
+    );
+
+    let _ = prepared
+        .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
+    let engine = DaemonEngine::default();
+    let administration = engine.store_administration.clone();
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let request = tokio::spawn(async move {
+        administration
+            .run_manual_branch_publication(async move {
+                let _ = started_sender.send(());
+                let _ = release_receiver.await;
+                Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+            })
+            .await
+    });
+    started_receiver
+        .await
+        .expect("manual branch publication starts");
+
+    let mut owner_phases = engine.shutdown_owner_phases().await;
+    let manual_branch_phase = owner_phases.remove(0);
+    let prepared = crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(vec![
+        manual_branch_phase,
+    ]);
+    let denied = engine
+        .store_administration
+        .run_manual_branch_publication(async {
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked)
+        })
+        .await
+        .expect_err("shutdown closes manual branch publication admission");
+    assert_eq!(
+        denied.project_route_context().map(|(reason, _, _)| reason),
+        Some("branch_tracking_failed")
+    );
+
+    let shutdown = tokio::spawn(async move {
+        prepared
+            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "daemon shutdown must retain the active manual branch publication"
+    );
+
+    let _ = release_sender.send(());
+    assert_eq!(
+        request
+            .await
+            .expect("manual branch request task joins")
+            .expect("manual branch publication succeeds"),
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
+    let receipt = shutdown.await.expect("daemon shutdown task joins");
+    assert!(
+        receipt.unfinished().is_empty(),
+        "manual branch publication shutdown must complete cleanly"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
     let engine = DaemonEngine::default();
     let key = ProjectServerKey {

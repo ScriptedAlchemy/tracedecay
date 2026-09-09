@@ -99,7 +99,15 @@ pub(super) async fn branch_add_response(
 
     #[cfg(unix)]
     {
-        match activate_and_track_manual_branch(&canonical_root, &graph, schedulers, branch).await {
+        match activate_and_track_manual_branch(
+            administration,
+            &canonical_root,
+            &graph,
+            schedulers,
+            branch,
+        )
+        .await
+        {
             Ok(activation) => {
                 JsonRpcResponse::success(request.id.clone(), branch_add_tool_result(&activation))
             }
@@ -124,6 +132,7 @@ pub(super) async fn branch_add_response(
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.branch_add.activate_and_track", future = true)]
 async fn activate_and_track_manual_branch(
+    administration: &StoreAdministration,
     project_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -139,27 +148,16 @@ async fn activate_and_track_manual_branch(
     let schedulers = schedulers.clone();
     let branch = branch.to_owned();
 
-    // The spawned owner keeps the exact lifecycle lease after request
-    // cancellation so retries cannot observe a half-published branch.
-    tokio::spawn(async move {
-        activate_and_track_manual_branch_owned(
+    administration
+        .run_manual_branch_publication(activate_and_track_manual_branch_owned(
             project_root,
             graph,
             schedulers,
             branch,
             data_root,
             lifecycle,
-        )
+        ))
         .await
-    })
-    .await
-    .map_err(|error| {
-        TraceDecayError::project_route(
-            BRANCH_TRACKING_FAILED,
-            true,
-            format!("manual branch lifecycle owner stopped before completion: {error}"),
-        )
-    })?
 }
 
 #[cfg(unix)]

@@ -10,6 +10,8 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+#[cfg(unix)]
+use tracedecay_runtime_core::branch::BranchAddOutcome;
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
@@ -456,6 +458,8 @@ pub(super) struct StoreAdministration {
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
+    #[cfg(unix)]
+    manual_branch_publications: Arc<ManualBranchPublicationTasks>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
@@ -469,6 +473,13 @@ pub(super) struct StoreAdministration {
     /// remainder of the deletion.
     remote_account_deletion_tombstone_persist:
         Arc<tokio::sync::watch::Sender<Option<tracedecay_global_db::RemoteDeletionTombstone>>>,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ManualBranchPublicationTasks {
+    closed: AtomicBool,
+    tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 /// Waitable receipt for the durable account-deletion tombstone persist.
@@ -540,6 +551,8 @@ impl Default for StoreAdministration {
             store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(unix)]
+            manual_branch_publications: Arc::new(ManualBranchPublicationTasks::default()),
             session_temporal_refresh_schedulers: Arc::new(
                 SessionTemporalRefreshSchedulerRegistry::default(),
             ),
@@ -565,6 +578,89 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
+    #[cfg(unix)]
+    pub(super) async fn run_manual_branch_publication<Task>(
+        &self,
+        publication: Task,
+    ) -> Result<BranchAddOutcome>
+    where
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        if self
+            .manual_branch_publications
+            .closed
+            .load(Ordering::Acquire)
+        {
+            return Err(TraceDecayError::project_route(
+                "branch_tracking_failed",
+                true,
+                "manual branch publication admission is closed",
+            ));
+        }
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut tasks = self.manual_branch_publications.tasks.lock().await;
+            if self
+                .manual_branch_publications
+                .closed
+                .load(Ordering::Acquire)
+            {
+                return Err(TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    "manual branch publication admission is closed",
+                ));
+            }
+            while let Some(result) = tasks.try_join_next() {
+                if let Err(error) = result {
+                    super::log_daemon_event(
+                        "manual_branch_publication",
+                        &[
+                            ("action", "reap".to_owned()),
+                            ("outcome", "task_join_failed".to_owned()),
+                            ("reason", error.to_string()),
+                        ],
+                    );
+                }
+            }
+            tasks.spawn(async move {
+                let _ = result_sender.send(publication.await);
+            });
+        }
+        result_receiver.await.map_err(|error| {
+            TraceDecayError::project_route(
+                "branch_tracking_failed",
+                true,
+                format!("manual branch publication owner stopped before completion: {error}"),
+            )
+        })?
+    }
+
+    #[cfg(unix)]
+    pub(super) fn cancel_manual_branch_publications(&self) {
+        self.manual_branch_publications
+            .closed
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn shutdown_manual_branch_publications(&self) {
+        self.cancel_manual_branch_publications();
+        let mut tasks = self.manual_branch_publications.tasks.lock().await;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                super::log_daemon_event(
+                    "manual_branch_publication",
+                    &[
+                        ("action", "shutdown".to_owned()),
+                        ("outcome", "task_join_failed".to_owned()),
+                        ("reason", error.to_string()),
+                    ],
+                );
+            }
+        }
+    }
+
     pub(super) fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,

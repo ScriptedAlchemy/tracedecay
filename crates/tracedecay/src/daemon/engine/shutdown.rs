@@ -33,6 +33,8 @@ impl DaemonEngine {
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
 
+        let manual_branch_cancel = self.store_administration.clone();
+        let manual_branch_join = self.store_administration.clone();
         let invocation_join = self.invocation.clone();
 
         let session_refresh = Arc::clone(
@@ -53,9 +55,21 @@ impl DaemonEngine {
         let watcher_cancel = self.git_watcher.clone();
         let watcher_join = self.git_watcher.clone();
 
-        let pr_join = Arc::clone(&self.pr_autotrack_task);
+        let pr_task = self.pr_autotrack_task.lock().await.take();
+        let pr_cancel = pr_task
+            .as_ref()
+            .map(crate::daemon::pr_autotrack::PrAutotrackTask::cancellation);
 
         vec![
+            vec![ShutdownOwner::new(
+                "manual_branch_publication",
+                move || manual_branch_cancel.cancel_manual_branch_publications(),
+                async move {
+                    manual_branch_join
+                        .shutdown_manual_branch_publications()
+                        .await;
+                },
+            )],
             vec![ShutdownOwner::with_deadline_status(
                 "invocation",
                 {
@@ -122,11 +136,19 @@ impl DaemonEngine {
                         }
                     },
                 ),
-                ShutdownOwner::new("pr_autotrack", || {}, async move {
-                    if let Some(task) = pr_join.lock().await.take() {
-                        task.shutdown().await;
-                    }
-                }),
+                ShutdownOwner::new(
+                    "pr_autotrack",
+                    move || {
+                        if let Some(cancellation) = pr_cancel {
+                            cancellation.cancel();
+                        }
+                    },
+                    async move {
+                        if let Some(task) = pr_task {
+                            task.shutdown().await;
+                        }
+                    },
+                ),
                 ShutdownOwner::new("session_sync", || {}, async move {
                     session_sync_join.shutdown_session_sync().await;
                 }),
