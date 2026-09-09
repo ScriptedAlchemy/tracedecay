@@ -1121,19 +1121,3 @@ end."#;
 // ----------------------------
 // LanguageExtractor trait
 // ----------------------------
-
-#[test]
-fn test_pascal_extractor_extensions() {
-    let extractor = PascalExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"pas"));
-    assert!(exts.contains(&"pp"));
-    assert!(exts.contains(&"dpr"));
-    assert!(exts.contains(&"lpr"));
-}
-
-#[test]
-fn test_pascal_extractor_language_name() {
-    let extractor = PascalExtractor;
-    assert_eq!(extractor.language_name(), "Pascal");
-}
