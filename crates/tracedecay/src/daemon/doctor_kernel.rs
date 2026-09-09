@@ -627,12 +627,6 @@ pub(super) async fn collect_code_generation_retention_findings(
     }
 }
 
-/// Live provider of the Remote Brain operational read. Every Doctor read
-/// re-observes the mounted remote authorities instead of freezing one value
-/// at project-composition time.
-pub(in crate::daemon) type RemoteOperationalReadProviderV1 =
-    Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>;
-
 /// Resolved kernel reads wired into the Doctor composer for one report.
 struct KernelDoctorSources<'a> {
     inputs: &'a DoctorKernelInputsV1,
@@ -790,7 +784,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
-    remote_operational: RemoteOperationalReadProviderV1,
+    remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
     retention: crate::config::RetentionConfig,
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,

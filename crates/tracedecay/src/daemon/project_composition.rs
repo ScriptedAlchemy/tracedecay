@@ -1293,7 +1293,7 @@ impl ProjectOpenInputs<'_> {
             let remote_credentials = core.graph_runtime.remote_credential_authority();
             Arc::new(move || remote_credentials.operational_status())
         };
-        let remote_operational_read: doctor_kernel::RemoteOperationalReadProviderV1 = {
+        let remote_operational_read = {
             let remote_operational_status = Arc::clone(&remote_operational_status);
             Arc::new(move || remote_operational_status().doctor_read())
         };
