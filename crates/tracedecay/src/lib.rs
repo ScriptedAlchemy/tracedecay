@@ -11,7 +11,6 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::wildcard_imports)]
 // Pedantic style lints allowed crate-wide (consistent with the allows above):
