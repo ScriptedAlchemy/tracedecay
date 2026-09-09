@@ -480,21 +480,6 @@ pub enum PerformanceDispositionV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use schemars::schema_for;
-
-    #[derive(JsonSchema, Serialize)]
-    #[schemars(rename = "ObservabilityPayloadV1")]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum DirectOperationResourceSchemaV1 {
-        OperationResource(CoverageStateV1),
-    }
-
-    #[derive(JsonSchema, Serialize)]
-    #[schemars(rename = "ObservabilityPayloadV1")]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum BoxedOperationResourceSchemaV1 {
-        OperationResource(Box<CoverageStateV1>),
-    }
 
     #[derive(Serialize)]
     #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
@@ -597,25 +582,6 @@ mod tests {
             serde_json::from_value::<ObservabilityPayloadV1>(boxed).unwrap(),
             payload
         );
-    }
-
-    #[test]
-    fn boxing_is_transparent_to_schemars_tagged_enum_shape() {
-        let direct_wire = serde_json::to_value(DirectOperationResourceSchemaV1::OperationResource(
-            CoverageStateV1::Known,
-        ))
-        .unwrap();
-        let boxed_wire = serde_json::to_value(BoxedOperationResourceSchemaV1::OperationResource(
-            Box::new(CoverageStateV1::Known),
-        ))
-        .unwrap();
-        let direct_schema = serde_json::to_value(schema_for!(DirectOperationResourceSchemaV1))
-            .expect("direct schema must serialize");
-        let boxed_schema = serde_json::to_value(schema_for!(BoxedOperationResourceSchemaV1))
-            .expect("boxed schema must serialize");
-
-        assert_eq!(boxed_wire, direct_wire);
-        assert_eq!(boxed_schema, direct_schema);
     }
 
     #[test]

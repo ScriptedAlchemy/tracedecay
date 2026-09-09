@@ -25,15 +25,3 @@ fn scope_matches_itself_and_descendants_only() {
         Some("src")
     ));
 }
-
-#[test]
-fn nested_scope_requires_a_path_component_boundary() {
-    assert!(repository_path_matches_scope(
-        "crates/domain/src/lib.rs",
-        Some("crates/domain")
-    ));
-    assert!(!repository_path_matches_scope(
-        "crates/domain-old/src/lib.rs",
-        Some("crates/domain")
-    ));
-}

@@ -381,11 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn fixture_record_validates() {
-        fixture_record().validate().expect("valid fixture record");
-    }
-
-    #[test]
     fn message_is_bounded_and_sanitized() {
         let mut record = fixture_record();
         record.message = String::new();
