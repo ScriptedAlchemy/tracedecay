@@ -19,7 +19,9 @@ use tracedecay_hooks::{
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::context_scout_model::context_scout_model_assistant_from_project_config;
-use super::context_scout_ports::ContextScoutConfigurationPinV1;
+use super::context_scout_ports::{
+    ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
+};
 use super::context_scout_v2::{
     ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableRuntimeV1,
@@ -34,6 +36,26 @@ use tracedecay_runtime_core::db::Database;
 
 const STARTUP_RECOVERY_LIMIT: usize = 32;
 const DELIVERY_LEASE_MICROS: i64 = 30 * 1_000_000;
+const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
+
+/// Typed admission for one hook-claim authority on a project owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextScoutClaimAdmissionV1 {
+    /// A new lifecycle was stored under the cap.
+    Mounted,
+    /// The same lifecycle replaced its previous mount.
+    Replaced,
+    /// The 256-claim cap is full and this lifecycle is new.
+    DeniedAtCapacity,
+    /// The claim was never admissible (zero watermark).
+    Rejected,
+}
+
+struct MountedContextScoutClaimV1 {
+    lifecycle: ContextScoutLifecycleAddressV1,
+    address: ContextScoutAddressV1,
+    input_watermark: [u8; 32],
+}
 
 pub(crate) type ProjectScoutRuntime = ContextScoutDurableRuntimeV1<
     Arc<ProjectContextScoutDurableStoreV1>,
@@ -49,6 +71,7 @@ pub struct ProjectContextScoutOwnerV1 {
     inflight: StdMutex<BTreeMap<ContextScoutAddressV1, (u64, CancellationToken)>>,
     next_inflight_id: AtomicU64,
     startup: ContextScoutDurableStartupOutcomeV1,
+    claim_authorities: RwLock<Vec<MountedContextScoutClaimV1>>,
 }
 
 fn registered_context_scout_owners() -> &'static StdMutex<ProjectContextScoutOwnerRegistry> {
@@ -111,6 +134,7 @@ impl ProjectContextScoutOwnerV1 {
             inflight: StdMutex::new(BTreeMap::new()),
             next_inflight_id: AtomicU64::new(1),
             startup,
+            claim_authorities: RwLock::new(Vec::new()),
         });
         let mut owners = registered_context_scout_owners().lock().ok()?;
         let project_owners = owners.entry(project_id).or_default();
@@ -121,6 +145,50 @@ impl ProjectContextScoutOwnerV1 {
 
     pub fn store(&self) -> Arc<ProjectContextScoutDurableStoreV1> {
         Arc::clone(&self.store)
+    }
+
+    /// Admits one claim authority keyed by lifecycle. A later mount for the
+    /// same lifecycle replaces the previous one; a new lifecycle at the cap
+    /// is a typed denial, not a silent eviction.
+    pub async fn admit_mounted_claim(
+        &self,
+        lifecycle: ContextScoutLifecycleAddressV1,
+        address: ContextScoutAddressV1,
+        input_watermark: [u8; 32],
+    ) -> ContextScoutClaimAdmissionV1 {
+        if input_watermark == [0; 32] {
+            return ContextScoutClaimAdmissionV1::Rejected;
+        }
+        let mut authorities = self.claim_authorities.write().await;
+        if let Some(existing) = authorities
+            .iter_mut()
+            .find(|existing| existing.lifecycle == lifecycle)
+        {
+            existing.address = address;
+            existing.input_watermark = input_watermark;
+            return ContextScoutClaimAdmissionV1::Replaced;
+        }
+        if authorities.len() >= MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES {
+            return ContextScoutClaimAdmissionV1::DeniedAtCapacity;
+        }
+        authorities.push(MountedContextScoutClaimV1 {
+            lifecycle,
+            address,
+            input_watermark,
+        });
+        ContextScoutClaimAdmissionV1::Mounted
+    }
+
+    pub async fn resolve_admitted_claim(
+        &self,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
+        self.claim_authorities
+            .read()
+            .await
+            .iter()
+            .find(|mounted| mounted.lifecycle == *lifecycle)
+            .map(|mounted| (mounted.address, mounted.input_watermark))
     }
 
     pub fn startup_outcome(&self) -> &ContextScoutDurableStartupOutcomeV1 {

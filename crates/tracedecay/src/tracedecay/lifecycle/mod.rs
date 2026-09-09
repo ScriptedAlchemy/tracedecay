@@ -836,6 +836,118 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn context_scout_owner_survives_branch_reopen() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("create project root");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let opened = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize project graph");
+        let project_id = tracedecay_agent_hosts::hooks::hook_project_id_for_layout(
+            opened.hook_store_layout(),
+        )
+        .expect("initialized project has hook identity");
+        let owner = opened
+            .context_scout_owner()
+            .cloned()
+            .expect("Context Scout owner starts with the project");
+        let registered =
+            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+                project_id,
+            );
+        assert!(
+            registered.iter().any(|candidate| Arc::ptr_eq(candidate, &owner)),
+            "startup must publish the owner into the process-global registry"
+        );
+
+        let lifecycle =
+            tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1 {
+                profile_id: "profile.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("profile id"),
+                provider_id: "provider.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("provider id"),
+                project_id: "project.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("project id"),
+                worktree_id: "worktree.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("worktree id"),
+                session_id: "session.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("session id"),
+                thread_id: "thread.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("thread id"),
+                turn_id: "turn.scout.reopen".to_owned().try_into().expect("turn id"),
+                agent_id: "agent.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("agent id"),
+                logical_message_id: "message.scout.reopen"
+                    .to_owned()
+                    .try_into()
+                    .expect("message id"),
+            };
+        let address = tracedecay_contracts::context_scout::ContextScoutAddressV1 {
+            profile_id: [1; 16],
+            provider_id: [2; 16],
+            protected_session_id: [3; 32],
+            thread_id: [4; 16],
+            turn_id: [5; 16],
+            agent_id: [6; 16],
+            logical_message_id: [7; 16],
+            project_id,
+        };
+        assert_eq!(
+            owner
+                .admit_mounted_claim(lifecycle.clone(), address, [9; 32])
+                .await,
+            tracedecay_agent_hosts::agents::context_scout_owner::ContextScoutClaimAdmissionV1::Mounted,
+            "one claim authority must be admissible before reopen"
+        );
+
+        let reopened = opened
+            .reopen_for_current_branch()
+            .await
+            .expect("reopen onto the live branch");
+        let after = reopened
+            .context_scout_owner()
+            .expect("Context Scout owner must remain resolvable after branch reopen");
+        assert!(
+            Arc::ptr_eq(&owner, after),
+            "Context Scout owner is keyed by project identity, not by the TraceDecay instance"
+        );
+        assert_eq!(
+            after.resolve_admitted_claim(&lifecycle).await,
+            Some((address, [9; 32])),
+            "mounted claim authority must remain resolvable after branch reopen"
+        );
+        let registered =
+            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+                project_id,
+            );
+        assert_eq!(
+            registered.len(),
+            1,
+            "one project identity has one Context Scout owner"
+        );
+        assert!(Arc::ptr_eq(&owner, &registered[0]));
+    }
+
+    #[tokio::test]
     async fn nonempty_wrong_schema_read_only_open_returns_reset_required() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let project = root.path().join("project");
