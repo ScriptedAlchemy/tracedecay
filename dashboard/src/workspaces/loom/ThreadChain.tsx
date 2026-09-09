@@ -1,4 +1,7 @@
-import { useMemo, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode, type Dispatch, type SetStateAction } from 'react';
+import { useSearchParams } from 'react-router';
+import { LoadedEventCanvas } from './WeaveCanvas.tsx';
+import { initialPlaybackState, playbackTickMillis, revealedFrames, seekPlayback, stepPlayback, type LoomPlaybackState, type LoomPlaybackSpeed } from './playback.ts';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { Fact, Legend, Meter, Panel } from '../../ui/instrument.tsx';
@@ -7,7 +10,7 @@ import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import { tokenCountLabel } from '../sessions/tokenLabel.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
-import { ThreadPlayback } from './ThreadPlayback.tsx';
+import { ThreadPlayback, playbackFrames } from './ThreadPlayback.tsx';
 import {
   LcmSessionPayloadV1Schema,
   type LcmMessageV1,
@@ -45,6 +48,8 @@ export function ThreadChain({
   thread: PlacedThread | null;
   relations: ThreadRelations;
 }) {
+  const [params] = useSearchParams();
+  const replaying = params.has('loomEvent');
   const chain = useEnvelope(
     ['loom', 'chain', thread?.id ?? 'none'],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(thread?.sessionId ?? '')}?limit=200`,
@@ -64,7 +69,9 @@ export function ThreadChain({
   }
 
   return (
-    <Panel legend="Thread" footer={<ChainTerminus thread={thread} relations={relations} />}>
+    <Panel legend="Thread" footer={replaying
+      ? <StateChip kind="unavailable" detail="Session-wide commits, edits and branch rollups are withheld during replay: this read does not bind them to individual transcript events." />
+      : <ChainTerminus thread={thread} relations={relations} />}>
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1">
           <span className="text-xs font-medium leading-snug text-text-primary">
@@ -75,6 +82,8 @@ export function ThreadChain({
           </span>
         </div>
 
+        <details>
+          <summary className="td-hit text-xs text-text-muted">Session metadata</summary>
         <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-2xs">
           <Fact label="host" value={thread.host} />
           <Fact label="started" value={formatMoment(thread.start)} />
@@ -90,7 +99,7 @@ export function ThreadChain({
           <Fact label="kind" value={thread.isSubagent ? 'subagent' : 'session'} />
         </dl>
 
-        {thread.models.length > 0 ? (
+        {!replaying && thread.models.length > 0 ? (
           <div className="flex flex-col gap-1">
             <Legend>models</Legend>
             <div className="flex flex-wrap gap-1">
@@ -105,6 +114,8 @@ export function ThreadChain({
             </div>
           </div>
         ) : null}
+
+        </details>
 
         <ReadSection
           title="Chain"
@@ -126,9 +137,9 @@ export function ThreadChain({
             }
             return (
               <IsolatedChain
+                key={thread.id}
                 messages={data.messages}
                 messageCount={data.counts.message_count}
-                truncated={data.next_cursor != null}
                 hasMoreMessages={data.has_more_messages || data.next_cursor != null}
                 hasMoreSummaryNodes={data.has_more_summary_nodes}
                 summaryNodes={data.summary_nodes}
@@ -145,7 +156,6 @@ export function ThreadChain({
 function IsolatedChain({
   messages,
   messageCount,
-  truncated,
   hasMoreMessages,
   hasMoreSummaryNodes,
   summaryNodes,
@@ -153,33 +163,70 @@ function IsolatedChain({
 }: {
   messages: readonly LcmMessageV1[];
   messageCount: number;
-  truncated: boolean;
   hasMoreMessages: boolean;
   hasMoreSummaryNodes: boolean;
   summaryNodes: readonly LcmSummaryNodeV1[];
   thread: PlacedThread;
 }) {
-  const summary = useMemo(
-    () => summarizeChain(messages, { message_count: messageCount }, truncated),
-    [messageCount, messages, truncated],
-  );
-  if (summary.steps.length === 0) {
-    return <StateChip kind="complete_zero_findings" detail="session holds no turns" />;
-  }
+  const [params, setParams] = useSearchParams();
+  const frames = useMemo(() => playbackFrames(messages), [messages]);
+  const eventId = params.get('loomEvent');
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState<LoomPlaybackSpeed>(1);
+  const cursor = eventId == null ? frames.length - 1 : frames.findIndex((frame) => frame.id === eventId);
+  const state: LoomPlaybackState = { ...initialPlaybackState(frames.length), cursor, followLive: eventId == null, playing: playing && cursor >= 0, speed };
+  const setPlayback: Dispatch<SetStateAction<LoomPlaybackState>> = (update) => {
+    const next = typeof update === 'function' ? update(state) : update;
+    setPlaying(next.playing);
+    setSpeed(next.speed);
+    const search = new URLSearchParams(params);
+    if (next.followLive) { search.delete('loomEvent'); search.delete('loomWindow'); }
+    else if (frames[next.cursor]) search.set('loomEvent', frames[next.cursor]!.id);
+    setParams(search, { replace: true });
+  };
+  useEffect(() => {
+    if (!state.playing || frames.length === 0) return;
+    const timer = window.setTimeout(() => setPlayback(stepPlayback(state, frames.length, 1)), playbackTickMillis(speed));
+    return () => window.clearTimeout(timer);
+  }, [state.playing, cursor, speed, frames, params]);
+  const visible = revealedFrames(frames, cursor, state.followLive);
+  const visibleIds = new Set(visible.map((frame) => frame.id));
+  const shownMessages = messages.filter((message) => visibleIds.has(message.message_id));
+  const summary = summarizeChain(shownMessages, { message_count: shownMessages.length }, false);
+  const active = frames[cursor];
+  // A linked summary can have been created after its raw turn. Do not reveal
+  // later compaction metadata just because the earlier message names its ID.
+  const shownSummaries = state.followLive ? summaryNodes : summaryNodes.filter((node) => active?.timestamp != null && node.created_at <= active.timestamp);
   const toolCeiling = summary.tools.reduce(
     (max, tool) => Math.max(max, tool.count),
     0,
   );
   return (
     <div className="flex flex-col gap-3">
+      {cursor < 0 && eventId != null ? (
+        <div role="status" className="flex flex-col gap-2">
+          <StateChip kind="unavailable" detail={`Selected event ${eventId} is outside this loaded page; it may have been compacted or removed.`} />
+          <button type="button" className="td-hit" onClick={() => setPlayback(initialPlaybackState(frames.length))}>Return to loaded tail</button>
+        </div>
+      ) : null}
       <ThreadPlayback
-        key={thread.id}
-        messages={messages}
-        summaryNodes={summaryNodes}
+        frames={frames}
+        state={state}
+        setState={setPlayback}
+        summaryNodes={shownSummaries}
         totalMessages={messageCount}
         hasMoreMessages={hasMoreMessages}
         hasMoreSummaryNodes={hasMoreSummaryNodes}
+      >
+      <LoadedEventCanvas
+        frames={frames}
+        visible={visible}
+        activeId={active?.id ?? null}
+        onSelect={(id) => setPlayback(seekPlayback(state, frames.length, frames.findIndex((frame) => frame.id === id)))}
+        onInspect={() => setPlaying(false)}
       />
+      </ThreadPlayback>
+      <p className="text-3xs text-text-muted">{visible.length} revealed · {frames.length - visible.length} withheld · source: {thread.host} / {thread.sessionId}. Spawn, handoff and rejoin evidence is not served by this read.</p>
                 <div className="flex flex-col gap-1">
                   <Legend
                     trailing={
@@ -264,7 +311,7 @@ function IsolatedChain({
                         >
                           {index + 1}
                         </span>
-                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <button type="button" aria-label={`Inspect stored event ${step.id}`} onClick={() => setPlayback(seekPlayback(state, frames.length, frames.findIndex((frame) => frame.id === step.id)))} className="td-hit flex min-w-0 flex-1 flex-col gap-0.5 text-left">
                           <span className="flex items-baseline gap-1.5">
                             <span className="td-legend shrink-0 text-text-secondary">
                               {step.role}
@@ -280,7 +327,7 @@ function IsolatedChain({
                               {step.excerpt}
                             </span>
                           ) : null}
-                        </span>
+                        </button>
                         <span className="shrink-0 whitespace-nowrap text-3xs text-text-muted tabular">
                           {chainStepTokenLabel(step)}
                         </span>

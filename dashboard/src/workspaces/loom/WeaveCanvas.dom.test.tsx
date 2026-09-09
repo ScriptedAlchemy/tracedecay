@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { WeaveCanvas } from './WeaveCanvas.tsx';
+import { WeaveCanvas, eventPositions } from './WeaveCanvas.tsx';
 import { composeWeave, type WeaveSession } from './weave.ts';
 
 /**
@@ -80,4 +80,15 @@ describe('WeaveCanvas time window', () => {
     expect(marks()).toBe(before);
     expect(screen.getByText('whole extent')).toBeTruthy();
   });
+});
+
+it('shares stable source coordinates across viewport and reveal changes', () => {
+  const frames = [10, 20, null].map((timestamp, index) => ({
+    id: `event-${index}`, ordinal: index, timestamp, role: 'assistant', tool: null,
+    content: null, excerpt: '', summaryNodeIds: [],
+  }));
+  const first = eventPositions(frames);
+  expect(eventPositions([...frames])).toEqual(first);
+  expect(first.points.map(({ x, y }) => [x, y])).toEqual([[0, 115], [1, 115], [1, 225]]);
+  expect(frames[2]!.timestamp).toBeNull();
 });
