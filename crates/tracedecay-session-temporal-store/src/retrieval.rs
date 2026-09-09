@@ -22,10 +22,12 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::db::engine;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidatePlan};
 use tracedecay_temporal_query::ports::{
-    CandidatePageSink, MeasuredTemporalValue, PageRequest, PageStatus, PortFuture,
-    TemporalCandidateFilterV1, TemporalCandidatePreparationPort, TemporalExecutionSnapshot,
-    TemporalMessageTypeFilterV1, TemporalPortError, TemporalReadPort, TemporalRecordPageSink,
+    CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState,
+    MeasuredTemporalValue, PageLimits, PageRequest, PageStatus, PortFuture,
+    TemporalCandidateFilterV1, TemporalExecutionSnapshot, TemporalMessageTypeFilterV1,
+    TemporalPortError, TemporalPreparedCandidateCohort, TemporalReadPort, TemporalRecordPageSink,
     TemporalRetrievalScope, TemporalSessionScopeFilterV1, TemporalSnapshotRequest,
+    await_controlled, begin_prepared_candidate_pull, commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
@@ -182,48 +184,6 @@ pub struct GlobalDbTemporalReadPort<'a> {
     git_scope_session_ids: Option<&'a BTreeSet<(String, String)>>,
 }
 
-pub(super) struct GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
-    read_port: &'port GlobalDbTemporalReadPort<'db>,
-    request: &'request TemporalSnapshotRequest,
-    plan: &'request CandidatePlan,
-}
-
-impl<'port, 'db, 'request> GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
-    #[hotpath::skip]
-    pub(super) const fn new(
-        read_port: &'port GlobalDbTemporalReadPort<'db>,
-        request: &'request TemporalSnapshotRequest,
-        plan: &'request CandidatePlan,
-    ) -> Self {
-        Self {
-            read_port,
-            request,
-            plan,
-        }
-    }
-}
-
-impl TemporalCandidatePreparationPort for GlobalDbPreparedCandidatePort<'_, '_, '_> {
-    fn produce_prepared_candidate_page<'a>(
-        &'a self,
-        request: PageRequest,
-        sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async move {
-            self.read_port
-                .produce_candidates_from_request(
-                    &TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
-                    self.request,
-                    1,
-                    self.plan,
-                    &request,
-                    sink,
-                )
-                .await
-        })
-    }
-}
-
 struct SessionReadRelationAuthority<'a> {
     scope: &'a SessionRelationScope,
     store: SessionRelationGraphStore,
@@ -274,6 +234,65 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             relation_authority: Some(SessionReadRelationAuthority { scope, store }),
             git_scope_session_ids: None,
         }
+    }
+
+    #[hotpath::measure(
+        future = true,
+        label = "session_temporal.query.prepare_root_candidates"
+    )]
+    pub(super) async fn prepare_root_candidate_cohort(
+        &self,
+        request: &TemporalSnapshotRequest,
+        plan: &CandidatePlan,
+    ) -> Result<TemporalPreparedCandidateCohort, TemporalPortError> {
+        request.execution_control().checkpoint()?;
+        let limits = request.limits();
+        let candidate_page_items = limits.candidate_limit.min(64);
+        let candidate_limits = PageLimits::new(
+            limits.candidate_limit,
+            limits.candidate_total_bytes,
+            limits.candidate_item_bytes,
+            candidate_page_items,
+        )?;
+        let mut state = CandidateReadState::new(candidate_limits);
+        let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
+        let scope = TemporalRetrievalScope::AllSessionsInAuthorizedRoot;
+        loop {
+            let limits = begin_prepared_candidate_pull(request, &mut state)?;
+            let control = request.execution_control();
+            let field_caps = CandidateFieldCaps::new(
+                limits.candidate_stable_id_bytes,
+                limits.candidate_anchor_id_bytes,
+                limits.candidate_metadata_field_bytes,
+            );
+            let page_request = state.request(limits.candidate_key_bytes, Some(field_caps));
+            let mut sink = state.begin_page(
+                control,
+                limits.candidate_key_bytes,
+                Some(field_caps),
+                CANDIDATE_READ_BUDGET,
+            );
+            let status = await_controlled(
+                control,
+                Box::pin(self.produce_candidates_from_request(
+                    &scope,
+                    request,
+                    1,
+                    plan,
+                    &page_request,
+                    &mut sink,
+                )),
+            )
+            .await?;
+            let page = sink.finish(status)?;
+            let page = commit_prepared_candidate_pull(&mut state, page)?;
+            let status = page.status();
+            candidates.extend(page.into_items());
+            if status == PageStatus::Complete {
+                break;
+            }
+        }
+        TemporalPreparedCandidateCohort::new(candidates)
     }
 
     #[hotpath::skip]
