@@ -1892,13 +1892,14 @@ fn project_code_index_authorities(
             scope.clone(),
         );
     let graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort = Arc::new(
-        crate::daemon::callable_code_authorization::DaemonCodeGraphReadAdmission::production(
+        tracedecay_daemon_service::DaemonCodeGraphReadAdmission::production(
             canonical_project_path.to_path_buf(),
             scope.clone(),
             Arc::clone(cg.configuration_runtime()),
+            crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
         ),
     );
-    let search_admission = query_mcp_admission::admit_query_mcp_read(
+    let search_admission = tracedecay_daemon_service::admit_query_mcp_read(
         Some(profile_identity),
         &project_id,
         &scope,
@@ -1908,7 +1909,7 @@ fn project_code_index_authorities(
         message: format!("project search admission is unavailable: {error}"),
     })?;
     let search_authority = search_admission.search_authority();
-    let read_admission_provider = query_mcp_admission::QueryMcpReadAdmissionProviderV1::new(
+    let read_admission_provider = tracedecay_daemon_service::QueryMcpReadAdmissionProviderV1::new(
         profile_identity.clone(),
         project_id.clone(),
         Arc::clone(route_registered),

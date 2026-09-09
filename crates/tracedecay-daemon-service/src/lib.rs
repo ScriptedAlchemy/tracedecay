@@ -57,16 +57,22 @@
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
 
 pub mod application_surface;
+pub mod callable_code_authorization;
 pub mod invocation;
 mod mcp_project_registry;
 mod mcp_workflow_index;
 pub mod project_owner_registration;
 pub mod project_runtime;
+pub mod query_mcp_admission;
+pub mod remote_protocol;
 pub mod request_cancellation;
 mod shutdown_coordination;
 
 mod multi_root;
 
+pub use callable_code_authorization::{
+    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission,
+};
 pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use invocation::{
@@ -110,6 +116,11 @@ pub use project_runtime::{
     SemanticOwnerRegistrationSignalsV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
 };
+pub use query_mcp_admission::{
+    QUERY_MCP_READ_CAPABILITY_V1, QueryMcpAdmissionUnavailableV1, QueryMcpReadAdmissionProviderV1,
+    QueryMcpReadAdmissionV1, admit_query_mcp_read,
+};
+pub use remote_protocol::build_daemon_remote_protocol_router;
 pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
 pub use shutdown_coordination::{ShutdownCoordinatorV1, ShutdownStatus};
 pub use tracedecay_daemon_protocol::{

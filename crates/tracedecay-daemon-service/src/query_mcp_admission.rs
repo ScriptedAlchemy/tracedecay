@@ -22,14 +22,13 @@ use tracedecay_code_index_runtime::mcp_admission::{
 };
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 
-pub(crate) const QUERY_MCP_READ_CAPABILITY_V1: &str =
-    "capability.application.code-index.search-read";
+pub const QUERY_MCP_READ_CAPABILITY_V1: &str = "capability.application.code-index.search-read";
 const QUERY_MCP_GRANT_HORIZON: Duration = Duration::from_hours(24);
 const AUTHORIZATION_REVISION_DOMAIN_V1: &str = "tracedecay.query-read-authorization.v1";
 const PRINCIPAL_DOMAIN_V1: &str = "tracedecay.query-profile-principal.v1";
 
 #[derive(Clone)]
-pub(crate) struct QueryMcpReadAdmissionV1 {
+pub struct QueryMcpReadAdmissionV1 {
     project_id: ProjectId,
     scope: ResolvedScope,
     principal: PrincipalId,
@@ -41,14 +40,14 @@ pub(crate) struct QueryMcpReadAdmissionV1 {
 }
 
 #[derive(Clone)]
-pub(crate) struct QueryMcpReadAdmissionProviderV1 {
+pub struct QueryMcpReadAdmissionProviderV1 {
     identity: LocalProfileIdentityAuthorityV1,
     project_id: ProjectId,
     route_registered: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub(crate) enum QueryMcpAdmissionUnavailableV1 {
+pub enum QueryMcpAdmissionUnavailableV1 {
     #[error("the MCP route has no daemon-authenticated profile actor")]
     Unauthenticated,
     #[error("the MCP read grant is invalid")]
@@ -94,7 +93,7 @@ fn record_query_admission_refusal(reason: QueryMcpAdmissionUnavailableV1) {
     }
 }
 
-pub(crate) fn admit_query_mcp_read(
+pub fn admit_query_mcp_read(
     identity: Option<&LocalProfileIdentityAuthorityV1>,
     project_id: &ProjectId,
     scope: &ResolvedScope,
@@ -121,7 +120,7 @@ pub(crate) fn admit_query_mcp_read(
 }
 
 impl QueryMcpReadAdmissionProviderV1 {
-    pub(crate) fn new(
+    pub fn new(
         identity: LocalProfileIdentityAuthorityV1,
         project_id: ProjectId,
         route_registered: Arc<AtomicBool>,
@@ -133,7 +132,7 @@ impl QueryMcpReadAdmissionProviderV1 {
         }
     }
 
-    pub(crate) fn admit_current(
+    pub fn admit_current(
         &self,
         scope: &ResolvedScope,
     ) -> Result<QueryMcpReadAdmissionV1, QueryMcpAdmissionUnavailableV1> {
@@ -145,7 +144,7 @@ impl QueryMcpReadAdmissionProviderV1 {
         )
     }
 
-    pub(crate) fn route_is_registered(&self) -> bool {
+    pub fn route_is_registered(&self) -> bool {
         self.route_registered.load(Ordering::Acquire)
     }
 }
@@ -253,14 +252,14 @@ impl CodeIndexMcpReadAdmissionV1 for QueryMcpReadAdmissionProviderV1 {
 }
 
 impl QueryMcpReadAdmissionV1 {
-    pub(crate) fn search_authority(&self) -> code_search::CodeIndexSearchAuthorityV1 {
+    pub fn search_authority(&self) -> code_search::CodeIndexSearchAuthorityV1 {
         code_search::CodeIndexSearchAuthorityV1 {
             principal: self.principal.clone(),
             authorization_revision: self.authorization_revision.clone(),
         }
     }
 
-    pub(crate) fn authorize(
+    pub fn authorize(
         &self,
         scope: &ResolvedScope,
         supplied: Option<&code_search::CodeIndexSearchAuthorityV1>,

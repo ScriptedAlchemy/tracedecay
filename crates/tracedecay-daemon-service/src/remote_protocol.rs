@@ -57,14 +57,13 @@ use tracedecay_domain::{
 use tracedecay_rusqlite_runtime::remote::{CredentialDerivedSpoolKeyringV1, RemoteSpoolKeyringV1};
 use tracedecay_tool_catalog::SchemaId;
 
-use tracedecay_daemon_service::DaemonInvocationService;
+use crate::DaemonInvocationService;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
 
 mod observability;
 
-#[cfg(test)]
-pub(super) fn remote_query_result_observation(
+pub fn remote_query_result_observation(
     operation_ref: &str,
     expected_shards: usize,
     result: &tracedecay_contracts::remote::query::RemoteQueryResultV1,
@@ -657,7 +656,7 @@ macro_rules! impl_daemon_remote_recovery_protocol {
 }
 
 #[hotpath::measure(label = "daemon.remote.router_build")]
-pub(crate) fn build_daemon_remote_protocol_router(
+pub fn build_daemon_remote_protocol_router(
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
     invocation: DaemonInvocationService,
