@@ -30,7 +30,6 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
-use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_store::FactReadControl;
 
 use crate::daemon::retained_owner::receipts::{PreparedRetainedEffect, prepare_retained_effect};
@@ -134,7 +133,9 @@ impl<T: Send + 'static> RetainedSettlementWaiter<Result<T>> {
 pub(crate) type AutomationLedgerObserver =
     Box<dyn FnOnce(&AutomationRunLedgerRecord) + Send + 'static>;
 
-use tracedecay_automation_runtime::automation::effect_runtime::settlement::BoundSettlement;
+use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
+    self, BoundSettlement,
+};
 #[cfg(test)]
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     PreparedWriteHook, RetainedSettlementPhase, SettlementPhaseHook,
@@ -391,7 +392,6 @@ struct RetainedDirectSettlement {
 struct RetainedAbandonment {
     authority: AutomationEffectAuthority,
     guard: RetainedSettlementGuardOwner,
-    reservation_abandoned: bool,
 }
 
 fn ledger_record_matches_result(
@@ -960,7 +960,6 @@ impl AutomationEffectAuthority {
         abandon_retained_owner(RetainedAbandonment {
             authority: self,
             guard,
-            reservation_abandoned: false,
         })
     }
 
@@ -993,6 +992,8 @@ impl AutomationEffectAuthority {
         configuration_digest: ManifestDigest,
         request: AutomationRunRequestV1,
     ) -> Result<AutomationEffectAdmission> {
+        // Admission retains journal and authority state; keep that frame out of scheduler and dashboard callers.
+        Box::pin(async move {
         if !request.validate() {
             return Err(contract_error("automation run identity is empty"));
         }
@@ -1407,6 +1408,7 @@ impl AutomationEffectAuthority {
         }?;
         observe_admission_decision(&admission);
         Ok(admission)
+        }).await
     }
 
     fn terminal_for_run(
@@ -1926,82 +1928,17 @@ fn observe_automation_ledger(
 }
 
 fn settle_direct_owner(
-    state: RetainedDirectSettlement,
-) -> Result<RetainedOwnerValue<AutomationSettledTerminal>> {
-    settle_direct_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
-}
-
-fn settle_direct_owner_with_budget(
     mut state: RetainedDirectSettlement,
-    budget: Duration,
 ) -> Result<RetainedOwnerValue<AutomationSettledTerminal>> {
-    let started = std::time::Instant::now();
-    let mut delay = Duration::from_millis(25);
-    loop {
-        let error = match settle_direct_once(&mut state) {
-            Ok(()) => return Ok(complete_direct_settlement(state)),
-            Err(error) => {
-                match classify_durable_settlement_blocking(
-                    &state.authority.journal_path,
-                    &state.authority.admission,
-                    &state.terminal,
-                    None,
-                ) {
-                    Ok(classification) if classification.is_terminal() => {
-                        tracing::warn!(error = %error, "direct automation terminal committed with deferred housekeeping");
-                        cleanup_direct_terminal(&state);
-                        return Ok(complete_direct_settlement(state));
-                    }
-                    Ok(_) => {
-                        tracing::warn!(error = %error, "direct automation finalization remains pending under its blocking owner");
-                    }
-                    Err(classification_error) => tracing::warn!(
-                        error = %error,
-                        classification_error = %classification_error,
-                        "direct automation finalization remains uncertain under its blocking owner"
-                    ),
-                }
-                error
-            }
-        };
-        if state.authority.cancellation.is_cancelled() {
-            return Err(contract_error(format!(
-                "direct automation settlement for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
-                state.authority.admission.request.run_id
-            )));
-        }
-        if started.elapsed() >= budget {
-            return Err(contract_error(format!(
-                "direct automation settlement for run '{}' exceeded its retry budget; state remains recoverable: {error}",
-                state.authority.admission.request.run_id
-            )));
-        }
-        std::thread::sleep(delay);
-        delay = delay.saturating_mul(2).min(Duration::from_secs(5));
-    }
-}
-
-fn settle_direct_once(state: &mut RetainedDirectSettlement) -> Result<()> {
-    state.terminal = persist_terminal_blocking(
-        &state.authority.journal_path,
-        &state.authority.admission,
-        state.terminal.clone(),
-    )?;
-    cleanup_direct_terminal(state);
-    Ok(())
-}
-
-fn cleanup_direct_terminal(state: &RetainedDirectSettlement) {
-    if let Err(error) = remove_pending_blocking(
+    state.terminal = settlement::settle_direct(
         &state.authority.dashboard_root,
         &state.authority.journal_path,
-    ) {
-        tracing::warn!(
-            run_id = %state.authority.admission.request.run_id,
-            error = %error,
-            "direct automation terminal is committed; pending-index cleanup remains recoverable"
-        );
-    }
+        &state.authority.admission,
+        &state.authority.cancellation,
+        state.terminal,
+        RETAINED_SETTLEMENT_RETRY_BUDGET,
+    )?;
+    Ok(complete_direct_settlement(state))
 }
 
 fn complete_direct_settlement(
@@ -2027,91 +1964,26 @@ fn complete_direct_settlement(
 }
 
 fn abandon_retained_owner(state: RetainedAbandonment) -> Result<RetainedOwnerValue<()>> {
-    abandon_retained_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
-}
-
-fn abandon_retained_owner_with_budget(
-    mut state: RetainedAbandonment,
-    budget: Duration,
-) -> Result<RetainedOwnerValue<()>> {
-    let started = std::time::Instant::now();
-    let mut delay = Duration::from_millis(25);
-    loop {
-        match abandon_retained_once(&mut state) {
-            Ok(()) => {
-                let RetainedAbandonment {
-                    authority,
-                    guard,
-                    reservation_abandoned: _,
-                } = state;
-                drop(authority);
-                let pair_keepalive = match guard {
-                    RetainedSettlementGuardOwner::Single(guard) => {
-                        drop(guard);
-                        None
-                    }
-                    RetainedSettlementGuardOwner::Pair(guards) => Some(guards),
-                };
-                return Ok(RetainedOwnerValue {
-                    value: (),
-                    pair_keepalive,
-                });
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "automation abandonment remains pending under its blocking owner"
-                );
-                if state.authority.cancellation.is_cancelled() {
-                    return Err(contract_error(format!(
-                        "automation abandonment for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
-                        state.authority.admission.request.run_id
-                    )));
-                }
-                if started.elapsed() >= budget {
-                    return Err(contract_error(format!(
-                        "automation abandonment for run '{}' exceeded its retry budget; state remains recoverable: {error}",
-                        state.authority.admission.request.run_id
-                    )));
-                }
-            }
-        }
-        std::thread::sleep(delay);
-        delay = delay.saturating_mul(2).min(Duration::from_secs(5));
-    }
-}
-
-fn abandon_retained_once(state: &mut RetainedAbandonment) -> Result<()> {
-    if !state.reservation_abandoned {
-        if let Err(error) =
-            abandon_reservation_blocking(&state.authority.journal_path, &state.authority.admission)
-        {
-            match std::fs::symlink_metadata(&state.authority.journal_path) {
-                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
-                    sync_parent_directory(
-                        &state.authority.journal_path,
-                        DirectorySyncPolicy::Strict,
-                    )
-                    .map_err(|sync_error| {
-                        contract_error(format!(
-                            "{error}; automation abandonment absence resync failed: {sync_error}"
-                        ))
-                    })?;
-                    tracing::warn!(
-                        run_id = %state.authority.admission.request.run_id,
-                        error = %error,
-                        "automation reservation removal was recovered by durable absence resnapshot"
-                    );
-                }
-                Ok(_) | Err(_) => return Err(error),
-            }
-        }
-        state.reservation_abandoned = true;
-    }
-    remove_pending_blocking(
+    settlement::abandon(
         &state.authority.dashboard_root,
         &state.authority.journal_path,
-    )
+        &state.authority.admission,
+        &state.authority.cancellation,
+        RETAINED_SETTLEMENT_RETRY_BUDGET,
+    )?;
+    let RetainedAbandonment { authority, guard } = state;
+    drop(authority);
+    let pair_keepalive = match guard {
+        RetainedSettlementGuardOwner::Single(guard) => {
+            drop(guard);
+            None
+        }
+        RetainedSettlementGuardOwner::Pair(guards) => Some(guards),
+    };
+    Ok(RetainedOwnerValue {
+        value: (),
+        pair_keepalive,
+    })
 }
 
 async fn discard_direct_recovery_unbound_spools(
