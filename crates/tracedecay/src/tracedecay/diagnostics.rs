@@ -18,7 +18,7 @@ use super::TraceDecay;
 pub use tracedecay_application::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
 
 /// The mounted lease is stored in `canonicalize()` spelling (`/private/var`
-/// on macOS). StoreLayout keeps the caller locator (`/var`, or a `tmp/link`
+/// on macOS). `StoreLayout` keeps the caller locator (`/var`, or a `tmp/link`
 /// alias). Those are one file; byte inequality is not two stores.
 fn mounted_graph_matches_layout(mounted: &Path, locator: &Path) -> bool {
     same_canonical_path(mounted, locator)
