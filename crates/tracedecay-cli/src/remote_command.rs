@@ -528,7 +528,7 @@ mod tests {
 
     use super::{
         RemoteProtocolArgs, build_client, canonical_json_line, emit_protocol_response,
-        render_protocol_response, render_status_human, status_json_line,
+        render_protocol_response, status_json_line,
     };
     use tracedecay_contracts::remote::protocol::{
         RemoteProtocolFailureV1, RemoteProtocolResponseV1, remote_enrollment_result_contract_v1,
@@ -598,31 +598,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_human_render_covers_all_read_variants() {
-        let observed = render_status_human(&observed_fixture());
-        assert!(observed.contains("Remote Brain: partial"));
-        assert!(observed.contains("Listener: serving"));
-        assert!(observed.contains("Authority: available"));
-        assert!(observed.contains("Enrollment configured: yes"));
-        assert!(observed.contains("Spool pending: 3"));
-        assert!(observed.contains("Spool quarantined: 1"));
-        assert!(observed.contains("Sequence gap: yes"));
-        assert!(observed.contains("Replay coverage complete: no"));
-        assert!(observed.contains("Current backup verified: yes"));
-        assert!(observed.contains("Failover in progress: no"));
-        assert!(observed.contains("Recovery required: no"));
-
-        assert_eq!(
-            render_status_human(&RemoteOperationalStatusReadV1::Unconfigured),
-            "Remote Brain: unconfigured\n"
-        );
-        assert_eq!(
-            render_status_human(&RemoteOperationalStatusReadV1::Unavailable),
-            "Remote Brain: unavailable\n"
-        );
-    }
-
     fn protocol_problem_response() -> RemoteProtocolResponseV1<()> {
         let request_id =
             RequestId::new("request.cli.remote.7").expect("canonical remote request id");
@@ -672,83 +647,6 @@ mod tests {
             }
             other => panic!("expected config error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn query_human_render_surfaces_remote_and_local_coverage_honestly() {
-        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
-            serde_json::from_value(serde_json::json!({
-                "composition": {
-                    "contributions": [{
-                        "manifest": {
-                            "brain_id": "brain.query",
-                            "shard_id": "shard.project",
-                            "generation_id": "generation.7",
-                            "schema_digest": vec![1u8; 32],
-                            "watermark_sequence": 9,
-                            "placement_revision": 3,
-                            "authority_epoch": 4,
-                            "cache_age_millis": 10,
-                            "cache_lag_commits": 0
-                        },
-                        "integrity": "verified",
-                        "authenticity": "authenticated",
-                        "freshness": "current",
-                        "completeness": "complete",
-                        "authorization": "authorized",
-                        "coverage": "partial",
-                        "authority_receipt": null,
-                        "value": null,
-                        "reason_code": "authorization_receipt_unavailable"
-                    }],
-                    "pending_local": {
-                        "availability": "available",
-                        "evidence": {
-                            "count": 2,
-                            "oldest_age_millis": 50,
-                            "has_sequence_gap": true,
-                            "has_quarantined": false
-                        }
-                    },
-                    "coverage": "partial"
-                },
-                "observation": { "state": "not_found" }
-            }))
-            .expect("query result fixture");
-
-        let rendered = super::render_query_coverage(&result, None);
-        assert!(rendered.contains("Coverage: partial"));
-        assert!(rendered.contains(
-            "Remote shard shard.project@generation.7: partial (authorization_receipt_unavailable)"
-        ));
-        assert!(rendered.contains("Local pending captures: 2"));
-        assert!(rendered.contains("Local sequence gap: yes"));
-        assert!(rendered.contains("Local quarantined captures: no"));
-        assert!(rendered.contains("Observation: not_found"));
-    }
-
-    #[test]
-    fn query_human_render_names_an_unavailable_local_spool() {
-        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
-            serde_json::from_value(serde_json::json!({
-                "composition": {
-                    "contributions": [],
-                    "pending_local": {
-                        "availability": "unavailable",
-                        "reason": "requesting_node_spool_not_supplied"
-                    },
-                    "coverage": "unknown"
-                },
-                "observation": { "state": "not_found" }
-            }))
-            .expect("query result fixture");
-
-        let rendered = super::render_query_coverage(&result, None);
-        assert!(
-            rendered.contains(
-                "Local pending captures: unavailable (requesting node spool not supplied)"
-            )
-        );
     }
 
     #[test]

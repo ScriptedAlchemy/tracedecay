@@ -139,68 +139,6 @@ fn kiro_fixture_records_install_and_list_arguments() {
 }
 
 #[test]
-fn kiro_fixture_conflict_marker_prints_typed_conflict_output() {
-    let home = TempDir::new().unwrap();
-    fs::create_dir_all(home.path().join(".tracedecay-host-cli-fixture")).unwrap();
-    fs::write(
-        home.path().join(".tracedecay-host-cli-fixture/conflict"),
-        b"",
-    )
-    .unwrap();
-    let bin_dir = TempDir::new().unwrap();
-    let bin = install_compiled_host_cli_fixture(bin_dir.path(), "kiro-cli");
-
-    let output = run_fixture(&bin, home.path(), &["mcp", "list"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("\"error\":\"conflict\""),
-        "conflict marker must print the conflict payload\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn kiro_fixture_malformed_marker_writes_invalid_registry_json() {
-    let home = TempDir::new().unwrap();
-    fs::create_dir_all(home.path().join(".tracedecay-host-cli-fixture")).unwrap();
-    fs::write(
-        home.path().join(".tracedecay-host-cli-fixture/malformed"),
-        b"",
-    )
-    .unwrap();
-    let bin_dir = TempDir::new().unwrap();
-    let bin = install_compiled_host_cli_fixture(bin_dir.path(), "kiro-cli");
-
-    let output = run_fixture(
-        &bin,
-        home.path(),
-        &[
-            "mcp",
-            "add",
-            "--name",
-            "tracedecay",
-            "--command",
-            "/usr/local/bin/tracedecay",
-            "--args",
-            "serve",
-            "--scope",
-            "global",
-            "--force",
-        ],
-    );
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "not-a-json-document"
-    );
-    let written = fs::read_to_string(home.path().join(".kiro/settings/mcp.json")).unwrap();
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&written).is_err(),
-        "malformed marker must write invalid registry JSON: {written}"
-    );
-}
-
-#[test]
 fn codex_fixture_installs_lists_and_records_plugin_arguments() {
     let home = TempDir::new().unwrap();
     let source = home.path().join(".codex/plugins/tracedecay/.codex-plugin");

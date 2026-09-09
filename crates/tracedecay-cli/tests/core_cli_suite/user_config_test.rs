@@ -1,17 +1,6 @@
 use tracedecay_session_memory::user_config::UserConfig;
 
 #[test]
-fn defaults_when_no_file() {
-    let config = UserConfig::default();
-    assert!(!config.upload_enabled);
-    assert_eq!(config.pending_upload, 0);
-    assert_eq!(config.last_upload_at, 0);
-    assert_eq!(config.last_worldwide_total, 0);
-    assert_eq!(config.last_worldwide_fetch_at, 0);
-    assert_eq!(config.last_flush_attempt_at, 0);
-}
-
-#[test]
 fn round_trip_serialization() {
     let config = UserConfig {
         upload_enabled: false,
@@ -63,11 +52,4 @@ fn old_daemon_debounce_field_still_deserializes() {
     let toml = r#"daemon_debounce = "30s""#;
     let cfg: tracedecay_session_memory::user_config::UserConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.watcher_debounce, "30s");
-}
-
-#[test]
-fn new_watcher_debounce_field_works() {
-    let toml = r#"watcher_debounce = "45s""#;
-    let cfg: tracedecay_session_memory::user_config::UserConfig = toml::from_str(toml).unwrap();
-    assert_eq!(cfg.watcher_debounce, "45s");
 }

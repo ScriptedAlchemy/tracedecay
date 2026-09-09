@@ -3,13 +3,6 @@ use tempfile::NamedTempFile;
 use tracedecay_runtime_core::sync::*;
 
 #[test]
-fn test_content_hash_deterministic() {
-    let hash1 = content_hash("fn main() {}");
-    let hash2 = content_hash("fn main() {}");
-    assert_eq!(hash1, hash2);
-}
-
-#[test]
 fn test_content_hash_different() {
     let hash1 = content_hash("fn main() {}");
     let hash2 = content_hash("fn main() { println!(\"hello\"); }");

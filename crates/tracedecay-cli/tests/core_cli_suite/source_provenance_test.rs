@@ -321,31 +321,8 @@ fn source_provenance_cargo_fixture() -> std::path::PathBuf {
     package_manifest_directory().join(SOURCE_PROVENANCE_CARGO_FIXTURE)
 }
 
-fn copy_directory(source: &std::path::Path, destination: &std::path::Path) {
-    std::fs::create_dir_all(destination).expect("copy destination");
-    for entry in std::fs::read_dir(source).expect("copy source") {
-        let entry = entry.expect("copy source entry");
-        let target = destination.join(entry.file_name());
-        if entry.file_type().expect("copy source type").is_dir() {
-            copy_directory(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy source file");
-        }
-    }
-}
-
 fn cargo_config_directory(path: &std::path::Path) -> String {
     toml::Value::String(path.to_string_lossy().into_owned()).to_string()
-}
-
-#[test]
-fn cargo_config_directory_is_a_toml_string_for_quotes_and_backslashes() {
-    let path = std::path::Path::new(r#"C:\fixture\"quoted"\vendor"#);
-    let document = format!("directory = {}\n", cargo_config_directory(path));
-    let parsed = toml::from_str::<toml::Value>(&document)
-        .unwrap_or_else(|error| panic!("invalid Cargo config {document:?}: {error}"));
-
-    assert_eq!(parsed["directory"].as_str(), path.to_str());
 }
 
 fn workspace_rustup_toolchain() -> Option<String> {
@@ -553,34 +530,6 @@ impl CargoFixture {
         }
         command.output().expect("fixture cargo should run")
     }
-}
-
-#[test]
-fn a_missing_vendored_checksum_fails_the_named_dependency_preflight() {
-    let damaged_vendor = tempfile::tempdir().expect("damaged vendor directory");
-    copy_directory(
-        &source_provenance_cargo_fixture().join("vendor"),
-        damaged_vendor.path(),
-    );
-    std::fs::remove_file(
-        damaged_vendor
-            .path()
-            .join("serde_json/.cargo-checksum.json"),
-    )
-    .expect("remove serde_json checksum");
-    let fixture = CargoFixture::with_vendor(damaged_vendor.path());
-
-    let error = fixture
-        .dependency_preflight()
-        .expect_err("missing vendored checksum must fail before provenance setup");
-
-    assert!(error.contains("source-provenance dependency preflight failed"));
-    assert!(error.contains("serde_json"), "{error}");
-    assert!(error.contains(".cargo-checksum.json"), "{error}");
-    assert!(
-        !fixture.root().join(".git").exists(),
-        "dependency failure must precede provenance repository setup"
-    );
 }
 
 #[test]

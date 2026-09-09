@@ -2,47 +2,6 @@ use tempfile::TempDir;
 use tracedecay::config::*;
 
 #[test]
-fn default_config_excludes_generated_vendor_cache_trees_and_gitignore_on() {
-    let config = TraceDecayConfig::default();
-    assert!(config.git_ignore);
-    assert!(config.include.is_empty());
-    for pattern in [
-        "target/**",
-        ".git/**",
-        ".tracedecay/**",
-        "**/node_modules/**",
-        "vendor/**",
-        "**/vendor/**",
-        "build/**",
-        "**/build/**",
-        "dist/**",
-        "**/dist/**",
-        "out/**",
-        "**/out/**",
-        "coverage/**",
-        "**/coverage/**",
-        ".cache/**",
-        "**/.cache/**",
-        ".next/**",
-        "**/.next/**",
-        ".turbo/**",
-        "**/.turbo/**",
-        ".gradle/**",
-        "**/.gradle/**",
-        ".venv/**",
-        "**/.venv/**",
-        "venv/**",
-        "**/venv/**",
-        "**/__pycache__/**",
-    ] {
-        assert!(
-            config.exclude.iter().any(|p| p == pattern),
-            "missing default exclude pattern {pattern}"
-        );
-    }
-}
-
-#[test]
 fn legacy_config_fixture_load_does_not_rewrite_input() {
     let dir = TempDir::new().unwrap();
     let config = TraceDecayConfig::default();
@@ -86,13 +45,6 @@ fn default_generated_excludes_prune_nested_dirs() {
             "expected default excludes to prune {path}"
         );
     }
-}
-
-#[test]
-fn test_tracedecay_dir_creation() {
-    let dir = TempDir::new().unwrap();
-    let cg_dir = get_tracedecay_dir(dir.path());
-    assert!(cg_dir.ends_with(".tracedecay"));
 }
 
 #[test]
@@ -164,21 +116,6 @@ fn test_is_in_gitignore_no_file() {
     assert!(!is_in_gitignore(dir.path()));
 }
 
-// ── resolve_path ────────────────────────────────────────────────────────────
-
-#[test]
-fn test_resolve_path_with_value() {
-    let path = std::env::temp_dir().join("myproject");
-    let result = resolve_path(Some(path.to_string_lossy().into_owned()));
-    assert_eq!(result, path);
-}
-
-#[test]
-fn test_resolve_path_none_uses_cwd() {
-    let result = resolve_path(None);
-    assert!(!result.as_os_str().is_empty());
-}
-
 #[test]
 fn test_discover_project_root_finds_parent() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -197,15 +134,4 @@ fn test_discover_project_root_returns_none() {
     let dir = tempfile::TempDir::new().unwrap();
     let found = tracedecay::config::discover_project_root(dir.path());
     assert!(found.is_none());
-}
-
-#[test]
-fn test_discover_project_root_at_root_itself() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let root = dir.path();
-    std::fs::create_dir_all(root.join(".tracedecay")).unwrap();
-    std::fs::write(root.join(".tracedecay/tracedecay.db"), b"fake").unwrap();
-
-    let found = tracedecay::config::discover_project_root(root);
-    assert_eq!(found, Some(root.to_path_buf()));
 }

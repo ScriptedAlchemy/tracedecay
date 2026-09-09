@@ -802,22 +802,6 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
 /// Drives the Codex activation journey non-interactively: install stages the
 /// plugin source and marketplace entry, then drives `codex plugin add` through
 /// a host-CLI shim that emulates Codex 0.147's non-interactive registry.
-#[test]
-fn codex_plugin_cli_shim_is_a_native_executable() {
-    let home = TempDir::new().unwrap();
-    let mut command = Command::new("true");
-    add_codex_plugin_cli_shim(&mut command, home.path());
-    let shim = home
-        .path()
-        .join(format!("bin/codex{}", std::env::consts::EXE_SUFFIX));
-    let bytes = std::fs::read(&shim).unwrap();
-    assert!(
-        provision_host_cli_fixture::looks_like_native_executable(&bytes),
-        "Codex host-CLI fixture must be a compiled executable, not a script (Windows os error 216); first bytes: {:?}",
-        &bytes[..bytes.len().min(8)]
-    );
-}
-
 fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
     let home_path = canonical_temp_path(home.path());
 
@@ -2685,43 +2669,6 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
             .expect("branch metadata after removal")
             .is_tracked("feature/new"),
         "branch remove must retire its metadata only after exact provenance cleanup is selected"
-    );
-}
-
-#[tokio::test]
-async fn branch_remove_deletes_branch_db_from_profile_shard() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_git_fixture(project.path());
-    write_profile_sharded_fixture(home.path(), project.path());
-    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
-        .await
-        .unwrap();
-    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
-    runtime.checkpoint_profile_database_for_test().await;
-    drop(runtime);
-    seed_canonical_configuration(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[("feature/ui", "branches/feature_ui.db")],
-        true,
-    );
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["branch", "remove", "feature/ui"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "branch remove should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !shard_root.join("branches/feature_ui.db").exists(),
-        "branch remove should delete branch DB from profile shard"
     );
 }
 

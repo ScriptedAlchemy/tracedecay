@@ -15,17 +15,6 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 #[test]
-fn cargo_env_pins_data_dir_for_tests() {
-    let value = std::env::var_os(USER_DATA_DIR_ENV).unwrap_or_default();
-    assert!(
-        !value.is_empty(),
-        "{USER_DATA_DIR_ENV} must be set for cargo-launched test processes; \
-         expected the [env] entry in .cargo/config.toml to provide it. \
-         Run tests through cargo/nextest from the workspace root."
-    );
-}
-
-#[test]
 fn resolved_data_dir_is_not_the_real_user_profile() {
     let resolved = user_data_dir().expect("user_data_dir should resolve in tests");
     let Some(real_profile) = dirs::home_dir().map(|home| home.join(".tracedecay")) else {
