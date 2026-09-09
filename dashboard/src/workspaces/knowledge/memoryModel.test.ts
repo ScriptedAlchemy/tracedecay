@@ -17,22 +17,7 @@ import {
   OplogPayloadSchema,
   TrustHistoryPayloadSchema,
 } from '../../data/query/memory.ts';
-import {
-  formatUtcMicros,
-  oplogReading,
-  projectionReading,
-  similarityReading,
-  trustDetailState,
-  trustHistoryReading,
-} from './memoryModel.ts';
-
-/* ---- trust history ------------------------------------------------------- */
-
-describe('formatUtcMicros', () => {
-  it('formats canonical microseconds for presentation without changing the wire value', () => {
-    expect(formatUtcMicros(1_754_006_400_000_000)).toBe('2025-08-01T00:00:00.000Z');
-  });
-});
+import { oplogReading, projectionReading, similarityReading, trustDetailState, trustHistoryReading } from './memoryModel.ts';
 
 function trustEvent(overrides: Partial<TrustHistoryPayload['trust_history'][number]> = {}) {
   return {

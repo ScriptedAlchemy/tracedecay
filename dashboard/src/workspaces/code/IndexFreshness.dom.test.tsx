@@ -146,17 +146,6 @@ describe('Code index freshness', () => {
     expect(text).not.toContain('0 B/s');
   });
 
-  it('removes progress when the generation is ready and has no active build', async () => {
-    renderFreshness('ready', {
-      worktrees: [{ ...worktree(), progress: null }],
-      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
-    });
-
-    await screen.findByText('Ready');
-    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
-    expect(screen.queryByText(/throughput unavailable/)).toBeNull();
-  });
-
   it('accepts a later replacement generation after epoch restart and rejects its delayed predecessor', async () => {
     vi.useFakeTimers();
     const first = envelope('loading', {

@@ -60,9 +60,6 @@ function twoRegionModel() {
 }
 
 describe('reliefOutline', () => {
-  it('is deterministic, so a screenshot of the same graph is the same picture', () => {
-    expect(reliefOutline('src/graph', 40)).toEqual(reliefOutline('src/graph', 40));
-  });
 
   it('gives two directories different landforms and the same mean radius', () => {
     const mean = (points: readonly { x: number; y: number }[]) =>

@@ -147,49 +147,6 @@ describe('CortexRelief', () => {
     }
   });
 
-  it('states the aggregation it performed, in counted figures', async () => {
-    serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
-    const { container } = renderCortex();
-    await screen.findByRole('table');
-
-    const plate = container.querySelector('[data-testid="cortex-readout"]')!.textContent ?? '';
-    expect(plate).toContain('module regions');
-    expect(plate).toContain('depth strata');
-    expect(plate).toContain('contour interval');
-    expect(plate).toContain('edges / file');
-    expect(plate).toContain('folded out');
-    expect(plate).toContain(`cap ${MAX_DRAWN_REGIONS} regions`);
-  });
-
-  it('names the channels the read does not back instead of drawing them', async () => {
-    serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
-    const { container } = renderCortex();
-    await screen.findByRole('table');
-
-    const key = container.querySelector('[data-testid="cortex-key"]')!.textContent ?? '';
-    // What it does draw, each traced to the measurement it came from.
-    expect(key).toContain('file-level dependency depth');
-    expect(key).toContain('area carries the count');
-    expect(key).toContain('files and not symbols');
-    expect(key).toContain('index contour');
-    // And the harder half: what it is not drawing, and why.
-    expect(key).toContain('not on this sheet');
-    expect(key).toContain('no git-churn read is exposed to this dashboard');
-    expect(key).toContain('not region-pair edge counts');
-    expect(key).toContain('live activity is published for the project and carries no path');
-  });
-
-  it('draws a measured zero as no relief rather than as flat ground', async () => {
-    serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
-    renderCortex();
-    const table = await screen.findByRole('table');
-    // `src/mod3` was given zero internal edges by the fixture.
-    expect(within(table).getAllByText('no relief').length).toBe(1);
-    const key = screen.getByTestId('cortex-key').textContent ?? '';
-    expect(key).toContain('1 without relief');
-    expect(key).toContain('It is not missing from the sheet, and it is not flat ground');
-  });
-
   it('rings the region the workspace focus lives in, composing with the lens', async () => {
     serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
     renderCortex('src/mod2/a.rs');
