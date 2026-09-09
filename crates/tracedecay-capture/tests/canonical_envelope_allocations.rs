@@ -1,3 +1,5 @@
+// Its own test binary, not a capture_suite module: the counting
+// #[global_allocator] below is binary-global.
 //! Finishing a canonical envelope must cost one structural conversion, not an
 //! encode-to-bytes plus a decode of those bytes. A counting allocator measures
 //! the finishing step alone: the native record is decoded and the envelope is

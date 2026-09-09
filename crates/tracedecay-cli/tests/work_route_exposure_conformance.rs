@@ -1,3 +1,5 @@
+// Its own test binary, not a core_cli_suite module: the conformance run sets and
+// restores process environment variables in-process.
 //! Conformance contract for every `RouteExposureV1::Public` executable binding.
 //!
 //! Each available executable binding advertises a public route path to clients.
