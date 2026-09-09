@@ -279,6 +279,10 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The test boundary varies provider, project, Git and message filters independently to verify isolation."
+    )]
     pub async fn search_session_messages_git_scoped_for_test(
         &self,
         scope: HostAdmissionScope,

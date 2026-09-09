@@ -20,7 +20,6 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::trivially_copy_pass_by_ref)]
 #![allow(clippy::unused_self)]
-#![allow(clippy::too_many_arguments)]
 #![allow(clippy::items_after_statements)]
 #![allow(clippy::struct_field_names)]
 #![allow(clippy::match_same_arms)]
