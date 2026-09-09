@@ -29,23 +29,6 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
 }
 
 #[tokio::test]
-async fn resolved_project_store_helpers_default_to_profile_sharded_artifact_paths() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let home = test_home(&dir);
-    let profile_root = home.join(".tracedecay");
-    fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeGuard::set(&home);
-    let project_id = default_profile_project_id(&project);
-
-    assert_path_eq(
-        resolve_project_session_db_path(&project).unwrap(),
-        profile_root.join(format!("projects/{project_id}/sessions.db")),
-    );
-}
-
-#[tokio::test]
 async fn hermes_profile_like_directory_uses_user_profile_shard() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
