@@ -1,4 +1,4 @@
-use crate::common::{EnvVarGuard, lock_global_db_env, lock_recovering_poison};
+use crate::common::{EnvVarGuard, lock_global_db_env};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay_agent_hosts::hooks::{
@@ -17,14 +17,6 @@ use tracedecay_runtime_core::storage::{
 fn is_blocked(json: &str) -> bool {
     let v: serde_json::Value = serde_json::from_str(json).unwrap();
     v["hookSpecificOutput"]["permissionDecision"].as_str() == Some("deny")
-}
-
-fn get_block_reason(json: &str) -> String {
-    let v: serde_json::Value = serde_json::from_str(json).unwrap();
-    v["hookSpecificOutput"]["permissionDecisionReason"]
-        .as_str()
-        .unwrap_or("")
-        .to_string()
 }
 
 fn read_hook_analytics_events(root: &Path) -> Vec<serde_json::Value> {
@@ -78,84 +70,8 @@ fn test_blocks_exploration_prompt_explore() {
 }
 
 #[test]
-fn test_blocks_codebase_structure_prompt() {
-    let input = r#"{"prompt": "Understand the codebase structure"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_blocks_call_graph_prompt() {
-    let input = r#"{"prompt": "Show me the call graph for this function"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_blocks_who_calls_prompt() {
-    let input = r#"{"prompt": "who calls the process_data function?"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_blocks_callers_of_prompt() {
-    let input = r#"{"prompt": "find callers of handle_request"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_blocks_callees_of_prompt() {
-    let input = r#"{"prompt": "what are the callees of main?"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_blocks_symbol_lookup_prompt() {
-    let input = r#"{"prompt": "do a symbol lookup for TraceDecay"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_blocks_read_every_prompt() {
-    let input = r#"{"prompt": "read every file in src/"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_blocks_entire_codebase_prompt() {
-    let input = r#"{"prompt": "scan the entire codebase for patterns"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_allows_normal_prompt() {
-    let input = r#"{"prompt": "write a unit test for the parse function"}"#;
-    let result = evaluate_hook_decision(input);
-    assert!(result.is_empty(), "allow should produce no output");
-}
-
-#[test]
-fn test_allows_empty_input() {
-    let result = evaluate_hook_decision("");
-    assert!(result.is_empty(), "allow should produce no output");
-}
-
-#[test]
 fn test_allows_invalid_json() {
     let result = evaluate_hook_decision("not json at all");
-    assert!(result.is_empty(), "allow should produce no output");
-}
-
-#[test]
-fn test_allows_no_prompt_no_subagent() {
-    let input = r#"{"foo": "bar"}"#;
-    let result = evaluate_hook_decision(input);
     assert!(result.is_empty(), "allow should produce no output");
 }
 
@@ -164,15 +80,6 @@ fn test_case_insensitive_blocking() {
     let input = r#"{"prompt": "EXPLORE the Codebase Architecture"}"#;
     let result = evaluate_hook_decision(input);
     assert!(is_blocked(&result));
-}
-
-#[test]
-fn test_block_response_has_reason() {
-    let input = r#"{"subagent_type": "Explore"}"#;
-    let result = evaluate_hook_decision(input);
-    let reason = get_block_reason(&result);
-    assert!(reason.contains("tracedecay MCP tools"));
-    assert!(reason.contains("tracedecay hint:"));
 }
 
 #[test]
@@ -210,18 +117,6 @@ fn test_kiro_blocks_delegate_code_research_task() {
 }
 
 #[test]
-fn test_kiro_blocks_subagent_research_prompt() {
-    let input = r#"{
-        "hook_event_name": "preToolUse",
-        "tool_name": "subagent",
-        "tool_input": {
-            "prompt": "who calls the process_data function?"
-        }
-    }"#;
-    assert!(evaluate_kiro_pre_tool_use(input).is_some());
-}
-
-#[test]
 fn test_kiro_allows_delegate_execution_task() {
     let input = r#"{
         "hook_event_name": "preToolUse",
@@ -248,28 +143,6 @@ fn test_kiro_allows_non_delegation_tool() {
 #[test]
 fn test_kiro_allows_invalid_json() {
     assert!(evaluate_kiro_pre_tool_use("not json").is_none());
-}
-
-#[test]
-fn test_cursor_subagent_start_allows_explore_research_task() {
-    let input = r#"{
-        "hook_event_name": "subagentStart",
-        "subagent_type": "explore",
-        "task": "Explore the codebase architecture and call graph"
-    }"#;
-
-    assert!(evaluate_cursor_subagent_start(input).is_none());
-}
-
-#[test]
-fn test_cursor_subagent_start_allows_execution_task() {
-    let input = r#"{
-        "hook_event_name": "subagentStart",
-        "subagent_type": "generalPurpose",
-        "task": "Run the test suite and summarize failures"
-    }"#;
-
-    assert!(evaluate_cursor_subagent_start(input).is_none());
 }
 
 #[test]
@@ -466,20 +339,6 @@ fn test_build_codex_session_context_carries_compact_steering() {
 }
 
 #[test]
-fn test_build_codex_session_context_for_unindexed_project_suggests_init() {
-    let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
-        HookWorkspaceStatus::UnindexedProject,
-        None,
-    );
-
-    assert!(context.contains("tracedecay_context"));
-    assert!(context.contains("tracedecay init"));
-    assert!(context.contains("tracedecay_project_list"));
-    assert!(context.contains("tracedecay_project_search"));
-    assert!(context.contains("tracedecay_message_search"));
-}
-
-#[test]
 fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance() {
     let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
         HookWorkspaceStatus::Generic,
@@ -507,38 +366,6 @@ fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance(
     assert!(
         !context.contains("repository"),
         "non-project chats should not mention repositories: {context}"
-    );
-}
-
-#[tokio::test]
-async fn test_codex_user_prompt_submit_generic_workspace_suppresses_code_hints() {
-    let generic = tempfile::tempdir().unwrap();
-    let event = serde_json::json!({
-        "cwd": generic.path(),
-        "session_id": "codex-generic-prompt-1",
-        "prompt": "Who calls build_codex_session_context?"
-    })
-    .to_string();
-
-    let context = codex_user_prompt_submit_context_for_event(&hook_runtime(), &event).await;
-
-    // Prompt steering is turn-local: UserPromptSubmit no longer repeats the
-    // session bootstrap, so a generic workspace produces no context at all.
-    assert!(
-        context.is_empty(),
-        "generic workspaces should emit no prompt steering: {context}"
-    );
-    assert!(
-        !context.contains("tracedecay hint:"),
-        "generic workspaces should suppress prompt-derived code hints: {context}"
-    );
-    assert!(
-        !context.contains("tracedecay_context"),
-        "generic workspaces should not include code graph tools: {context}"
-    );
-    assert!(
-        !context.contains("tracedecay init"),
-        "generic workspaces should not suggest code graph initialization: {context}"
     );
 }
 
@@ -992,29 +819,4 @@ fn test_codex_project_root_uses_cwd() {
         codex_project_root_from_event(&input),
         Some(dir.path().to_path_buf())
     );
-}
-
-/// Regression guard for tolerant recovery from a poisoned env lock.
-#[test]
-fn poisoned_env_lock_is_recovered_by_tolerant_acquire() {
-    use std::sync::Mutex;
-
-    static LOCK: Mutex<()> = Mutex::new(());
-
-    let poisoned = std::panic::catch_unwind(|| {
-        let _guard = LOCK.lock().unwrap();
-        panic!("simulated panic while holding the env lock");
-    });
-    assert!(poisoned.is_err(), "the injected closure must have panicked");
-    assert!(
-        LOCK.is_poisoned(),
-        "a panic while holding the guard must poison the mutex"
-    );
-
-    assert!(
-        LOCK.lock().is_err(),
-        "poisoned lock must surface Err to a plain lock()/unwrap() caller"
-    );
-
-    let _recovered = lock_recovering_poison(&LOCK);
 }

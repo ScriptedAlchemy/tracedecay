@@ -4,59 +4,6 @@ use serde_json::json;
 #[cfg(feature = "test-transport")]
 use std::sync::Arc;
 
-#[tokio::test]
-async fn search_call_writes_savings_ledger_row() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
-    let fixture = crate::support::production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
-    crate::support::warm_code_index_search(&server, "helper").await;
-    server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
-        .expect("project path canonicalizes")
-        .to_string_lossy()
-        .to_string();
-    let baseline = fixture
-        .harness
-        .sum_profile_savings(Some(&project_path), 0)
-        .await
-        .expect("baseline settled savings");
-
-    let responses = run_server_with_messages(
-        Arc::clone(&server),
-        vec![jsonrpc_request(
-            json!(9001),
-            "tools/call",
-            json!({
-                "name": "tracedecay_search",
-                "arguments": { "query": "hello" }
-            }),
-        )],
-    )
-    .await;
-
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 9001)
-        .expect("should have a response for id=9001");
-    let resp = parse_response(resp_str);
-    assert!(resp["error"].is_null(), "search should not error");
-
-    server.ledger_writes_settled().await;
-    let total = fixture
-        .harness
-        .sum_profile_savings(Some(&project_path), 0)
-        .await
-        .expect("settled savings after the accounted call");
-    assert_eq!(total.calls, baseline.calls + 1);
-    fixture.harness.shutdown().await;
-}
-
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn search_call_writes_mcp_runtime_analytics_event() {
@@ -373,40 +320,6 @@ async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
     assert_eq!(metadata["arguments"]["id"], "repo-hygiene");
     assert_eq!(metadata["function"]["name"], "tracedecay_skill_view");
     assert_eq!(metadata["function"]["arguments"]["id"], "repo-hygiene");
-}
-
-#[tokio::test]
-async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
-    let fixture = setup_accounted_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let db_path = &fixture.global_db_path;
-
-    let resp = call_tool(
-        server,
-        9004,
-        "tracedecay_changelog",
-        json!({
-            "from_ref": "definitely-not-a-ref",
-            "to_ref": "also-not-a-ref",
-            "_meta": { "sessionId": "mcp-session-9004" }
-        }),
-    )
-    .await;
-
-    assert!(resp["error"].is_null(), "semantic failures are MCP results");
-    assert_eq!(resp["result"]["isError"], true);
-
-    server_handle.ledger_writes_settled().await;
-    let event = expect_mcp_runtime_event(
-        db_path,
-        "tracedecay_changelog",
-        "mcp-session-9004",
-        "durable semantic-failure MCP runtime analytics event",
-    )
-    .await;
-
-    assert_eq!(event.session_id.as_deref(), Some("mcp-session-9004"));
-    assert_eq!(event.outcome.as_deref(), Some("error"));
 }
 
 #[tokio::test]

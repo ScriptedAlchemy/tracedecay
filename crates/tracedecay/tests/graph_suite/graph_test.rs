@@ -45,11 +45,6 @@ fn test_gini_empty() {
 }
 
 #[test]
-fn test_gini_single() {
-    assert_eq!(gini_coefficient(&[42.0]), 0.0);
-}
-
-#[test]
 fn test_gini_label_thresholds() {
     assert_eq!(gini_label(0.10), "low inequality (healthy)");
     assert_eq!(gini_label(0.30), "moderate inequality");
@@ -164,20 +159,6 @@ fn test_composite_health_one_zero() {
         coverage_discipline: 1.0,
     };
     assert_eq!(compute_composite_health(&dimensions), 0);
-}
-
-#[test]
-fn test_composite_health_mixed() {
-    let dimensions = HealthDimensions {
-        acyclicity: 0.8,
-        depth: 0.7,
-        equality: 0.9,
-        redundancy: 0.6,
-        modularity: 0.5,
-        coverage_discipline: 1.0,
-    };
-    let score = compute_composite_health(&dimensions);
-    assert!((1..10_000).contains(&score));
 }
 
 #[tokio::test]

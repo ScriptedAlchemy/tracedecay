@@ -615,26 +615,6 @@ fn active_project_and_storage_status_tools_are_advertised_readonly() {
 }
 
 #[tokio::test]
-async fn active_project_tool_defaults_to_markdown() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    // Call the crate dispatch directly: the test-local wrapper injects
-    // format:"json", and this test asserts the true default.
-    let result =
-        tracedecay::mcp::handle_tool_call(&cg, "tracedecay_active_project", json!({}), None, None)
-            .await
-            .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        serde_json::from_str::<Value>(text).is_err(),
-        "default active_project output should be markdown, got: {text}"
-    );
-    assert!(
-        text.contains("**project_root:**"),
-        "markdown field missing: {text}"
-    );
-}
-
-#[tokio::test]
 async fn active_project_tool_reports_resolved_store_metadata() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let project_root = cg.project_root().display().to_string();

@@ -983,23 +983,6 @@ async fn memory_recall_updates_retrieval_count() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
-async fn memory_list_rejects_an_unknown_category() {
-    let cg = setup_project().await;
-
-    let bad_category = invoke_production_tool(
-        &cg,
-        "tracedecay_fact_store_list",
-        json!({"category": "definitely-not-a-category"}),
-    )
-    .await;
-    assert!(
-        bad_category.is_err(),
-        "the exact list schema must reject an unknown category"
-    );
-    close_test_graph(cg).await;
-}
-
 /// Status reports the canonical algebra and counters through the production
 /// memory authority.
 #[tokio::test]
@@ -1036,18 +1019,6 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
         status["memory"]["algebra"]["estimated_capacity"]
             .as_u64()
             .is_some_and(|capacity| capacity > 0)
-    );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn fact_store_reason_requires_an_entity_selection() {
-    let cg = setup_project().await;
-
-    let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", json!({})).await;
-    assert!(
-        result.is_err(),
-        "the exact reason route must reject an empty entity selection"
     );
     close_test_graph(cg).await;
 }

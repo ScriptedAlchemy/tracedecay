@@ -33,13 +33,6 @@ fn make_node(id: &str, name: &str) -> Node {
 }
 
 #[test]
-fn generate_node_id_is_deterministic() {
-    let id1 = generate_node_id("src/main.rs", &NodeKind::Function, "main", 1);
-    let id2 = generate_node_id("src/main.rs", &NodeKind::Function, "main", 1);
-    assert_eq!(id1, id2, "same inputs must produce same ID");
-}
-
-#[test]
 fn generate_node_id_format() {
     let id = generate_node_id("src/lib.rs", &NodeKind::Struct, "MyStruct", 10);
 

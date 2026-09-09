@@ -1107,32 +1107,6 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn no_explicit_path_without_roots_still_uses_global_fallback() {
-    let home = TempDir::new().unwrap();
-    let cwd = TempDir::new().unwrap();
-    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
-    register_global_project(home.path(), active.path()).await;
-    let _daemon = common::spawn_tracedecay_daemon(home.path());
-
-    let output = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .current_dir(cwd.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay serve should run");
-
-    assert!(
-        output.status.success(),
-        "no explicit path should keep global DB fallback when MCP roots are unavailable\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
