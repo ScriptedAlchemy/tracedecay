@@ -727,18 +727,18 @@ fn automation_settings_payload(
 }
 
 /// Lists the PR branches the daemon currently auto-tracks for this project, read
-/// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
-/// feature has tracked nothing yet.
+/// from the store's PR-autotrack state sidecar.
 fn pr_autotrack_payload(
     state: &DashboardState,
 ) -> std::result::Result<PrAutoTrackPayloadV1, DashboardConfigurationRouteErrorV1> {
-    let tracked = match &state.pr_autotrack_reader {
-        Some(reader) => map_managed_pr_autotrack_entries(
-            reader(state.store_root.clone())
-                .map_err(|_| configuration_authority_unavailable_error())?,
-        ),
-        None => Vec::new(),
-    };
+    let reader = state
+        .pr_autotrack_reader
+        .as_ref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let tracked = map_managed_pr_autotrack_entries(
+        reader(state.store_root.clone())
+            .map_err(|_| configuration_authority_unavailable_error())?,
+    );
     Ok(PrAutoTrackPayloadV1 { tracked })
 }
 

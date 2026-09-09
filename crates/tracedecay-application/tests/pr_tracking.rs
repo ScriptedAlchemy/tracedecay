@@ -4,6 +4,23 @@ use tracedecay_application::pr_tracking::{
 use tracedecay_domain::errors::TraceDecayError;
 
 #[test]
+fn missing_managed_pr_state_is_empty() {
+    let store = tempfile::tempdir().expect("store root");
+
+    assert!(
+        load_state(store.path())
+            .expect("load missing state")
+            .managed
+            .is_empty()
+    );
+    assert!(
+        managed_summary(store.path())
+            .expect("summarize missing state")
+            .is_empty()
+    );
+}
+
+#[test]
 fn managed_pr_state_round_trips_through_application_owner() {
     let store = tempfile::tempdir().expect("store root");
     let mut state = PrAutotrackState::default();
@@ -42,6 +59,10 @@ fn malformed_managed_pr_state_is_a_typed_json_error() {
         load_state(store.path()),
         Err(TraceDecayError::Json(_))
     ));
+    assert!(matches!(
+        managed_summary(store.path()),
+        Err(TraceDecayError::Json(_))
+    ));
 }
 
 #[test]
@@ -52,6 +73,10 @@ fn unreadable_managed_pr_state_is_a_typed_io_error() {
 
     assert!(matches!(
         load_state(store.path()),
+        Err(TraceDecayError::Io(_))
+    ));
+    assert!(matches!(
+        managed_summary(store.path()),
         Err(TraceDecayError::Io(_))
     ));
 }

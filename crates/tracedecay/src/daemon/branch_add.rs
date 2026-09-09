@@ -170,6 +170,7 @@ async fn activate_and_track_manual_branch_owned(
     data_root: std::path::PathBuf,
     lifecycle: super::pr_autotrack::ManualBranchLifecycleLeaseV1,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
+    let publication = branch_publication_context(&graph)?;
     let activation = super::pr_autotrack::activate_manual_branch_head_with_lifecycle(
         &project_root,
         &graph,
@@ -188,7 +189,6 @@ async fn activate_and_track_manual_branch_owned(
             "manual branch lifecycle lease does not match branch sealing request",
         ));
     }
-    let publication = branch_publication_context(&graph)?;
     let tracked = publication
         .track_exact_worktree_branch(&schedulers, &project_root, &activation.worktree, &branch)
         .await;
