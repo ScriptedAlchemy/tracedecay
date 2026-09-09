@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::config::PinnedUserDataDir;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::McpServerConstructionContext;
 use crate::tracedecay::TraceDecay;
 

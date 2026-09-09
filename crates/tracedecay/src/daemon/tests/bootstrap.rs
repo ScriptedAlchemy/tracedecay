@@ -3860,7 +3860,7 @@ async fn production_composition_harness_reads_retained_profile_analytics_authori
         .await;
 
     let second_owner =
-        crate::host_admission::HostAdmissionTestRuntimeV1::profile(harness.profile_root()).await;
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(harness.profile_root()).await;
     let error = match second_owner {
         Ok(_) => panic!("parallel profile authority must remain rejected"),
         Err(error) => error,

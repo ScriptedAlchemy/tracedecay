@@ -572,7 +572,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
 
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+    let gdb = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
 
@@ -649,7 +649,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
 async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+    let gdb = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
 
@@ -720,7 +720,7 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+    let gdb = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
 
@@ -894,7 +894,7 @@ mod runtime_configuration_cutover {
         cached_telemetry_config, install_pinned_runtime_configuration,
         runtime_configuration_for_layout,
     };
-    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_configuration::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
         ProjectConfigurationRuntime,

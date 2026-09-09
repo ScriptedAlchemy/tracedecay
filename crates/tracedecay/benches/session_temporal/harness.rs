@@ -718,7 +718,7 @@ fn measurement_result(source_identity: Value, measurement: Value) -> Value {
 /// benchmark-private handle.
 fn ensure_admission_resource_authorities()
 -> Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1> {
-    crate::host_admission::ensure_process_background_cpu_authority()
+    crate::test_support::host_admission::ensure_process_background_cpu_authority()
         .expect("install process capture authorities for the benchmark")
 }
 

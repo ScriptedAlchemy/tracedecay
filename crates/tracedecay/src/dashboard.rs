@@ -325,7 +325,7 @@ impl DashboardGraphTestRuntimeV1 {
                 label = "dashboard.graph.project_memory"
             )
             .await?;
-            let graph_proxy = crate::host_admission::await_bound_graph_runtime(
+            let graph_proxy = crate::test_support::host_admission::await_bound_graph_runtime(
                 &project_database,
                 "bind dashboard project graph",
             )

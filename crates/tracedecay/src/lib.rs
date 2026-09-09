@@ -51,8 +51,6 @@ pub mod bench;
 // Gated so a default or `production` build carries none of it.
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_support;
-#[cfg(any(test, feature = "test-helpers"))]
-pub use test_support::host_admission;
 pub use tracedecay_code_index as code_index;
 pub use tracedecay_query as query;
 pub mod config;

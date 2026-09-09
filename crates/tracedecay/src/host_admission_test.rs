@@ -169,7 +169,7 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     // process's worker plan. Observation capture prepares under the background
     // CPU authority that plan installs and refuses with
     // `Unavailable/background_cpu_unavailable` when none is injected.
-    let background_cpu = crate::host_admission::ensure_process_background_cpu_authority()
+    let background_cpu = crate::test_support::host_admission::ensure_process_background_cpu_authority()
         .expect("install the process background CPU authority");
     let root = TempDir::new().unwrap();
     let repository_root = root.path().join("repository");
@@ -372,7 +372,7 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
     // process's worker plan. Observation capture prepares under the background
     // CPU authority that plan installs and refuses with
     // `Unavailable/background_cpu_unavailable` when none is injected.
-    let background_cpu = crate::host_admission::ensure_process_background_cpu_authority()
+    let background_cpu = crate::test_support::host_admission::ensure_process_background_cpu_authority()
         .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
@@ -505,7 +505,7 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     // process's worker plan. Observation capture prepares under the background
     // CPU authority that plan installs and refuses with
     // `Unavailable/background_cpu_unavailable` when none is injected.
-    let background_cpu = crate::host_admission::ensure_process_background_cpu_authority()
+    let background_cpu = crate::test_support::host_admission::ensure_process_background_cpu_authority()
         .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
