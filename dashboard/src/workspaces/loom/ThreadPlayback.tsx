@@ -59,16 +59,6 @@ export function ThreadPlayback({
 
   return (
     <section className="flex flex-col gap-2" aria-label="Session replay">
-      <Legend
-        trailing={
-          <span className="td-value shrink-0 text-3xs text-text-muted tabular-nums">
-            {state.cursor + 1} / {frames.length} loaded turns
-          </span>
-        }
-      >
-        replay
-      </Legend>
-
       <div
         role="toolbar"
         aria-label="Replay controls"
@@ -127,13 +117,15 @@ export function ThreadPlayback({
             RETURN TO LOADED TAIL
           </PlaybackButton>
         )}
+        <span className="text-3xs text-text-muted">{state.cursor + 1} / {frames.length} loaded turns</span>
       </div>
 
-      <label className="flex flex-col gap-1 text-3xs text-text-muted">
+      <label className="flex items-center gap-2 text-3xs text-text-muted">
         Seek loaded event
         <input
           aria-label="Seek loaded event"
           type="range"
+          className="min-w-0 flex-1"
           min={0}
           max={latest}
           step={1}

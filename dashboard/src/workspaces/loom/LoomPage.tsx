@@ -260,14 +260,13 @@ function TemporalBody({
         role="region"
         aria-label="Loom content"
         tabIndex={0}
-        className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row"
+        className={cn("flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable]", !selected && "xl:flex-row")}
       >
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           {selectedId && !selected ? <StateChip kind="unavailable" detail="Selected session is outside this loaded page; choose a retained session." /> : null}
           {selected ? (
             <>
-              <button type="button" className="td-hit self-start text-xs text-text-secondary" onClick={() => onSelect(null)}>← All loaded sessions</button>
-              <ThreadChain thread={selected} relations={{ commits: selectedCommits, editedFiles: selectedFiles, branchSpans: selectedSpans, commitStatus, branchStatus }} />
+              <ThreadChain onReturn={() => onSelect(null)} thread={selected} relations={{ commits: selectedCommits, editedFiles: selectedFiles, branchSpans: selectedSpans, commitStatus, branchStatus }} />
             </>
           ) : weave.threads.length === 0 ? (
             <EmptyWeave undated={weave.undated} rows={rows.length} />
@@ -289,7 +288,12 @@ function TemporalBody({
           )}
         </div>
 
-        <aside className="flex w-full shrink-0 flex-col gap-3 xl:w-[22rem]">
+        <aside className={cn("flex w-full shrink-0 flex-col gap-3", selected ? "order-first" : "xl:w-[22rem]")}>
+          <details open={selected ? undefined : true}>
+            {selected && <summary className="td-hit flex flex-wrap items-center gap-2 text-xs text-text-muted">
+              Source coverage · {envelope.freshness.state} · {data.source_statuses.map((source) => `${source.label}: ${source.state}`).join(' · ')}
+            </summary>}
+            <div className={cn("flex gap-3", selected ? "flex-wrap [&>*]:min-w-64 [&>*]:flex-1" : "flex-col")}>
           <Panel legend="Causal crossings">
             <div className="flex flex-col gap-2">
               <p className="text-2xs leading-relaxed text-text-muted">
@@ -344,6 +348,8 @@ function TemporalBody({
             </div>
           </Panel>
 
+            </div>
+          </details>
         </aside>
       </div>
     </div>

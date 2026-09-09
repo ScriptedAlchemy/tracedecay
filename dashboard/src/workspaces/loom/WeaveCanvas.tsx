@@ -126,6 +126,8 @@ export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspe
     return ids.has(previous.id) && ids.has(point.id) ? [{ previous, point }] : [];
   });
   const points = revealed.filter((point) => point.x >= window.start && point.x <= window.end);
+  const hasUndated = revealed.some((point) => point.frame.timestamp == null);
+  const laneY = hasUndated ? [115, 225] : [115];
   const active = revealed.find((point) => point.id === activeId);
   const x = (position: number) => left + (position - window.start) / (window.end - window.start) * spanPx;
   const move = (start: number, end: number) => {
@@ -151,14 +153,14 @@ export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspe
     </div>
     {width < 480 && <p className="text-xs text-text-muted">{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)} → {geometry.end == null ? 'loaded source order' : `${formatMoment(geometry.end)} · loaded end`}</p>}
     <div className="td-optic">
-      <svg role="group" aria-label="Revealed execution events" width="100%" viewBox={`0 0 ${width} 295`}>
+      <svg role="group" aria-label="Revealed execution events" width="100%" viewBox={`0 0 ${width} ${hasUndated ? 295 : 235}`}>
         <defs><clipPath id={clipId}><rect x={left - 12} y={40} width={spanPx + 24} height={240} /></clipPath></defs>
         <text visibility={width < 480 ? "hidden" : "visible"} x={left} y={24} fill="var(--raw-graph-text)" fontSize={12}>{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)}</text>
         <text visibility={width < 480 ? "hidden" : "visible"} x={width - RIGHT} y={24} textAnchor="end" fill="var(--raw-graph-text)" fontSize={12}>{geometry.end == null ? 'Loaded source order' : `${formatMoment(geometry.end)} · LOADED END`}</text>
         <text x={12} y={85} fill="var(--raw-graph-text)" fontSize={11}>Recorded time</text>
-        <text x={12} y={195} fill="var(--raw-graph-text)" fontSize={11}>Undated</text>
-        <text x={12} y={210} fill="var(--raw-graph-text)" fontSize={10}>source order</text>
-        {[115, 225].map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y} y2={y} stroke="var(--raw-graph-edge)" strokeDasharray="2 5" />)}
+        {hasUndated && <text x={12} y={195} fill="var(--raw-graph-text)" fontSize={11}>Undated</text>}
+        {hasUndated && <text x={12} y={210} fill="var(--raw-graph-text)" fontSize={10}>source order</text>}
+        {laneY.map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y} y2={y} stroke="var(--raw-graph-edge)" strokeDasharray="2 5" />)}
         <g clipPath={`url(#${clipId})`}>
           {sequences.map(({ previous, point }) => {
             const path = orderPath(previous, point, x);
@@ -179,7 +181,7 @@ export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspe
         </g>
       </svg>
       <svg role="group" aria-label="Execution minimap" width="100%" viewBox={`0 0 ${width} 64`}>
-        {[115, 225].map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y / 5} y2={y / 5} stroke="var(--raw-graph-edge)" />)}
+        {laneY.map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y / 5} y2={y / 5} stroke="var(--raw-graph-edge)" />)}
         {sequences.map(({ previous, point }) => <path key={`${previous.id}:${point.id}`} d={orderPath(previous, point, (position) => left + position * spanPx, .2)} fill="none" stroke="#58daec" opacity={.5} />)}
         {revealed.map((point) => <circle key={point.id} data-minimap-event={point.id} cx={left + point.x * spanPx} cy={point.y / 5} r={point.id === activeId ? 4 : 2} fill="#58daec" />)}
         <rect x={left + window.start * spanPx} y={8} width={span * spanPx} height={48} fill="none" stroke="var(--raw-graph-text)" />
