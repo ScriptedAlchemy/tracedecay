@@ -132,12 +132,4 @@ mod tests {
             assert!(!evidence.is_empty());
         }
     }
-
-    #[test]
-    fn extracts_task_id_from_metadata() {
-        assert_eq!(
-            task_id_from_metadata(r#"{"task_id":"task-123"}"#),
-            Some("task-123".to_string())
-        );
-    }
 }

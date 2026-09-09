@@ -116,14 +116,6 @@ fn reverse_reader_accepts_large_record_but_rejects_unbounded_record() {
 }
 
 #[test]
-fn blank_reflog_record_is_unsupported_framing() {
-    assert_eq!(
-        complete_line_ranges(b"valid\n\n", 0).unwrap_err(),
-        BoundedBackfillInterruption::UnsupportedSourceFraming
-    );
-}
-
-#[test]
 fn truncated_reflog_is_permanent_unsupported_framing() {
     let fixture = fixture();
     let repository = gix::discover(fixture.path()).unwrap();

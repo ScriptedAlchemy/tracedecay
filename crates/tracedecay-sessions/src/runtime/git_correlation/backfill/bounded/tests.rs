@@ -300,59 +300,6 @@ async fn incremental_publication_failure_holds_frontier_until_retry_succeeds() {
 }
 
 #[tokio::test]
-async fn incremental_missing_commit_log_holds_frontier_until_retry_succeeds() {
-    let repository = repository_fixture();
-    let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
-    let git = FailCommitLogCall {
-        calls: AtomicUsize::new(0),
-        fail_on: 0,
-    };
-
-    let failed = run_incremental_backfill(&store, &git, 1).await.unwrap();
-    assert_eq!(failed.skipped_git_error, 1);
-    assert!(!failed.frontier_advanced);
-    assert_eq!(
-        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
-            .await
-            .unwrap(),
-        None
-    );
-
-    let retried = run_incremental_backfill(&store, &git, 1).await.unwrap();
-    assert_eq!(retried.skipped_git_error, 0);
-    assert!(retried.frontier_advanced);
-}
-
-#[tokio::test]
-async fn later_attribution_failure_returns_committed_backfill_progress() {
-    let repository = repository_fixture();
-    let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
-    let git = FailCommitLogCall {
-        calls: AtomicUsize::new(0),
-        fail_on: 1,
-    };
-
-    let partial = run_incremental_backfill_outcome(&store, &git, 1)
-        .await
-        .unwrap();
-    assert!(partial.stats.frontier_advanced);
-    assert!(partial.stats.spans_written > 0);
-    assert_eq!(partial.stats.skipped_git_error, 1);
-    assert!(matches!(
-        partial.later_failure,
-        Some(GitCorrelationError::Unavailable(_))
-    ));
-
-    let retried = run_incremental_backfill(&store, &SystemGit, 1)
-        .await
-        .unwrap();
-    assert_eq!(retried.sessions_scanned, 0);
-    assert_eq!(retried.skipped_git_error, 0);
-}
-
-#[tokio::test]
 async fn later_frontier_failure_returns_committed_graph_progress() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();

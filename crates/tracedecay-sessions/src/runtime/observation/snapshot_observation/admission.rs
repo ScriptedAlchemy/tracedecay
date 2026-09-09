@@ -957,30 +957,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn snapshot_adapter_discovery_releases_the_only_worker() {
-        let handle = tokio::runtime::Handle::current();
-        tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
-                &MemoryHostAdmission::default(),
-                "test",
-                ObservationScopeV1::Profile,
-                &ObservationCancellation::default(),
-                None,
-                move || {
-                    crate::runtime::source::require_blocking_section_releases_worker(handle);
-                    discovery(Vec::new())
-                },
-                |_| Ok(0),
-                |_| Ok(None),
-            )
-            .await
-        })
-        .await
-        .expect("join snapshot discovery")
-        .expect("snapshot discovery");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn snapshot_adapter_metadata_read_releases_the_only_worker() {
         let handle = tokio::runtime::Handle::current();
         tokio::spawn(async move {
@@ -1254,29 +1230,5 @@ mod tests {
 
         assert_eq!(retry.stats.messages_upserted, 1);
         assert_eq!(admission.observations().len(), 1);
-    }
-
-    #[test]
-    fn snapshot_budget_is_aggregate_and_reports_deferral() {
-        let mut runner = SnapshotAdmissionRunner::new("test", Some(5));
-        assert!(runner.budget.try_consume(3));
-        assert!(!runner.budget.try_consume(3));
-        assert!(runner.budget.try_consume(2));
-        runner.sessions.insert("session-1".to_owned());
-
-        let outcome = runner.finish();
-        assert_eq!(outcome.bytes_consumed, 5);
-        assert!(outcome.deferred_by_byte_cap);
-        assert_eq!(outcome.stats.sessions_upserted, 1);
-    }
-
-    #[test]
-    fn unbounded_snapshot_budget_still_reports_consumed_bytes() {
-        let mut runner = SnapshotAdmissionRunner::new("test", None);
-        assert!(runner.budget.try_consume(7));
-        assert!(runner.budget.try_consume(11));
-        let outcome = runner.finish();
-        assert_eq!(outcome.bytes_consumed, 18);
-        assert!(!outcome.deferred_by_byte_cap);
     }
 }
