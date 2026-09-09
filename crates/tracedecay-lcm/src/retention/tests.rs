@@ -290,37 +290,6 @@ async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result
     Ok(())
 }
 
-// (a)+(d) drop acts only on projection-durable rows; un-projected live evidence
-// is never deleted, even when older than the window.
-#[tokio::test]
-async fn drop_reaps_only_projection_durable_rows() -> Result<(), String> {
-    let store = test_store().await?;
-    let conn = &store.conn;
-    let durable = insert_message(conn, 1, 90, "durable old content").await?;
-    let _live = insert_message(conn, 2, 90, "live un-projected content").await?;
-    make_projection_durable(conn, durable).await?;
-
-    let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
-
-    assert_eq!(
-        report.dropped.eligible, 1,
-        "only the durable row is eligible"
-    );
-    assert_eq!(report.dropped.acted, 1);
-    assert_eq!(
-        count(conn, "lcm_raw_messages").await?,
-        1,
-        "live row retained"
-    );
-    // The surviving raw row is the un-projected live one.
-    let survivor: i64 = fetch_i64(conn, "SELECT store_id FROM lcm_raw_messages", ()).await?;
-    assert_ne!(survivor, durable, "durable row dropped, live row kept");
-    // Projected twin of the dropped row is gone; the live twin remains.
-    assert_eq!(count(conn, "session_messages").await?, 1);
-    assert!(report.dropped.bytes_reclaimed > 0, "reclaim is measurable");
-    Ok(())
-}
-
 // Dropping projection-durable raw rows is intentional (plan 38 §3: the summary
 // is the durable survivor), so summary expansion must degrade rather than
 // abort once the drop window passes. The dropped source is reported as

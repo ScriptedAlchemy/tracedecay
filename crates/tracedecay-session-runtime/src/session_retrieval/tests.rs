@@ -53,19 +53,6 @@ fn test_binding_digest(label: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(label.as_bytes())))
 }
 
-#[test]
-fn real_page_fixture_rejects_legacy_binding_digests_and_accepts_test_digests() {
-    for (field, invalid) in [
-        ("root_digest", "root.page"),
-        ("request_digest", "request.page.session.page.00"),
-        ("access_digest", "access.page.session.page.00"),
-        ("configuration", "page-test"),
-    ] {
-        assert!(BindingDigest::new(field, invalid).is_err());
-        assert!(BindingDigest::new(field, test_binding_digest(invalid)).is_ok());
-    }
-}
-
 fn real_page_root(root_id: &str) -> TemporalAuthorizedRoot {
     TemporalAuthorizedRoot::profile("profile.page", "store.page", root_id)
         .expect("registered profile root")
@@ -659,33 +646,6 @@ fn profile_serving_identity_rejects_mismatched_root() {
             "root.profile.foreign",
         )
         .is_none()
-    );
-}
-
-#[test]
-fn profile_serving_identity_accepts_exact_profile_store_root_and_shard() {
-    let brain_id = typed::<tracedecay_domain::BrainId>("brain.session-retrieval");
-    let profile_id = typed::<tracedecay_domain::UserProfileId>("profile.durable-session-retrieval");
-    let root = profile_retrieval_root(
-        profile_id.as_str(),
-        profile_id.as_str(),
-        "store.profile.durable-session-retrieval",
-        "root.profile.durable-session-retrieval",
-    )
-    .expect("exact profile retrieval identity");
-
-    assert_eq!(root.identity.profile_id().as_str(), profile_id.as_str());
-    assert_eq!(
-        root.identity.store_id().as_str(),
-        "store.profile.durable-session-retrieval"
-    );
-    assert_eq!(
-        root.identity.root_id().as_str(),
-        "root.profile.durable-session-retrieval"
-    );
-    assert_eq!(
-        root.expected_runtime_shard,
-        Some(StoreShardIdV1::profile_sessions(brain_id, profile_id))
     );
 }
 

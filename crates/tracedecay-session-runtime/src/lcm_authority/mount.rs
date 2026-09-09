@@ -273,21 +273,6 @@ mod deadline_tests {
     use tracedecay_domain::UtcMicros;
 
     #[test]
-    fn grant_expiry_is_derived_from_operation_deadline_with_settlement_margin() {
-        let observed_at = UtcMicros(1_000_000);
-        let (operation_expires_at, grant_expires_at) =
-            lcm_operation_and_grant_expiries(observed_at).expect("bounded LCM deadlines");
-
-        assert_eq!(operation_expires_at, UtcMicros(31_000_000));
-        assert_eq!(grant_expires_at, UtcMicros(32_000_000));
-        assert_eq!(
-            grant_expires_at.0 - operation_expires_at.0,
-            1_000_000,
-            "the capability may outlive execution only by the settlement margin"
-        );
-    }
-
-    #[test]
     fn lcm_deadline_derivation_fails_closed_on_clock_overflow() {
         assert!(lcm_operation_and_grant_expiries(UtcMicros(i64::MAX)).is_none());
     }

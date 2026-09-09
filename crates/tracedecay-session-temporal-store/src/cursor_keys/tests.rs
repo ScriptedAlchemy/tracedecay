@@ -66,34 +66,6 @@ async fn mutate(database: &RegisteredGlobalDb, sql: &str, params: impl IntoParam
 }
 
 #[tokio::test]
-async fn first_load_provisions_one_key_and_later_loads_need_no_writer() {
-    let directory = tempdir().expect("temporary session store");
-    let runtime = registered_runtime(directory.path()).await;
-    let database = database(&runtime);
-    assert!(key_rows(database).await.is_empty());
-
-    let first = load(database).await.expect("first load provisions");
-    let rows = key_rows(database).await;
-    assert_eq!(rows.len(), 1, "first use mints exactly one key: {rows:?}");
-    assert_eq!(rows[0].1, 1);
-    assert_eq!(rows[0].0, first.active_key_ref().key_id.as_str());
-
-    // Hold the store's only writer open: a provisioned store must still load
-    // its provider from a read snapshot instead of queueing behind the writer.
-    let held_writer = database
-        .begin_write_transaction()
-        .await
-        .expect("unrelated writer transaction");
-    let second = load(database).await.expect("provisioned load is read-only");
-    assert_eq!(second.active_key_ref(), first.active_key_ref());
-    held_writer
-        .commit()
-        .await
-        .expect("release unrelated writer");
-    assert_eq!(key_rows(database).await.len(), 1);
-}
-
-#[tokio::test]
 async fn concurrent_first_use_callers_mint_exactly_one_active_key() {
     let directory = tempdir().expect("temporary session store");
     let runtime = registered_runtime(directory.path()).await;

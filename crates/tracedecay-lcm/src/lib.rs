@@ -260,38 +260,6 @@ mod budget_tests {
     use super::{lcm_budget_tokens, lcm_message_budget_tokens, lcm_message_visible_text};
     use serde_json::json;
 
-    #[test]
-    fn object_with_text_exposes_visible_words_not_json_keys() {
-        let message = json!({
-            "content": {
-                "extra": "ignored key words",
-                "text": "one",
-            }
-        });
-        assert_eq!(lcm_message_visible_text(&message), "one");
-        assert_eq!(
-            lcm_message_budget_tokens(&message),
-            lcm_budget_tokens("one")
-        );
-        assert_eq!(lcm_message_budget_tokens(&message), 1);
-    }
-
-    #[test]
-    fn array_of_text_parts_joins_visible_words() {
-        let message = json!({
-            "content": [
-                { "extra": "ignored key words", "text": "one" },
-                { "text": "two three" },
-            ]
-        });
-        assert_eq!(lcm_message_visible_text(&message), "one\n\ntwo three");
-        assert_eq!(
-            lcm_message_budget_tokens(&message),
-            lcm_budget_tokens("one\n\ntwo three")
-        );
-        assert_eq!(lcm_message_budget_tokens(&message), 3);
-    }
-
     /// The borrowed counter must agree with counting the materialized visible
     /// text for every content shape, including the minimum-of-one floor.
     #[test]

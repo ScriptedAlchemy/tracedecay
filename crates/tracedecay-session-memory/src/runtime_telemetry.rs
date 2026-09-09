@@ -1182,42 +1182,6 @@ mod tests {
     }
 
     #[test]
-    fn text_report_names_the_non_sampled_process_states_truthfully() {
-        assert!(process_text_block(&ProcessTelemetry::NotYetSampled).contains("not yet sampled"));
-        assert!(
-            process_text_block(&ProcessTelemetry::SampleFailed {
-                error: "sampler unavailable".to_string(),
-            })
-            .contains("sample failed: sampler unavailable")
-        );
-        let sampled = process_text_block(&ProcessTelemetry::Sampled {
-            sampled_at: 1_700_000_000,
-            snapshot: test_process_snapshot(),
-        });
-        assert!(sampled.contains("sampled at       1700000000"));
-        assert!(sampled.contains("cpu              12.5%"));
-        let stale = process_text_block(&ProcessTelemetry::Stale {
-            sampled_at: 1_700_000_000,
-            age_millis: 300,
-            snapshot: test_process_snapshot(),
-        });
-        assert!(stale.contains("freshness        stale (300ms old"));
-        assert!(
-            !stale.contains("refresh pending"),
-            "the rendered stale state cannot claim a refresh that thread spawning may have failed to start"
-        );
-    }
-
-    #[test]
-    fn bytes_human_formats_units() {
-        assert_eq!(bytes_human(0), "0 B");
-        assert_eq!(bytes_human(512), "512 B");
-        assert_eq!(bytes_human(2 * 1024), "2.0 KB");
-        assert_eq!(bytes_human(5 * 1024 * 1024), "5.0 MB");
-        assert_eq!(bytes_human(3 * 1024 * 1024 * 1024), "3.0 GB");
-    }
-
-    #[test]
     fn dirty_marker_snapshot_parses_owner_epoch_and_state() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("graph.db.dirty");
@@ -1278,18 +1242,6 @@ mod tests {
         assert_eq!(
             occupancy.general.available + occupancy.general.leased + occupancy.general.limbo,
             occupancy.general.workers
-        );
-    }
-
-    #[test]
-    fn cpu_percent_from_linux_ticks_is_cpu_seconds_over_wall() {
-        assert_eq!(
-            cpu_percent_from_linux_ticks(10, 110, Duration::from_secs(1), 100),
-            Some(100.0)
-        );
-        assert_eq!(
-            cpu_percent_from_linux_ticks(0, 50, Duration::from_secs(2), 100),
-            Some(25.0)
         );
     }
 

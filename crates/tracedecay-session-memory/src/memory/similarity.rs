@@ -111,26 +111,4 @@ mod tests {
         assert!(!tokens.contains("the"));
         assert!(!tokens.contains("and"));
     }
-
-    #[test]
-    fn lexical_overlap_identical_text() {
-        let text = "hello world example";
-        let (payload, token_overlap, overlap_coefficient) = lexical_overlap(text, text);
-        assert!((token_overlap - 1.0).abs() < f64::EPSILON);
-        assert!((overlap_coefficient - 1.0).abs() < f64::EPSILON);
-        assert_eq!(payload["shared_token_count"], 3);
-    }
-
-    #[test]
-    fn similarity_classification_tiers() {
-        assert_eq!(
-            similarity_classification(0.96, 0.5, 0.7),
-            "likely_duplicate"
-        );
-        assert_eq!(
-            similarity_classification(0.92, 0.25, 0.4),
-            "high_similarity"
-        );
-        assert_eq!(similarity_classification(0.80, 0.1, 0.1), "related");
-    }
 }

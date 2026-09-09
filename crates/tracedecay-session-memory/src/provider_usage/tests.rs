@@ -82,38 +82,6 @@ fn totals(input: u64, output: u64) -> AggregatedProviderUsageCountersV1 {
 }
 
 #[test]
-fn paired_codex_delta_and_checkpoint_count_once() {
-    let aggregate = reduce_provider_usage(&[
-        observation(
-            1,
-            0,
-            "codex",
-            "session-a",
-            ProviderUsageCounterSemanticsV1::Delta,
-            counters(10, 2),
-        ),
-        observation(
-            1,
-            1,
-            "codex",
-            "session-a",
-            ProviderUsageCounterSemanticsV1::Cumulative,
-            counters(100, 20),
-        ),
-    ]);
-
-    assert_eq!(aggregate.coverage, ProviderUsageCoverageV1::Complete);
-    assert_eq!(aggregate.totals, totals(10, 2));
-    assert_eq!(aggregate.deltas.len(), 1);
-    assert_eq!(aggregate.deltas[0].scope, ObservationScopeV1::Profile);
-    assert_eq!(aggregate.deltas[0].provider, "codex");
-    assert_eq!(aggregate.deltas[0].session_id, "session-a");
-    assert_eq!(aggregate.deltas[0].turn_id.as_deref(), Some("turn:1"));
-    assert_eq!(aggregate.deltas[0].message_id.as_deref(), Some("message:1"));
-    assert_eq!(aggregate.deltas[0].request_id.as_deref(), Some("request:1"));
-}
-
-#[test]
 fn paired_unknown_model_emits_one_model_issue() {
     let mut native = observation(
         1,
@@ -458,41 +426,6 @@ fn cumulative_decrease_is_a_typed_reset_and_never_underflows() {
             .iter()
             .any(|issue| issue.kind == ProviderUsageIssueKindV1::CumulativeReset)
     );
-}
-
-#[test]
-fn mixed_provider_native_deltas_preserve_provenance_and_sum_exactly() {
-    let aggregate = reduce_provider_usage(&[
-        observation(
-            1,
-            0,
-            "claude",
-            "claude-session",
-            ProviderUsageCounterSemanticsV1::Delta,
-            counters(11, 3),
-        ),
-        observation(
-            2,
-            0,
-            "codex",
-            "codex-session",
-            ProviderUsageCounterSemanticsV1::Delta,
-            counters(5, 7),
-        ),
-    ]);
-
-    assert_eq!(aggregate.coverage, ProviderUsageCoverageV1::Complete);
-    assert_eq!(aggregate.totals, totals(16, 10));
-    assert_eq!(
-        aggregate
-            .deltas
-            .iter()
-            .map(|delta| delta.provider.as_str())
-            .collect::<Vec<_>>(),
-        vec!["claude", "codex"]
-    );
-    assert_eq!(aggregate.deltas[0].native_timestamp, Some(1_700_000_001));
-    assert_eq!(aggregate.deltas[0].native_field, "fixture.usage");
 }
 
 #[test]

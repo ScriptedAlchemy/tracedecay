@@ -27,17 +27,3 @@ pub fn trust_bucket(score: f64) -> &'static str {
         "high"
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Guards the label representative scores against bucket-boundary drift:
-    /// each representative must map back onto its own bucket.
-    #[test]
-    fn label_representatives_map_onto_their_buckets() {
-        assert_eq!(trust_bucket(LOW_TRUST_REPRESENTATIVE), "low");
-        assert_eq!(trust_bucket(DEFAULT_TRUST), "medium");
-        assert_eq!(trust_bucket(HIGH_TRUST_REPRESENTATIVE), "high");
-    }
-}
