@@ -6,6 +6,7 @@
 mod access;
 mod anchors;
 mod ci_cache;
+mod credential_lifecycle;
 mod decoder;
 mod discovery;
 mod dto;
@@ -47,6 +48,9 @@ pub use anchors::{
     GitHubReviewBodyEvidenceAuthorityV1, GitHubReviewBodyEvidenceV1, GitHubReviewBodyReadOutcomeV1,
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
     github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
+};
+pub use credential_lifecycle::{
+    GitHubReadOnlyCredentialLifecycleV1, GitHubSecretReadErrorV1, GitHubSecretReadPortV1,
 };
 pub use decoder::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,

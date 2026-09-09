@@ -65,7 +65,10 @@ async fn open_unseated_graph_fixture() -> UnseatedGraphFixture {
         "fixture daemon must have no seated semantic runtime"
     );
     let layout = graph.hook_store_layout();
-    let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
+    let store_root = tracedecay_code_index_retention::code_index_generations::code_index_store_root(
+        &layout.data_root,
+        &layout.project_root,
+    );
     seed_sealed_generation_store(&store_root, FIXTURE_GENERATION_COUNT);
     UnseatedGraphFixture {
         _pinned_home: pinned_home,

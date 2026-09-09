@@ -22,12 +22,12 @@ use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportV1,
     DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1,
     HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
-    IngestRefusalCountV1, LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
-    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
-    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
-    RuntimeHealthDoctorPort, RuntimeHealthReadV1, SemanticOwnerDoctorPort, SemanticOwnerReadV1,
-    StorageDoctorPort, advisory_feedback_read_from_publication, merge_storage_reads,
-    runtime_health_read, storage_family_read,
+    LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort,
+    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
+    ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
+    SemanticOwnerDoctorPort, SemanticOwnerReadV1, StorageDoctorPort,
+    advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
+    storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{
@@ -277,101 +277,7 @@ pub fn observability_read_from_model(
     }
 }
 
-/// Map the durable cursor-advance refusal censuses of the consulted sessions
-/// stores into one truthful kernel read. Counts merge by provider/reason; a
-/// single unavailable store makes the whole census `Unknown` rather than a
-/// silently partial healthy claim.
-#[must_use]
-pub fn ingest_refusal_read_from_censuses(
-    censuses: &[tracedecay_global_db::observation::ObservationRefusalCensusV1],
-) -> IngestRefusalCensusReadV1 {
-    let mut merged: std::collections::BTreeMap<(String, String), u64> =
-        std::collections::BTreeMap::new();
-    for census in censuses {
-        match census {
-            tracedecay_global_db::observation::ObservationRefusalCensusV1::Observed {
-                refusals,
-            } => {
-                for refusal in refusals {
-                    let key = (refusal.provider.clone(), refusal.reason.clone());
-                    let entry = merged.entry(key).or_insert(0);
-                    *entry = entry.saturating_add(refusal.count);
-                }
-            }
-            tracedecay_global_db::observation::ObservationRefusalCensusV1::Unavailable => {
-                return IngestRefusalCensusReadV1::Unknown;
-            }
-        }
-    }
-    IngestRefusalCensusReadV1::Observed {
-        refusals: merged
-            .into_iter()
-            .map(|((provider, reason), count)| IngestRefusalCountV1 {
-                provider,
-                reason,
-                count,
-            })
-            .collect(),
-    }
-}
-
 // === Storage retention/size (Storage family) =================================
-
-fn orphan_store_findings_from_census(
-    census: &[tracedecay_maintenance::retention::orphan_stores::StoreCensusEntry],
-    retention_secs: i64,
-    now: i64,
-) -> DoctorStorageFamilyReadV1 {
-    let classified = tracedecay_maintenance::retention::orphan_stores::classify_stores(census, now);
-    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
-        classified,
-        retention_secs,
-    );
-    storage_family_read(
-        plan.collect
-            .iter()
-            .chain(plan.retained_immature.iter())
-            .chain(plan.relink.iter())
-            .filter_map(crate::doctor::registry_drift::orphan_store_doctor_finding)
-            .collect(),
-    )
-}
-
-/// Collect the daemon's read-only unregistered-store-directory Doctor
-/// findings for a profile (plan 38 §2's disjoint on-disk-only audit class —
-/// a store directory with no `code_projects` row at all, invisible to the
-/// registry-driven census performs). Runs the bottom-up sweep in
-/// classification-only mode (no collection).
-#[hotpath::measure(label = "daemon.doctor.unregistered_stores", future = true)]
-pub async fn collect_unregistered_store_findings(
-    global_db: &tracedecay_global_db::RegisteredGlobalDb,
-    profile_root: &Path,
-    retention_secs: i64,
-    now: i64,
-) -> DoctorStorageFamilyReadV1 {
-    let report = tracedecay_maintenance::retention::orphan_stores::sweep_unregistered_stores(
-        global_db,
-        profile_root,
-        retention_secs,
-        now,
-        false,
-    )
-    .await;
-    let Ok(report) = report else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    hotpath::gauge!("daemon.doctor.unregistered_stores_total")
-        .inc((report.plan.collect.len() + report.plan.retained_immature.len()) as u64);
-    storage_family_read(
-        report
-            .plan
-            .collect
-            .iter()
-            .chain(report.plan.retained_immature.iter())
-            .filter_map(crate::doctor::registry_drift::unregistered_store_doctor_finding)
-            .collect(),
-    )
-}
 
 /// Evaluate every owner-configured soft budget against the daemon's retained
 /// project, registry, and session stores. A configured key that is not mounted
@@ -382,8 +288,6 @@ struct CollectedStoreTelemetryV1 {
 }
 
 const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
 /// Entry ceiling for the code-index generation census.
 ///
 /// The census is metadata-only — a `stat` and a bounded manifest prefix per
@@ -394,47 +298,6 @@ const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
 /// on every real profile and the finding this kernel exists to produce was
 /// structurally unreachable.
 const MAX_SYNCHRONOUS_GENERATION_CENSUS_ENTRIES: usize = 4_096;
-
-fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
-    let mut pending = vec![root.to_path_buf()];
-    let mut observed_bytes = 0_u64;
-    let mut observed_entries = 0_usize;
-    while let Some(path) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return false;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return false;
-            };
-            observed_entries = observed_entries.saturating_add(1);
-            if observed_entries > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES {
-                return false;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                return false;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                pending.push(entry.path());
-                continue;
-            }
-            if !file_type.is_file() {
-                return false;
-            }
-            let Ok(metadata) = entry.metadata() else {
-                return false;
-            };
-            observed_bytes = observed_bytes.saturating_add(metadata.len());
-            if observed_bytes > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES {
-                return false;
-            }
-        }
-    }
-    true
-}
 
 /// Whether the sealed-generation directory is small enough (in *entries*) for a
 /// synchronous metadata census. Byte size is deliberately not consulted.
@@ -459,23 +322,6 @@ fn permits_synchronous_generation_census(generations_root: &Path) -> bool {
         }
     }
     true
-}
-
-fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
-    ["", "-wal", "-shm"]
-        .into_iter()
-        .try_fold(0_u64, |total, suffix| {
-            let mut path = database_path.as_os_str().to_os_string();
-            path.push(suffix);
-            match std::fs::metadata(PathBuf::from(path)) {
-                Ok(metadata) => total
-                    .checked_add(metadata.len())
-                    .filter(|size| *size <= MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(total),
-                Err(_) => None,
-            }
-        })
-        .is_some()
 }
 
 fn permits_synchronous_table_growth(
@@ -573,77 +419,6 @@ async fn collect_over_budget_store_findings(
         findings: storage_family_read(findings),
         table_growth_evidence,
     }
-}
-
-fn incident_debris_findings_from_census(
-    census: &[tracedecay_maintenance::retention::orphan_stores::StoreCensusEntry],
-    profile_root: &Path,
-    observed_at_secs: i64,
-) -> DoctorStorageFamilyReadV1 {
-    let mut findings = Vec::new();
-    for entry in census {
-        let Ok(scan) = tracedecay_maintenance::retention::incident_debris::scan_incident_debris(
-            entry,
-            profile_root,
-            observed_at_secs,
-        ) else {
-            return DoctorStorageFamilyReadV1::Unknown;
-        };
-        let Ok(finding) = tracedecay_contracts::storage::incident_debris_finding(&scan) else {
-            return DoctorStorageFamilyReadV1::Unknown;
-        };
-        findings.push(finding);
-    }
-    storage_family_read(findings)
-}
-
-/// Read the configured session-retention backlog from the retained session
-/// store. This mirrors the retention SQL in read-only form and emits clean
-/// zero-byte records when a configured window has no eligible rows.
-#[hotpath::measure(label = "daemon.doctor.retention_backlog", future = true)]
-pub async fn collect_retention_backlog_findings(
-    profile_sessions: &tracedecay_global_db::RegisteredGlobalDb,
-    retention: &crate::config::RetentionConfig,
-    observed_at_secs: i64,
-) -> DoctorStorageFamilyReadV1 {
-    if !permits_synchronous_session_retention_backlog(profile_sessions.db_path()) {
-        return DoctorStorageFamilyReadV1::Unknown;
-    }
-    let Some(file_name) = profile_sessions
-        .db_path()
-        .file_name()
-        .and_then(|name| name.to_str())
-    else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let Ok(store) = tracedecay_contracts::storage::StoreKeyV1::new(file_name.to_owned()) else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let Ok(snapshot) = profile_sessions.read_snapshot().await else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let Ok(records) = tracedecay_lcm::retention::read_session_retention_backlog(
-        &snapshot,
-        store,
-        &retention.session_lcm,
-        observed_at_secs,
-    )
-    .await
-    else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    hotpath::gauge!("daemon.doctor.retention_backlog_records_total").inc(records.len() as u64);
-    let mut findings = Vec::new();
-    for record in records {
-        let Ok(finding) = tracedecay_contracts::storage::retention_backlog_finding(
-            &record,
-            DoctorCoverageCompletenessV1::Complete,
-        ) else {
-            return DoctorStorageFamilyReadV1::Unknown;
-        };
-        findings.push(finding);
-    }
-    storage_family_read(findings)
 }
 
 /// Read the exact code-generation liveness plan and surface superseded,
@@ -775,7 +550,10 @@ pub(super) async fn collect_code_generation_retention_findings(
         // that could not be proven must never read as "nothing is stranded".
         let scopes = scope_store_root.and_then(|scope_store_root| {
             let live_roots =
-                super::store_maintenance::resolve_live_code_index_roots(&project_root).ok()?;
+                tracedecay_code_index_retention::code_index_generations::resolve_live_code_index_roots(
+                    &project_root,
+                )
+                .ok()?;
             plan_scope_root_retention(
                 &scope_store_root,
                 &live_roots,
@@ -1080,35 +858,14 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .and_then(|days| days.checked_mul(24 * 60 * 60))
                 .unwrap_or(i64::MAX);
             let now = now_secs();
-            let profile_scan_root = profile_root.join("projects");
             let profile_storage_reads = async {
-                // The admission walk stats every store file under the profile;
-                // its own wall span separates filesystem-walk cost from the
-                // census reads it admits.
-                let permitted = tokio::task::spawn_blocking(move || {
-                    hotpath::measure_block!(
-                        "daemon.doctor.profile_scan",
-                        permits_synchronous_exhaustive_scan(&profile_scan_root)
-                    )
-                })
+                tracedecay_maintenance::retention::diagnostics::collect_profile_storage_findings(
+                    registry.as_ref(),
+                    &profile_root,
+                    retention_secs,
+                    now,
+                )
                 .await
-                .is_ok_and(|permitted| permitted);
-                if !permitted {
-                    return (None, DoctorStorageFamilyReadV1::Unknown);
-                }
-                let (registered_census, unregistered) = tokio::join!(
-                    tracedecay_maintenance::retention::orphan_stores::build_store_census(
-                        registry.as_ref(),
-                        &profile_root,
-                    ),
-                    collect_unregistered_store_findings(
-                        registry.as_ref(),
-                        &profile_root,
-                        retention_secs,
-                        now,
-                    ),
-                );
-                (registered_census.ok(), unregistered)
             };
             let code_index_store_root =
                 tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
@@ -1169,7 +926,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 quick_check,
                 authority_audit_ok,
                 temporal,
-                (registered_census, unregistered),
+                profile_storage,
                 store_telemetry,
                 profile_retention_backlog,
                 project_retention_backlog,
@@ -1190,8 +947,16 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     project_sessions.session_temporal_doctor_health(),
                     profile_storage_reads,
                     collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
-                    collect_retention_backlog_findings(profile_sessions.as_ref(), &retention, now),
-                    collect_retention_backlog_findings(project_sessions.as_ref(), &retention, now),
+                    tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
+                        profile_sessions.as_ref(),
+                        &retention.session_lcm,
+                        now,
+                    ),
+                    tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
+                        project_sessions.as_ref(),
+                        &retention.session_lcm,
+                        now,
+                    ),
                     collect_code_generation_retention_findings(
                         &schedulers,
                         &store_telemetry_sampling,
@@ -1237,23 +1002,11 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
                 | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
             };
-            let (orphan, incident_debris) = registered_census.as_deref().map_or(
-                (
-                    DoctorStorageFamilyReadV1::Unknown,
-                    DoctorStorageFamilyReadV1::Unknown,
-                ),
-                |census| {
-                    (
-                        orphan_store_findings_from_census(census, retention_secs, now),
-                        incident_debris_findings_from_census(census, &profile_root, now),
-                    )
-                },
-            );
             let storage = [
-                orphan,
-                unregistered,
+                profile_storage.orphan_stores,
+                profile_storage.unregistered_stores,
                 store_telemetry.findings,
-                incident_debris,
+                profile_storage.incident_debris,
                 profile_retention_backlog,
                 project_retention_backlog,
                 code_generation_retention,
@@ -1262,10 +1015,11 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             .reduce(merge_storage_reads)
             .unwrap_or(DoctorStorageFamilyReadV1::Absent);
             let observability = observability_read_from_model(observability_read);
-            let ingest_refusals = ingest_refusal_read_from_censuses(&[
-                profile_refusal_census,
-                project_refusal_census,
-            ]);
+            let ingest_refusals =
+                tracedecay_global_db::observation::ingest_refusal_read_from_censuses(&[
+                    profile_refusal_census,
+                    project_refusal_census,
+                ]);
             let host = match host_read {
                 Ok(read) => read,
                 Err(_) => HostIntegrationReadV1::Unknown,
