@@ -85,13 +85,14 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
 #[cfg(feature = "test-transport")]
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
+    incoming: Option<String>,
     pub(crate) output: String,
 }
 
 #[cfg(feature = "test-transport")]
 impl McpTransport for CaptureTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        Ok(None)
+        Ok(self.incoming.take())
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -217,11 +218,14 @@ pub(crate) async fn handle_real_server_tool_call_raw(
             "arguments": arguments,
         }
     });
-    let mut transport = CaptureTransport::default();
+    let mut transport = CaptureTransport {
+        incoming: Some(request.to_string()),
+        output: String::new(),
+    };
     // Heap-allocate the server dispatch future so every awaiting test keeps a
     // bounded resident frame (perf-profile layouts overflow the test stack
     // when these mega-futures compose inline).
-    Box::pin(server.handle_and_write(&request.to_string(), &mut transport))
+    Box::pin(server.run_connection(&mut transport))
         .await
         .expect("real MCP server tool call");
     serde_json::from_str(transport.output.trim()).expect("JSON-RPC response")

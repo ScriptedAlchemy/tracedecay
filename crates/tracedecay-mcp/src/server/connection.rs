@@ -60,9 +60,6 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     fn max_concurrent_reads(&self) -> usize;
     fn tool_is_read_only(&self, tool_name: &str) -> bool;
     fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool;
-    fn request_admitted(&self, _request: &JsonRpcRequest) -> bool {
-        true
-    }
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
@@ -755,67 +752,6 @@ where
                 }
             }
         }
-    }
-
-    /// Process one raw JSON-RPC line through the production context and write
-    /// its response without starting a long-lived connection loop.
-    #[hotpath::measure(label = "mcp.server.handle_and_write", future = true)]
-    pub async fn handle_and_write(
-        &self,
-        line: &str,
-        transport: &mut impl McpTransport,
-    ) -> Result<()> {
-        let parsed =
-            hotpath::measure_block!("mcp.server.connection.decode", JsonRpcRequest::decode(line));
-        let admitted = match parsed.as_ref() {
-            Ok(request) => self.context.request_admitted(request),
-            Err(_) => true,
-        };
-        let mut connection = self.new_connection_route_state()?;
-        let response = if admitted {
-            match parsed {
-                Ok(request) => {
-                    self.handle_request_for_connection(
-                        &request,
-                        self.timings_enabled(),
-                        &mut connection,
-                        false,
-                    )
-                    .await
-                }
-                Err(error) => Some(error.into_response()),
-            }
-        } else {
-            parsed.as_ref().ok().and_then(|request| {
-                request.id.clone().map(|id| {
-                    JsonRpcResponse::error_with_data(
-                        id,
-                        ErrorCode::InternalError,
-                        "tool project route failed: project server was retired".to_owned(),
-                        Some(serde_json::json!({
-                            "reason_code": "project_server_retired",
-                            "retryable": true,
-                            "detail": "the retained project server was replaced or revoked; retry against the current owner",
-                        })),
-                    )
-                })
-            })
-        };
-        let selected_response_lease = connection.take_selected_response_lease();
-        let response_revoked = selected_response_lease
-            .as_ref()
-            .map(McpResponseLease::revoked);
-        if let Some(response) = response {
-            let mut line = hotpath::measure_block!(
-                "mcp.server.response.serialize",
-                serialize_response_line(&response)
-            );
-            line.push('\n');
-            let _ = self
-                .write_response_line_or_revoke(transport, &line, response_revoked)
-                .await?;
-        }
-        Ok(())
     }
 
     /// Runs the server, reading JSON-RPC requests from stdin and writing

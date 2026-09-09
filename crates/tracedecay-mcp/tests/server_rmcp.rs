@@ -50,6 +50,7 @@ impl McpConnectionState for TestConnection {
 
 struct TestContext {
     cancellation_registered: tokio::sync::Notify,
+    cancellations: std::sync::Mutex<Vec<(Value, String)>>,
 }
 
 impl McpConnectionContext for TestContext {
@@ -102,8 +103,12 @@ impl McpConnectionContext for TestContext {
         })
     }
 
-    fn cancel_request(&self, _id: &Value, _connection_scope: &str) -> bool {
-        false
+    fn cancel_request(&self, id: &Value, connection_scope: &str) -> bool {
+        self.cancellations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((id.clone(), connection_scope.to_owned()));
+        true
     }
 
     fn cancellation_registered(&self) -> &tokio::sync::Notify {
@@ -134,8 +139,10 @@ impl McpConnectionContext for TestContext {
 async fn rmcp_duplex_handshake_and_typed_list_share_the_dispatch_context() {
     let context = Arc::new(TestContext {
         cancellation_registered: tokio::sync::Notify::new(),
+        cancellations: std::sync::Mutex::new(Vec::new()),
     });
-    let adapter = RmcpConnectionAdapter::new(context, false, None, None).expect("RMCP adapter");
+    let adapter =
+        RmcpConnectionAdapter::new(Arc::clone(&context), false, None, None).expect("RMCP adapter");
     let (server_io, client_io) = tokio::io::duplex(256 * 1024);
     let serving = tokio::spawn(async move {
         let running = adapter
@@ -154,6 +161,37 @@ async fn rmcp_duplex_handshake_and_typed_list_share_the_dispatch_context() {
         .await
         .expect("typed tools/list");
     assert!(tools.tools.is_empty());
+
+    client
+        .peer()
+        .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+            Some(rmcp::model::RequestId::String(Arc::from("cancelled"))),
+            Some("test cancellation".to_owned()),
+        ))
+        .await
+        .expect("send typed cancellation");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let cancellation_observed = !context
+                .cancellations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty();
+            if cancellation_observed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("RMCP cancellation route");
+    assert_eq!(
+        *context
+            .cancellations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![(json!("cancelled"), "rmcp-test".to_owned())],
+    );
 
     client.close().await.expect("close RMCP client");
     serving.await.expect("join RMCP server");

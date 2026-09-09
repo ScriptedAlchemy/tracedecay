@@ -464,7 +464,7 @@ where
             .await;
     }
 
-    pub fn cancel_request(&self, request_id: Option<rmcp::model::RequestId>) -> bool {
+    fn cancel_request(&self, request_id: Option<rmcp::model::RequestId>) -> bool {
         request_id
             .map(rmcp::model::RequestId::into_json_value)
             .is_some_and(|request_id| {
@@ -498,10 +498,6 @@ where
             },
         )
         .await
-    }
-
-    pub fn memory_request_scope(&self) -> &str {
-        &self.memory_request_scope
     }
 }
 

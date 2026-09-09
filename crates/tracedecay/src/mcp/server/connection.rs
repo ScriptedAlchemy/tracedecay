@@ -54,16 +54,6 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
         super::requests::tool_supports_live_cancellation(tool_name)
     }
 
-    fn request_admitted(&self, request: &JsonRpcRequest) -> bool {
-        request.method != "tools/call"
-            || self.server.project_server_live.is_none()
-            || !self
-                .server
-                .project_server_lifecycle
-                .response_revoked()
-                .is_cancelled()
-    }
-
     fn dispatch<'a>(
         &'a self,
         request: tracedecay_mcp::server::McpDispatchRequest<'a>,
@@ -134,10 +124,17 @@ impl McpServer {
     #[cfg(any(test, feature = "test-transport"))]
     #[hotpath::skip]
     pub async fn run_connection(
-        self: &Arc<Self>,
+        &self,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
     ) -> Result<()> {
-        self.connection_server().run_connection(transport).await
+        let server = self.dispatch_authority.server().upgrade().ok_or_else(|| {
+            TraceDecayError::project_route(
+                "tool_dispatch_shutdown",
+                true,
+                "MCP server was released before connection dispatch",
+            )
+        })?;
+        server.connection_server().run_connection(transport).await
     }
 
     #[hotpath::skip]
@@ -170,26 +167,6 @@ impl McpServer {
                 timings_override,
                 request_lifecycle,
             )
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-transport"))]
-    #[hotpath::skip]
-    pub async fn handle_and_write(
-        &self,
-        line: &str,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-    ) -> Result<()> {
-        let server = self.dispatch_authority.server().upgrade().ok_or_else(|| {
-            TraceDecayError::project_route(
-                "tool_dispatch_shutdown",
-                true,
-                "MCP server was released before direct request dispatch",
-            )
-        })?;
-        server
-            .connection_server()
-            .handle_and_write(line, transport)
             .await
     }
 

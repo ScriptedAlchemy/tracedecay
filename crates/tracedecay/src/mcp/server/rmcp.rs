@@ -23,8 +23,6 @@ use tracedecay_mcp::server::{
 
 pub(crate) struct RmcpConnectionAdapter {
     inner: tracedecay_mcp::server::RmcpConnectionAdapter<ProductionMcpConnectionContext>,
-    #[cfg(test)]
-    memory_request_scope: String,
 }
 
 impl RmcpConnectionAdapter {
@@ -41,13 +39,7 @@ impl RmcpConnectionAdapter {
             initialize_response_decorator,
             delivery_settlement_recorder,
         )?;
-        #[cfg(test)]
-        let memory_request_scope = inner.memory_request_scope().to_owned();
-        Ok(Self {
-            inner,
-            #[cfg(test)]
-            memory_request_scope,
-        })
+        Ok(Self { inner })
     }
 
     pub(crate) fn work_delivery_settlement(&self) -> RmcpWorkDeliverySettlement {
@@ -72,11 +64,6 @@ impl RmcpConnectionAdapter {
         T: rmcp::transport::Transport<RoleServer> + Send + 'static,
     {
         self.inner.serve(transport).await
-    }
-
-    #[cfg(test)]
-    fn cancel_request(&self, request_id: Option<rmcp::model::RequestId>) -> bool {
-        self.inner.cancel_request(request_id)
     }
 
     #[cfg(test)]
@@ -636,42 +623,6 @@ mod tests {
                 "legacy notification produced a response: {notification}",
             );
         }
-        server.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn rmcp_cancellation_uses_the_connection_scoped_application_identity() {
-        crate::product_runtime::register_fixture_product_runtime();
-        let (cg, _repo, authority) =
-            crate::mcp::server::writer_test_support::init_indexed_repo().await;
-        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
-        let server = McpServer::new_with_registered_test_context(context, Vec::new())
-            .await
-            .expect("registered cancellation server");
-        let adapter =
-            RmcpConnectionAdapter::new(Arc::clone(&server), false, None).expect("RMCP adapter");
-        let wire_id = json!("rmcp-cancellation-oracle");
-        let application_id =
-            super::super::application_surface_request_id(&wire_id, &adapter.memory_request_scope)
-                .expect("connection-scoped application request id");
-        let cancellation =
-            tracedecay_contracts::CancellationSignal::active("cancellation.rmcp-wire-oracle")
-                .expect("cancellation signal");
-        server
-            .dispatch_authority
-            .register_cancellation(application_id, cancellation);
-
-        assert!(
-            adapter.cancel_request(Some(rmcp::model::RequestId::String(Arc::from(
-                "rmcp-cancellation-oracle"
-            ),)))
-        );
-        assert!(
-            !adapter.cancel_request(Some(rmcp::model::RequestId::String(Arc::from(
-                "different-id",
-            )))),
-            "a cancellation from the same connection must not alias another wire id",
-        );
         server.shutdown().await;
     }
 
