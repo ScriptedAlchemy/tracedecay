@@ -337,6 +337,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One negotiated connection exercises the wire contract from initialization through tools, resources, typed refusals, and large-result retrieval."
+    )]
     async fn rmcp_wire_matrix_matches_legacy_initialize_tools_and_resources() {
         let fixture = RmcpWireFixture::start().await;
         let initialize_id = fixture.last_response()["id"].clone();
