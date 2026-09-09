@@ -819,13 +819,27 @@ fn new_automation_task_lock_token() -> Result<String> {
     Ok(hex::encode(random))
 }
 
+fn resolve_task_lock_parent(path: &Path) -> std::io::Result<PathBuf> {
+    let (parent, name) = path.parent().zip(path.file_name()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "automation task-lock path requires a parent and file name",
+        )
+    })?;
+    // Resolve OS directory aliases without hiding a final symlink from no-follow checks.
+    Ok(
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent)
+            .join(name),
+    )
+}
+
 fn try_acquire_task_lock_blocking(
     path: &Path,
     ownership_token: &str,
     stale_after_secs: Option<u64>,
     now_secs: i64,
 ) -> std::io::Result<Option<AutomationTaskLock>> {
-    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    let path = resolve_task_lock_parent(path)?;
     if let Some(parent) = path.parent() {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
@@ -979,7 +993,7 @@ fn prepare_task_lock_publication(
     ownership_token: &str,
     now_secs: i64,
 ) -> std::result::Result<PreparedTaskLockPublication, TaskLockStagingCreationError> {
-    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    let path = resolve_task_lock_parent(path)?;
     tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -1176,7 +1190,7 @@ fn remove_owned_task_lock_blocking(path: &Path, ownership_token: &str) -> std::i
 }
 
 fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File> {
-    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    let path = resolve_task_lock_parent(path)?;
     let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&path);
     tracedecay_runtime_core::storage::reject_symlink_components(
         &coordination_path,
@@ -1233,7 +1247,7 @@ struct AutomationTaskLockSnapshot {
 }
 
 fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTaskLockSnapshot>> {
-    let path = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    let path = resolve_task_lock_parent(path)?;
     tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -2431,6 +2445,30 @@ evidence about it",
         assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
         assert!(coordination_path.is_symlink());
         assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_lock_rejects_final_symlink_without_touching_target() {
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let lock_path = alias.join("task.lock");
+        let outside = temp.path().join("outside");
+        let token = "1".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
+        let contents = format!("pid=invalid\ncreated_at=1\ntoken={token}\n");
+        std::fs::write(&outside, &contents).unwrap();
+        std::os::unix::fs::symlink(&outside, &lock_path).unwrap();
+
+        assert!(read_task_lock_snapshot(&lock_path).is_err());
+        assert!(prepare_task_lock_publication(&lock_path, &token, 200).is_err());
+        assert!(remove_owned_task_lock_blocking(&lock_path, &token).is_err());
+        assert!(try_acquire_task_lock_blocking(&lock_path, &token, Some(0), 200).is_err());
+        assert!(lock_path.is_symlink());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), contents);
+        assert!(!tracedecay_runtime_core::storage::append_lock_path(&outside).exists());
     }
 
     #[test]
