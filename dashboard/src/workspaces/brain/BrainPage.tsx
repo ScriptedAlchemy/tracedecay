@@ -313,25 +313,8 @@ function RegistryFieldView({
 
   return (
     <>
-      {/* One HUD column rather than two free-floating corners. From `md` up it
-        * overlays the field, anchored to the top and grown downward, so both
-        * strips stay ON the lit canvas -- a bottom-anchored panel measured
-        * from this column instead sat over the caption BELOW the field on a
-        * narrow viewport, which read as chrome spilled onto the page. Below
-        * `md` the overlay itself becomes the problem: on a narrow canvas the
-        * HUD's own content is taller than the field it floats on, so an
-        * absolutely-positioned strip covers the whole canvas and the network
-        * underneath is reduced to a blurred glow behind opaque panels. There
-        * the HUD returns to normal document flow, stacked ABOVE the canvas
-        * (hence rendered first here -- position:absolute takes it out of
-        * flow at `md` and up, so the source order only matters below that).
-        * `z-10` is required, not decorative: GraphCanvas's own canvas element
-        * is `position:relative` (so its own children position correctly),
-        * which makes it a positioned, z-index:auto box just like this HUD --
-        * two such boxes stack in DOM order, and with the HUD now rendered
-        * FIRST (for the mobile flow case above) the canvas would otherwise
-        * paint over it at every width. */}
-      <div className="pointer-events-none static z-10 mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
+      {/* Readouts reserve space so no measured body is hidden behind chrome. */}
+      <div className="pointer-events-none mb-2 flex shrink-0 flex-wrap items-start gap-2">
         <InstrumentReadout
           items={[
             { label: 'repos', value: groups.length },

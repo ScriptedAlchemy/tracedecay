@@ -26,8 +26,8 @@ export type { GraphCanvasEdge, GraphCanvasEncoding, GraphCanvasNode } from './ty
  * Deterministic ForceAtlas2 settle (laid out once, never animated), nodes
  * sized by degree and lit by their real vitality, relations drawn as curved
  * connective tissue rather than chords. Everything that moves is a response to
- * a real event: an activation strike from the live stream, a search that hit,
- * or the pointer. At rest the field is completely still and the render loop is
+ * a real event: an activation strike from the live stream. Pointer focus only
+ * isolates the neighborhood. At rest the field is completely still and the render loop is
  * asleep. The synchronized list next to the canvas remains the accessible
  * surface.
  *
@@ -59,8 +59,7 @@ export function GraphCanvas({
   /** Occupy the parent's full height instead of a fixed one. The parent must
    * establish the height (e.g. `flex-1 min-h-0`). */
   fill?: boolean;
-  /** External synapse field; when omitted the canvas owns a local one fed by
-   * selection strikes. */
+  /** External synapse field; when omitted the canvas owns an idle local one. */
   activation?: ActivationField;
   /** Extra classes merged onto the canvas element itself (not the figure) --
    * for a caller that needs to guarantee a minimum rendered height on a
@@ -494,8 +493,7 @@ export function GraphCanvas({
           {caption ?? (
             <>
               {nodes.length} symbols · {edges.length} relations · hover isolates
-              a neighbourhood · click fires it and the glow decays with the
-              activation
+              a neighbourhood · activity glow follows supplied events
             </>
           )}
         </div>
