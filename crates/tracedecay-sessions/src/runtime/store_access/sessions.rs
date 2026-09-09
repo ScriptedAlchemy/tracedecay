@@ -15,7 +15,7 @@ use tracedecay_lcm::retrieval_content::{
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
-use super::super::shared::path_identity_key;
+use super::super::shared::durable_project_path_key;
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -43,8 +43,8 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
 /// Appends the project-scope predicate.
 ///
 /// `project_key` is an opaque authority and stays byte-exact. `project_path`
-/// is written through `path_identity_key`, so the same selector can use its
-/// exact spelling for the key and its canonical path spelling for the path.
+/// is written through `durable_project_path_key`, so a selector spelled as a
+/// symlink alias still matches the stored OS identity.
 fn push_project_identity_predicate(
     sql: &mut String,
     query_params: &mut Vec<Value>,
@@ -52,7 +52,7 @@ fn push_project_identity_predicate(
 ) {
     query_params.push(Value::Text(project_selector.to_owned()));
     let key_parameter = query_params.len();
-    query_params.push(Value::Text(path_identity_key(project_selector)));
+    query_params.push(Value::Text(durable_project_path_key(project_selector)));
     let path_parameter = query_params.len();
     let _ = write!(
         sql,
