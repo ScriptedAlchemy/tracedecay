@@ -53,12 +53,14 @@ use tracedecay_automation_runtime::automation::effect_runtime::{
     AutomationSettledProblem, AutomationSettledTerminal, contract_error, digest, journal,
     retirement,
 };
+use tracedecay_automation_runtime::automation::effect_runtime::{
+    add_pending_blocking, effect_authority_digest as calculate_effect_authority_digest,
+    finalize_terminal_housekeeping, recovered_partial_terminal, remove_pending_blocking,
+};
 use tracedecay_daemon_service::{DaemonInvocationService, RegisteredRetainedRequestContextError};
 use tracedecay_domain::errors::Result;
 
-mod authority;
 pub(crate) mod recovery_index;
-use authority::finalize_terminal_housekeeping as finalize_terminal_housekeeping_owned;
 
 #[cfg(test)]
 #[path = "automation_effect/journal/tests.rs"]
@@ -1183,7 +1185,7 @@ impl AutomationEffectAuthority {
             }
             AutomationRecoveryBinding::External { recovery_problem }
         };
-        let effect_authority_digest = recovery_index::effect_authority_digest(
+        let effect_authority_digest = calculate_effect_authority_digest(
             1,
             &operation,
             &request,
@@ -1226,8 +1228,8 @@ impl AutomationEffectAuthority {
                 reserve_or_replay_indexed_blocking(
                     &reserve_path,
                     requested,
-                    || recovery_index::add_pending_blocking(&index_root, &index_path, &indexed),
-                    || recovery_index::remove_pending_blocking(&index_root, &index_path),
+                    || add_pending_blocking(&index_root, &index_path, &indexed),
+                    || remove_pending_blocking(&index_root, &index_path),
                 )
             })
         })
@@ -1389,7 +1391,7 @@ impl AutomationEffectAuthority {
                     authority.settle_recovered_retirement().await?
                 } else if !committed_receipts.is_empty() {
                     authority
-                        .persist_recovered_terminal(recovery_index::recovered_partial_terminal(
+                        .persist_recovered_terminal(recovered_partial_terminal(
                             &authority.admission,
                             committed_receipts,
                             &authority.operation,
@@ -1746,7 +1748,7 @@ impl AutomationEffectAuthority {
         let index_path = path.clone();
         tokio::task::spawn_blocking(move || {
             abandon_reservation_blocking(&path, &admission)?;
-            recovery_index::remove_pending_blocking(&dashboard_root, &index_path)
+            remove_pending_blocking(&dashboard_root, &index_path)
         })
         .await
         .map_err(|error| {
@@ -2076,7 +2078,7 @@ fn cleanup_bound_terminal(state: &RetainedBoundSettlement) {
         );
         return;
     }
-    if let Err(error) = recovery_index::remove_pending_blocking(
+    if let Err(error) = remove_pending_blocking(
         &state.authority.dashboard_root,
         &state.authority.journal_path,
     ) {
@@ -2199,7 +2201,7 @@ fn settle_direct_once(state: &mut RetainedDirectSettlement) -> Result<()> {
 }
 
 fn cleanup_direct_terminal(state: &RetainedDirectSettlement) {
-    if let Err(error) = recovery_index::remove_pending_blocking(
+    if let Err(error) = remove_pending_blocking(
         &state.authority.dashboard_root,
         &state.authority.journal_path,
     ) {
@@ -2315,7 +2317,7 @@ fn abandon_retained_once(state: &mut RetainedAbandonment) -> Result<()> {
         }
         state.reservation_abandoned = true;
     }
-    recovery_index::remove_pending_blocking(
+    remove_pending_blocking(
         &state.authority.dashboard_root,
         &state.authority.journal_path,
     )
@@ -2374,44 +2376,4 @@ fn validate_retirement_binding(
             "automation retirement classification changed after durable admission",
         ))
     }
-}
-
-async fn finalize_terminal_housekeeping(
-    dashboard_root: &Path,
-    journal_path: &Path,
-    admission: &DurableAutomationAdmission,
-    terminal: &AutomationSettledTerminal,
-    live_retirement: Option<retirement::RetirementPlan>,
-) -> Result<()> {
-    let retirement_binding = match (
-        admission.retirement().cloned(),
-        terminal.is_retirement_terminal(),
-    ) {
-        (Some(binding), true) => Some(binding),
-        (Some(_), false) if terminal.problem().is_some() => None,
-        (Some(_), false) => {
-            return Err(contract_error(
-                "retirement-bound automation terminal is neither its exact zero-effect retirement nor a typed problem",
-            ));
-        }
-        (None, true) => {
-            return Err(contract_error(
-                "automation retirement terminal has no admitted source binding",
-            ));
-        }
-        (None, false) if live_retirement.is_some() => {
-            return Err(contract_error(
-                "live retirement plan has no durable admission binding",
-            ));
-        }
-        (None, false) => None,
-    };
-    finalize_terminal_housekeeping_owned(
-        dashboard_root,
-        journal_path,
-        admission.clone(),
-        retirement_binding,
-        live_retirement,
-    )
-    .await
 }
