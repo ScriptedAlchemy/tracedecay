@@ -1499,7 +1499,7 @@ mod tests {
         let cancellation = CancellationSignal::active(format!("cancel.{run_id}"))
             .expect("combined recovery cancellation");
         let report =
-            crate::daemon::automation_effect::recovery_index::reconcile_reserved_automation_effects_for_project(
+            crate::daemon::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
                 &fixture.dashboard_root,
                 &cancellation,
@@ -1520,7 +1520,7 @@ mod tests {
         assert!(!conflicting_journal.exists());
         assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
         let report =
-            crate::daemon::automation_effect::recovery_index::reconcile_reserved_automation_effects_for_project(
+            crate::daemon::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
                 &fixture.dashboard_root,
                 &cancellation,
