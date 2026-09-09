@@ -30,15 +30,16 @@
 //! repositories; that is deliberately out of scope.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_application::pr_tracking::{
-    DiscoveredPr, ManagedPr, ManualBranchActivationError, ManualBranchArtifactOwnershipV1,
-    ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1, PrAutotrackState, PrCleanupError,
-    PrCleanupReceipt, PrCommandControlV1 as PrCommandControl, PrDiscovery, cleanup_owned_worktree,
-    cleanup_pr_worktree, default_pr_command_control, discover_open_prs_with_control, load_state,
-    manual_branch_artifact_ownership, manual_branch_artifacts_match,
+    DiscoveredPr, ManagedPr, ManualBranchActivation, ManualBranchActivationError,
+    ManualBranchArtifactOwnershipV1, ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1,
+    PrAutotrackState, PrCommandControlV1 as PrCommandControl, PrDiscovery, ReconcileReport,
+    cleanup_owned_worktree, cleanup_owned_worktree_off_runtime, cleanup_pr_worktree_off_runtime,
+    default_pr_command_control, discover_open_prs_with_control, load_state,
+    manual_branch_artifact_ownership_off_runtime, manual_branch_artifacts_match_off_runtime,
     manual_branch_source_owns_artifacts, pr_label, pr_tracking_ref, prepare_manual_branch_worktree,
     prepare_pr_worktree, resolve_branch_head, save_state,
 };
@@ -63,19 +64,6 @@ async fn git_authority_available(repo_root: &Path) -> bool {
     .await
     .ok()
     .unwrap_or(false)
-}
-
-/// Outcome of a successful manual branch-head activation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ManualBranchActivation {
-    /// Operator-requested branch name.
-    pub(crate) branch: String,
-    /// Resolved commit of that branch at activation time.
-    pub(crate) head_sha: String,
-    /// Linked worktree checked out for the code-index scheduler.
-    pub(crate) worktree: PathBuf,
-    /// CLI/MCP outcome for the activation.
-    pub(crate) outcome: tracedecay_runtime_core::branch::BranchAddOutcome,
 }
 
 #[cfg(test)]
@@ -123,24 +111,6 @@ const MAX_NEW_TRACKS_PER_CYCLE: usize = 10;
 // ---------------------------------------------------------------------------
 // Lifecycle reconciliation
 // ---------------------------------------------------------------------------
-
-/// A summary of what one reconcile pass changed, for logging and tests.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct ReconcileReport {
-    /// Internal labels newly tracked or recovered this pass.
-    pub(crate) tracked: Vec<String>,
-    /// Labels untracked this pass (PR closed/merged).
-    pub(crate) untracked: Vec<String>,
-    /// PR numbers skipped as forks.
-    pub(crate) skipped_forks: Vec<u64>,
-    /// True when the per-cycle new-track cap held some additions back.
-    pub(crate) capped: bool,
-    /// True when removals were skipped because the discovery was `partial`
-    /// (possibly truncated) — no managed PR is untracked on an incomplete view.
-    pub(crate) removals_suppressed: bool,
-    /// Tracking or persistence failures surfaced to callers.
-    pub(crate) failures: Vec<(String, String)>,
-}
 
 /// Logs a `pr_autotrack` "skipped" daemon event with the optional branch label
 /// and PR number. Every skip path (persistence failure, track failure, fork,
@@ -559,88 +529,6 @@ pub(crate) async fn retire_worktree_mount(
     Ok(())
 }
 
-async fn cleanup_owned_worktree_off_runtime(
-    repo_root: &Path,
-    worktree: &Path,
-    tracking_ref: &str,
-    label: &str,
-    expected_head: &str,
-    command_control: PrCommandControl,
-) -> std::result::Result<bool, ManualBranchActivationError> {
-    let repo_root = repo_root.to_path_buf();
-    let worktree = worktree.to_path_buf();
-    let tracking_ref = tracking_ref.to_owned();
-    let label = label.to_owned();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        cleanup_owned_worktree(
-            &repo_root,
-            &worktree,
-            &tracking_ref,
-            &label,
-            &expected_head,
-            &command_control,
-        )
-    })
-    .await
-    .map_err(|error| {
-        ManualBranchActivationError::activation_failed(format!(
-            "manual branch cleanup task did not complete: {error}"
-        ))
-    })?
-}
-
-async fn manual_branch_artifact_ownership_off_runtime(
-    repo_root: &Path,
-    worktree: &Path,
-    tracking_ref: &str,
-    label: &str,
-    expected_head: &str,
-    command_control: PrCommandControl,
-) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
-    let repo_root = repo_root.to_path_buf();
-    let worktree = worktree.to_path_buf();
-    let tracking_ref = tracking_ref.to_owned();
-    let label = label.to_owned();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        manual_branch_artifact_ownership(
-            &repo_root,
-            &worktree,
-            &tracking_ref,
-            &label,
-            &expected_head,
-            &command_control,
-        )
-    })
-    .await
-    .map_err(|error| {
-        ManualBranchActivationError::activation_failed(format!(
-            "manual branch ownership check task did not complete: {error}"
-        ))
-    })?
-}
-
-async fn manual_branch_artifacts_match_off_runtime(
-    repo_root: &Path,
-    artifacts: &ManualBranchArtifactsV1,
-    expected_head: &str,
-    command_control: PrCommandControl,
-) -> std::result::Result<bool, ManualBranchActivationError> {
-    let repo_root = repo_root.to_path_buf();
-    let artifacts = artifacts.clone();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        manual_branch_artifacts_match(&repo_root, &artifacts, &expected_head, &command_control)
-    })
-    .await
-    .map_err(|error| {
-        ManualBranchActivationError::activation_failed(format!(
-            "manual branch exactness inspection task did not complete: {error}"
-        ))
-    })?
-}
-
 #[hotpath::measure(label = "daemon.pr_autotrack.reconcile", future = true)]
 async fn reconcile_project_with_administration(
     repo_root: &Path,
@@ -1054,7 +942,6 @@ async fn cleanup_failed_track(
 
 /// Fetches `refs/pull/<N>/head` into `tracking_ref` and adds a linked worktree
 /// checked out on a local branch named `label` at that ref.
-#[hotpath::measure(label = "daemon.pr_autotrack.prepare_worktree")]
 /// Untracks a managed PR: removes its branch store, its worktree, its local
 /// tracking branch, and its ref. The Git artifacts are released only after the
 /// coordinator reports that the store is gone (or was already absent).
@@ -1170,31 +1057,6 @@ async fn sweep_orphan_pr_worktrees(
             Err(reason) => log_pr_skip(repo_root, Some(&label), Some(number), &reason),
         }
     }
-}
-
-async fn cleanup_pr_worktree_off_runtime(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    expected_head: &str,
-    remove_synthetic_branch: bool,
-    command_control: PrCommandControl,
-) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
-    let repo_root = repo_root.to_path_buf();
-    let data_root = data_root.to_path_buf();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        cleanup_pr_worktree(
-            &repo_root,
-            &data_root,
-            pr,
-            &expected_head,
-            remove_synthetic_branch,
-            &command_control,
-        )
-    })
-    .await
-    .map_err(|error| PrCleanupError::Join(error.to_string()))?
 }
 
 #[cfg(test)]

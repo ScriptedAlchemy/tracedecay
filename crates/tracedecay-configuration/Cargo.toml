@@ -20,7 +20,6 @@ tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-semantic-contracts.workspace = true

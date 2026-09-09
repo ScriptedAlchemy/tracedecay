@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::configuration::ConfigurationSnapshotV1;
 use tracedecay_domain::configuration::{
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
@@ -24,7 +25,6 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use tracedecay_runtime_core::config::{
     GENERATED_DIR_SEGMENTS, active_data_dir_name, discover_project_root, get_tracedecay_dir,
     is_generated_dir_segment,

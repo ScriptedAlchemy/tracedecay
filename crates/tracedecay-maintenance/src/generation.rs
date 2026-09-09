@@ -1,12 +1,16 @@
 //! Ordered generation retention for one mounted project.
 
-use super::{
-    MaintenanceContinuation, MaintenanceTickOutcome, StoreTelemetrySamplingRegistry,
-    record_live_compaction_outcome,
+use crate::compaction_receipt::record_live_compaction_outcome;
+use crate::lease::ProjectStoreMaintenanceLeaseV1;
+use crate::store_maintenance::{
+    CodeGenerationRetentionOutcomeV1, run_branch_compaction, run_code_generation_retention,
+    run_code_index_scope_reconciliation, run_semantic_vector_generation_retention,
 };
-use crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1;
+use crate::telemetry::StoreTelemetrySamplingRegistry;
+use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 
-/// Run the production generation-maintenance journey for one mounted project.
+/// Run the production generation-maintenance journey for one admitted store lease.
 ///
 /// Vector generations converge before their source code generations can be
 /// collected. Scope deletion is admitted only from a complete
@@ -24,21 +28,18 @@ use crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1;
 /// draining a superseded backlog on the short cadence without re-running
 /// scope reconciliation or compaction.
 #[hotpath::measure(label = "daemon.maintenance.generation", future = true)]
-pub(in crate::daemon) async fn run_project_generation_maintenance(
-    graph: &crate::tracedecay::TraceDecay,
+pub async fn run_project_generation_maintenance(
+    lease: &ProjectStoreMaintenanceLeaseV1,
     code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_session_memory::context::CancellationToken,
-    retention: &tracedecay_configuration::RetentionConfig,
+    compaction: Option<&CompactionThresholdConfig>,
     continuation: Option<MaintenanceContinuation>,
 ) -> MaintenanceTickOutcome {
-    // Each ordered phase gets its own wall span: the outer generation span is
-    // inclusive, so a slow tick is attributed to vector retention, code
-    // generation retention, scope reconciliation, or compaction — not guessed.
     let mut outcome = hotpath::measure_block!(
         "daemon.maintenance.vector_retention",
-        crate::daemon::store_maintenance::run_semantic_vector_generation_retention(
-            graph,
+        run_semantic_vector_generation_retention(
+            lease,
             code_index_schedulers,
             maintenance_observations,
             cancellation,
@@ -54,8 +55,8 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     } else {
         hotpath::measure_block!(
             "daemon.maintenance.code_generation_retention",
-            crate::daemon::store_maintenance::run_code_generation_retention(
-                graph,
+            run_code_generation_retention(
+                lease,
                 code_index_schedulers,
                 maintenance_observations,
                 cancellation,
@@ -82,12 +83,12 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     if semantic_collection_complete
         && code_generation == CodeGenerationRetentionOutcomeV1::Complete
         && !cancellation.is_cancelled()
-        && maintenance_observations.semantic_vector_scope_collection_ready(graph.project_root())
+        && maintenance_observations.semantic_vector_scope_collection_ready(lease.project_root())
     {
         let scope_reconciled = hotpath::measure_block!(
             "daemon.maintenance.scope_reconciliation",
-            crate::daemon::store_maintenance::run_code_index_scope_reconciliation(
-                graph,
+            run_code_index_scope_reconciliation(
+                lease,
                 code_index_schedulers,
                 maintenance_observations,
             )
@@ -98,13 +99,13 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
         }
     }
     if !cancellation.is_cancelled()
-        && let Some(compaction) = &retention.compaction
+        && let Some(compaction) = compaction
     {
         hotpath::measure_block!("daemon.maintenance.compaction", {
             let project_compacted = record_live_compaction_outcome(
-                crate::config::DB_FILENAME,
-                tracedecay_maintenance::retention::live_compaction::compact_project_store(
-                    graph.db(),
+                tracedecay_runtime_core::config::DB_FILENAME,
+                crate::retention::live_compaction::compact_project_store(
+                    lease.graph_db(),
                     compaction,
                 )
                 .await,
@@ -113,9 +114,7 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
                 outcome = MaintenanceTickOutcome::Retry;
             }
             if !cancellation.is_cancelled() {
-                let branch_compacted =
-                    crate::daemon::store_maintenance::run_branch_compaction(graph, compaction)
-                        .await;
+                let branch_compacted = run_branch_compaction(lease, compaction).await;
                 if !branch_compacted {
                     outcome = MaintenanceTickOutcome::Retry;
                 }
@@ -125,8 +124,6 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     finalize_generation_outcome(outcome, cancellation)
 }
 
-/// Cancelled and degraded ticks are recorded too: a maintenance lane that
-/// silently retries forever is exactly the waste being diagnosed.
 fn finalize_generation_outcome(
     outcome: MaintenanceTickOutcome,
     cancellation: &tracedecay_session_memory::context::CancellationToken,

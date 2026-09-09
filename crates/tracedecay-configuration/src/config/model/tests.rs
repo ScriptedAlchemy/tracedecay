@@ -645,7 +645,7 @@ fn default_excludes_still_catch_target_and_worktrees() {
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
     use crate::{RetentionConfig, SyncConfig};
-    use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
+    use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 
     #[test]
     fn default_retention_runs_only_safe_bounded_maintenance() {

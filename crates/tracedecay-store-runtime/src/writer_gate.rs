@@ -1,6 +1,6 @@
-//! Per-store daemon writer gates.
+//! Per-store writer gates.
 //!
-//! # Why this is not one daemon-wide mutex
+//! # Why this is not one process-wide mutex
 //!
 //! Writer administration used to be a single process-wide `Mutex`. Its own
 //! comment conceded that "a background refresh or a generation rebuild can hold
@@ -30,11 +30,11 @@
 //! * **Daemon scope still excludes everything.** A `Daemon` acquisition takes
 //!   `daemon.write()`, which no store-scoped acquisition can hold concurrently.
 //! * **Owner and Content are deliberately concurrent.** They are disjoint
-//!   concerns: `Owner` mutates the daemon's in-memory owner/scheduler
-//!   bookkeeping for a store, `Content` writes index rows into a store that is
-//!   already open. They were only serialized before because there was one gate.
-//!   Content writes were never exclusive against the rest of the daemon anyway
-//!   — hook writes and memory writes go straight to the store without taking
+//!   concerns: `Owner` mutates in-memory owner/scheduler bookkeeping for a
+//!   store, `Content` writes index rows into a store that is already open.
+//!   They were only serialized before because there was one gate. Content
+//!   writes were never exclusive against the rest of the process anyway —
+//!   hook writes and memory writes go straight to the store without taking
 //!   this gate at all — so admitting an owner-bookkeeping mutation beside a
 //!   sync adds no writer that did not already exist.
 
@@ -46,9 +46,9 @@ use tokio::sync::{Mutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWrite
 
 /// What one writer acquisition is allowed to do to a store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum StoreWriterClass {
-    /// Mutates the daemon's owner/scheduler bookkeeping for the store (project
-    /// open, owner rekey, scheduler start/stop). Serialized against itself.
+pub enum StoreWriterClass {
+    /// Mutates owner/scheduler bookkeeping for the store (project open, owner
+    /// rekey, scheduler start/stop). Serialized against itself.
     Owner,
     /// Writes index content into an already-open store (git-watch sync,
     /// background refresh). Serialized against itself.
@@ -57,8 +57,8 @@ pub(super) enum StoreWriterClass {
 
 /// Which lane a writer acquisition takes.
 #[derive(Clone, Debug)]
-pub(super) enum WriterScope {
-    /// Daemon-wide exclusion. Reserved for operations that sweep every mounted
+pub enum WriterScope {
+    /// Process-wide exclusion. Reserved for operations that sweep every mounted
     /// store, or whose store cannot be resolved.
     Daemon,
     /// Exclusion scoped to one store family, keyed by its canonical `data_root`.
@@ -72,7 +72,8 @@ impl WriterScope {
     /// Store-scoped acquisition for `data_root`. The caller is responsible for
     /// passing a canonical path; [`StoreWriterGates`] keys on it verbatim so
     /// that a mismatched key can never silently split a store's gate.
-    pub(super) fn store(data_root: impl Into<PathBuf>, class: StoreWriterClass) -> Self {
+    #[must_use]
+    pub fn store(data_root: impl Into<PathBuf>, class: StoreWriterClass) -> Self {
         Self::Store {
             data_root: data_root.into(),
             class,
@@ -102,7 +103,7 @@ impl StoreGate {
 ///
 /// Dropping this releases the whole hierarchy. The fields are never read; they
 /// exist to pin the guards.
-pub(super) struct WriterAdmissionGuard {
+pub struct WriterAdmissionGuard {
     _class: Option<OwnedMutexGuard<()>>,
     _daemon: DaemonGuard,
     /// Keeps the store's gate alive for as long as it is held, so a registry
@@ -119,9 +120,8 @@ enum DaemonGuard {
     Exclusive(OwnedRwLockWriteGuard<()>),
 }
 
-/// The daemon's writer-gate registry: one daemon-wide lane plus one lane set
-/// per store family.
-pub(super) struct StoreWriterGates {
+/// Writer-gate registry: one process-wide lane plus one lane set per store family.
+pub struct StoreWriterGates {
     daemon: Arc<RwLock<()>>,
     stores: std::sync::Mutex<HashMap<PathBuf, Weak<StoreGate>>>,
 }
@@ -159,7 +159,7 @@ impl StoreWriterGates {
     /// Number of live store gates. Test-only observability for the isolation
     /// proofs.
     #[cfg(test)]
-    pub(super) fn live_store_gates(&self) -> usize {
+    pub fn live_store_gates(&self) -> usize {
         let mut stores = self
             .stores
             .lock()
@@ -170,7 +170,7 @@ impl StoreWriterGates {
 
     /// Acquires admission for `scope`, waiting as long as necessary.
     #[hotpath::skip]
-    pub(super) async fn acquire(&self, scope: &WriterScope) -> WriterAdmissionGuard {
+    pub async fn acquire(&self, scope: &WriterScope) -> WriterAdmissionGuard {
         match scope {
             WriterScope::Daemon => WriterAdmissionGuard {
                 _class: None,
@@ -206,7 +206,7 @@ impl StoreWriterGates {
 
     /// Acquires admission only if every level is free right now.
     #[hotpath::measure(label = "daemon.writer_gate.try_acquire")]
-    pub(super) fn try_acquire(&self, scope: &WriterScope) -> Option<WriterAdmissionGuard> {
+    pub fn try_acquire(&self, scope: &WriterScope) -> Option<WriterAdmissionGuard> {
         match scope {
             WriterScope::Daemon => Some(WriterAdmissionGuard {
                 _class: None,
