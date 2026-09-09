@@ -7,7 +7,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_mcp::tools::render::Md;
 
-use super::super::dependency_hints;
+use tracedecay_mcp::handlers::dependency_hints;
 
 #[hotpath::measure(future = true, label = "mcp.graph.search_race")]
 pub(super) async fn race_primary_search_with_graph<S, G>(
@@ -145,9 +145,7 @@ impl<'a> SearchGraphEvidence<'a> {
                 scope_prefix,
                 deadline,
                 cancellation,
-            )
-            .await
-            {
+            ) {
                 Ok(hint) => hint,
                 Err(error) => Some(dependency_hints::unavailable_hint(&error)),
             },

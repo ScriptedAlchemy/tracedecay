@@ -10,20 +10,21 @@ use tracedecay_contracts::retrieval::{
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
-use tracedecay_mcp::tools::render::{self, Md};
 
-pub(super) fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
+use crate::tools::render::{self, Md};
+
+pub fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
     result_count == 0 || result_count < limit.clamp(1, 20)
 }
 
-pub(super) fn lazy_indexing_requested(args: &Value) -> bool {
+pub fn lazy_indexing_requested(args: &Value) -> bool {
     args.get("lazy_index_ignored_dependencies")
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }
 
-#[hotpath::measure(future = true, label = "mcp.search.import_hint.total")]
-pub(super) async fn external_import_hint(
+#[hotpath::measure(label = "mcp.search.import_hint.total")]
+pub fn external_import_hint(
     graph: &VerifiedGraphQuery,
     query: &str,
     limit: usize,
@@ -51,7 +52,7 @@ pub(super) async fn external_import_hint(
     })))
 }
 
-pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
+pub fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
     let (reason_code, retryable, detail) =
         if let Some((reason_code, retryable, detail)) = error.project_route_context() {
             (reason_code, retryable, detail.to_owned())
@@ -72,12 +73,12 @@ pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavaila
     }
 }
 
-pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
+pub fn unavailable_hint(error: &TraceDecayError) -> Value {
     json!(unavailable_evidence(error))
 }
 
 #[hotpath::measure(label = "mcp.search.import_admit.total")]
-pub(super) async fn admit_verified_ignored_dependency(
+pub async fn admit_verified_ignored_dependency(
     admission: Option<&dyn CodeIndexIgnoredDependencyAdmissionPortV1>,
     graph: &VerifiedGraphQuery,
     query: &str,
@@ -190,7 +191,7 @@ fn generation_advanced() -> TraceDecayError {
     )
 }
 
-pub(super) fn append_external_import_hint_md(md: &mut Md, value: &Value) {
+pub fn append_external_import_hint_md(md: &mut Md, value: &Value) {
     let Some(hint) = value.get("external_import_hint") else {
         return;
     };

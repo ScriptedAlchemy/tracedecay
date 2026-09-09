@@ -14,12 +14,13 @@ use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
-use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::ast_grep as portable_ast_grep;
+use tracedecay_mcp::handlers::git;
 use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
+use tracedecay_mcp::{McpToolContext, ToolResult};
 
 use super::ToolCallRegistryOptions;
 use super::support::{effective_path, generic_tool_result, unique_file_paths};
@@ -27,7 +28,7 @@ use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
     admin_cli, admin_project, application_surface, automation_runs, dashboard, dispatch_controls,
-    edit, git, graph, hook_runtime, info, skills, workflow,
+    edit, graph, hook_runtime, info, skills, workflow,
 };
 
 mod health_dispatch;
@@ -1025,20 +1026,21 @@ fn dispatch_git_tools_inner<'a>(
         // also tells the underlying operation to stop at its next checkpoint.
         let carried_deadline = options.application_deadline.as_ref();
         let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
+        let ctx = git_tool_context(cg, &options);
 
         let handler = async {
             match tool_name {
                 "tracedecay_affected" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_affected(cg, &graph, args).await
+                    git::handle_affected(&ctx, &graph, args).await
                 }
                 "tracedecay_diff_context" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_diff_context(cg, &graph, args).await
+                    git::handle_diff_context(&ctx, &graph, args).await
                 }
                 "tracedecay_changelog" => {
                     git::handle_changelog(
-                        cg,
+                        &ctx,
                         admitted_graph_query(cg, &options, "file_dependents"),
                         args,
                     )
@@ -1046,54 +1048,19 @@ fn dispatch_git_tools_inner<'a>(
                 }
                 "tracedecay_commit_context" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
-                    git::handle_commit_context(cg, &graph, args).await
+                    git::handle_commit_context(&ctx, &graph, args).await
                 }
                 "tracedecay_pr_context" => {
-                    let deadline = options.application_deadline.clone();
-                    let cancellation = options.application_cancellation.clone();
-                    let registered_project_session_db =
-                        options.registered_project_session_db.clone();
                     git::handle_pr_context(
-                        cg,
+                        &ctx,
                         admitted_graph_query(cg, &options, "file_dependents"),
                         args,
-                        deadline,
-                        cancellation,
-                        registered_project_session_db,
                     )
                     .await
                 }
-                "tracedecay_branch_search" => {
-                    git::handle_branch_search(
-                        cg,
-                        args,
-                        options.code_index_search_executor.as_ref(),
-                        options.code_index_search_authority.as_ref(),
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
-                    )
-                    .await
-                }
-                "tracedecay_branch_diff" => {
-                    git::handle_branch_diff(
-                        cg,
-                        args,
-                        options.code_index_branch_diff_executor.as_ref(),
-                        options.code_index_search_authority.as_ref(),
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
-                    )
-                    .await
-                }
-                "tracedecay_branch_list" => {
-                    git::handle_branch_list(
-                        cg,
-                        args,
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
-                    )
-                    .await
-                }
+                "tracedecay_branch_search" => git::handle_branch_search(&ctx, args).await,
+                "tracedecay_branch_diff" => git::handle_branch_diff(&ctx, args).await,
+                "tracedecay_branch_list" => git::handle_branch_list(&ctx, args).await,
                 _ => Err(unknown_tool_error(tool_name)),
             }
         };
@@ -1101,17 +1068,43 @@ fn dispatch_git_tools_inner<'a>(
         match (carried_deadline.is_some(), remaining) {
             (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
                 Ok(result) => result,
-                Err(_elapsed) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
+                Err(_elapsed) => Ok(git::git_dispatch_deadline_result(&ctx, tool_name)),
             },
             // `deadline_remaining` yields `None` for a non-positive budget, so a
             // carried deadline that already elapsed must be rejected rather than
             // dispatched unbounded.
-            (true, None) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
+            (true, None) => Ok(git::git_dispatch_deadline_result(&ctx, tool_name)),
             // Standalone / non-admission callers carry no deadline and stay
             // unbounded.
             (false, None) => handler.await,
         }
     })
+}
+
+/// Binds the admitted authorities the git handler family reads.
+///
+/// Everything the family may touch — the project route, the caller's deadline
+/// and cancellation, the registered project session store that authenticates
+/// PR-context cursors, and the daemon-owned code-index executors with the
+/// authorization proved for them — crosses into `tracedecay-mcp` through this
+/// one context. An authority the daemon did not admit stays absent, and the
+/// handler reports its own typed unavailable state.
+fn git_tool_context<'a>(
+    cg: &'a TraceDecay,
+    options: &'a ToolCallRegistryOptions<'a>,
+) -> McpToolContext<'a> {
+    McpToolContext::new(cg.project_root())
+        .with_active_branch(cg.active_branch())
+        .with_request_control(
+            options.application_deadline.as_ref(),
+            options.application_cancellation.as_ref(),
+        )
+        .with_project_session_db(options.registered_project_session_db.as_ref())
+        .with_code_index_authorities(
+            options.code_index_search_executor.as_ref(),
+            options.code_index_branch_diff_executor.as_ref(),
+            options.code_index_search_authority.as_ref(),
+        )
 }
 
 /// Dispatch source-editing tools (`tracedecay_str_replace`,

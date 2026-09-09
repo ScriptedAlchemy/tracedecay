@@ -1,13 +1,17 @@
 //! Portable MCP catalog, rendering, JSON-RPC transport, and server-adjacent
 //! protocol helpers.
 //!
-//! This crate owns daemon-free MCP surface: JSON-RPC contracts, concrete
+//! This crate owns the MCP surface itself: JSON-RPC contracts, concrete
 //! stdio/channel/replay transports, tool definitions, response truncation,
 //! canonical application-result presentation, request-deadline decoding,
-//! tool-error classification, hook-event plan decoding, and construction
-//! ports that need MCP-adjacent types. Server construction, connection
-//! lifecycle adapters, and handlers that reach daemon internals stay in the
-//! composition root.
+//! tool-error classification, hook-event plan decoding, construction ports
+//! that need MCP-adjacent types, and the tool handlers that translate a
+//! transport request into a business-owner call.
+//!
+//! Handlers reach daemon state only through [`McpToolContext`], the single
+//! context the composition root fills with the authorities it admitted for
+//! the call. Server construction, connection lifecycle adapters, and the
+//! wiring that builds that context stay in the composition root.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -51,6 +55,7 @@ pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
 pub mod tool_call_deadline;
+pub mod tool_context;
 pub mod tool_errors;
 pub mod tools;
 pub mod transport;
@@ -84,6 +89,7 @@ pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, caller_tool_call_deadline_from_meta,
     tool_call_deadline_meta,
 };
+pub use tool_context::McpToolContext;
 pub use tool_errors::{
     mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
     structured_hook_error_data, tool_error_response, tool_result_has_semantic_error,

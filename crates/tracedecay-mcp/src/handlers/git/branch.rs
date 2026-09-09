@@ -77,7 +77,13 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
     use tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1;
 
     match error {
-        BranchRouteReadErrorV1::Capacity => ("branch_read_capacity_unavailable", true),
+        // Both ceilings are the same answer to the caller: the local
+        // admission semaphore refused the read, or the ref walk exceeded its
+        // own bound. Either way the route is over capacity and retryable.
+        BranchRouteReadErrorV1::Capacity
+        | BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::CapacityExceeded { .. }) => {
+            ("branch_read_capacity_unavailable", true)
+        }
         BranchRouteReadErrorV1::Task => ("branch_read_failed", true),
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::InvalidReference { .. }) => {
             ("branch_ref_invalid", false)
@@ -95,9 +101,6 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::InvalidLimit) => {
             ("invalid_request", false)
         }
-        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::CapacityExceeded { .. }) => {
-            ("branch_read_capacity_unavailable", true)
-        }
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::Cancelled) => ("cancelled", false),
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::TimedOut) => ("timed_out", true),
     }
@@ -105,12 +108,9 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
 
 /// Lists exact local branch refs. A branch name never selects a branch DB.
 #[hotpath::measure(future = true, label = "mcp.git.branch_list.total")]
-pub(crate) async fn handle_branch_list(
-    cg: &TraceDecay,
-    args: Value,
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
-) -> Result<ToolResult> {
+pub async fn handle_branch_list(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
+    let deadline = ctx.deadline().cloned();
+    let cancellation = ctx.cancellation().cloned();
     let limit = args
         .get("limit")
         .and_then(Value::as_u64)
@@ -129,7 +129,7 @@ pub(crate) async fn handle_branch_list(
         .map(str::to_owned);
     match hotpath::future!(
         run_branch_ref_read(
-            cg.project_root().to_path_buf(),
+            ctx.project_root().to_path_buf(),
             limit,
             after,
             deadline,
@@ -165,7 +165,7 @@ pub(crate) async fn handle_branch_list(
                 })
             );
             Ok(generic_tool_result(
-                Some(cg.project_root()),
+                Some(ctx.project_root()),
                 &args,
                 &result,
                 vec![],
@@ -174,7 +174,7 @@ pub(crate) async fn handle_branch_list(
         Err(error) => {
             let (reason, retryable) = branch_read_reason(&error);
             Ok(generic_tool_result(
-                Some(cg.project_root()),
+                Some(ctx.project_root()),
                 &args,
                 &json!({
                     "status": "unavailable",
@@ -190,7 +190,7 @@ pub(crate) async fn handle_branch_list(
 }
 
 fn branch_reference_unavailable(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     args: &Value,
     field: &str,
     branch: &str,
@@ -198,7 +198,7 @@ fn branch_reference_unavailable(
 ) -> ToolResult {
     let (reason, retryable) = branch_read_reason(error);
     generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         args,
         &json!({
             "status": "unavailable",
@@ -215,15 +215,15 @@ fn branch_reference_unavailable(
 }
 
 fn branch_search_unavailable(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     args: &Value,
     branch: &str,
     revision: &tracedecay_domain::GitOidV1,
-    unavailable: &crate::mcp::server::CodeIndexSearchUnavailableV1,
+    unavailable: &tracedecay_query::code_search::CodeIndexSearchUnavailableV1,
 ) -> ToolResult {
     let (reason, retryable) = branch_unavailable_wire(unavailable.reason);
     generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         args,
         &json!({
             "status": "unavailable",
@@ -243,14 +243,14 @@ fn branch_search_unavailable(
 }
 
 fn branch_unavailable_wire(
-    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1,
+    reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
 ) -> (&'static str, bool) {
     (
         reason.as_str(),
         matches!(
             reason,
-            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-                | crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
         ),
     )
 }
@@ -265,14 +265,11 @@ fn branch_search_page_status(has_more: bool) -> (&'static str, Option<&'static s
 
 /// Searches the generation sealed for the selected local ref's exact commit.
 #[hotpath::measure(future = true, label = "mcp.git.branch_search.total")]
-pub(crate) async fn handle_branch_search(
-    cg: &TraceDecay,
-    args: Value,
-    executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
-) -> Result<ToolResult> {
+pub async fn handle_branch_search(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
+    let executor = ctx.code_index_search_executor();
+    let authority = ctx.code_index_search_authority();
+    let deadline = ctx.deadline().cloned();
+    let cancellation = ctx.cancellation().cloned();
     let branch = args
         .get("branch")
         .and_then(Value::as_str)
@@ -293,11 +290,11 @@ pub(crate) async fn handle_branch_search(
         .get("limit")
         .and_then(Value::as_u64)
         .map_or(10, |value| value.min(500) as usize);
-    let cursor = super::super::support::retrieval_cursor(&args)?;
+    let cursor = crate::handlers::support::retrieval_cursor(&args)?;
     let revision_branch = branch.clone();
     let revision = match hotpath::future!(
         run_branch_ref_read(
-            cg.project_root().to_path_buf(),
+            ctx.project_root().to_path_buf(),
             1,
             None,
             deadline.clone(),
@@ -317,24 +314,24 @@ pub(crate) async fn handle_branch_search(
         Ok(revision) => revision,
         Err(error) => {
             return Ok(branch_reference_unavailable(
-                cg, &args, "branch", &branch, &error,
+                ctx, &args, "branch", &branch, &error,
             ));
         }
     };
     let Some(executor) = executor else {
         return Ok(branch_search_unavailable(
-            cg,
+            ctx,
             &args,
             &branch,
             &revision.commit,
-            &crate::mcp::server::CodeIndexSearchUnavailableV1 {
+            &tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                 code_generation: None,
                 reason:
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+                semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
                     reason: "code_index_unavailable",
                 },
-                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
                     "code_index_unavailable",
                 ),
             },
@@ -347,15 +344,15 @@ pub(crate) async fn handle_branch_search(
             }
         })?;
     match hotpath::future!(
-        executor(crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
+        executor(tracedecay_query::code_search::CodeIndexSearchRequestV1 {
+            project_root: ctx.project_root().to_path_buf(),
             query,
             source_revision: Some(revision.commit.clone()),
             source_tree: Some(revision.tree.clone()),
             source_reference: Some(source_reference),
             limit,
             cursor,
-            mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
+            mode: tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed,
             lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::query_only(),
             authority: authority.cloned(),
             deadline,
@@ -365,7 +362,7 @@ pub(crate) async fn handle_branch_search(
     )
     .await
     {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
             let next_cursor = complete
                 .next_cursor
                 .as_ref()
@@ -392,7 +389,7 @@ pub(crate) async fn handle_branch_search(
                 })
                 .collect::<Vec<_>>();
             Ok(generic_tool_result(
-                Some(cg.project_root()),
+                Some(ctx.project_root()),
                 &args,
                 &hotpath::measure_block!(
                     "mcp.git.branch_search.assemble",
@@ -411,22 +408,22 @@ pub(crate) async fn handle_branch_search(
                 vec![],
             ))
         }
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => Ok(
-            branch_search_unavailable(cg, &args, &branch, &revision.commit, &unavailable),
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => Ok(
+            branch_search_unavailable(ctx, &args, &branch, &revision.commit, &unavailable),
         ),
     }
 }
 
 fn branch_diff_unavailable(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     args: &Value,
     base: (&str, &tracedecay_domain::GitOidV1),
     head: (&str, &tracedecay_domain::GitOidV1),
-    unavailable: &crate::mcp::server::CodeIndexBranchDiffUnavailableV1,
+    unavailable: &tracedecay_query::code_search::CodeIndexBranchDiffUnavailableV1,
 ) -> ToolResult {
     let (reason, retryable) = branch_unavailable_wire(unavailable.reason);
     generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         args,
         &json!({
             "status": "unavailable",
@@ -448,7 +445,7 @@ fn branch_diff_unavailable(
     ))
 }
 
-fn branch_symbol_json(symbol: &crate::mcp::server::CodeIndexBranchSymbolV1) -> Value {
+fn branch_symbol_json(symbol: &tracedecay_query::code_search::CodeIndexBranchSymbolV1) -> Value {
     json!({
         "symbol_identity": symbol.symbol_identity,
         "symbol_occurrence_id": symbol.symbol_occurrence_id,
@@ -462,17 +459,17 @@ fn branch_symbol_json(symbol: &crate::mcp::server::CodeIndexBranchSymbolV1) -> V
     })
 }
 
-fn branch_change_json(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> Value {
+fn branch_change_json(change: &tracedecay_query::code_search::CodeIndexBranchChangeV1) -> Value {
     match change {
-        crate::mcp::server::CodeIndexBranchChangeV1::Added { symbol } => json!({
+        tracedecay_query::code_search::CodeIndexBranchChangeV1::Added { symbol } => json!({
             "change": "added",
             "symbol": branch_symbol_json(symbol),
         }),
-        crate::mcp::server::CodeIndexBranchChangeV1::Removed { symbol } => json!({
+        tracedecay_query::code_search::CodeIndexBranchChangeV1::Removed { symbol } => json!({
             "change": "removed",
             "symbol": branch_symbol_json(symbol),
         }),
-        crate::mcp::server::CodeIndexBranchChangeV1::Changed { base, head } => json!({
+        tracedecay_query::code_search::CodeIndexBranchChangeV1::Changed { base, head } => json!({
             "change": "changed",
             "base": branch_symbol_json(base),
             "head": branch_symbol_json(head),
@@ -480,31 +477,33 @@ fn branch_change_json(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> V
     }
 }
 
-fn branch_change_files(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> [&str; 2] {
+fn branch_change_files(
+    change: &tracedecay_query::code_search::CodeIndexBranchChangeV1,
+) -> [&str; 2] {
     match change {
-        crate::mcp::server::CodeIndexBranchChangeV1::Added { symbol }
-        | crate::mcp::server::CodeIndexBranchChangeV1::Removed { symbol } => {
+        tracedecay_query::code_search::CodeIndexBranchChangeV1::Added { symbol }
+        | tracedecay_query::code_search::CodeIndexBranchChangeV1::Removed { symbol } => {
             [symbol.file.as_str(), symbol.file.as_str()]
         }
-        crate::mcp::server::CodeIndexBranchChangeV1::Changed { base, head } => {
+        tracedecay_query::code_search::CodeIndexBranchChangeV1::Changed { base, head } => {
             [base.file.as_str(), head.file.as_str()]
         }
     }
 }
 
 fn branch_change_counts(
-    changes: &[crate::mcp::server::CodeIndexBranchChangeV1],
+    changes: &[tracedecay_query::code_search::CodeIndexBranchChangeV1],
 ) -> (usize, usize, usize) {
     changes
         .iter()
         .fold((0, 0, 0), |counts, change| match change {
-            crate::mcp::server::CodeIndexBranchChangeV1::Added { .. } => {
+            tracedecay_query::code_search::CodeIndexBranchChangeV1::Added { .. } => {
                 (counts.0 + 1, counts.1, counts.2)
             }
-            crate::mcp::server::CodeIndexBranchChangeV1::Removed { .. } => {
+            tracedecay_query::code_search::CodeIndexBranchChangeV1::Removed { .. } => {
                 (counts.0, counts.1 + 1, counts.2)
             }
-            crate::mcp::server::CodeIndexBranchChangeV1::Changed { .. } => {
+            tracedecay_query::code_search::CodeIndexBranchChangeV1::Changed { .. } => {
                 (counts.0, counts.1, counts.2 + 1)
             }
         })
@@ -512,14 +511,11 @@ fn branch_change_counts(
 
 /// Compares generations sealed for the two selected local refs' exact commits.
 #[hotpath::measure(future = true, label = "mcp.git.branch_diff.total")]
-pub(crate) async fn handle_branch_diff(
-    cg: &TraceDecay,
-    args: Value,
-    executor: Option<&crate::mcp::server::CodeIndexBranchDiffExecutor>,
-    authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
-) -> Result<ToolResult> {
+pub async fn handle_branch_diff(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
+    let executor = ctx.code_index_branch_diff_executor();
+    let authority = ctx.code_index_search_authority();
+    let deadline = ctx.deadline().cloned();
+    let cancellation = ctx.cancellation().cloned();
     let base_name = args
         .get("base")
         .and_then(Value::as_str)
@@ -531,7 +527,7 @@ pub(crate) async fn handle_branch_diff(
     let head_name = args
         .get("head")
         .and_then(Value::as_str)
-        .or_else(|| cg.active_branch())
+        .or_else(|| ctx.active_branch())
         .filter(|head| !head.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| TraceDecayError::Config {
@@ -541,7 +537,8 @@ pub(crate) async fn handle_branch_diff(
         .get("limit")
         .and_then(Value::as_u64)
         .map_or(100, |value| {
-            value.min(crate::mcp::server::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1 as u64) as usize
+            value.min(tracedecay_query::code_search::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1 as u64)
+                as usize
         });
     if limit == 0 {
         return Err(TraceDecayError::Config {
@@ -561,7 +558,7 @@ pub(crate) async fn handle_branch_diff(
     let resolution_head = head_name.clone();
     let (base_revision, head_revision) = match hotpath::future!(
         run_branch_ref_read(
-            cg.project_root().to_path_buf(),
+            ctx.project_root().to_path_buf(),
             1,
             None,
             deadline.clone(),
@@ -587,7 +584,7 @@ pub(crate) async fn handle_branch_diff(
         Ok(revisions) => revisions,
         Err(error) => {
             return Ok(branch_reference_unavailable(
-                cg,
+                ctx,
                 &args,
                 "base_or_head",
                 &format!("{base_name}..{head_name}"),
@@ -597,46 +594,48 @@ pub(crate) async fn handle_branch_diff(
     };
     let Some(executor) = executor else {
         return Ok(branch_diff_unavailable(
-            cg,
+            ctx,
             &args,
             (&base_name, &base_revision.commit),
             (&head_name, &head_revision.commit),
-            &crate::mcp::server::CodeIndexBranchDiffUnavailableV1 {
+            &tracedecay_query::code_search::CodeIndexBranchDiffUnavailableV1 {
                 base_generation: None,
                 head_generation: None,
                 reason:
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
             },
         ));
     };
     match hotpath::future!(
-        executor(crate::mcp::server::CodeIndexBranchDiffRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            base_reference: tracedecay_domain::RefId::new(format!("refs/heads/{base_name}"))
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("invalid base branch reference: {error}"),
-                })?,
-            base_revision: base_revision.commit.clone(),
-            base_tree: base_revision.tree.clone(),
-            head_reference: tracedecay_domain::RefId::new(format!("refs/heads/{head_name}"))
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("invalid head branch reference: {error}"),
-                })?,
-            head_revision: head_revision.commit.clone(),
-            head_tree: head_revision.tree.clone(),
-            file_filter: args.get("file").and_then(Value::as_str).map(str::to_owned),
-            kind_filter: args.get("kind").and_then(Value::as_str).map(str::to_owned),
-            limit,
-            cursor,
-            authority: authority.cloned(),
-            deadline,
-            cancellation,
-        }),
+        executor(
+            tracedecay_query::code_search::CodeIndexBranchDiffRequestV1 {
+                project_root: ctx.project_root().to_path_buf(),
+                base_reference: tracedecay_domain::RefId::new(format!("refs/heads/{base_name}"))
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("invalid base branch reference: {error}"),
+                    })?,
+                base_revision: base_revision.commit.clone(),
+                base_tree: base_revision.tree.clone(),
+                head_reference: tracedecay_domain::RefId::new(format!("refs/heads/{head_name}"))
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("invalid head branch reference: {error}"),
+                    })?,
+                head_revision: head_revision.commit.clone(),
+                head_tree: head_revision.tree.clone(),
+                file_filter: args.get("file").and_then(Value::as_str).map(str::to_owned),
+                kind_filter: args.get("kind").and_then(Value::as_str).map(str::to_owned),
+                limit,
+                cursor,
+                authority: authority.cloned(),
+                deadline,
+                cancellation,
+            }
+        ),
         label = "mcp.git.branch_diff.diff"
     )
     .await
     {
-        crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Complete(completed) => {
+        tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Complete(completed) => {
             let (added, removed, changed) = branch_change_counts(&completed.changes);
             let changes = completed
                 .changes
@@ -645,7 +644,7 @@ pub(crate) async fn handle_branch_diff(
                 .collect::<Vec<_>>();
             let touched = unique_file_paths(completed.changes.iter().flat_map(branch_change_files));
             Ok(generic_tool_result(
-                Some(cg.project_root()),
+                Some(ctx.project_root()),
                 &args,
                 &hotpath::measure_block!(
                     "mcp.git.branch_diff.assemble",
@@ -671,7 +670,7 @@ pub(crate) async fn handle_branch_diff(
                 touched,
             ))
         }
-        crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Partial(partial) => {
+        tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Partial(partial) => {
             let (added, removed, changed) = branch_change_counts(&partial.changes);
             let changes = partial
                 .changes
@@ -680,7 +679,7 @@ pub(crate) async fn handle_branch_diff(
                 .collect::<Vec<_>>();
             let touched = unique_file_paths(partial.changes.iter().flat_map(branch_change_files));
             Ok(generic_tool_result(
-                Some(cg.project_root()),
+                Some(ctx.project_root()),
                 &args,
                 &hotpath::measure_block!(
                     "mcp.git.branch_diff.assemble",
@@ -708,9 +707,9 @@ pub(crate) async fn handle_branch_diff(
                 touched,
             ))
         }
-        crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => {
+        tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => {
             Ok(branch_diff_unavailable(
-                cg,
+                ctx,
                 &args,
                 (&base_name, &base_revision.commit),
                 (&head_name, &head_revision.commit),
@@ -722,7 +721,74 @@ pub(crate) async fn handle_branch_diff(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{branched_repository, ref_read_guard};
     use super::*;
+
+    /// A context with no admitted code-index authority must produce the typed
+    /// capability-unavailable answer, not an empty result set that reads like
+    /// "this branch contains no matches".
+    #[tokio::test]
+    async fn branch_search_without_an_admitted_executor_is_capability_unavailable() {
+        let _serialized = ref_read_guard().await;
+        let repo = branched_repository();
+        let ctx = McpToolContext::new(repo.path());
+
+        let result = handle_branch_search(&ctx, json!({ "branch": "feature", "query": "after" }))
+            .await
+            .expect("an unadmitted executor returns a typed result, not an error");
+
+        assert_eq!(result.semantic_error(), Some(true));
+        let message = result.failure_message().unwrap_or_default();
+        assert!(
+            message.contains("search is unavailable") && message.contains("code_index_unavailable"),
+            "absent code-index authority must be named as such, got {message:?}"
+        );
+    }
+
+    /// The same absence on the branch-diff route, which reads a different
+    /// executor slot off the same context.
+    #[tokio::test]
+    async fn branch_diff_without_an_admitted_executor_is_capability_unavailable() {
+        let _serialized = ref_read_guard().await;
+        let repo = branched_repository();
+        let ctx = McpToolContext::new(repo.path());
+
+        let result = handle_branch_diff(&ctx, json!({ "base": "main", "head": "feature" }))
+            .await
+            .expect("an unadmitted executor returns a typed result, not an error");
+
+        assert_eq!(result.semantic_error(), Some(true));
+        let message = result.failure_message().unwrap_or_default();
+        assert!(
+            message.contains("branch diff main..feature is unavailable")
+                && message.contains("code_index_unavailable"),
+            "absent code-index authority must be named as such, got {message:?}"
+        );
+    }
+
+    /// Branch diff takes its head from the context's active branch when the
+    /// caller names only a base, and reports a typed argument error when
+    /// neither the arguments nor the context resolve one.
+    #[tokio::test]
+    async fn branch_diff_head_comes_from_the_context_active_branch() {
+        let _serialized = ref_read_guard().await;
+        let repo = branched_repository();
+
+        let without_branch =
+            handle_branch_diff(&McpToolContext::new(repo.path()), json!({ "base": "main" })).await;
+        assert!(matches!(
+            without_branch,
+            Err(TraceDecayError::Config { .. })
+        ));
+
+        let with_branch = handle_branch_diff(
+            &McpToolContext::new(repo.path()).with_active_branch(Some("feature")),
+            json!({ "base": "main" }),
+        )
+        .await
+        .expect("the context's active branch resolves head");
+        assert_eq!(with_branch.semantic_error(), Some(true));
+    }
 
     #[test]
     fn branch_search_continuation_is_reported_as_partial() {
@@ -737,7 +803,7 @@ mod tests {
     fn corruption_reset_required_has_a_stable_non_retryable_wire_code() {
         assert_eq!(
             branch_unavailable_wire(
-                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
             ),
             ("index_corruption_reset_required", false),
         );
@@ -745,6 +811,7 @@ mod tests {
 
     #[tokio::test]
     async fn branch_ref_route_reports_capacity_without_queueing() {
+        let _serialized = ref_read_guard().await;
         let first = Arc::clone(&BRANCH_REF_READ_ADMISSION)
             .acquire_owned()
             .await
@@ -769,6 +836,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_branch_ref_read_owns_worker_until_settlement() {
+        let _serialized = ref_read_guard().await;
         let cancellation =
             tracedecay_contracts::CancellationSignal::active("branch-ref-owned-settlement")
                 .expect("cancellation");

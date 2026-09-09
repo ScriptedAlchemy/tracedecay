@@ -21,12 +21,13 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 
-use super::dependency_hints;
 use super::support::{
     self, CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request,
     take_internal_context_memory_analytics, text_tool_result, unique_file_paths,
 };
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::dependency_hints;
+use tracedecay_mcp::handlers::support::retrieval_cursor;
 use tracedecay_mcp::tools::render::{self, Md};
 
 mod context_support;
@@ -250,7 +251,7 @@ where
     let semantic_mode = semantic_search_mode(&args)?;
     let lexical_routing = lexical_routing::routing_from_args(&args)?;
     let lazy_indexing_requested = dependency_hints::lazy_indexing_requested(&args);
-    let cursor = support::retrieval_cursor(&args)?;
+    let cursor = retrieval_cursor(&args)?;
     let include_graph_node_ids = render::wants_json(&args);
     let limit = args
         .get("limit")

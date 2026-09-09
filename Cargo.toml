@@ -79,6 +79,10 @@ grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg"
 grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
 grafeo-storage = { version = "=0.5.42", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
+# Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
+# resolve the same object database and status implementation, so a feature
+# added for one is never missing for the other.
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 tracedecay-semantic-contracts = { path = "crates/tracedecay-semantic-contracts", version = "0.1.0" }
 
 [profile.bench]

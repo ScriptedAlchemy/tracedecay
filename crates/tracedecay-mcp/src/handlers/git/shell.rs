@@ -501,7 +501,7 @@ pub(super) fn classify_file_role(
     path: &str,
     _files_with_inline_tests: &HashSet<String>,
 ) -> &'static str {
-    if crate::tracedecay::is_test_file(path) {
+    if tracedecay_code_index::is_test_file(path) {
         return "test";
     }
     let lower = path.to_lowercase();
@@ -528,26 +528,9 @@ pub(super) fn classify_file_role(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::test_git;
     use super::*;
 
-    fn test_git(root: &std::path::Path, args: &[&str]) {
-        let git = tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve");
-        let output = std::process::Command::new(git)
-            .args(args)
-            .current_dir(root)
-            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
     #[test]
     fn pr_comparison_anchors_at_merge_base_when_base_advanced() {
         let temp = tempfile::tempdir().expect("temp repo");

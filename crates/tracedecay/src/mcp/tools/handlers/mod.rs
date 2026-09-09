@@ -46,7 +46,6 @@ mod configuration_dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod context_scout_control_dispatch_tests;
-mod dependency_hints;
 mod dispatch_controls;
 mod dispatch_groups;
 #[cfg(test)]
@@ -68,7 +67,6 @@ mod dispatch_test_support;
 )]
 mod dispatch_tests;
 pub mod edit;
-pub mod git;
 pub mod graph;
 pub mod health;
 pub mod hook_runtime;
