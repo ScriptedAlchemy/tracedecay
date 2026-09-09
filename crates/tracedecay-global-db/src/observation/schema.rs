@@ -461,11 +461,17 @@ pub async fn ensure_observation_schema(
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     }
+    // The retained marker already certifies the native-source scheme. Reopening
+    // an enrolled authority must not scan historical JSON again while holding
+    // schema admission's writer transaction.
     // Enroll the native-source scheme wherever it cannot double-count: an
     // authority with no rows, or one whose rows and cursors never came from a
     // Cline-like host. Only a populated authority that does carry such rows is
     // left unmarked, and `require_admitted_observation_shape` refuses it.
-    if !observation_authority_populated(conn).await? || !cline_like_sources_present(conn).await? {
+    if !migration_recorded(conn, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION).await?
+        && (!observation_authority_populated(conn).await?
+            || !cline_like_sources_present(conn).await?)
+    {
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
             params![OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
@@ -475,4 +481,130 @@ pub async fn ensure_observation_schema(
     }
     require_admitted_observation_shape(conn).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_runtime_core::db::engine::{IntoParams, Rows};
+
+    use super::*;
+
+    struct CountQueries<'a, T> {
+        inner: &'a T,
+        count: AtomicUsize,
+    }
+
+    impl<T: QueryExecutor> QueryExecutor for CountQueries<'_, T> {
+        async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
+        where
+            P: IntoParams,
+        {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.inner.query(sql, params).await
+        }
+    }
+
+    impl<T: Executor> Executor for CountQueries<'_, T> {
+        async fn execute<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<u64>
+        where
+            P: IntoParams,
+        {
+            self.inner.execute(sql, params).await
+        }
+
+        async fn execute_batch(
+            &self,
+            sql: &str,
+        ) -> tracedecay_runtime_core::db::engine::Result<()> {
+            self.inner.execute_batch(sql).await
+        }
+    }
+
+    #[tokio::test]
+    async fn enrolled_schema_admission_cost_does_not_grow_with_retained_observations() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let fixture = crate::tests::harness::open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
+        let transaction = fixture.database().begin_write_transaction().await.unwrap();
+        let measured = CountQueries {
+            inner: &transaction,
+            count: AtomicUsize::new(0),
+        };
+        ensure_observation_schema(&measured).await.unwrap();
+        let empty_queries = measured.count.swap(0, Ordering::Relaxed);
+
+        for index in 0..=OBSERVATION_SOURCE_CENSUS_PAGE_ROWS * 2 {
+            let (observation, cursor) =
+                crate::schema_contract::invariants::test_fixture::authority_fixture(
+                    index as u64,
+                    &format!("enrolled-{index}"),
+                );
+            let receipt = observation.receipt();
+            transaction
+                .execute(
+                    "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        receipt.receipt().receipt_id().as_str(),
+                        receipt.receipt().sanitizer_version().as_str(),
+                        observation.payload_reference().digest().as_str(),
+                        serde_json::to_string(receipt).unwrap()
+                    ],
+                )
+                .await
+                .unwrap();
+            transaction.execute(
+                "INSERT INTO observations
+                 (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![observation.observation_id().as_str(), observation.payload_reference().digest().as_str(),
+                    receipt.receipt().receipt_id().as_str(), serde_json::to_string(&observation).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()],
+            ).await.unwrap();
+        }
+        ensure_observation_schema(&measured).await.unwrap();
+        let populated_queries = measured.count.swap(0, Ordering::Relaxed);
+
+        transaction
+            .execute(
+                "DELETE FROM global_schema_migrations WHERE migration = ?1",
+                params![OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+            )
+            .await
+            .unwrap();
+        ensure_observation_schema(&measured).await.unwrap();
+        let unenrolled_queries = measured.count.swap(0, Ordering::Relaxed);
+        println!(
+            "schema queries: empty={empty_queries}, populated enrolled={populated_queries}, unenrolled={unenrolled_queries}"
+        );
+        assert!(
+            unenrolled_queries > populated_queries,
+            "unmarked content must still be inspected"
+        );
+        assert!(
+            populated_queries <= empty_queries + 1,
+            "enrolled admission must not page through historical content: empty={empty_queries}, populated={populated_queries}"
+        );
+        assert!(
+            migration_recorded(&transaction, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION)
+                .await
+                .unwrap()
+        );
+        transaction.rollback().await.unwrap();
+    }
 }

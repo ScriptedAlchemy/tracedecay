@@ -79,7 +79,7 @@ describe('SignalPanel connection honesty', () => {
     expect(queryByText(/frozen, not idle/i)).toBeNull();
     // Six minutes of quiet on an open stream: the rate is a truthful zero and
     // the age says how long the quiet has lasted.
-    expect(getByText(/per min · last 60s/i)).toBeTruthy();
+    expect(getByText(/retained · last 60s/i)).toBeTruthy();
     expect(getByText('6m')).toBeTruthy();
   });
 
@@ -88,7 +88,8 @@ describe('SignalPanel connection honesty', () => {
     vi.restoreAllMocks();
     const dead = renderPanel('offline', NOW - 370_000).container.textContent ?? '';
     expect(idle).not.toEqual(dead);
-    expect(idle).toContain('current');
+    expect(idle).toContain('Connected.');
+    expect(idle).toContain('only the retained pulse window, not the full stream');
     expect(dead).toContain('Disconnected');
   });
 

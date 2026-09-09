@@ -22,6 +22,7 @@ use tracedecay_domain::{
 };
 
 use crate::DaemonInvocationService;
+use tracedecay_store_runtime::remote_credentials::remote_authority_unavailable_response;
 use tracedecay_store_runtime::{
     DaemonRemoteCredentialAuthorityV1, DaemonRemoteExactObservationQueryPortV1,
     DaemonRemoteReplayTransactionAuthorityV1,
@@ -76,7 +77,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
                 )
                 .execute(request, credential)?
             }
-            Err(_) => super::unavailable_response(
+            Err(_) => remote_authority_unavailable_response(
                 request_id,
                 observed_at,
                 tracedecay_contracts::remote::query::
@@ -114,7 +115,7 @@ pub(super) fn record_remote_query_response(
     );
 }
 
-pub(super) fn remote_query_result_observation(
+pub fn remote_query_result_observation(
     operation_ref: &str,
     expected_shards: usize,
     result: &RemoteQueryResultV1,

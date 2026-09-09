@@ -24,6 +24,12 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
   ariaLabel: string;
 }) {
   const clipId = useId();
+  const field = useRef<HTMLDivElement>(null);
+  const [vertical, setVertical] = useState({ start: 0, fraction: 1 });
+  const measureViewport = () => {
+    const element = field.current;
+    if (element && element.scrollHeight > 0) setVertical({ start: element.scrollTop / element.scrollHeight, fraction: element.clientHeight / element.scrollHeight });
+  };
   const [zoomed, updateWindow] = useState<LoomWindow | null>(initialWindow ?? null);
   const setZoomed = (window: LoomWindow | null) => { updateWindow(window); onWindowChange?.(window); };
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -58,6 +64,14 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
     for (const parent of parents) descendantCounts.set(parent, (descendantCounts.get(parent) ?? 0) + 1);
   }
   const height = Math.max(440, visible.length * 42 + 70);
+  useEffect(() => {
+    measureViewport();
+    const element = field.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measureViewport);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [height]);
   const rowById = new Map(visible.map((thread, index) => [thread.id, index]));
   const left = 240, span = WIDTH - left - RIGHT;
   const x = (time: number) => left + (time - view!.start) / (view!.end - view!.start) * span;
@@ -89,6 +103,7 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
   });
   const extentPattern = (thread: typeof visible[number]) => thread.endSource === 'session_end' ? undefined
     : thread.endSource === 'last_message' ? '6 2' : '2 5';
+  const knownAgents = new Set(nodes.filter((node) => threadById.has(JSON.stringify([node.provider, node.session_id])) && node.agent != null).map((node) => node.agent));
   const full = extent ? fittedWindow(extent) : null;
   const miniX = (time: number) => left + (time - full!.start) / (full!.end - full!.start) * span;
   const miniY = (id: string) => 8 + y(id) / height * 64;
@@ -100,14 +115,16 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
       <button className="min-h-8 min-w-8" aria-label="Pan to later sessions" disabled={!zoomed} onClick={() => pan(1)}>→</button>
       <button className="min-h-8 min-w-8" aria-label="Fit the whole extent" disabled={!zoomed} onClick={() => setZoomed(null)}>fit</button>
       <span>{!zoomed ? 'whole extent' : `${formatMoment(view!.start)} – ${formatMoment(view!.end)}`}</span>
-      <span>{visible.length} / {ordered.length} loaded sessions · {links.length} visible parent links</span>
+      <span>{visible.length} / {ordered.length} loaded sessions · {links.length} visible parent links · {knownAgents.size} recorded agent labels</span>
     </div>
-    <div className="td-optic max-h-[60vh] overflow-auto">
+    <div ref={field} onScroll={measureViewport} className="td-optic max-h-[60vh] overflow-auto" role="region" aria-label="Session lane viewport" tabIndex={0}>
+      <svg aria-label="Session time axis" role="img" width="100%" style={{ minWidth: 720 }} className="sticky top-0 z-10 bg-surface-0" viewBox={`0 0 ${WIDTH} 32`}>
+        {view && axisTicks(view, span).map((tick) => <text key={tick.time} x={left + tick.x} y={22} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{tick.label}</text>)}
+      </svg>
       <svg role="group" aria-label={ariaLabel} width="100%" style={{ minWidth: 720 }} viewBox={`0 0 ${WIDTH} ${height}`}>
         <defs><clipPath id={clipId}><rect x={left} y={35} width={span} height={height - 40} /></clipPath></defs>
         {view && axisTicks(view, span).map((tick) => <g key={tick.time}>
           <line x1={left + tick.x} x2={left + tick.x} y1={35} y2={height - 20} stroke="var(--raw-graph-edge)" opacity={.3} />
-          <text x={left + tick.x} y={22} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{tick.label}</text>
         </g>)}
         {visible.map((thread) => {
           const depth = ancestorsById.get(thread.id)?.length ?? 0, count = descendantCounts.get(thread.id) ?? 0;
@@ -149,10 +166,22 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
       </svg>
     </div>
     {full && view && <div className="td-optic">
-      <svg role="group" aria-label="Session hierarchy minimap" width="100%" viewBox={`0 0 ${WIDTH} 80`}>
+      <svg role="group" aria-label="Session hierarchy minimap" tabIndex={0} width="100%" viewBox={`0 0 ${WIDTH} 80`}
+        onClick={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const fraction = Math.max(0, Math.min(1, ((event.clientY - bounds.top) / bounds.height * 80 - 8) / 64));
+          field.current?.scrollTo({ top: fraction * field.current.scrollHeight - field.current.clientHeight / 2 });
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            field.current?.scrollBy({ top: (event.key === 'ArrowDown' ? 1 : -1) * field.current.clientHeight * .75 });
+          }
+        }}>
+        <title>Click to locate session lanes; Up and Down scroll the lane viewport.</title>
         {links.map(({ parent, child }) => <path key={child.id} data-minimap-parent={parent.sessionId} d={linkPath(parent, child, miniX, miniY)} fill="none" stroke="var(--raw-graph-text)" strokeDasharray="4 3" strokeWidth={1} />)}
         {visible.map((thread) => <line key={thread.id} data-minimap-session={thread.sessionId} style={kindColorVars(thread.host)} x1={miniX(thread.start)} x2={thread.end == null ? miniX(thread.start) + 3 : miniX(thread.end)} y1={miniY(thread.id)} y2={miniY(thread.id)} stroke="var(--kind-dark)" strokeDasharray={extentPattern(thread)} />)}
-        <rect x={miniX(view.start)} y={4} width={miniX(view.end) - miniX(view.start)} height={72} fill="none" stroke="var(--raw-graph-text)" />
+        <rect data-session-viewport x={miniX(view.start)} y={8 + vertical.start * 64} width={miniX(view.end) - miniX(view.start)} height={Math.max(1, vertical.fraction * 64)} fill="none" stroke="var(--raw-graph-text)" />
       </svg>
       <label className="flex items-center gap-2 text-3xs text-text-muted">Session window
         <input className="flex-1" aria-label="Session minimap viewport" type="range" min={full.start} max={Math.max(full.start, full.end - (view.end - view.start))} step="any" value={view.start} disabled={!zoomed} onChange={(event) => { const start = Number(event.currentTarget.value); setZoomed({ start, end: start + view.end - view.start }); }} />
