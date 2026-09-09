@@ -117,7 +117,9 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
             runtime.mcp_session_authorities(),
-        ),
+        )
+        .admit_opened_project(&cg)
+        .unwrap(),
     )
     .await
     .unwrap();
@@ -179,7 +181,9 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
             runtime.mcp_session_authorities(),
-        ),
+        )
+        .admit_opened_project(&cg)
+        .unwrap(),
     )
     .await
     .unwrap();
