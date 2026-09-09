@@ -150,7 +150,7 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         canonical_project.display(),
     );
     assert!(
-        crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(&replay_root),
+        crate::daemon::hook_v2_replay_consumer::hook_v2_replay_consumer_registered(&replay_root),
         "fresh project open must start Hook V2 replay"
     );
     let graph_weak = Arc::downgrade(&graph);
