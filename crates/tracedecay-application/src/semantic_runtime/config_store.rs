@@ -256,9 +256,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         now: UtcMicros,
     ) -> Result<SemanticConfigurationTransitionV1, SemanticConfigurationBackendErrorV1> {
         let stored = self.current_record().await?;
-        if stored.state.configuration_revision() != &base_configuration.revision_id
-            || result_configuration.revision_id == base_configuration.revision_id
-        {
+        if result_configuration.revision_id == base_configuration.revision_id {
             return Err(SemanticConfigurationBackendErrorV1::Conflict);
         }
         let prior_active = stored.state.active().clone();
@@ -277,6 +275,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 candidate_runtime,
                 RetrievalProfileCommitMetadataV1::new(
                     freshness_vector_digest,
+                    base_configuration.revision_id.clone(),
                     result_configuration.revision_id.clone(),
                     now,
                 ),
@@ -338,6 +337,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 trigger.clone(),
                 RetrievalProfileCommitMetadataV1::new(
                     freshness_vector_digest,
+                    base_configuration.revision_id.clone(),
                     result_configuration.revision_id.clone(),
                     now,
                 ),
@@ -405,7 +405,8 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .await?
             .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?;
         if current.epoch != base_epoch
-            || current.state.configuration_revision() != &transition.base_configuration.revision_id
+            || current.state.configuration_revision()
+                != &transition.expected_cas.expected_configuration_revision
         {
             return Err(SemanticConfigurationBackendErrorV1::Conflict);
         }
@@ -555,7 +556,7 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
                 load_pending(&transaction, &self.scope, &transition.transition_digest).await?;
             if current.epoch != pending.base_epoch
                 || current.state.configuration_revision()
-                    != &transition.base_configuration.revision_id
+                    != &transition.expected_cas.expected_configuration_revision
                 || pending.transition != *transition
             {
                 return Err(SemanticConfigurationBackendErrorV1::Conflict);
