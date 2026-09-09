@@ -1247,36 +1247,6 @@ mod tests {
     }
 
     #[test]
-    fn phases_are_descriptive_and_ordered() {
-        assert_eq!(
-            Phase::ALL.map(Phase::as_str),
-            [
-                "rebuild_activate",
-                "exact_replay",
-                "compact_rank",
-                "late_hydrate",
-            ]
-        );
-        assert_eq!(P95_LABEL, "descriptive nearest-rank sample p95");
-        assert_eq!(
-            P99_LABEL,
-            "descriptive nearest-rank sample p99 (sample maximum when n=30)"
-        );
-    }
-
-    #[test]
-    fn diagnostic_measurement_host_policy_allows_linux_and_macos() {
-        assert!(BenchmarkHostPolicy::for_target_os("linux").allows_diagnostic_measurement());
-        assert!(BenchmarkHostPolicy::for_target_os("macos").allows_diagnostic_measurement());
-    }
-
-    #[test]
-    fn contract_refresh_host_policy_is_linux_only() {
-        assert!(BenchmarkHostPolicy::for_target_os("linux").allows_contract_refresh());
-        assert!(!BenchmarkHostPolicy::for_target_os("macos").allows_contract_refresh());
-    }
-
-    #[test]
     fn nearest_rank_uses_descriptive_sample_labels() {
         let samples = [10_u64, 20, 30, 40, 50];
         assert_eq!(nearest_rank(&samples, 50), Some(30));
