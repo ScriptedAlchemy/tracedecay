@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
+import { useSearchParams } from 'react-router';
 import type { ReactNode } from 'react';
 import { Waypoints } from 'lucide-react';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
@@ -17,7 +18,7 @@ import {
 import { cn } from '../../ui/cn';
 import { formatCount } from '../../ui/format.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
-import { MARK_PITCH_PX, PLOT_HEIGHT, WeaveCanvas } from './WeaveCanvas.tsx';
+import { MARK_PITCH_PX, PLOT_WIDTH, WeaveCanvas } from './WeaveCanvas.tsx';
 import { ThreadChain } from './ThreadChain.tsx';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import {
@@ -43,7 +44,7 @@ import {
  * provider-qualified rows. The reasoning, in full, is in `weave.ts`:
  *
  *   - Threads are real. Every mark is one session at its real start time, as
- *     thick as its real message count, in its host's column.
+ *     thick as its real message count, in its host's lane.
  *   - Extent is honest per thread. A recorded end wins, then a last-message
  *     observation; otherwise the thread stays visibly open.
  *   - Commit, edited-file and branch/worktree relations come directly from
@@ -68,7 +69,16 @@ export function LoomPage() {
     '/api/plugins/hermes-lcm/timeline',
     LcmTimelinePayloadV1Schema,
   );
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [params, setParams] = useSearchParams();
+  const selectedId = params.get('loomSession');
+  const setSelectedId = (id: string | null) => {
+    const next = new URLSearchParams(params);
+    if (id == null) next.delete('loomSession');
+    else next.set('loomSession', id);
+    next.delete('loomEvent');
+    next.delete('loomWindow');
+    setParams(next);
+  };
 
   const busiestDay = useMemo(() => {
     const buckets = envelopePayload(timeline.data)?.buckets ?? [];
@@ -124,38 +134,16 @@ function TemporalBody({
   const data = envelope.payload;
   const rows = data.sessions ?? [];
 
-  // Packing needs to know what OVERLAPS ON SCREEN, which is a question
-  // about scale, not about the data: at a week per screen two sessions
-  // an hour apart are the same mark. So the extent is measured first,
-  // converted into the seconds one mark's height covers, and only then
-  // is the weave composed. Composing with a zero gap instead left every
-  // non-overlapping thread in sub-column zero, which stacked a whole
-  // host's threads on one centre line and spent none of the column.
+  // Pack overlapping source spans against the horizontal viewport scale.
+  // Selection does not change this source-derived geometry.
   const weave = useMemo(() => {
     const reading = threadsFrom(data.sessions ?? []);
     const extent = extentOf(reading.threads);
     const minGap = extent
-      ? ((extent.end - extent.start) / PLOT_HEIGHT) * MARK_PITCH_PX
+      ? ((extent.end - extent.start) / PLOT_WIDTH) * MARK_PITCH_PX
       : 0;
     return composeWeave(reading, minGap);
   }, [data.sessions]);
-
-  if (data.available === false) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-        <div className="flex max-w-sm flex-col items-center gap-3 text-center">
-          <StateChip kind="unknown" detail="session store not readable" />
-          <p className="text-xs leading-relaxed text-text-muted">
-            The daemon answered but reported its session store
-            unavailable, so there is no thread to place on the axis.{' '}
-            <span className="text-text-secondary">
-              This is the store saying so, not an empty result.
-            </span>
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   const selected = useMemo(
     () => weave.threads.find((thread) => thread.id === selectedId) ?? null,
@@ -192,6 +180,23 @@ function TemporalBody({
         : [],
     [data.branch_spans, selected],
   );
+  if (data.available === false) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+          <StateChip kind="unknown" detail="session store not readable" />
+          <p className="text-xs leading-relaxed text-text-muted">
+            The daemon answered but reported its session store
+            unavailable, so there is no thread to place on the axis.{' '}
+            <span className="text-text-secondary">
+              This is the store saying so, not an empty result.
+            </span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   const commitStatus =
     data.source_statuses.find((source) => source.id === 'session_commit') ?? null;
   const branchStatus =
@@ -204,7 +209,7 @@ function TemporalBody({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <ReadoutBar
+      {!selected && <ReadoutBar
         label="Weave readings"
         elevation="raised"
         items={[
@@ -246,7 +251,7 @@ function TemporalBody({
                   : 'timeline read failed',
           },
         ]}
-      />
+      />}
 
       {/* The scrolling body takes a name and the tab stop: the weave
         * canvas and tables can overflow it with nothing focusable in
@@ -258,7 +263,13 @@ function TemporalBody({
         className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row"
       >
         <div className="flex min-w-0 flex-1 flex-col gap-2">
-          {weave.threads.length === 0 ? (
+          {selectedId && !selected ? <StateChip kind="unavailable" detail="Selected session is outside this loaded page; choose a retained session." /> : null}
+          {selected ? (
+            <>
+              <button type="button" className="td-hit self-start text-xs text-text-secondary" onClick={() => onSelect(null)}>← All loaded sessions</button>
+              <ThreadChain thread={selected} relations={{ commits: selectedCommits, editedFiles: selectedFiles, branchSpans: selectedSpans, commitStatus, branchStatus }} />
+            </>
+          ) : weave.threads.length === 0 ? (
             <EmptyWeave undated={weave.undated} rows={rows.length} />
           ) : (
             <>
@@ -333,16 +344,6 @@ function TemporalBody({
             </div>
           </Panel>
 
-          <ThreadChain
-            thread={selected}
-            relations={{
-              commits: selectedCommits,
-              editedFiles: selectedFiles,
-              branchSpans: selectedSpans,
-              commitStatus,
-              branchStatus,
-            }}
-          />
         </aside>
       </div>
     </div>
@@ -425,7 +426,7 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
   const busiest = weave.hosts.reduce((max, host) => Math.max(max, host.count), 0);
   return (
     <div className="flex flex-col gap-1.5">
-      <Legend>time down · host across · width = messages</Legend>
+      <Legend>time left to right · host lanes · thickness = messages</Legend>
       <div className="flex flex-wrap border-y border-edge-subtle bg-surface-1">
         {weave.hosts.map((host) => (
           <div
@@ -464,9 +465,9 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
         </span>
       </div>
       <p className="text-2xs leading-relaxed text-text-muted">
-        Each thread is one session: vertical position = when it started (exact,
-        on the printed axis), column = the host that ran it, width = its message
-        count on a log scale. A thread drawn solid to a lower edge has a served
+        Each thread is one session: horizontal position = when it started (exact,
+        on the printed axis), lane = the host that ran it, thickness = its message
+        count on a log scale. A thread drawn solid to its right endpoint has a served
         end time; a thread ending in a short dashed stub does not —{' '}
         <span className="text-text-secondary">
           {weave.openEndedCount} of {weave.threads.length} sessions have no
@@ -479,7 +480,7 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
         {weave.undated > 0
           ? `${weave.undated} ${weave.undated === 1 ? 'row' : 'rows'} carried no usable start time and ${weave.undated === 1 ? 'is' : 'are'} not on the field at all. `
           : ''}
-        Sub-column offset inside a host is packing so threads do not overlap; it
+        Sub-lane offset inside a host is packing so threads do not overlap; it
         encodes nothing.
       </p>
     </div>
@@ -588,7 +589,7 @@ function weaveDescription(weave: ReturnType<typeof composeWeave>): string {
   const hosts = weave.hosts
     .map((host) => `${host.count} on ${host.label}`)
     .join(', ');
-  return `Weave: ${weave.threads.length} sessions as vertical threads, time running downward, one column per host (${hosts || 'none'}). ${weave.openEndedCount} have no recorded extent and are drawn open. Provider-qualified causal rows are served and listed in the selected-thread rail, but are not geometrically drawn on this weave. The thread table below is the accessible equivalent.`;
+  return `Weave: ${weave.threads.length} sessions as horizontal threads, time running left to right, one lane group per host (${hosts || 'none'}). ${weave.openEndedCount} have no recorded extent and are drawn open. Provider-qualified causal rows are served and listed in the selected workspace, but are not geometrically drawn on this weave. The thread table below is the accessible equivalent.`;
 }
 
 /** Composed empty state: the frame stays, so an empty weave reads as an

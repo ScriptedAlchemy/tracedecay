@@ -1,565 +1,193 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
+import { axisTicks, clampWindow, fittedWindow, formatMoment, zoomWindow, type LoomWindow } from './tracks.ts';
+import type { Weave } from './weave.ts';
+import type { LoomPlaybackFrame } from './playback.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
-import { cn } from '../../ui/cn';
-import {
-  axisTicks,
-  clampWindow,
-  dayBands,
-  fittedWindow,
-  formatMoment,
-  isFitted,
-  zoomWindow,
-  type LoomWindow,
-} from './tracks.ts';
-import type { PlacedThread, Weave } from './weave.ts';
 
-/**
- * The weave, drawn.
- *
- * SVG rather than Canvas2D, deliberately. The track engine's canvas path earns
- * its complexity at thousands of spans; this surface draws one mark per session
- * in the served window — a hundred or so — and in exchange for staying in the
- * DOM it gets three things the honesty contract actually needs: real dashed
- * strokes for unmeasured extent, hue that flips with the theme through the same
- * CSS custom properties every other mark in the console uses, and marks an
- * accessibility tool can see. The canvas would have had to reimplement all
- * three, and the third one badly.
- *
- * Nothing in here decides anything. Positions, widths and solidity all arrive
- * from `composeWeave`; this file turns them into pixels and nothing more.
- */
+// Packing scale for the bounded session overview. This is presentation geometry,
+// not an event time or a claim that sessions have parent/child relations.
+export const PLOT_WIDTH = 832;
+export const MARK_PITCH_PX = 24;
+const WIDTH = 960;
+const LEFT = 100;
+const RIGHT = 28;
+const SPAN = WIDTH - LEFT - RIGHT;
 
-/** Left gutter for the printed time axis. */
-const GUTTER = 64;
-const RIGHT_PAD = 12;
-/** Header strip carrying the host column names. */
-const HEAD = 26;
-/** Vertical room for the field itself. Constant so a screenshot is stable and
- * the axis pitch does not change under the reader as data arrives. */
-const FIELD_HEIGHT = 520;
-const TOP_PAD = 10;
-const BOTTOM_PAD = 18;
-
-/** How far an unmeasured tail runs before it stops. Fixed, and short: the
- * length must not read as a duration, because it is not one. */
-const OPEN_TAIL = 15;
-/** The solid head every thread gets, so a thread with no measured end is still
- * a visible mark at the time it genuinely started. */
-const HEAD_CAP = 5;
-
-/** Vertical pixels the time axis actually spans. Exported because the caller
- * has to convert a mark's on-screen size into seconds before it can ask
- * `composeWeave` to pack: packing is a question about what OVERLAPS, and what
- * overlaps depends on the scale it is drawn at. */
-export const PLOT_HEIGHT = FIELD_HEIGHT - TOP_PAD - BOTTOM_PAD;
-/** Vertical room one mark occupies: its head plus its open tail plus a hair of
- * clearance. Two threads closer together than this collide on screen. */
-export const MARK_PITCH_PX = HEAD_CAP + OPEN_TAIL + 4;
-
-export function WeaveCanvas({
-  weave,
-  selectedId,
-  onSelect,
-  ariaLabel,
-}: {
+export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel }: {
   weave: Weave;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   ariaLabel: string;
 }) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const [width, setWidth] = useState(880);
+  const clipId = useId();
+  const [zoomed, setZoomed] = useState<LoomWindow | null>(null);
+  const extent = weave.extent;
+  const view = extent ? zoomed ?? fittedWindow(extent) : null;
+  const rows = Math.max(weave.hosts.reduce((sum, host) => sum + host.lanes, 0), 1);
+  const height = Math.max(300, Math.min(560, rows * 36 + 80));
+  const x = (time: number) => LEFT + (time - view!.start) / (view!.end - view!.start) * SPAN;
+  const lane = (column: number, offset: number) => weave.hosts.slice(0, column).reduce((sum, host) => sum + host.lanes, 0) + offset;
+  const y = (row: number) => 65 + row / rows * (height - 100);
+  const zoom = (factor: number) => {
+    if (extent && view) setZoomed(zoomWindow(view, extent, factor, (view.start + view.end) / 2));
+  };
+  const pan = (direction: number) => {
+    if (!extent || !view) return;
+    const delta = (view.end - view.start) * .25 * direction;
+    setZoomed(clampWindow({ start: view.start + delta, end: view.end + delta }, extent));
+  };
+  return <div className="min-w-0">
+    <div role="toolbar" aria-label="Time window" className="flex flex-wrap items-center gap-2 border border-edge-subtle p-2 text-xs">
+      <button className="td-hit" aria-label="Zoom in" onClick={() => zoom(.5)}>+</button>
+      <button className="td-hit" aria-label="Zoom out" onClick={() => zoom(2)}>−</button>
+      <button className="td-hit" aria-label="Pan to earlier sessions" disabled={!zoomed} onClick={() => pan(-1)}>←</button>
+      <button className="td-hit" aria-label="Pan to later sessions" disabled={!zoomed} onClick={() => pan(1)}>→</button>
+      <button className="td-hit" aria-label="Fit the whole extent" disabled={!zoomed} onClick={() => setZoomed(null)}>fit</button>
+      <span>{!zoomed ? 'whole extent' : `${formatMoment(zoomed.start)} – ${formatMoment(zoomed.end)}`}</span>
+    </div>
+    <div className="td-optic">
+      <svg role="img" aria-label={ariaLabel} width="100%" viewBox={`0 0 ${WIDTH} ${height}`}>
+        <defs><clipPath id={clipId}><rect x={LEFT} y={35} width={SPAN} height={height - 40} /></clipPath></defs>
+        {view && axisTicks(view, SPAN).map((tick) => <g key={tick.time}>
+          <line x1={LEFT + tick.x} x2={LEFT + tick.x} y1={35} y2={height - 20} stroke="var(--raw-graph-edge)" opacity={.3} />
+          <text x={LEFT + tick.x} y={22} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{tick.label}</text>
+        </g>)}
+        {weave.hosts.map((host, index) => <text key={host.id} x={12} y={y(lane(index, 0)) + 4} fill="var(--raw-graph-text)" fontSize={11}>{host.label}</text>)}
+        <g clipPath={`url(#${clipId})`}>
+          {view && weave.threads.filter((thread) => thread.start <= view.end && (thread.end ?? thread.start) >= view.start).map((thread) => {
+            const start = x(thread.start);
+            const end = thread.end == null ? start + 18 : Math.max(start + 4, x(thread.end));
+            const middle = y(lane(thread.column, thread.lane));
+            const thickness = 2 + thread.weight * 7;
+            const evidence = thread.endSource === 'session_end' ? 'var(--ev-measured)'
+              : thread.endSource === 'last_message' ? 'var(--ev-associated)' : 'var(--ev-unknown)';
+            return <g key={thread.id} data-thread={thread.id} style={kindColorVars(thread.host)} opacity={selectedId && selectedId !== thread.id ? .25 : 1} onClick={() => onSelect(thread.id)} className="cursor-pointer">
+              <title>{thread.host} · {formatMoment(thread.start)} · {thread.messages} messages · {thread.endSource}</title>
+              <line x1={start} x2={end} y1={middle} y2={middle} stroke="var(--kind-dark)" strokeWidth={thickness + 7} opacity={.12} />
+              <line x1={start} x2={end} y1={middle} y2={middle} stroke={evidence} strokeWidth={thickness} strokeDasharray={thread.end == null ? '3 4' : undefined} />
+              <circle cx={start} cy={middle} r={4} fill={thread.hollow ? 'var(--raw-graph-bg)' : 'var(--kind-dark)'} stroke="var(--kind-dark)" />
+              <rect x={start - 8} y={middle - 14} width={Math.max(end - start + 16, 24)} height={28} fill="transparent" />
+            </g>;
+          })}
+        </g>
+      </svg>
+    </div>
+  </div>;
+}
 
+/** Canonical source positions; both the field and minimap use this projection. */
+export function eventPositions(frames: readonly LoomPlaybackFrame[]) {
+  const times = frames.flatMap((frame) => frame.timestamp == null ? [] : [frame.timestamp]);
+  const start = times.length ? Math.min(...times) : null;
+  const end = times.length ? Math.max(...times) : null;
+  return {
+    start, end,
+    points: frames.map((frame, index) => ({
+      id: frame.id,
+      x: frame.timestamp != null && start != null && end != null
+        ? end === start ? .5 : (frame.timestamp - start) / (end - start)
+        : frames.length <= 1 ? .5 : index / (frames.length - 1),
+      y: frame.timestamp == null ? 225 : 115,
+      frame,
+    })),
+  };
+}
+
+export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspect }: {
+  frames: readonly LoomPlaybackFrame[];
+  visible: readonly LoomPlaybackFrame[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onInspect: () => void;
+}) {
+  const clipId = useId();
+  const host = useRef<HTMLElement>(null);
+  const [width, setWidth] = useState(960);
   useEffect(() => {
-    const element = hostRef.current;
-    if (!element || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver((entries) => {
-      const next = entries[0]?.contentRect.width;
-      if (next && next > 0) setWidth(next);
+    if (!host.current || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry && entry.contentRect.width > 0) setWidth(entry.contentRect.width);
     });
-    observer.observe(element);
+    observer.observe(host.current);
     return () => observer.disconnect();
   }, []);
-
-  const height = HEAD + FIELD_HEIGHT;
-  const fieldWidth = Math.max(width - GUTTER - RIGHT_PAD, 80);
-  const extent = weave.extent;
-
-  // The viewport over time. `null` means fitted — the whole extent with its
-  // margin — so new data keeps refitting until the reader deliberately zooms.
-  const [zoomed, setZoomed] = useState<LoomWindow | null>(null);
-  useEffect(() => {
-    setZoomed(null);
-  }, [extent?.start, extent?.end]);
-  const view = extent ? (zoomed ?? fittedWindow(extent)) : null;
-
-  const applyZoom = (factor: number) => {
-    if (!extent || !view) return;
-    const next = zoomWindow(view, extent, factor, (view.start + view.end) / 2);
-    setZoomed(isFitted(next, extent) ? null : next);
+  const left = width < 480 ? 28 : 100;
+  const spanPx = Math.max(width - left - RIGHT, 1);
+  const [params, setParams] = useSearchParams();
+  const raw = params.get('loomWindow')?.split(',').map(Number);
+  const window = raw?.length === 2 && raw.every(Number.isFinite) && raw[0]! >= 0 && raw[1]! <= 1 && raw[1]! > raw[0]!
+    ? { start: raw[0]!, end: raw[1]! } : { start: 0, end: 1 };
+  const geometry = useMemo(() => eventPositions(frames), [frames]);
+  const ids = new Set(visible.map((frame) => frame.id));
+  const revealed = geometry.points.filter((point) => ids.has(point.id));
+  const sequences = geometry.points.slice(1).flatMap((point, index) => {
+    const previous = geometry.points[index]!;
+    return ids.has(previous.id) && ids.has(point.id) ? [{ previous, point }] : [];
+  });
+  const points = revealed.filter((point) => point.x >= window.start && point.x <= window.end);
+  const active = revealed.find((point) => point.id === activeId);
+  const x = (position: number) => left + (position - window.start) / (window.end - window.start) * spanPx;
+  const move = (start: number, end: number) => {
+    // One URL update also suspends tail-follow; separate updates could race and
+    // lose either the cursor or the viewport under React Router batching.
+    const search = new URLSearchParams(params);
+    if (activeId) search.set('loomEvent', activeId);
+    search.set('loomWindow', `${Math.max(0, start)},${Math.min(1, end)}`);
+    setParams(search, { replace: true });
+    onInspect();
   };
-  const pan = (direction: 1 | -1) => {
-    if (!extent || !view) return;
-    const shift = direction * (view.end - view.start) * 0.25;
-    const next = clampWindow(
-      { start: view.start + shift, end: view.end + shift },
-      extent,
-    );
-    setZoomed(isFitted(next, extent) ? null : next);
+  const span = window.end - window.start;
+  const orderPath = (previous: typeof geometry.points[number], point: typeof geometry.points[number], projectX: (position: number) => number, scaleY = 1) => {
+    const mid = (projectX(previous.x) + projectX(point.x)) / 2;
+    return `M ${projectX(previous.x)} ${previous.y * scaleY} C ${mid} ${previous.y * scaleY}, ${mid} ${point.y * scaleY}, ${projectX(point.x)} ${point.y * scaleY}`;
   };
-
-  const geometry = useMemo(() => {
-    if (!extent || !view) return null;
-    const span = Math.max(view.end - view.start, 1);
-    const plotTop = HEAD + TOP_PAD;
-    const plotHeight = Math.max(FIELD_HEIGHT - TOP_PAD - BOTTOM_PAD, 1);
-    const y = (time: number) =>
-      plotTop + ((time - view.start) / span) * plotHeight;
-
-    // Every host column gets the same share of the field; inside it, each
-    // packed sub-column gets an equal slice of that share. A column with one
-    // lane therefore draws a wide, calm thread and a busy column draws several
-    // narrow ones, which is the packing telling the truth about congestion.
-    const columnWidth = fieldWidth / Math.max(weave.hosts.length, 1);
-    const centerOf = (thread: PlacedThread) => {
-      const host = weave.hosts[thread.column];
-      const lanes = Math.max(host?.lanes ?? 1, 1);
-      const laneWidth = columnWidth / lanes;
-      return (
-        GUTTER + thread.column * columnWidth + (thread.lane + 0.5) * laneWidth
-      );
-    };
-    const maxThickness = (thread: PlacedThread) => {
-      const host = weave.hosts[thread.column];
-      const lanes = Math.max(host?.lanes ?? 1, 1);
-      return Math.max(columnWidth / lanes - 8, 2);
-    };
-    return { y, columnWidth, centerOf, maxThickness, plotTop, plotHeight, span };
-  }, [extent, view, fieldWidth, weave.hosts]);
-
-  // The axis helpers are written for a horizontal track engine, so they are
-  // handed the field's HEIGHT as their length and their `x` output is read as
-  // a `y`. The arithmetic is orientation-free; only the name is horizontal.
-  const ticks = useMemo(
-    () =>
-      geometry && view
-        ? axisTicks({ start: view.start, end: view.end }, geometry.plotHeight)
-        : [],
-    [geometry, view],
-  );
-  const bands = useMemo(
-    () =>
-      geometry && view
-        ? dayBands({ start: view.start, end: view.end }, geometry.plotHeight)
-        : [],
-    [geometry, view],
-  );
-
-  return (
-    // The toolbar is shell chrome; the weave itself is projected light on the
-    // night optical window, inside either shell theme, so its marks draw in
-    // the graph palette rather than shell ink.
-    <div ref={hostRef} className="relative w-full">
-      {extent && view ? (
-        <div
-          role="toolbar"
-          aria-label="Time window"
-          className="flex flex-wrap items-center gap-1 border border-b-0 border-edge-subtle bg-surface-1 px-2 py-1"
-        >
-          <ZoomButton label="Zoom in" onClick={() => applyZoom(0.5)}>
-            +
-          </ZoomButton>
-          <ZoomButton label="Zoom out" onClick={() => applyZoom(2)}>
-            −
-          </ZoomButton>
-          <ZoomButton
-            label="Pan to earlier sessions"
-            disabled={zoomed == null}
-            onClick={() => pan(-1)}
-          >
-            ↑
-          </ZoomButton>
-          <ZoomButton
-            label="Pan to later sessions"
-            disabled={zoomed == null}
-            onClick={() => pan(1)}
-          >
-            ↓
-          </ZoomButton>
-          <ZoomButton
-            label="Fit the whole extent"
-            disabled={zoomed == null}
-            onClick={() => setZoomed(null)}
-          >
-            fit
-          </ZoomButton>
-          <span className="min-w-0 truncate pl-1 text-3xs tabular-nums text-text-muted">
-            {zoomed == null
-              ? 'whole extent'
-              : `${formatMoment(view.start)} – ${formatMoment(view.end)}`}
-          </span>
-        </div>
-      ) : null}
-      <div className="td-optic td-grain td-scanlines">
-      <svg
-        role="img"
-        aria-label={ariaLabel}
-        width="100%"
-        height={height}
-        viewBox={`0 0 ${Math.max(width, 1)} ${height}`}
-        className="relative block"
-      >
-        {/* Calendar bands: the weave's warp. Alternating tint only, no label
-          * inside the field — the axis gutter carries the words. */}
-        {geometry
-          ? bands
-              .filter((band) => band.odd)
-              .map((band) => (
-                <rect
-                  key={`band-${band.time}`}
-                  x={GUTTER}
-                  y={geometry.plotTop + band.x0}
-                  width={fieldWidth}
-                  height={Math.max(band.x1 - band.x0, 0)}
-                  className="fill-[var(--raw-graph-dim)]"
-                  fillOpacity={0.22}
-                />
-              ))
-          : null}
-
-        {/* Host column dividers and names. */}
-        {geometry
-          ? weave.hosts.map((host, index) => {
-              const x = GUTTER + index * geometry.columnWidth;
-              return (
-                <g key={host.id}>
-                  {index > 0 ? (
-                    <line
-                      x1={x}
-                      y1={HEAD}
-                      x2={x}
-                      y2={height}
-                      className="stroke-[var(--raw-graph-edge)]"
-                      strokeOpacity={0.55}
-                      strokeWidth={1}
-                    />
-                  ) : null}
-                  {/* Label and count in ONE text run: the count rides a tspan
-                    * whose dx is measured from the end of the label's last
-                    * glyph, so it cannot collide with it. Positioning the two
-                    * as separate elements meant guessing the label's rendered
-                    * width from its character count, and letterspaced small
-                    * caps do not have the width that guess assumed — every
-                    * column header printed as "CLAUDE12". */}
-                  {/* At 320px a column is ~78px wide and three full host names
-                    * ran into each other ("CLAUDE 12CODEX 11CURSOR"). The name
-                    * is truncated to what its own column can hold rather than
-                    * being allowed to trespass on its neighbour's — a header
-                    * that overlaps the next column mislabels it. */}
-                  {/* Below ~96px a column cannot hold a host name and its
-                    * count without one of them being cut, and a clipped count
-                    * ("12" rendered as "1") is worse than no count: it is a
-                    * wrong number. The header is simply omitted there. Nothing
-                    * is lost — the per-host readout row directly beneath the
-                    * canvas names every host with its thread and message
-                    * totals, and it wraps rather than truncating. */}
-                  {geometry.columnWidth >= HEADER_MIN_WIDTH ? (
-                    <>
-                      <clipPath id={`weave-head-${index}`}>
-                        <rect
-                          x={x}
-                          y={0}
-                          width={Math.max(geometry.columnWidth - 2, 1)}
-                          height={HEAD}
-                        />
-                      </clipPath>
-                      {/* Truncation trims the label to an ESTIMATE of the room
-                        * its column has; the clip guarantees it. Font metrics
-                        * are not knowable here, so the estimate alone kept
-                        * letting a count graze the column next door and
-                        * mislabel it. */}
-                      <text
-                        x={x + 6}
-                        y={HEAD - 9}
-                        clipPath={`url(#weave-head-${index})`}
-                        className="fill-[var(--raw-graph-text)] text-[9px] uppercase tracking-[0.18em]"
-                      >
-                        {truncateLabel(host.label, geometry.columnWidth)}
-                        <tspan dx={7} fillOpacity={0.7} className="tracking-normal">
-                          {host.count}
-                        </tspan>
-                      </text>
-                    </>
-                  ) : null}
-                </g>
-              );
-            })
-          : null}
-        <line
-          x1={GUTTER}
-          y1={HEAD}
-          x2={Math.max(width - RIGHT_PAD, GUTTER)}
-          y2={HEAD}
-          className="stroke-[var(--raw-graph-edge)]"
-          strokeWidth={1}
-        />
-
-        {/* The printed time axis: real labels at real times, running down. */}
-        {geometry
-          ? ticks.map((tick) => (
-              <g key={`tick-${tick.time}`}>
-                <line
-                  x1={GUTTER - 4}
-                  y1={geometry.plotTop + tick.x}
-                  x2={Math.max(width - RIGHT_PAD, GUTTER)}
-                  y2={geometry.plotTop + tick.x}
-                  className="stroke-[var(--raw-graph-edge)]"
-                  strokeWidth={1}
-                  strokeOpacity={0.4}
-                />
-                <text
-                  x={GUTTER - 8}
-                  y={geometry.plotTop + tick.x + 3}
-                  textAnchor="end"
-                  className="fill-[var(--raw-graph-text)] text-[9px] tabular-nums"
-                  fillOpacity={0.75}
-                >
-                  {tick.label}
-                </text>
-              </g>
-            ))
-          : null}
-
-        {/* The threads, clipped to the field: a zoomed window puts some
-          * threads outside the visible span of time, and a mark escaping into
-          * the header would claim a time the axis does not show. */}
-        <clipPath id="weave-plot">
-          <rect x={GUTTER} y={HEAD} width={fieldWidth} height={FIELD_HEIGHT} />
-        </clipPath>
-        {geometry && view ? (
-          <g clipPath="url(#weave-plot)">
-            {weave.threads
-              .filter(
-                (thread) =>
-                  thread.start <= view.end && (thread.end ?? thread.start) >= view.start,
-              )
-              .map((thread) => (
-                <Thread
-                  key={thread.id}
-                  thread={thread}
-                  x={geometry.centerOf(thread)}
-                  y0={geometry.y(thread.start)}
-                  y1={thread.end != null ? geometry.y(thread.end) : null}
-                  maxThickness={geometry.maxThickness(thread)}
-                  selected={selectedId === thread.id}
-                  dimmed={selectedId != null && selectedId !== thread.id}
-                  onSelect={onSelect}
-                />
-              ))}
-          </g>
-        ) : null}
-      </svg>
-      </div>
+  return <section ref={host} aria-label="Loaded execution field" className="min-w-0">
+    <div className="flex flex-wrap gap-2 border border-edge-subtle p-2 text-xs" role="toolbar" aria-label="Execution viewport">
+      <button className="td-hit" aria-label="Zoom into execution" disabled={span < .02} onClick={() => move(window.start + span / 4, window.end - span / 4)}>+ Zoom</button>
+      <button className="td-hit" aria-label="Fit loaded execution" onClick={() => move(0, 1)}>Fit</button>
+      <button className="td-hit" aria-label="Pan execution earlier" disabled={window.start === 0} onClick={() => { const start = Math.max(0, window.start - span / 4); move(start, start + span); }}>← Older</button>
+      <button className="td-hit" aria-label="Pan execution later" disabled={window.end === 1} onClick={() => { const end = Math.min(1, window.end + span / 4); move(end - span, end); }}>Later →</button>
     </div>
-  );
-}
-
-/** Narrowest column that can carry a host name and its count without cutting
- * either. Below this the header is dropped rather than clipped. */
-const HEADER_MIN_WIDTH = 96;
-
-/** One window-toolbar control: a real button, 44px hit target via `td-hit`,
- * named for a screen reader rather than by its glyph. */
-function ZoomButton({
-  label,
-  disabled,
-  onClick,
-  children,
-}: {
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      className="td-hit group"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      <span
-        className={cn(
-          'inline-flex min-w-6 items-center justify-center border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs',
-          disabled
-            ? 'text-text-muted'
-            : 'text-text-secondary group-hover:text-text-primary',
-        )}
-      >
-        {children}
-      </span>
-    </button>
-  );
-}
-
-/** Letterspaced 9px small caps run about 7.4px per character; the count and its
- * gap need roughly 42px more. Trimmed to at least three characters so a column
- * always carries some identity rather than an ellipsis alone. */
-function truncateLabel(label: string, columnWidth: number): string {
-  const room = Math.floor((columnWidth - 42) / 7.4);
-  if (room >= label.length) return label;
-  return `${label.slice(0, Math.max(room - 1, 3))}…`;
-}
-
-/**
- * One session.
- *
- * Two shapes, and which one is drawn is a statement about the DATA, not about
- * the session: a thread whose end the store served is a solid bar between two
- * measured times; a thread whose end it did not serve is a solid head at the
- * one time that WAS measured, followed by a dashed stub of fixed length that
- * says "and then, unrecorded". The stub never reaches a tick, so it cannot be
- * mistaken for a duration.
- *
- * A session the store reports at zero messages is drawn hollow — outline only,
- * at the same width the smallest real thread gets. Zero is a reading, and a
- * reading has to be visible; collapsing it to nothing would hide it among the
- * sessions that simply are not there.
- */
-function Thread({
-  thread,
-  x,
-  y0,
-  y1,
-  maxThickness,
-  selected,
-  dimmed,
-  onSelect,
-}: {
-  thread: PlacedThread;
-  x: number;
-  y0: number;
-  y1: number | null;
-  maxThickness: number;
-  selected: boolean;
-  dimmed: boolean;
-  onSelect: (id: string | null) => void;
-}) {
-  // The width channel gets real range. At a nine-pixel span every thread was
-  // within a few pixels of every other one, so the measurement it carries —
-  // message count — was drawn but not legible; a 998-turn session has to LOOK
-  // heavier than a 12-turn one from across the field. Still clamped to the
-  // sub-column, so a wide thread can never overlap its neighbour.
-  const thickness = Math.max(Math.min(2 + thread.weight * 26, maxThickness), 2);
-  const half = thickness / 2;
-  // Always the lit-body side of the kind hue: the weave draws on the night
-  // window in both shell themes, so the paper-ink variant never applies here.
-  const strokeClass = 'stroke-[var(--kind-dark)]';
-  const fillClass = 'fill-[var(--kind-dark)]';
-  const measuredEnd = y1 != null && y1 > y0;
-  const bodyEnd = measuredEnd ? y1 : y0 + HEAD_CAP;
-  const boundaryClass =
-    thread.endSource === 'session_end'
-      ? 'stroke-[var(--ev-measured)]'
-      : 'stroke-[var(--ev-associated)]';
-
-  return (
-    <g
-      data-thread={thread.id}
-      style={kindColorVars(thread.host)}
-      className={cn(
-        'cursor-pointer',
-        dimmed && 'opacity-25',
-        selected && 'opacity-100',
-      )}
-      onClick={() => onSelect(selected ? null : thread.id)}
-      // The table below is the keyboard and screen-reader path (plan 11a
-      // archetype 3), so these marks stay out of the tab order rather than
-      // duplicating every row as a second focus stop.
-      aria-hidden
-    >
-      {/* Generous invisible hit area: a two-pixel thread is not a click
-        * target, and widening the visible mark to make it one would inflate a
-        * measured quantity. */}
-      <rect
-        x={x - Math.max(half, 6)}
-        y={y0 - 3}
-        width={Math.max(thickness, 12)}
-        height={Math.max(bodyEnd - y0 + (measuredEnd ? 6 : OPEN_TAIL + 6), 12)}
-        fill="transparent"
-      />
-
-      {thread.hollow ? (
-        <rect
-          x={x - half}
-          y={y0}
-          width={thickness}
-          height={Math.max(bodyEnd - y0, 3)}
-          className={cn(strokeClass, 'fill-none')}
-          strokeWidth={1}
-        />
-      ) : (
-        <rect
-          x={x - half}
-          y={y0}
-          width={thickness}
-          height={Math.max(bodyEnd - y0, 3)}
-          className={fillClass}
-          fillOpacity={selected ? 1 : 0.82}
-        />
-      )}
-
-      {/* Boundary provenance is a separate visual channel from host hue:
-        * measured session end, associated last-message observation, or
-        * unknown open extent. */}
-      {measuredEnd ? (
-        <line
-          x1={x - half - 2}
-          y1={bodyEnd}
-          x2={x + half + 2}
-          y2={bodyEnd}
-          className={boundaryClass}
-          strokeWidth={2}
-        />
-      ) : (
-        <line
-          x1={x}
-          y1={bodyEnd + 1}
-          x2={x}
-          y2={bodyEnd + OPEN_TAIL}
-          className="stroke-[var(--ev-unknown)]"
-          strokeWidth={Math.min(thickness, 2)}
-          strokeDasharray="2 3"
-          strokeOpacity={0.7}
-        />
-      )}
-
-      {/* Subagent threads carry a real flag from the store, so they get a
-        * mark: a hairline crossbar at the head. Shape, not hue — the hue is
-        * already spent on the host. */}
-      {thread.isSubagent ? (
-        <line
-          x1={x - half - 3}
-          y1={y0}
-          x2={x + half + 3}
-          y2={y0}
-          className={strokeClass}
-          strokeWidth={1}
-        />
-      ) : null}
-
-      {selected ? (
-        <rect
-          x={x - half - 3}
-          y={y0 - 3}
-          width={thickness + 6}
-          height={Math.max(bodyEnd - y0, 3) + 6}
-          className="fill-none stroke-[var(--raw-graph-accent)]"
-          strokeWidth={1}
-        />
-      ) : null}
-    </g>
-  );
+    {width < 480 && <p className="text-xs text-text-muted">{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)} → {geometry.end == null ? 'loaded source order' : `${formatMoment(geometry.end)} · loaded end`}</p>}
+    <div className="td-optic">
+      <svg role="group" aria-label="Revealed execution events" width="100%" viewBox={`0 0 ${width} 295`}>
+        <defs><clipPath id={clipId}><rect x={left - 12} y={40} width={spanPx + 24} height={240} /></clipPath></defs>
+        <text visibility={width < 480 ? "hidden" : "visible"} x={left} y={24} fill="var(--raw-graph-text)" fontSize={12}>{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)}</text>
+        <text visibility={width < 480 ? "hidden" : "visible"} x={width - RIGHT} y={24} textAnchor="end" fill="var(--raw-graph-text)" fontSize={12}>{geometry.end == null ? 'Loaded source order' : `${formatMoment(geometry.end)} · LOADED END`}</text>
+        <text x={12} y={85} fill="var(--raw-graph-text)" fontSize={11}>Recorded time</text>
+        <text x={12} y={195} fill="var(--raw-graph-text)" fontSize={11}>Undated</text>
+        <text x={12} y={210} fill="var(--raw-graph-text)" fontSize={10}>source order</text>
+        {[115, 225].map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y} y2={y} stroke="var(--raw-graph-edge)" strokeDasharray="2 5" />)}
+        <g clipPath={`url(#${clipId})`}>
+          {sequences.map(({ previous, point }) => {
+            const path = orderPath(previous, point, x);
+            return <g key={`${previous.id}:${point.id}`} aria-label="Recorded message order">
+              <path d={path} fill="none" stroke="#58daec" strokeWidth={8} opacity={.08} />
+              <path d={path} fill="none" stroke="#58daec" strokeWidth={1} opacity={.6} />
+            </g>;
+          })}
+          {active && <line x1={x(active.x)} x2={x(active.x)} y1={42} y2={270} stroke="var(--raw-graph-text)" strokeWidth={1} opacity={.55} />}
+          {points.map((point) => <g key={point.id} data-event={point.id} role="button" tabIndex={0} aria-label={`Select stored event ${point.id}`} aria-pressed={point.id === activeId} onClick={() => onSelect(point.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(point.id); } }} className="cursor-pointer outline-none [&:focus>rect]:stroke-white">
+            <rect x={x(point.x) - 22} y={point.y - 22} width={44} height={70} fill="transparent" />
+            <title>{point.frame.role} · {point.frame.tool ?? 'message'} · {point.id}</title>
+            <circle cx={x(point.x)} cy={point.y} r={point.id === activeId ? 19 : 12} fill="#35d6ee" opacity={.08} />
+            <circle cx={x(point.x)} cy={point.y} r={point.id === activeId ? 10 : 6} fill="var(--raw-graph-bg)" stroke="#58daec" strokeWidth={point.id === activeId ? 2 : 1} />
+            <circle cx={x(point.x)} cy={point.y} r={2} fill="#c1f8ff" />
+            <text x={x(point.x)} y={point.y + 35} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{points.length <= 12 || point.id === activeId ? point.frame.tool ?? point.frame.role : ''}</text>
+          </g>)}
+        </g>
+      </svg>
+      <svg role="group" aria-label="Execution minimap" width="100%" viewBox={`0 0 ${width} 64`}>
+        {[115, 225].map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y / 5} y2={y / 5} stroke="var(--raw-graph-edge)" />)}
+        {sequences.map(({ previous, point }) => <path key={`${previous.id}:${point.id}`} d={orderPath(previous, point, (position) => left + position * spanPx, .2)} fill="none" stroke="#58daec" opacity={.5} />)}
+        {revealed.map((point) => <circle key={point.id} data-minimap-event={point.id} cx={left + point.x * spanPx} cy={point.y / 5} r={point.id === activeId ? 4 : 2} fill="#58daec" />)}
+        <rect x={left + window.start * spanPx} y={8} width={span * spanPx} height={48} fill="none" stroke="var(--raw-graph-text)" />
+      </svg>
+    </div>
+    <label className="flex flex-wrap items-center gap-2 text-xs text-text-muted">Minimap position
+      <input type="range" aria-label="Minimap viewport" min={0} max={1 - span} step={.001} value={window.start} disabled={span === 1} onChange={(event) => move(Number(event.currentTarget.value), Number(event.currentTarget.value) + span)} />
+    </label>
+    <p className="text-3xs text-text-muted">Each dot is a stored message. Placement measures time, or explicitly undated source order; thin connections show canonical message order, not causal attribution. Proximity is not a causal edge. Exact source selection remains available in the sequence below.</p>
+  </section>;
 }

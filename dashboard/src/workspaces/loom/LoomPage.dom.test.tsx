@@ -1,5 +1,6 @@
+import { MemoryRouter, useLocation } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
@@ -356,16 +357,21 @@ const HAPPY = {
   '/api/plugins/hermes-lcm/timeline': { status: 200, body: TEMPORAL_RETRIEVAL_UNAVAILABLE },
 };
 
-function renderLoom(routes: Record<string, { status: number; body: unknown }> = HAPPY) {
+function LocationProbe() {
+  return <output data-testid="loom-url">{useLocation().search}</output>;
+}
+
+function renderLoom(routes: Record<string, { status: number; body: unknown }> = HAPPY, entry = '/loom?scope=project-loom') {
   vi.stubGlobal('fetch', serve(routes));
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  return render(
+  const result = render(
     <QueryClientProvider client={client}>
-      <LoomPage />
+      <MemoryRouter initialEntries={[entry]}><LoomPage /><LocationProbe /></MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...result, client };
 }
 
 afterEach(() => {
@@ -405,7 +411,7 @@ describe('LoomPage', () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <LoomPage />
+        <MemoryRouter><LoomPage /></MemoryRouter>
       </QueryClientProvider>,
     );
     await screen.findByText('Deliver Git primitive runtime');
@@ -427,7 +433,7 @@ describe('LoomPage', () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <LoomPage />
+        <MemoryRouter><LoomPage /></MemoryRouter>
       </QueryClientProvider>,
     );
 
@@ -520,6 +526,60 @@ describe('LoomPage', () => {
     expect(screen.getByText('tokens unknown')).toBeTruthy();
   });
 
+  it('shares reveal, picking, minimap and exact evidence through one URL cursor', async () => {
+    renderLoom({ ...HAPPY, '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) } });
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('Deliver Git primitive runtime'));
+    await screen.findByText('stored ordinal 2');
+    expect(document.querySelector('[data-event="m2"]')).not.toBeNull();
+    expect(document.querySelector('[data-minimap-event="m2"]')).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Select stored event m0' }));
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
+    expect(screen.getByTestId('loom-url').textContent).toContain('scope=project-loom');
+    expect(document.querySelector('[data-event="m2"]')).toBeNull();
+    expect(document.querySelector('[data-minimap-event="m2"]')).toBeNull();
+    expect(screen.queryByText('Running the suite.')).toBeNull();
+    expect(screen.queryByText('Bash')).toBeNull();
+    expect(screen.queryByText('src/runtime.rs')).toBeNull();
+    expect(screen.queryByText('abc123def456')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Step to next stored event' }));
+    expect(document.querySelector('[data-event="m1"]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Inspect stored event m1' })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Select stored event m0' }), { key: 'Enter' });
+    expect(screen.getByText('stored ordinal 0')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Zoom into execution' }));
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomWindow=');
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
+    await user.click(screen.getByRole('button', { name: 'Return replay to latest loaded event' }));
+    expect(document.querySelector('[data-event="m2"]')).not.toBeNull();
+    expect(document.querySelector('[data-minimap-event="m2"]')).not.toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).not.toContain('loomEvent');
+    expect(screen.getByTestId('loom-url').textContent).not.toContain('loomWindow');
+  });
+
+  it('follows appended admitted page members but retains or discloses an inspected identity on refetch', async () => {
+    const routes = { ...HAPPY, '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) } };
+    const { client } = renderLoom(routes);
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('Deliver Git primitive runtime'));
+    await screen.findByText('stored ordinal 2');
+    const appended = [...CHAIN.messages, chainMessage({ message_id: 'm3', ordinal: 3, content: 'New admitted page member' })];
+    routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended });
+    await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
+    await screen.findByText('stored ordinal 3');
+    await user.click(screen.getByRole('button', { name: 'Select stored event m1' }));
+    routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended.slice(1) });
+    await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
+    expect(screen.getByText('stored ordinal 1')).toBeTruthy();
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m1');
+    routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended.slice(2) });
+    await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
+    expect(await screen.findByText(/Selected event m1 is outside this loaded page/)).toBeTruthy();
+    expect(document.querySelectorAll('[data-event]')).toHaveLength(0);
+    expect(screen.queryByText('New admitted page member')).toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m1');
+  });
+
   it('replays only the canonical loaded raw-turn order and keeps compaction linked', async () => {
     const user = userEvent.setup();
     renderLoom({
@@ -588,7 +648,8 @@ describe('LoomPage', () => {
     await user.click(screen.getByRole('button', { name: 'Step to previous stored event' }));
     expect(screen.getByText('stored ordinal 0')).toBeTruthy();
     expect(screen.getByText('linked compaction boundaries')).toBeTruthy();
-    expect(screen.getByText(/checkpoint · depth 1/)).toBeTruthy();
+    expect(screen.queryByText(/checkpoint · depth 1/)).toBeNull();
+    expect(screen.getByText(/linked boundary is outside this loaded transcript page/)).toBeTruthy();
 
     await user.selectOptions(screen.getByLabelText('Replay speed'), '2');
     expect((screen.getByLabelText('Replay speed') as HTMLSelectElement).value).toBe('2');

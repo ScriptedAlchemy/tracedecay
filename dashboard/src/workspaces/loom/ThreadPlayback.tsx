@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import type { ReactNode } from 'react';
 import type { LcmMessageV1, LcmSummaryNodeV1 } from '../../contracts/generated.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
@@ -6,15 +6,13 @@ import { Legend } from '../../ui/instrument.tsx';
 import { formatStamp } from '../../ui/format.ts';
 import { orderChainMessages } from './weave.ts';
 import {
-  initialPlaybackState,
   LOOM_PLAYBACK_SPEEDS,
-  playbackTickMillis,
-  reconcilePlaybackState,
   returnToLive,
   seekPlayback,
   stepPlayback,
   type LoomPlaybackFrame,
   type LoomPlaybackSpeed,
+  type LoomPlaybackState,
 } from './playback.ts';
 
 /**
@@ -25,43 +23,25 @@ import {
  * does not imply an SSE subscription that this route does not provide.
  */
 export function ThreadPlayback({
-  messages,
+  children,
+  frames,
+  state,
+  setState,
   summaryNodes,
   totalMessages,
   hasMoreMessages,
   hasMoreSummaryNodes,
 }: {
-  messages: readonly LcmMessageV1[];
+  children: ReactNode;
+  frames: readonly LoomPlaybackFrame[];
+  state: LoomPlaybackState;
+  setState: Dispatch<SetStateAction<LoomPlaybackState>>;
   summaryNodes: readonly LcmSummaryNodeV1[];
   totalMessages: number;
   hasMoreMessages: boolean;
   hasMoreSummaryNodes: boolean;
 }) {
-  const frames = useMemo(() => playbackFrames(messages), [messages]);
-  const signature = frames.map((frame) => frame.id).join('\u0000');
-  const [state, setState] = useState(() => initialPlaybackState(frames.length));
   const active = frames[state.cursor] ?? null;
-  const activeId = active?.id ?? null;
-  const priorActiveId = useRef<string | null>(activeId);
-
-  // A refetch can append or remove a page member. Stable identity wins over a
-  // numeric cursor; live following is the explicit exception and takes tail.
-  useEffect(() => {
-    const previousActiveId = priorActiveId.current;
-    setState((previous) => reconcilePlaybackState(previous, previousActiveId, frames));
-  }, [frames, signature]);
-
-  useEffect(() => {
-    priorActiveId.current = activeId;
-  }, [activeId]);
-
-  useEffect(() => {
-    if (!state.playing || frames.length === 0) return;
-    const timer = window.setTimeout(() => {
-      setState((previous) => stepPlayback(previous, frames.length, 1));
-    }, playbackTickMillis(state.speed));
-    return () => window.clearTimeout(timer);
-  }, [frames.length, state.playing, state.speed, state.cursor]);
 
   if (frames.length === 0) {
     return (
@@ -96,7 +76,7 @@ export function ThreadPlayback({
       >
         <PlaybackButton
           label={state.playing ? 'Pause replay' : 'Play replay'}
-          disabled={!state.playing && state.cursor >= latest}
+          disabled={!state.playing && (state.cursor < 0 || state.cursor >= latest)}
           onClick={() => {
             setState((previous) => ({
               ...previous,
@@ -109,7 +89,7 @@ export function ThreadPlayback({
         </PlaybackButton>
         <PlaybackButton
           label="Step to previous stored event"
-          disabled={state.cursor === 0}
+          disabled={state.cursor <= 0}
           onClick={() => setState((previous) => stepPlayback(previous, frames.length, -1))}
         >
           prev
@@ -144,7 +124,7 @@ export function ThreadPlayback({
             label="Return replay to latest loaded event"
             onClick={() => setState((previous) => returnToLive(previous, frames.length))}
           >
-            return to latest
+            RETURN TO LOADED TAIL
           </PlaybackButton>
         )}
       </div>
@@ -157,12 +137,14 @@ export function ThreadPlayback({
           min={0}
           max={latest}
           step={1}
-          value={state.cursor}
+          value={Math.max(state.cursor, 0)}
           onChange={(event) => {
             setState((previous) => seekPlayback(previous, frames.length, Number(event.currentTarget.value)));
           }}
         />
       </label>
+
+      {children}
 
       {active ? (
         <div className="flex flex-col gap-1 border border-edge-subtle bg-surface-0 px-2 py-1.5">
@@ -190,7 +172,9 @@ export function ThreadPlayback({
         viewing pace, not recorded elapsed time.{' '}
         {hasMoreMessages
           ? `${totalMessages.toLocaleString()} turns exist for this session; later pages remain outside this replay until the canonical transcript page is opened.`
-          : `This response contains all ${totalMessages.toLocaleString()} recorded turns.`}{' '}
+          : totalMessages === frames.length
+            ? `This response contains all ${totalMessages.toLocaleString()} recorded turns.`
+            : `${frames.length} of ${totalMessages.toLocaleString()} recorded turns are loaded; no further page is advertised by this response.`}{' '}
         {hasMoreSummaryNodes
           ? 'More compaction boundaries exist outside this response page.'
           : 'Compaction links are kept separate from the event cursor unless the store linked them to this raw turn.'}
@@ -199,7 +183,7 @@ export function ThreadPlayback({
   );
 }
 
-function playbackFrames(messages: readonly LcmMessageV1[]): LoomPlaybackFrame[] {
+export function playbackFrames(messages: readonly LcmMessageV1[]): LoomPlaybackFrame[] {
   return orderChainMessages(messages).map((message) => ({
     id: message.message_id,
     ordinal: message.ordinal,
