@@ -264,9 +264,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     pub automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     pub(crate) doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
-    pub(crate) remote_operational_status: Option<
-        std::sync::Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>,
-    >,
+    pub(crate) remote_operational_status:
+        Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     pub(crate) code_index_freshness_reader:
         Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,

@@ -4,9 +4,6 @@
 //! Analytics retains its distinct facts and automation rollups; those private
 //! counters, sections, and Markdown rendering are not Observatory DTOs.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_tool_catalog::{
@@ -65,36 +62,6 @@ impl ObservatoryReadRequestV1 {
 pub struct ObservatoryReadResultV1 {
     pub observatory: ObservatoryReadModelV1,
     pub costs: CostsReadModelV1,
-}
-
-pub type ObservatoryReadFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<ObservatoryReadResultV1, ApplicationContractError>> + Send + 'a>,
->;
-
-/// Daemon-owned access to the registered project observation authorities.
-pub trait ObservatoryReadPortV1: Send + Sync {
-    fn read<'a>(&'a self, request: ObservatoryReadRequestV1) -> ObservatoryReadFuture<'a>;
-}
-
-pub struct ObservatoryReadServiceV1<P> {
-    port: P,
-}
-
-impl<P> ObservatoryReadServiceV1<P>
-where
-    P: ObservatoryReadPortV1,
-{
-    #[hotpath::skip]
-    pub const fn new(port: P) -> Self {
-        Self { port }
-    }
-
-    pub async fn read(
-        &self,
-        request: ObservatoryReadRequestV1,
-    ) -> Result<ObservatoryReadResultV1, ApplicationContractError> {
-        self.port.read(request).await
-    }
 }
 
 pub fn observatory_read_catalog_contribution()

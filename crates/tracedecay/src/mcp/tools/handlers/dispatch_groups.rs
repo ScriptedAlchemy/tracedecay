@@ -670,7 +670,7 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_remote_status" => portable_info::handle_remote_status(
                 cg.project_root(),
                 &args,
-                options.remote_operational_status.as_deref(),
+                options.remote_operational_status.as_ref(),
             ),
             "tracedecay_status" => {
                 info::handle_status(
