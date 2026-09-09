@@ -4,18 +4,25 @@
 //! deadline, cancellation, and every code-index authority *before* handler
 //! dispatch, then hands the whole admitted set across this one boundary.
 //!
-//! Construction is one validated step, not a builder chain: an authority
-//! arrives already paired with the checkout the daemon admitted it for, and
-//! [`McpToolContext::bind`] refuses a binding whose parts name different
-//! checkouts. That refusal is the selector-isolation gate for the moved
-//! families — a store lease opened for one project can never be presented
-//! alongside another project's resolved scope, because the pair travels as one
-//! value and every named scope is cross-checked before any handler runs.
+//! Construction is one validated step, not a builder chain, and the binding
+//! carries exactly one scope: the checkout the daemon admitted for this
+//! request. A scoped authority is admitted *under* that scope rather than
+//! arriving with a scope label of its own, so there is no second label a
+//! caller could set to make one project's store or executors look like
+//! another's. Where an authority knows its own identity, [`McpToolContext::bind`]
+//! checks that identity rather than the caller's word: a registered store
+//! lease reports the logical shard it was opened for, and a lease whose shard
+//! names a different project is refused however it was presented.
+//!
+//! Authorization is carried, never inferred. The root validated whether this
+//! request may read the admitted project store and hands that verdict over
+//! with the lease; the context reports it verbatim and cannot upgrade a
+//! missing or unauthorized verdict into an apparent capability.
 //!
 //! Absence stays typed. An authority the daemon never admitted is `None` here
-//! and each handler turns that into its own unavailable state; the context
-//! neither mints a substitute nor upgrades a missing authorization into an
-//! apparent capability.
+//! and each handler turns that into its own unavailable state. With no
+//! admitted scope no scoped authority may be admitted at all, and graph
+//! verification refuses rather than waving a query through.
 
 use std::path::Path;
 
@@ -33,16 +40,18 @@ use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 pub enum McpToolBindingError {
     #[error("admitted project root '{root}' is not absolute")]
     RelativeProjectRoot { root: String },
-    #[error("admitted {authority} scope is not self-consistent")]
-    ScopeInvalid { authority: &'static str },
+    #[error("admitted request scope is not self-consistent: {detail}")]
+    ScopeInvalid { detail: String },
+    #[error("{authority} cannot be admitted without a resolved request scope")]
+    UnscopedAuthority { authority: &'static str },
     #[error(
-        "project session store is admitted for checkout {store} but this request resolved {request}"
+        "project session store lease is not scoped to a project; its shard is {shard} while this request resolved {request}"
     )]
-    ProjectStoreScopeMismatch { request: String, store: String },
+    ProjectStoreNotProjectScoped { request: String, shard: String },
     #[error(
-        "code index authorities are admitted for checkout {code_index} but this request resolved {request}"
+        "project session store lease was opened for project {lease} but this request resolved {request}"
     )]
-    CodeIndexScopeMismatch { request: String, code_index: String },
+    ProjectStoreProjectMismatch { request: String, lease: String },
     #[error("code index admission carries no executor to authorize")]
     CodeIndexWithoutExecutor,
 }
@@ -54,8 +63,9 @@ impl McpToolBindingError {
         match self {
             Self::RelativeProjectRoot { .. } => "mcp_tool_binding_root_not_absolute",
             Self::ScopeInvalid { .. } => "mcp_tool_binding_scope_invalid",
-            Self::ProjectStoreScopeMismatch { .. } => "mcp_tool_binding_store_scope_mismatch",
-            Self::CodeIndexScopeMismatch { .. } => "mcp_tool_binding_code_index_scope_mismatch",
+            Self::UnscopedAuthority { .. } => "mcp_tool_binding_scope_unresolved",
+            Self::ProjectStoreNotProjectScoped { .. } => "mcp_tool_binding_store_not_project_shard",
+            Self::ProjectStoreProjectMismatch { .. } => "mcp_tool_binding_store_project_mismatch",
             Self::CodeIndexWithoutExecutor => "mcp_tool_binding_code_index_without_executor",
         }
     }
@@ -79,36 +89,68 @@ pub struct RequestControls<'a> {
     pub cancellation: Option<&'a CancellationSignal>,
 }
 
-/// The registered project session store, paired with the checkout the daemon
-/// opened it for.
+/// The registered project session store the daemon opened for this request,
+/// with the authorization the daemon validated for reading it.
 ///
-/// The pair is the isolation proof: a handler receives the lease only together
-/// with the scope it belongs to, so it cannot read a store the daemon opened
-/// for a different project.
+/// Both halves come from the root. The lease knows the logical shard it was
+/// opened for, so [`McpToolContext::bind`] can check it against the admitted
+/// checkout instead of trusting how it was presented; the authorization is the
+/// root's own verdict and is carried through untouched.
 #[derive(Clone, Copy)]
 pub struct AdmittedProjectStore<'a> {
-    /// The checkout this store was opened for, when a project route had
-    /// resolved one at admission time.
-    pub scope: Option<&'a ResolvedScope>,
-    pub lease: &'a RegisteredGlobalDbLeaseV1,
+    lease: &'a RegisteredGlobalDbLeaseV1,
+    authorization: ValidatedAuthorization,
+}
+
+impl<'a> AdmittedProjectStore<'a> {
+    /// Pairs the lease the root opened with the verdict the root reached.
+    ///
+    /// `authorization` must be the authorization the daemon validated for this
+    /// request. Passing [`ValidatedAuthorization::Unauthorized`] keeps every
+    /// store-backed handler denied; there is no value that means "decide later".
+    #[must_use]
+    pub fn new(
+        lease: &'a RegisteredGlobalDbLeaseV1,
+        authorization: ValidatedAuthorization,
+    ) -> Self {
+        Self {
+            lease,
+            authorization,
+        }
+    }
 }
 
 /// Daemon-owned code-index executors with the authorization proved for them.
 ///
-/// The authority travels with the executors because neither is usable without
-/// the other, and grouping them means a root cannot wire an executor while
-/// dropping its authorization on the floor.
+/// The authority is required, not optional: an executor admitted without the
+/// admission envelope it authenticates is an empty capability claim that would
+/// report the index as mounted while nothing can answer. The executors carry
+/// no scope of their own — they are admitted under the request's one scope,
+/// and each one re-authorizes its embedded route admission against the request
+/// root when it runs.
 #[derive(Clone, Copy)]
 pub struct AdmittedCodeIndex<'a> {
-    /// The checkout these executors were admitted for, when a project route
-    /// had resolved one at admission time.
-    pub scope: Option<&'a ResolvedScope>,
-    /// The authorization the daemon proved. Absent stays absent: the executor
-    /// itself denies an unauthorized request, and reporting that as a missing
-    /// *capability* instead would hide a real authorization failure.
-    pub authority: Option<&'a CodeIndexSearchAuthorityV1>,
-    pub search: Option<&'a CodeIndexSearchExecutor>,
-    pub branch_diff: Option<&'a CodeIndexBranchDiffExecutor>,
+    authority: &'a CodeIndexSearchAuthorityV1,
+    search: Option<&'a CodeIndexSearchExecutor>,
+    branch_diff: Option<&'a CodeIndexBranchDiffExecutor>,
+}
+
+impl<'a> AdmittedCodeIndex<'a> {
+    /// Admits at least one executor together with the authority it presents.
+    pub fn new(
+        authority: &'a CodeIndexSearchAuthorityV1,
+        search: Option<&'a CodeIndexSearchExecutor>,
+        branch_diff: Option<&'a CodeIndexBranchDiffExecutor>,
+    ) -> std::result::Result<Self, McpToolBindingError> {
+        if search.is_none() && branch_diff.is_none() {
+            return Err(McpToolBindingError::CodeIndexWithoutExecutor);
+        }
+        Ok(Self {
+            authority,
+            search,
+            branch_diff,
+        })
+    }
 }
 
 /// Everything the composition root admits for one MCP tool call.
@@ -119,9 +161,9 @@ pub struct McpToolBinding<'a> {
     /// The branch git resolved for that worktree, when it has one.
     pub active_branch: Option<&'a str>,
     pub controls: RequestControls<'a>,
-    /// The scope the daemon's project route resolved for this request. Absent
-    /// on a standalone server and on the core server that answers before
-    /// project-open publication mounts a route.
+    /// The one checkout the daemon admitted for this request. Absent on a
+    /// standalone server and on the core server that answers before
+    /// project-open publication resolves a route.
     pub scope: Option<&'a ResolvedScope>,
     pub project_session_store: Option<AdmittedProjectStore<'a>>,
     pub code_index: Option<AdmittedCodeIndex<'a>>,
@@ -137,9 +179,11 @@ pub struct McpToolContext<'a> {
     active_branch: Option<&'a str>,
     deadline: Option<&'a Deadline>,
     cancellation: Option<&'a CancellationSignal>,
-    /// The one checkout every named authority in this binding agreed on.
+    /// The one checkout every admitted authority in this binding belongs to.
     admitted_scope: Option<&'a ResolvedScope>,
     project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
+    /// The root's verdict for reading `project_session_db`, carried verbatim.
+    project_session_authorization: Option<ValidatedAuthorization>,
     code_index_search_executor: Option<&'a CodeIndexSearchExecutor>,
     code_index_branch_diff_executor: Option<&'a CodeIndexBranchDiffExecutor>,
     code_index_search_authority: Option<&'a CodeIndexSearchAuthorityV1>,
@@ -148,9 +192,11 @@ pub struct McpToolContext<'a> {
 impl<'a> McpToolContext<'a> {
     /// Validates one admitted binding and freezes it for the call.
     ///
-    /// Every scope the binding names must be self-consistent and must identify
-    /// the same checkout, and a code-index admission must carry an executor.
-    /// Nothing is defaulted or repaired: a binding that does not prove one
+    /// The root must be absolute, the admitted scope self-consistent, and every
+    /// scoped authority must actually have that scope to be admitted under. A
+    /// store lease is checked against its own logical shard identity, so a
+    /// lease opened for another project is refused whatever scope accompanied
+    /// it. Nothing is defaulted or repaired: a binding that does not prove one
     /// coherent request scope is refused whole.
     pub fn bind(binding: McpToolBinding<'a>) -> std::result::Result<Self, McpToolBindingError> {
         if !binding.project_root.is_absolute() {
@@ -158,21 +204,21 @@ impl<'a> McpToolContext<'a> {
                 root: binding.project_root.display().to_string(),
             });
         }
-        let store_scope = binding
-            .project_session_store
-            .as_ref()
-            .and_then(|store| store.scope);
-        let code_index_scope = binding
-            .code_index
-            .as_ref()
-            .and_then(|code_index| code_index.scope);
-        let admitted_scope =
-            verify_admitted_checkouts(binding.scope, store_scope, code_index_scope)?;
-        if let Some(code_index) = &binding.code_index
-            && code_index.search.is_none()
-            && code_index.branch_diff.is_none()
+        if let Some(scope) = binding.scope
+            && let Err(error) = scope.validate()
         {
-            return Err(McpToolBindingError::CodeIndexWithoutExecutor);
+            return Err(McpToolBindingError::ScopeInvalid {
+                detail: error.to_string(),
+            });
+        }
+        if let Some(store) = binding.project_session_store {
+            verify_store_lease(
+                require_scope(binding.scope, "project session store")?,
+                store,
+            )?;
+        }
+        if binding.code_index.is_some() {
+            require_scope(binding.scope, "code index")?;
         }
 
         Ok(Self {
@@ -180,39 +226,16 @@ impl<'a> McpToolContext<'a> {
             active_branch: binding.active_branch,
             deadline: binding.controls.deadline,
             cancellation: binding.controls.cancellation,
-            admitted_scope,
-            project_session_db: binding
+            admitted_scope: binding.scope,
+            project_session_db: binding.project_session_store.map(|store| store.lease),
+            project_session_authorization: binding
                 .project_session_store
-                .as_ref()
-                .map(|store| store.lease),
-            code_index_search_executor: binding
-                .code_index
-                .as_ref()
-                .and_then(|code_index| code_index.search),
+                .map(|store| store.authorization),
+            code_index_search_executor: binding.code_index.and_then(|code_index| code_index.search),
             code_index_branch_diff_executor: binding
                 .code_index
-                .as_ref()
                 .and_then(|code_index| code_index.branch_diff),
-            code_index_search_authority: binding
-                .code_index
-                .as_ref()
-                .and_then(|code_index| code_index.authority),
-        })
-    }
-
-    /// A binding for a server with no daemon admission at all.
-    ///
-    /// A standalone MCP server knows the worktree it was started in and
-    /// nothing else, so every daemon authority is absent and each handler
-    /// reports its own unavailable state.
-    pub fn standalone(project_root: &'a Path) -> std::result::Result<Self, McpToolBindingError> {
-        Self::bind(McpToolBinding {
-            project_root,
-            active_branch: None,
-            controls: RequestControls::default(),
-            scope: None,
-            project_session_store: None,
-            code_index: None,
+            code_index_search_authority: binding.code_index.map(|code_index| code_index.authority),
         })
     }
 
@@ -236,31 +259,24 @@ impl<'a> McpToolContext<'a> {
         self.cancellation
     }
 
-    /// The one checkout this call is admitted for, when any authority named it.
+    /// The one checkout this call is admitted for, when the daemon resolved one.
     #[must_use]
     pub fn admitted_scope(&self) -> Option<&'a ResolvedScope> {
         self.admitted_scope
     }
 
-    #[must_use]
-    pub fn project_session_db(&self) -> Option<&'a RegisteredGlobalDbLeaseV1> {
-        self.project_session_db
-    }
-
-    /// The admitted project store together with the authorization binding it
-    /// proved.
+    /// The admitted project store together with the root's authorization.
     ///
-    /// A handler must not decide for itself that a store read is authorized.
-    /// [`Self::bind`] already proved this lease belongs to the checkout this
-    /// call is admitted for, and that proof is what this pair reports; with no
-    /// admitted store there is nothing to authorize and the caller receives
-    /// the typed absence instead.
+    /// The verdict is the root's, carried through [`Self::bind`] unchanged: a
+    /// handler cannot decide for itself that a store read is authorized, and
+    /// this accessor never supplies a verdict of its own. With no admitted
+    /// store the caller receives the typed absence instead.
     #[must_use]
     pub fn authorized_project_session_db(
         &self,
     ) -> Option<(&'a RegisteredGlobalDbLeaseV1, ValidatedAuthorization)> {
         self.project_session_db
-            .map(|lease| (lease, ValidatedAuthorization::Authorized))
+            .zip(self.project_session_authorization)
     }
 
     #[must_use]
@@ -283,7 +299,9 @@ impl<'a> McpToolContext<'a> {
     /// The graph authority only exists once its admission future resolves, so
     /// it cannot be cross-checked at bind time; every handler that awaits one
     /// passes it through here first. The graph carries its own resolved scope,
-    /// which must name the checkout this call was admitted for.
+    /// which must name the checkout this call was admitted for. With no
+    /// admitted scope there is nothing to isolate against and the query is
+    /// refused rather than trusted.
     pub fn verify_graph_scope(&self, graph: &VerifiedGraphQuery) -> Result<()> {
         verify_scope_isolation(self.admitted_scope, graph.request_context().scope())
     }
@@ -303,6 +321,10 @@ impl std::fmt::Debug for McpToolContext<'_> {
             .field("has_cancellation", &self.cancellation.is_some())
             .field("has_project_session_db", &self.project_session_db.is_some())
             .field(
+                "project_session_authorization",
+                &self.project_session_authorization,
+            )
+            .field(
                 "has_code_index_search_executor",
                 &self.code_index_search_executor.is_some(),
             )
@@ -318,14 +340,56 @@ impl std::fmt::Debug for McpToolContext<'_> {
     }
 }
 
-/// Refuses a graph admitted for a different checkout than this call.
+/// The admitted scope a scoped authority needs, or a typed refusal.
 ///
-/// With no admitted scope there is no selected project to isolate from: the
-/// binding named no store and no scoped executor, so the graph's own admission
-/// is the only identity in play and it answers for itself.
+/// An authority the daemon scoped cannot be admitted into a request that never
+/// resolved a checkout: there would be nothing to isolate it against, and a
+/// handler reading it would answer from whatever project the authority happens
+/// to hold.
+fn require_scope<'a>(
+    scope: Option<&'a ResolvedScope>,
+    authority: &'static str,
+) -> std::result::Result<&'a ResolvedScope, McpToolBindingError> {
+    scope.ok_or(McpToolBindingError::UnscopedAuthority { authority })
+}
+
+/// Refuses a store lease whose own logical shard names another project.
+///
+/// The lease reports the shard the registry opened it for, which is the
+/// store's own identity rather than a label travelling beside it. A profile or
+/// remote-node shard has no project at all and cannot serve a project-scoped
+/// read.
+fn verify_store_lease(
+    scope: &ResolvedScope,
+    store: AdmittedProjectStore<'_>,
+) -> std::result::Result<(), McpToolBindingError> {
+    let shard = &store.lease.binding().shard_id;
+    let Some(lease_project) = shard.scope.project_id() else {
+        return Err(McpToolBindingError::ProjectStoreNotProjectScoped {
+            request: checkout_label(scope),
+            shard: format!("{:?}", shard.scope),
+        });
+    };
+    if lease_project != &scope.project_id {
+        return Err(McpToolBindingError::ProjectStoreProjectMismatch {
+            request: checkout_label(scope),
+            lease: lease_project.as_str().to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a graph admitted for a different checkout than this call.
 fn verify_scope_isolation(admitted: Option<&ResolvedScope>, graph: &ResolvedScope) -> Result<()> {
     let Some(admitted) = admitted else {
-        return Ok(());
+        return Err(TraceDecayError::project_route(
+            "mcp_tool_graph_scope_unresolved",
+            false,
+            format!(
+                "verified graph answers for checkout {} but this request resolved no admitted scope",
+                checkout_label(graph)
+            ),
+        ));
     };
     if admitted.identifies_same_checkout(graph) {
         return Ok(());
@@ -339,53 +403,6 @@ fn verify_scope_isolation(admitted: Option<&ResolvedScope>, graph: &ResolvedScop
             checkout_label(admitted)
         ),
     ))
-}
-
-/// Proves every checkout a binding names is the same one, and returns it.
-///
-/// The request scope leads when the daemon's route resolved one; otherwise the
-/// first authority that names a checkout carries the only identity this call
-/// has, and the rest must agree with it. A binding that names two checkouts is
-/// a cross-project leak, not a preference to reconcile.
-fn verify_admitted_checkouts<'a>(
-    request: Option<&'a ResolvedScope>,
-    store: Option<&'a ResolvedScope>,
-    code_index: Option<&'a ResolvedScope>,
-) -> std::result::Result<Option<&'a ResolvedScope>, McpToolBindingError> {
-    validate_scope(request, "request")?;
-    validate_scope(store, "project session store")?;
-    validate_scope(code_index, "code index")?;
-
-    let admitted = request.or(store).or(code_index);
-    if let (Some(admitted), Some(store)) = (admitted, store)
-        && !admitted.identifies_same_checkout(store)
-    {
-        return Err(McpToolBindingError::ProjectStoreScopeMismatch {
-            request: checkout_label(admitted),
-            store: checkout_label(store),
-        });
-    }
-    if let (Some(admitted), Some(code_index)) = (admitted, code_index)
-        && !admitted.identifies_same_checkout(code_index)
-    {
-        return Err(McpToolBindingError::CodeIndexScopeMismatch {
-            request: checkout_label(admitted),
-            code_index: checkout_label(code_index),
-        });
-    }
-    Ok(admitted)
-}
-
-fn validate_scope(
-    scope: Option<&ResolvedScope>,
-    authority: &'static str,
-) -> std::result::Result<(), McpToolBindingError> {
-    match scope {
-        Some(scope) if scope.validate().is_err() => {
-            Err(McpToolBindingError::ScopeInvalid { authority })
-        }
-        _ => Ok(()),
-    }
 }
 
 /// Names the physical checkout a scope identifies, for operator-facing refusals.
@@ -403,6 +420,29 @@ fn checkout_label(scope: &ResolvedScope) -> String {
 mod tests {
     use super::*;
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+
+    /// A registered project session store opened by the production
+    /// registration path, so a binding is checked against a lease's own
+    /// logical shard rather than a stand-in that repeats whatever the caller
+    /// claimed.
+    async fn registered_project_store(
+        home: &Path,
+        project: &str,
+    ) -> (RegisteredGlobalDbTestRuntime, RegisteredGlobalDbLeaseV1) {
+        let project_id = ProjectId::new(format!("project.{project}")).expect("project id");
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            home.join(format!("profile-{project}")),
+            home.join(format!("checkout-{project}")),
+            project_id,
+        )
+        .await
+        .expect("registered project store");
+        let lease = runtime
+            .project_database_arc()
+            .expect("registered project lease");
+        (runtime, lease)
+    }
 
     fn scope(project: &str) -> ResolvedScope {
         ResolvedScope::new(
@@ -425,109 +465,61 @@ mod tests {
         }
     }
 
+    fn authority() -> CodeIndexSearchAuthorityV1 {
+        CodeIndexSearchAuthorityV1 {
+            principal: tracedecay_domain::PrincipalId::new("principal.mcp-binding.fixture")
+                .expect("principal"),
+            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                "revision.mcp-binding.fixture",
+            )
+            .expect("revision"),
+        }
+    }
+
     /// A relative root cannot anchor path resolution or identity, so it is
     /// refused instead of silently joined against the process directory.
     #[test]
     fn a_relative_project_root_is_refused() {
-        let error = McpToolContext::standalone(Path::new("relative/root"))
+        let error = McpToolContext::bind(binding(Path::new("relative/root"), None))
             .expect_err("relative root must be refused");
         assert_eq!(error.reason_code(), "mcp_tool_binding_root_not_absolute");
-    }
-
-    /// A store lease opened for one project must never be readable through a
-    /// context admitted for another: that is the cross-project selector leak
-    /// the binding exists to prevent.
-    #[test]
-    fn a_store_from_another_project_is_refused() {
-        let request = scope("admitted");
-        let foreign = scope("foreign");
-
-        let error = verify_admitted_checkouts(Some(&request), Some(&foreign), None)
-            .expect_err("a foreign store scope must be refused");
-
-        assert_eq!(error.reason_code(), "mcp_tool_binding_store_scope_mismatch");
-        let message = error.to_string();
-        assert!(message.contains("project.foreign"), "got {message:?}");
-        assert!(message.contains("project.admitted"), "got {message:?}");
-    }
-
-    /// The same store presented with the scope it was opened for binds, so the
-    /// mismatch refusal is proving identity rather than rejecting every store.
-    #[test]
-    fn a_store_from_the_admitted_project_binds() {
-        let request = scope("admitted");
-
-        let admitted = verify_admitted_checkouts(Some(&request), Some(&request), None)
-            .expect("a store admitted for this request must bind");
-
-        assert_eq!(
-            admitted.map(|scope| scope.project_id.as_str()),
-            Some("project.admitted")
-        );
-    }
-
-    /// Code-index executors admitted for another checkout are refused for the
-    /// same reason a foreign store is: they would answer from a different
-    /// project's sealed generations.
-    #[test]
-    fn code_index_executors_from_another_project_are_refused() {
-        let request = scope("admitted");
-        let foreign = scope("foreign");
-
-        let error = verify_admitted_checkouts(Some(&request), None, Some(&foreign))
-            .expect_err("foreign code index scope must be refused");
-
-        assert_eq!(
-            error.reason_code(),
-            "mcp_tool_binding_code_index_scope_mismatch"
-        );
-    }
-
-    /// Before a route resolves, the store lease carries the only checkout
-    /// identity this call has, and a code-index authority admitted for another
-    /// project must still be refused against it.
-    #[test]
-    fn an_unrouted_call_isolates_against_the_store_checkout() {
-        let store = scope("admitted");
-        let foreign = scope("foreign");
-
-        let admitted = verify_admitted_checkouts(None, Some(&store), Some(&store))
-            .expect("one agreed checkout must bind without a route");
-        assert_eq!(
-            admitted.map(|scope| scope.project_id.as_str()),
-            Some("project.admitted")
-        );
-
-        let error = verify_admitted_checkouts(None, Some(&store), Some(&foreign))
-            .expect_err("a foreign code index must be refused against the store checkout");
-        assert_eq!(
-            error.reason_code(),
-            "mcp_tool_binding_code_index_scope_mismatch"
-        );
     }
 
     /// A code-index admission with no executor is an empty capability claim:
     /// handlers would report the index as mounted while nothing can answer.
     #[test]
     fn a_code_index_admission_without_an_executor_is_refused() {
-        let temp = tempfile::tempdir().expect("temp root");
-        let request = scope("admitted");
+        let authority = authority();
 
-        let error = McpToolContext::bind(McpToolBinding {
-            code_index: Some(AdmittedCodeIndex {
-                scope: Some(&request),
-                authority: None,
-                search: None,
-                branch_diff: None,
-            }),
-            ..binding(temp.path(), Some(&request))
-        })
-        .expect_err("an executorless code index admission must be refused");
+        let Err(error) = AdmittedCodeIndex::new(&authority, None, None) else {
+            panic!("an executorless code index admission must be refused");
+        };
 
         assert_eq!(
             error.reason_code(),
             "mcp_tool_binding_code_index_without_executor"
         );
+    }
+
+    /// A request that resolved no checkout has nothing to isolate a scoped
+    /// authority against, so admitting one fails closed rather than reading
+    /// whatever project the authority happens to hold.
+    #[test]
+    fn a_code_index_cannot_be_admitted_without_a_resolved_scope() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let authority = authority();
+        let search: CodeIndexSearchExecutor =
+            std::sync::Arc::new(|_| unreachable!("binding must be refused before any search runs"));
+
+        let error = McpToolContext::bind(McpToolBinding {
+            code_index: Some(
+                AdmittedCodeIndex::new(&authority, Some(&search), None).expect("admission"),
+            ),
+            ..binding(temp.path(), None)
+        })
+        .expect_err("an unscoped code index admission must be refused");
+
+        assert_eq!(error.reason_code(), "mcp_tool_binding_scope_unresolved");
     }
 
     /// A graph admitted for another checkout is refused before a handler reads
@@ -546,5 +538,132 @@ mod tests {
 
         verify_scope_isolation(Some(&admitted), &admitted)
             .expect("the admitted checkout's own graph must pass");
+    }
+
+    /// With no admitted scope the graph's own admission is the only identity
+    /// in play, and trusting it would let any checkout's graph answer. The
+    /// query is refused instead.
+    #[test]
+    fn a_graph_without_an_admitted_scope_is_refused() {
+        let graph = scope("graph");
+
+        let error = verify_scope_isolation(None, &graph)
+            .expect_err("an unscoped request must not read a verified graph");
+        assert_eq!(
+            error.project_route_context().map(|(reason, _, _)| reason),
+            Some("mcp_tool_graph_scope_unresolved")
+        );
+    }
+
+    /// A store lease opened for one project must never be readable through a
+    /// context admitted for another. The lease below is a real registered
+    /// project store, and the refusal comes from its own logical shard rather
+    /// than from any label presented alongside it.
+    #[tokio::test]
+    async fn a_real_lease_from_another_project_is_refused() {
+        let home = tempfile::tempdir().expect("temp home");
+        let (_admitted_runtime, admitted_lease) =
+            registered_project_store(home.path(), "admitted").await;
+        let (_foreign_runtime, foreign_lease) =
+            registered_project_store(home.path(), "foreign").await;
+        let admitted = scope("admitted");
+
+        let error = McpToolContext::bind(McpToolBinding {
+            project_session_store: Some(AdmittedProjectStore::new(
+                &foreign_lease,
+                ValidatedAuthorization::Authorized,
+            )),
+            ..binding(home.path(), Some(&admitted))
+        })
+        .map(|_| ())
+        .expect_err("another project's real lease must be refused");
+        assert_eq!(
+            error.reason_code(),
+            "mcp_tool_binding_store_project_mismatch"
+        );
+        assert!(error.to_string().contains("project.foreign"), "got {error}");
+
+        let bound = McpToolContext::bind(McpToolBinding {
+            project_session_store: Some(AdmittedProjectStore::new(
+                &admitted_lease,
+                ValidatedAuthorization::Authorized,
+            )),
+            ..binding(home.path(), Some(&admitted))
+        })
+        .expect("the admitted project's own lease must bind");
+        let (bound_lease, authorization) = bound
+            .authorized_project_session_db()
+            .expect("the bound store is reported");
+        assert!(
+            bound_lease.shares_client_with(&admitted_lease),
+            "the bound context must report the very lease it was admitted with"
+        );
+        assert_eq!(authorization, ValidatedAuthorization::Authorized);
+    }
+
+    /// A request that resolved no checkout cannot admit a store either: there
+    /// would be no identity to check the lease's shard against.
+    #[tokio::test]
+    async fn a_real_lease_cannot_be_admitted_without_a_resolved_scope() {
+        let home = tempfile::tempdir().expect("temp home");
+        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
+
+        let error = McpToolContext::bind(McpToolBinding {
+            project_session_store: Some(AdmittedProjectStore::new(
+                &lease,
+                ValidatedAuthorization::Authorized,
+            )),
+            ..binding(home.path(), None)
+        })
+        .map(|_| ())
+        .expect_err("an unscoped store admission must be refused");
+
+        assert_eq!(error.reason_code(), "mcp_tool_binding_scope_unresolved");
+    }
+
+    /// The root's verdict is carried, not re-derived: a context bound with an
+    /// unauthorized store reports exactly that, so every store-backed handler
+    /// denies instead of reading it.
+    #[tokio::test]
+    async fn an_unauthorized_verdict_survives_binding() {
+        let home = tempfile::tempdir().expect("temp home");
+        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
+        let admitted = scope("admitted");
+
+        let bound = McpToolContext::bind(McpToolBinding {
+            project_session_store: Some(AdmittedProjectStore::new(
+                &lease,
+                ValidatedAuthorization::Unauthorized,
+            )),
+            ..binding(home.path(), Some(&admitted))
+        })
+        .expect("an unauthorized store is still a coherent binding");
+
+        let (_, authorization) = bound
+            .authorized_project_session_db()
+            .expect("the store is reported with its verdict");
+        assert_eq!(authorization, ValidatedAuthorization::Unauthorized);
+    }
+
+    /// A checkout differs from another by project, repository, or worktree —
+    /// never by the branch reference HEAD happens to carry. Two scopes for the
+    /// same checkout on different branches must isolate identically.
+    #[test]
+    fn a_branch_switch_does_not_change_the_admitted_checkout() {
+        let registered = scope("admitted");
+        let switched = ResolvedScope::new(
+            registered.project_id.clone(),
+            registered.repository_id.clone(),
+            registered.worktree_id.clone(),
+            Some(tracedecay_domain::RefId::new("refs/heads/feature").expect("reference")),
+        )
+        .expect("scope on another branch");
+        assert_ne!(
+            registered.scope_digest, switched.scope_digest,
+            "fixture must differ in the reference-sensitive digest"
+        );
+
+        verify_scope_isolation(Some(&registered), &switched)
+            .expect("the same checkout on another branch must still bind");
     }
 }

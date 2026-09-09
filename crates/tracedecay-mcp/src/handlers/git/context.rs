@@ -990,7 +990,7 @@ where
             changes: &changes,
         },
     );
-    let cursor_authority = match ctx.project_session_db() {
+    let cursor_authority = match ctx.authorized_project_session_db() {
         Some(_) => Some(
             hotpath::future!(
                 pr_context_cursor_authority(ctx, &cursor_binding),

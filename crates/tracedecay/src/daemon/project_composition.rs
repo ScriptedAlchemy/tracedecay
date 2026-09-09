@@ -519,6 +519,7 @@ impl ComposedCoreServer {
                 ),
             )
             .with_code_index_search_authority(code_index.search_authority.clone())
+            .with_admitted_project_scope(code_index.scope.clone())
             .with_project_server_live(Arc::clone(&self.route_registered))
             .with_application_invocation_executor(Arc::clone(
                 &ports.application_invocation_executor,

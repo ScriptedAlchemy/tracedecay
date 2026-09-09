@@ -298,6 +298,10 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) source_edit_rollback_executor:
         Option<crate::mcp::server::SourceEditRollbackExecutor>,
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    /// The checkout the serving route was admitted for. Every scoped authority
+    /// a moved handler family reads binds against this one scope; absent, no
+    /// scoped authority may be admitted at all.
+    pub(crate) admitted_project_scope: Option<tracedecay_contracts::ResolvedScope>,
     pub(crate) code_graph_projection_read_port:
         Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port:
@@ -367,6 +371,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             source_edit_reconciliation_executor: None,
             source_edit_rollback_executor: None,
             code_index_search_authority: None,
+            admitted_project_scope: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
             verified_graph_query_port: None,

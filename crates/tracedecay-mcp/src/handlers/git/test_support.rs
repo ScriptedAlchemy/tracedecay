@@ -9,7 +9,15 @@ use crate::tool_context::{McpToolBinding, McpToolContext, RequestControls};
 /// The binding a standalone (non-daemon) server produces: a worktree root and
 /// no admitted authority at all.
 pub(super) fn standalone_context(project_root: &Path) -> McpToolContext<'_> {
-    McpToolContext::standalone(project_root).expect("an absolute root binds standalone")
+    McpToolContext::bind(McpToolBinding {
+        project_root,
+        active_branch: None,
+        controls: RequestControls::default(),
+        scope: None,
+        project_session_store: None,
+        code_index: None,
+    })
+    .expect("an absolute root binds standalone")
 }
 
 /// The same standalone binding with the branch git resolved for the worktree.

@@ -19,15 +19,20 @@ const PR_CONTEXT_CURSOR_SESSION: &str = "session.daemon.pr-context";
 /// Canonical identity of the checkout a cursor was minted for.
 ///
 /// This is `TraceDecay`'s own resolved project/repository/worktree identity,
-/// not
-/// a locally derived name: the same authority every other scoped read binds
-/// to, carried verbatim so a cursor cannot travel between projects.
+/// not a locally derived name: the same authority every other scoped read
+/// binds to, carried verbatim so a cursor cannot travel between projects.
+///
+/// It is deliberately the three fields
+/// [`tracedecay_contracts::ResolvedScope::identifies_same_checkout`] compares,
+/// and not the scope digest. The digest also covers the git reference the
+/// scope was resolved under, which changes on every ordinary branch switch —
+/// binding cursors to it would invalidate in-flight pagination whenever HEAD
+/// moved, while proving nothing about which checkout is being read.
 #[derive(Clone, Copy, Serialize)]
 pub(super) struct PrContextCursorScope<'a> {
     pub project_id: &'a str,
     pub repository_id: &'a str,
     pub worktree_id: &'a str,
-    pub scope_digest: &'a str,
 }
 
 impl<'a> PrContextCursorScope<'a> {
@@ -36,9 +41,21 @@ impl<'a> PrContextCursorScope<'a> {
             project_id: scope.project_id.as_str(),
             repository_id: scope.repository_id.as_str(),
             worktree_id: scope.worktree_id.as_str(),
-            scope_digest: scope.scope_digest.as_str(),
         }
     }
+}
+
+/// The logical shard the store that signs this cursor was opened for.
+///
+/// Cursor denial is a store-level outcome: a cursor is "not yours" when it was
+/// minted against another store, and that store's own registered shard is what
+/// names it. Carrying the shard makes the denial hold even between two stores
+/// that happen to serve the same checkout.
+#[derive(Clone, Copy, Serialize)]
+pub(super) struct PrContextCursorStore<'a> {
+    pub brain_id: &'a str,
+    pub profile_id: &'a str,
+    pub project_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -47,6 +64,8 @@ pub(super) struct PrContextCursorBinding<'a> {
     /// The admitted checkout, when the daemon's route resolved one. A cursor
     /// minted under one project's scope cannot verify under another's.
     pub scope: Option<PrContextCursorScope<'a>>,
+    /// The registered store that signs and verifies this cursor.
+    pub store: Option<PrContextCursorStore<'a>>,
     /// The worktree root exactly as the filesystem stores it.
     ///
     /// `Path::to_string_lossy` maps every unpaired byte onto the same
@@ -75,6 +94,9 @@ impl<'a> PrContextCursorBinding<'a> {
             scope: ctx
                 .admitted_scope()
                 .map(PrContextCursorScope::from_resolved),
+            store: ctx
+                .authorized_project_session_db()
+                .map(|(lease, _)| PrContextCursorStore::from_shard(&lease.binding().shard_id)),
             project_root,
             base_oid: comparison.base_oid,
             head_oid: comparison.head_oid,
@@ -94,6 +116,7 @@ impl<'a> PrContextCursorBinding<'a> {
             "tracedecay.pr-context.cursor.identity.v1",
             self.protocol,
             &self.scope,
+            &self.store,
             self.project_root,
         ))
         .map_err(|error| TraceDecayError::Config {
@@ -106,6 +129,19 @@ impl<'a> PrContextCursorBinding<'a> {
         canonical_sha256(self).map_err(|error| TraceDecayError::Config {
             message: format!("failed to bind PR context cursor: {error}"),
         })
+    }
+}
+
+impl<'a> PrContextCursorStore<'a> {
+    fn from_shard(shard: &'a tracedecay_store::StoreShardIdV1) -> Self {
+        Self {
+            brain_id: shard.brain_id.as_str(),
+            profile_id: shard.profile_id.as_str(),
+            project_id: shard
+                .scope
+                .project_id()
+                .map(tracedecay_domain::ProjectId::as_str),
+        }
     }
 }
 
@@ -206,6 +242,16 @@ pub(super) async fn pr_context_cursor_authority(
             "no admitted project session store can authenticate a PR context cursor",
         ));
     };
+    // The root's verdict decides. An unauthorized store is a denial, not a
+    // missing capability: the store is right there and the caller may not read
+    // it, and retrying the same request cannot change that.
+    if !authorization.is_authorized() {
+        return Err(TraceDecayError::project_route(
+            "pr_context_cursor_denied",
+            false,
+            "this request is not authorized to read the admitted project session store",
+        ));
+    }
     let session_db: &RegisteredGlobalDb = session_db;
     let authenticator = hotpath::future!(
         session_db.load_preprovisioned_session_cursor_key_provider_result(),
@@ -365,7 +411,9 @@ mod tests {
     use std::os::unix::ffi::OsStrExt as _;
 
     use super::*;
+    use crate::tool_context::{AdmittedProjectStore, McpToolBinding, RequestControls};
     use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
 
     fn cursor_key() -> SignedCursorKeyRefV1 {
@@ -384,9 +432,19 @@ mod tests {
         scope: Option<PrContextCursorScope<'a>>,
         changes: &'a [GitFileChange],
     ) -> PrContextCursorBinding<'a> {
+        binding_bound_to(root, scope, None, changes)
+    }
+
+    fn binding_bound_to<'a>(
+        root: &'a [u8],
+        scope: Option<PrContextCursorScope<'a>>,
+        store: Option<PrContextCursorStore<'a>>,
+        changes: &'a [GitFileChange],
+    ) -> PrContextCursorBinding<'a> {
         PrContextCursorBinding {
             protocol: "tracedecay.pr-context.cursor.v2",
             scope,
+            store,
             project_root: root,
             base_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             head_oid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -412,13 +470,19 @@ mod tests {
         )
     }
 
-    fn scope(project: &'static str) -> PrContextCursorScope<'static> {
-        PrContextCursorScope {
-            project_id: project,
-            repository_id: "repository.pr-context",
-            worktree_id: "worktree.pr-context",
-            scope_digest: "sha256:pr-context-scope",
-        }
+    /// A real resolved scope, minted through the same contract every admitted
+    /// read binds to, so these tests exercise canonical identity rather than a
+    /// hand-rolled stand-in.
+    fn resolved(project: &str, reference: Option<&str>) -> tracedecay_contracts::ResolvedScope {
+        tracedecay_contracts::ResolvedScope::new(
+            tracedecay_domain::ProjectId::new(project.to_owned()).expect("project id"),
+            tracedecay_domain::RepositoryId::new("repository.pr-context".to_owned())
+                .expect("repository id"),
+            tracedecay_domain::WorktreeId::new("worktree.pr-context".to_owned())
+                .expect("worktree id"),
+            reference.map(|value| tracedecay_domain::RefId::new(value).expect("reference")),
+        )
+        .expect("resolved scope")
     }
 
     /// A cursor issued for one comparison must decode back to the exact page
@@ -426,7 +490,12 @@ mod tests {
     #[test]
     fn a_cursor_round_trips_to_its_own_page_position() {
         let changes = Vec::new();
-        let binding = binding_for(b"/projects/round-trip", Some(scope("project.a")), &changes);
+        let scope = resolved("project.a", None);
+        let binding = binding_for(
+            b"/projects/round-trip",
+            Some(PrContextCursorScope::from_resolved(&scope)),
+            &changes,
+        );
         let snapshot = snapshot_for(&binding);
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
@@ -489,8 +558,18 @@ mod tests {
     fn a_cursor_from_a_foreign_project_scope_is_denied() {
         let changes = Vec::new();
         let root = b"/projects/shared";
-        let mine = snapshot_for(&binding_for(root, Some(scope("project.mine")), &changes));
-        let theirs = snapshot_for(&binding_for(root, Some(scope("project.theirs")), &changes));
+        let my_scope = resolved("project.mine", None);
+        let their_scope = resolved("project.theirs", None);
+        let mine = snapshot_for(&binding_for(
+            root,
+            Some(PrContextCursorScope::from_resolved(&my_scope)),
+            &changes,
+        ));
+        let theirs = snapshot_for(&binding_for(
+            root,
+            Some(PrContextCursorScope::from_resolved(&their_scope)),
+            &changes,
+        ));
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
 
@@ -513,7 +592,12 @@ mod tests {
     #[test]
     fn a_cursor_from_a_foreign_store_key_is_denied() {
         let changes = Vec::new();
-        let binding = binding_for(b"/projects/shared", Some(scope("project.a")), &changes);
+        let scope = resolved("project.a", None);
+        let binding = binding_for(
+            b"/projects/shared",
+            Some(PrContextCursorScope::from_resolved(&scope)),
+            &changes,
+        );
         let snapshot = snapshot_for(&binding);
         let (after, nodes, edges, bytes) = position();
 
@@ -542,14 +626,15 @@ mod tests {
             status: "modified",
         }];
         let empty = Vec::new();
+        let scope = resolved("project.a", None);
         let before = snapshot_for(&binding_for(
             b"/projects/shared",
-            Some(scope("project.a")),
+            Some(PrContextCursorScope::from_resolved(&scope)),
             &empty,
         ));
         let after_change = snapshot_for(&binding_for(
             b"/projects/shared",
-            Some(scope("project.a")),
+            Some(PrContextCursorScope::from_resolved(&scope)),
             &changes,
         ));
         let authenticator = authenticator();
@@ -564,6 +649,166 @@ mod tests {
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_invalid"),
+            "got {refusal}"
+        );
+    }
+
+    /// Switching branches does not move the checkout, so a page opened on one
+    /// branch must continue on another. Only the reference differs between the
+    /// two scopes below, and the reference-sensitive `scope_digest` differs
+    /// with it — binding cursor identity to that digest would break pagination
+    /// on every ordinary branch switch.
+    #[test]
+    fn a_cursor_survives_a_branch_switch_on_the_same_checkout() {
+        let changes = Vec::new();
+        let registered = resolved("project.a", Some("refs/heads/main"));
+        let switched = resolved("project.a", Some("refs/heads/feature"));
+        assert_ne!(
+            registered.scope_digest, switched.scope_digest,
+            "fixture must differ in the reference-sensitive digest"
+        );
+        assert!(registered.identifies_same_checkout(&switched));
+
+        let opened = snapshot_for(&binding_for(
+            b"/projects/shared",
+            Some(PrContextCursorScope::from_resolved(&registered)),
+            &changes,
+        ));
+        let continued = snapshot_for(&binding_for(
+            b"/projects/shared",
+            Some(PrContextCursorScope::from_resolved(&switched)),
+            &changes,
+        ));
+        let authenticator = authenticator();
+        let (after, nodes, edges, bytes) = position();
+
+        let encoded =
+            encode_pr_context_cursor(&after, nodes, edges, bytes, &opened, &authenticator)
+                .expect("cursor issues");
+
+        let decoded = decode_pr_context_cursor(&encoded, &continued, &authenticator)
+            .expect("the same checkout on another branch must continue its own pagination");
+        assert_eq!(decoded.after.as_str(), after.as_str());
+    }
+
+    /// The root's verdict decides whether this request may read the admitted
+    /// store, and an unauthorized verdict must deny rather than degrade into a
+    /// missing capability. The store below is a real registered project store,
+    /// so the denial comes from the carried authorization and not from an
+    /// absent authority.
+    #[tokio::test]
+    async fn an_unauthorized_store_denies_the_cursor_authority() {
+        let home = tempfile::tempdir().expect("temp home");
+        let project_id =
+            tracedecay_domain::ProjectId::new("project.pr-context".to_owned()).expect("project id");
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            home.path().join("profile"),
+            home.path().join("checkout"),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project store");
+        let lease = runtime
+            .project_database_arc()
+            .expect("registered project lease");
+        // The daemon provisions this store's signing key at project open; the
+        // authority path below reads it back exactly as production does.
+        lease
+            .ensure_active_session_cursor_key_result()
+            .await
+            .expect("provision the store's cursor signing key");
+        let scope = tracedecay_contracts::ResolvedScope::new(
+            project_id,
+            tracedecay_domain::RepositoryId::new("repository.pr-context".to_owned())
+                .expect("repository id"),
+            tracedecay_domain::WorktreeId::new("worktree.pr-context".to_owned())
+                .expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope");
+        let changes = Vec::new();
+        let comparison = || PrContextCursorComparison {
+            base_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            head_oid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            merge_base: "cccccccccccccccccccccccccccccccccccccccc",
+            graph_generation: "generation.pr-context.fixture",
+            maximum_symbols: 25,
+            changes: &changes,
+        };
+        let context_for = |authorization| {
+            McpToolContext::bind(McpToolBinding {
+                project_root: home.path(),
+                active_branch: None,
+                controls: RequestControls::default(),
+                scope: Some(&scope),
+                project_session_store: Some(AdmittedProjectStore::new(&lease, authorization)),
+                code_index: None,
+            })
+            .expect("a real lease for the admitted project binds")
+        };
+
+        let denied_context = context_for(ValidatedAuthorization::Unauthorized);
+        let root = tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(
+            denied_context.project_root().as_os_str(),
+        );
+        let denied_binding = PrContextCursorBinding::new(&denied_context, &root, comparison());
+        let refusal = pr_context_cursor_authority(&denied_context, &denied_binding)
+            .await
+            .expect_err("an unauthorized store must not mint a cursor authority");
+        assert_eq!(
+            refusal.project_route_context().map(|(reason, _, _)| reason),
+            Some("pr_context_cursor_denied"),
+            "got {refusal}"
+        );
+
+        let authorized_context = context_for(ValidatedAuthorization::Authorized);
+        let authorized_binding =
+            PrContextCursorBinding::new(&authorized_context, &root, comparison());
+        pr_context_cursor_authority(&authorized_context, &authorized_binding)
+            .await
+            .expect("the same store, authorized, opens its own cursor authority");
+    }
+
+    /// Two stores can serve the same checkout — a registered project store and
+    /// a differently registered one for the same worktree. A cursor minted
+    /// against one must not verify against the other, so the store's own
+    /// registered shard is part of cursor identity.
+    #[test]
+    fn a_cursor_from_a_foreign_bound_store_is_denied() {
+        let changes = Vec::new();
+        let scope = resolved("project.a", None);
+        let mine = snapshot_for(&binding_bound_to(
+            b"/projects/shared",
+            Some(PrContextCursorScope::from_resolved(&scope)),
+            Some(PrContextCursorStore {
+                brain_id: "brain.mine",
+                profile_id: "profile.mine",
+                project_id: Some("project.a"),
+            }),
+            &changes,
+        ));
+        let theirs = snapshot_for(&binding_bound_to(
+            b"/projects/shared",
+            Some(PrContextCursorScope::from_resolved(&scope)),
+            Some(PrContextCursorStore {
+                brain_id: "brain.theirs",
+                profile_id: "profile.theirs",
+                project_id: Some("project.a"),
+            }),
+            &changes,
+        ));
+        let authenticator = authenticator();
+        let (after, nodes, edges, bytes) = position();
+
+        let encoded =
+            encode_pr_context_cursor(&after, nodes, edges, bytes, &theirs, &authenticator)
+                .expect("cursor issues");
+
+        let refusal = decode_pr_context_cursor(&encoded, &mine, &authenticator)
+            .expect_err("a foreign store's cursor must not decode");
+        assert_eq!(
+            refusal.project_route_context().map(|(reason, _, _)| reason),
+            Some("pr_context_cursor_denied"),
             "got {refusal}"
         );
     }

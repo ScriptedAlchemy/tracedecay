@@ -24,6 +24,7 @@ use tracedecay_mcp::{
     AdmittedCodeIndex, AdmittedProjectStore, McpToolBinding, McpToolContext, RequestControls,
     ToolResult,
 };
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 use super::ToolCallRegistryOptions;
 use super::support::{effective_path, generic_tool_result, unique_file_paths};
@@ -1087,35 +1088,46 @@ fn dispatch_git_tools_inner<'a>(
 /// deadline and cancellation, the registered project session store that
 /// authenticates PR-context cursors, and the daemon-owned code-index executors
 /// with the authorization proved for them — crosses into `tracedecay-mcp` as
-/// one validated binding. Each store or executor group travels paired with the
-/// checkout the daemon admitted it for, so `bind` refuses a set that names two
-/// checkouts instead of letting a handler read across projects. An authority
-/// the daemon did not admit stays absent, and the handler reports its own
-/// typed unavailable state.
+/// one validated binding, under the single checkout the serving route was
+/// admitted for. An authority the daemon did not admit stays absent and the
+/// handler reports its own typed unavailable state; an authority that
+/// contradicts the admitted checkout refuses the whole call.
 fn admitted_tool_context<'a>(
     cg: &'a TraceDecay,
     options: &'a ToolCallRegistryOptions<'a>,
 ) -> Result<McpToolContext<'a>> {
-    // Two independent authorities name a checkout here, and a git tool may
-    // only run when they agree. The invocation target is the checkout the
-    // *caller's* request resolved to; the project route is the checkout the
-    // daemon admitted these authorities under. The session store and the
-    // code-index executors both mount behind that route, so they enter paired
-    // with it, and `bind` refuses the call if the caller selected a different
-    // project than the route admitted.
-    let requested = options.application_invocation_target.resolved();
-    let admitted = options.resolved_project_route.map(|route| &route.scope);
-    // An executor is worth carrying even when the authorization is absent: the
-    // executor itself denies the request and names *that* as the reason,
-    // whereas dropping it would report the index as unmounted.
-    let code_index = (options.code_index_search_executor.is_some()
-        || options.code_index_branch_diff_executor.is_some())
-    .then_some(AdmittedCodeIndex {
-        scope: admitted,
-        authority: options.code_index_search_authority.as_ref(),
-        search: options.code_index_search_executor.as_ref(),
-        branch_diff: options.code_index_branch_diff_executor.as_ref(),
-    });
+    // Project open resolves one checkout per served route and publishes it
+    // alongside the authorities that mount behind it, so this is the checkout
+    // every scoped authority below belongs to. Absent, the request never
+    // resolved a project: a scoped authority offered without it is dropped
+    // here rather than read against whatever project it happens to hold.
+    let scope = options.admitted_project_scope.as_ref();
+    // Executors and their admission envelope are published together by the
+    // route. Presenting executors without the envelope is a wiring fault, not
+    // a capability to report: they would authenticate nothing.
+    let code_index = match (
+        scope.and(options.code_index_search_authority.as_ref()),
+        options.code_index_search_executor.as_ref(),
+        options.code_index_branch_diff_executor.as_ref(),
+    ) {
+        (Some(authority), search, branch_diff) => {
+            Some(AdmittedCodeIndex::new(authority, search, branch_diff)?)
+        }
+        (None, None, None) => None,
+        (None, _, _) => {
+            return Err(TraceDecayError::project_route(
+                "mcp_tool_binding_code_index_without_authority",
+                false,
+                "code-index executors were admitted without the admitted scope and read admission envelope they authenticate against",
+            ));
+        }
+    };
+    // The daemon opened this store for the route it admitted, which is the
+    // authorization this request carries. `bind` proves independently that the
+    // lease's own logical shard names that project before any handler reads it.
+    let project_session_store = scope
+        .and(options.registered_project_session_db.as_ref())
+        .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
     Ok(McpToolContext::bind(McpToolBinding {
         project_root: cg.project_root(),
         active_branch: cg.active_branch(),
@@ -1123,13 +1135,8 @@ fn admitted_tool_context<'a>(
             deadline: options.application_deadline.as_ref(),
             cancellation: options.application_cancellation.as_ref(),
         },
-        scope: requested,
-        project_session_store: options.registered_project_session_db.as_ref().map(|lease| {
-            AdmittedProjectStore {
-                scope: admitted,
-                lease,
-            }
-        }),
+        scope,
+        project_session_store,
         code_index,
     })?)
 }

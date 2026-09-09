@@ -329,6 +329,7 @@ impl McpServer {
                     .cloned(),
                 source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
+                admitted_project_scope: self.admitted_project_scope.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
                 code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
                 verified_graph_query_port: self.verified_graph_query_port.clone(),
