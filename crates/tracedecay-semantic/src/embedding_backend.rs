@@ -33,6 +33,14 @@ pub enum EmbeddingRuntimeFamilyV1 {
 }
 
 impl EmbeddingRuntimeFamilyV1 {
+    /// Whether this binary can execute the backend, independent of stored artifacts.
+    pub const fn is_compiled(self) -> bool {
+        match self {
+            Self::FastEmbedOrt => cfg!(all(feature = "semantic-fastembed", not(windows))),
+            Self::Model2VecStatic => cfg!(feature = "semantic-model2vec"),
+        }
+    }
+
     pub const fn runtime_family(self) -> &'static str {
         match self {
             Self::FastEmbedOrt => FASTEMBED_RUNTIME_FAMILY_V1,

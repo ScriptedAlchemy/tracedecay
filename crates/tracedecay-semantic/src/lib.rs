@@ -158,7 +158,11 @@ impl<'a> LoadableLifecycleArtifactV1<'a> {
     fn resolve(
         lifecycle: &'a SemanticModelLifecycleOwnerV1,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
-        Self::from_state(lifecycle.status().state, lifecycle.catalog())
+        let artifact = Self::from_state(lifecycle.status().state, lifecycle.catalog())?;
+        if !artifact.model.backend.runtime_family().is_compiled() {
+            return Err(SemanticRuntimeScheduleFailureV1::Runtime);
+        }
+        Ok(artifact)
     }
 
     fn from_state(

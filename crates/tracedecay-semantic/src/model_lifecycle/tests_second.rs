@@ -1084,7 +1084,10 @@
             ready.state,
             Some(SemanticModelLifecycleStateV1::Ready { .. })
         ));
-        assert!(!ready.semantics_omitted);
+        assert_eq!(
+            ready.semantics_omitted,
+            !crate::embedding_backend::EmbeddingRuntimeFamilyV1::FastEmbedOrt.is_compiled()
+        );
     }
 
     #[test]
@@ -1185,9 +1188,10 @@
 
     #[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
     #[test]
-    fn unavailable_fastembed_selection_is_terminal_and_refuses_persisted_ready() {
+    fn unavailable_runtime_preserves_ready_selection_and_rollback_leases() {
         let fixture = tempfile::tempdir().unwrap();
         let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap();
         let root = tempfile::tempdir().unwrap();
         let source = Arc::new(FixtureSource {
             root: fixture.path().to_path_buf(),
@@ -1196,58 +1200,74 @@
         let owner =
             SemanticModelLifecycleOwnerV1::open(root.path(), catalog.clone(), source.clone())
                 .unwrap();
-
-        let selected = owner.select_model(Some(&model_id), true).unwrap();
-        let Some(SemanticModelLifecycleStateV1::Failed {
-            detail, retryable, ..
-        }) = selected.state
-        else {
-            panic!("unavailable FastEmbed selection must be terminal: {selected:?}");
-        };
-        assert_eq!(
-            detail,
-            super::super::artifact_store::SemanticCapabilityDisabledV1::IncompatibleRuntime
-                .to_string()
-        );
-        assert!(!retryable);
-        assert!(!selected.remediation.retry);
-        assert!(!owner.enqueue_demand_acquisition_if_needed());
-        assert_eq!(owner.retry(), Err(ModelLifecycleErrorV1::Rejected));
-        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
-
-        let model = catalog.get(&model_id).unwrap();
-        persist_durable(
-            root.path(),
-            &DurableLifecycleV1 {
-                schema: LIFECYCLE_SCHEMA_V1.to_owned(),
-                selected_model: Some(model_id.clone()),
-                auto_download: true,
-                state: Some(SemanticModelLifecycleStateV1::Ready {
-                    model_id: model_id.clone(),
-                    revision: model.source.revision.clone(),
-                    artifact_digest: catalog_package_digest(model),
-                    install_path: root.path().join("persisted-ready"),
-                }),
-                previous_ready: None,
-            },
-        )
-        .unwrap();
+        let first_manifest = tiny_manifest(model);
+        owner
+            .import_local_artifact(&model_id, &first_manifest, fixture.path(), 10)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let previous = owner.status().state;
+        let mut second_manifest = first_manifest.clone();
+        second_manifest.payload.resource_ceiling.max_resident_bytes += 1;
+        owner
+            .import_local_artifact(&model_id, &second_manifest, fixture.path(), 20)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let ready = owner.status().state;
+        let before = fs::read(root.path().join("lifecycle.json")).unwrap();
         drop(owner);
 
-        let reopened = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
-        let Some(SemanticModelLifecycleStateV1::Failed {
-            detail, retryable, ..
-        }) = reopened.status().state
-        else {
-            panic!("persisted Ready must be refused when its runtime is unavailable");
-        };
+        let reopened =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source.clone()).unwrap();
         assert_eq!(
-            detail,
-            super::super::artifact_store::SemanticCapabilityDisabledV1::IncompatibleRuntime
-                .to_string()
+            fs::read(root.path().join("lifecycle.json")).unwrap(),
+            before
         );
-        assert!(!retryable);
-        assert!(!reopened.status().remediation.retry);
+        assert_eq!(reopened.status().state, ready);
+        assert!(reopened.status().semantics_omitted);
+        assert!(reopened.status().remediation.rollback);
+        assert!(matches!(
+            crate::LoadableLifecycleArtifactV1::resolve(&reopened),
+            Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
+        ));
+        let projection = crate::session_pool::test_support::authority()
+            .projection()
+            .clone();
+        assert!(matches!(
+            crate::LoadedSemanticArtifactV1::from_lifecycle_projection(
+                &reopened,
+                &projection,
+                SemanticResourceCeilings::default(),
+            ),
+            Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
+        ));
+        // Re-selecting on an incapable binary must verify bytes without runtime admission.
+        assert_eq!(
+            reopened.select_model(Some(&model_id), true).unwrap().state,
+            ready
+        );
+        for (slot, kind, expected) in [
+            (
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                second_manifest.artifact_identity_digest(),
+            ),
+            (
+                EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Rollback,
+                first_manifest.artifact_identity_digest(),
+            ),
+        ] {
+            assert_eq!(
+                reopened
+                    .artifact_store
+                    .artifact_digest_for_lease(slot, kind, 40)
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        assert_eq!(reopened.rollback_to_previous().unwrap().state, previous);
+        assert!(reopened.status().semantics_omitted);
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(feature = "semantic-model2vec")]

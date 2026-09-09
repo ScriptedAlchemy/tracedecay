@@ -290,18 +290,7 @@ impl SemanticModelLifecycleOwnerV1 {
                 grace_seconds: 7 * 24 * 60 * 60,
             },
         )?);
-        let mut durable = load_or_default_durable(&root, &catalog)?;
-        if let Some(model) = durable
-            .selected_model
-            .as_deref()
-            .and_then(|model_id| catalog.get(model_id))
-            && let Some(unavailable) = unavailable_runtime_state(model)
-            && (durable.state.as_ref() != Some(&unavailable) || durable.previous_ready.is_some())
-        {
-            durable.state = Some(unavailable);
-            durable.previous_ready = None;
-            persist_durable(&root, &durable)?;
-        }
+        let durable = load_or_default_durable(&root, &catalog)?;
         let initial_ready = SemanticLifecycleVerifiedReadyEventV1 {
             epoch: 0,
             artifact_digest: durable
@@ -636,11 +625,20 @@ impl SemanticModelLifecycleOwnerV1 {
         ) {
             remediation.rollback = true;
         }
-        let semantics_omitted = guard
+        // Durable readiness describes verified artifacts. Executability belongs
+        // to this binary and must never retire another runtime's valid install.
+        let runtime_available = guard
             .durable
-            .state
-            .as_ref()
-            .is_none_or(SemanticModelLifecycleStateV1::omits_semantics);
+            .selected_model
+            .as_deref()
+            .and_then(|id| self.catalog.get(id))
+            .is_some_and(|model| model.backend.runtime_family().is_compiled());
+        let semantics_omitted = !runtime_available
+            || guard
+                .durable
+                .state
+                .as_ref()
+                .is_none_or(SemanticModelLifecycleStateV1::omits_semantics);
         SemanticModelLifecycleStatusV1 {
             selected_model: guard.durable.selected_model.clone(),
             auto_download: guard.durable.auto_download,
@@ -667,12 +665,9 @@ impl SemanticModelLifecycleOwnerV1 {
                         return Err(CatalogErrorV1::UnknownModel.into());
                     }
                 };
-                let installed = match unavailable_runtime_state(model) {
+                let installed = match self.re_admit_durable_selection(model)? {
                     Some(state) => Some(state),
-                    None => match self.re_admit_durable_selection(model)? {
-                        Some(state) => Some(state),
-                        None => self.discover_shared_selection(model)?,
-                    },
+                    None => self.discover_shared_selection(model)?,
                 };
                 Some((model, installed))
             }
@@ -812,20 +807,12 @@ impl SemanticModelLifecycleOwnerV1 {
             .artifact_store
             .installed_digest(&durable_install_path)
             .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
-        let environment =
-            RuntimeEnvironmentV1::detect_embedding_process(model.backend.runtime_family())
-                .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        let admitted = self
-            .artifact_store
-            .admit_leased_for_runtime_by_digest(
-                &digest,
-                &environment,
-                &self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1),
-                ArtifactLeaseKindV1::Active,
-                current_unix_seconds()?,
-            )
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        verify_catalog_manifest(model, admitted.manifest())?;
+        let record = self.artifact_store.verified_installed_record(&digest)?;
+        let manifest = record
+            .manifest
+            .as_ref()
+            .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
+        verify_catalog_manifest(model, manifest)?;
         let install_path = self.artifact_store.installed_directory(&digest);
         Ok(Some(if was_ready {
             SemanticModelLifecycleStateV1::Ready {
@@ -1329,23 +1316,6 @@ impl SemanticModelLifecycleOwnerV1 {
                 .as_ref()
                 .map(|(store, active, rollback)| (*store, active.as_str(), rollback.as_str())),
         )
-    }
-}
-
-fn unavailable_runtime_state(
-    model: &CatalogedFastEmbedModelV1,
-) -> Option<SemanticModelLifecycleStateV1> {
-    match RuntimeEnvironmentV1::detect_embedding_process(model.backend.runtime_family()) {
-        Err(error @ SemanticCapabilityDisabledV1::IncompatibleRuntime) => {
-            Some(SemanticModelLifecycleStateV1::Failed {
-                model_id: model.model_id.clone(),
-                revision: model.source.revision.clone(),
-                artifact_digest: catalog_package_digest(model),
-                detail: error.to_string(),
-                retryable: false,
-            })
-        }
-        Ok(_) | Err(_) => None,
     }
 }
 
