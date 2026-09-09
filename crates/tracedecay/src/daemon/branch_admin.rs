@@ -7,7 +7,10 @@ use std::sync::{
 };
 
 use serde_json::json;
-
+use tracedecay_application::pr_tracking::{
+    ManualBranchLifecycleLeaseV1, manual_branch_source_owns_artifacts,
+    try_acquire_manual_branch_lifecycle,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 #[cfg(unix)]
@@ -1712,7 +1715,7 @@ impl StoreAdministration {
             .single_store_retirements()
             .iter()
             .filter(|retirement| {
-                super::pr_autotrack::manual_branch_source_owns_artifacts(
+                manual_branch_source_owns_artifacts(
                     data_root,
                     &retirement.branch,
                     &retirement.source,
@@ -1797,17 +1800,18 @@ impl StoreAdministration {
 fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
-) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
     retirements
         .iter()
         .map(|retirement| {
-            super::pr_autotrack::try_acquire_manual_branch_lifecycle(data_root, &retirement.branch)
-                .map_err(|error| TraceDecayError::Config {
+            try_acquire_manual_branch_lifecycle(data_root, &retirement.branch).map_err(|error| {
+                TraceDecayError::Config {
                     message: format!(
                         "branch removal for '{}' is contended or unavailable: {error}",
                         retirement.branch
                     ),
-                })
+                }
+            })
         })
         .collect()
 }
@@ -1818,8 +1822,8 @@ async fn cleanup_manual_branch_retirements(
     data_root: &Path,
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
-    lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
-) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+    lifecycle_leases: Vec<ManualBranchLifecycleLeaseV1>,
+) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
     if retirements.len() != lifecycle_leases.len() {
         return Err(TraceDecayError::Config {
             message: "branch retirement lifecycle ownership did not match metadata selection"

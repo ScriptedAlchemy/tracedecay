@@ -379,6 +379,10 @@ async fn begin_portable_project_open(
 
 #[cfg(any(not(unix), test))]
 #[hotpath::measure(label = "daemon.project.orchestrate.warmup", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Warmup retains the independent daemon owners across the background handoff; the extra argument is a test probe."
+)]
 pub(super) async fn schedule_portable_project_server_warmup(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
@@ -424,6 +428,10 @@ pub(super) async fn schedule_portable_project_server_warmup(
 
 #[cfg(any(not(unix), test))]
 #[hotpath::measure(label = "daemon.project.orchestrate.request", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Foreground admission borrows the handshake while retaining independent daemon owners; the extra argument is a test probe."
+)]
 pub(super) async fn portable_project_server_for_request(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,

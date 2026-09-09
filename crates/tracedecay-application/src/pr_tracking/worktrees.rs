@@ -1,18 +1,14 @@
-//! Git worktree artifacts, lifecycle leases, and cleanup for PR/manual branches.
-//!
-//! Scheduler mounts stay in the daemon adapter. This module owns the exact Git
-//! identity, lease, and teardown proofs that activation and retirement pass
-//! upward.
+//! Exact Git ownership and managed worktree preparation/retirement.
 
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::branch::BranchAddOutcome;
-use tracedecay_runtime_core::branch_meta::BranchGraphSourceV1;
 
 use super::{
-    PrCommandControlV1, PrGitCommandError, default_pr_command_control, pr_label, pr_tracking_ref,
-    run_git_with_control, successful_git_with_control,
+    PrCommandControlV1, PrGitCommandError, pr_label, pr_tracking_ref, run_git_with_control,
+    successful_git_with_control,
 };
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
@@ -30,6 +26,17 @@ pub struct ManualBranchActivation {
     pub outcome: BranchAddOutcome,
 }
 
+/// A summary of what one reconcile pass changed, for logging and tests.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub tracked: Vec<String>,
+    pub untracked: Vec<String>,
+    pub skipped_forks: Vec<u64>,
+    pub capped: bool,
+    pub removals_suppressed: bool,
+    pub failures: Vec<(String, String)>,
+}
+
 /// The exact Git and filesystem artifacts owned by one manually activated
 /// branch. The raw branch name remains the Git ref identity; only the
 /// filesystem path is hashed so distinct valid refs cannot alias on disk.
@@ -39,6 +46,8 @@ pub struct ManualBranchArtifactsV1 {
     pub worktree: PathBuf,
     pub tracking_ref: String,
     pub label: String,
+    /// Digest of the raw branch name, computed once at construction; both the
+    /// worktree directory and the lifecycle lock file derive from it.
     branch_digest: String,
 }
 
@@ -67,6 +76,12 @@ impl ManualBranchArtifactsV1 {
         artifacts
     }
 
+    /// Lifecycle locks live beside `branch-worktrees`, never inside it. The
+    /// lease is taken before the branch identity is resolved, so a typed
+    /// pre-mutation refusal (missing ref, unavailable Git authority) must not
+    /// leave the worktree root behind as evidence of an activation that never
+    /// happened — and nothing enumerating branch worktrees has to filter a
+    /// non-worktree entry out.
     fn lifecycle_lock_path(&self, data_root: &Path) -> PathBuf {
         data_root
             .join("branch-lifecycle")
@@ -74,7 +89,10 @@ impl ManualBranchArtifactsV1 {
     }
 }
 
-/// Non-blocking exact-branch lifecycle gate.
+/// Non-blocking exact-branch lifecycle gate. It deliberately spans activation,
+/// worktree replacement, scheduler mount, and metadata sealing; a concurrent
+/// caller receives a typed retryable contention rather than observing a
+/// partially replaced branch route.
 pub struct ManualBranchLifecycleLeaseV1 {
     branch: String,
     _lock: std::fs::File,
@@ -90,8 +108,6 @@ pub fn try_acquire_manual_branch_lifecycle(
     data_root: &Path,
     branch: &str,
 ) -> std::result::Result<ManualBranchLifecycleLeaseV1, ManualBranchActivationError> {
-    use fs2::FileExt;
-
     let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
     let lock_path = artifacts.lifecycle_lock_path(data_root);
     let lock_directory = lock_path.parent().ok_or_else(|| {
@@ -128,17 +144,25 @@ pub fn try_acquire_manual_branch_lifecycle(
     })
 }
 
-/// Typed failure for manual branch-head activation.
+/// Typed failure for manual branch-head activation. Missing scheduler or
+/// identity is a project-route state, not a transport error or empty success.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualBranchActivationError {
+    /// No injected code-index scheduler, retained graph, or project identity.
     SchedulerUnavailable { detail: String },
+    /// Git cannot name a worktree root for the requested project.
     GitAuthorityUnavailable { detail: String },
+    /// The requested name is not a resolvable local or origin branch ref.
     InvalidBranchRef { detail: String },
+    /// Worktree preparation or scheduler mount failed after admission.
     ActivationFailed { detail: String },
+    /// An exact lifecycle owner is already activating, replacing, or retiring
+    /// the requested branch.
     LifecycleContended { detail: String },
 }
 
 impl ManualBranchActivationError {
+    /// Stable reason code for JSON-RPC / project-route mapping.
     pub fn reason_code(&self) -> &'static str {
         match self {
             Self::SchedulerUnavailable { .. } => CODE_INDEX_SCHEDULER_UNAVAILABLE,
@@ -149,6 +173,7 @@ impl ManualBranchActivationError {
         }
     }
 
+    /// Whether a later retry with the same arguments can succeed.
     pub fn retryable(&self) -> bool {
         match self {
             Self::SchedulerUnavailable { .. }
@@ -159,6 +184,7 @@ impl ManualBranchActivationError {
         }
     }
 
+    /// Human-readable detail carried beside [`Self::reason_code`].
     pub fn detail(&self) -> &str {
         match self {
             Self::SchedulerUnavailable { detail }
@@ -193,7 +219,7 @@ impl ManualBranchActivationError {
         }
     }
 
-    pub fn lifecycle_contended(detail: impl Into<String>) -> Self {
+    fn lifecycle_contended(detail: impl Into<String>) -> Self {
         Self::LifecycleContended {
             detail: detail.into(),
         }
@@ -207,17 +233,6 @@ impl std::fmt::Display for ManualBranchActivationError {
 }
 
 impl std::error::Error for ManualBranchActivationError {}
-
-/// A summary of what one reconcile pass changed, for logging and tests.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ReconcileReport {
-    pub tracked: Vec<String>,
-    pub untracked: Vec<String>,
-    pub skipped_forks: Vec<u64>,
-    pub capped: bool,
-    pub removals_suppressed: bool,
-    pub failures: Vec<(String, String)>,
-}
 
 pub fn resolve_branch_head(
     repo_root: &Path,
@@ -275,7 +290,7 @@ pub fn prepare_manual_branch_worktree(
 pub fn manual_branch_source_owns_artifacts(
     data_root: &Path,
     branch: &str,
-    source: &BranchGraphSourceV1,
+    source: &tracedecay_runtime_core::branch_meta::BranchGraphSourceV1,
 ) -> bool {
     let canonical_data_root = data_root
         .canonicalize()
@@ -291,88 +306,6 @@ pub fn manual_branch_source_owns_artifacts(
         && !source.source_oid.is_empty()
 }
 
-pub async fn cleanup_owned_worktree_off_runtime(
-    repo_root: &Path,
-    worktree: &Path,
-    tracking_ref: &str,
-    label: &str,
-    expected_head: &str,
-    command_control: PrCommandControlV1,
-) -> std::result::Result<bool, ManualBranchActivationError> {
-    let repo_root = repo_root.to_path_buf();
-    let worktree = worktree.to_path_buf();
-    let tracking_ref = tracking_ref.to_owned();
-    let label = label.to_owned();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        cleanup_owned_worktree(
-            &repo_root,
-            &worktree,
-            &tracking_ref,
-            &label,
-            &expected_head,
-            &command_control,
-        )
-    })
-    .await
-    .map_err(|error| {
-        ManualBranchActivationError::activation_failed(format!(
-            "manual branch cleanup task did not complete: {error}"
-        ))
-    })?
-}
-
-pub async fn manual_branch_artifact_ownership_off_runtime(
-    repo_root: &Path,
-    worktree: &Path,
-    tracking_ref: &str,
-    label: &str,
-    expected_head: &str,
-    command_control: PrCommandControlV1,
-) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
-    let repo_root = repo_root.to_path_buf();
-    let worktree = worktree.to_path_buf();
-    let tracking_ref = tracking_ref.to_owned();
-    let label = label.to_owned();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        manual_branch_artifact_ownership(
-            &repo_root,
-            &worktree,
-            &tracking_ref,
-            &label,
-            &expected_head,
-            &command_control,
-        )
-    })
-    .await
-    .map_err(|error| {
-        ManualBranchActivationError::activation_failed(format!(
-            "manual branch ownership check task did not complete: {error}"
-        ))
-    })?
-}
-
-pub async fn manual_branch_artifacts_match_off_runtime(
-    repo_root: &Path,
-    artifacts: &ManualBranchArtifactsV1,
-    expected_head: &str,
-    command_control: PrCommandControlV1,
-) -> std::result::Result<bool, ManualBranchActivationError> {
-    let repo_root = repo_root.to_path_buf();
-    let artifacts = artifacts.clone();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        manual_branch_artifacts_match(&repo_root, &artifacts, &expected_head, &command_control)
-    })
-    .await
-    .map_err(|error| {
-        ManualBranchActivationError::activation_failed(format!(
-            "manual branch exactness inspection task did not complete: {error}"
-        ))
-    })?
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManualBranchArtifactOwnershipV1 {
     Absent,
@@ -381,7 +314,7 @@ pub enum ManualBranchArtifactOwnershipV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExactRefReadV1 {
+enum ExactRefReadV1 {
     Absent,
     Present(String),
 }
@@ -741,7 +674,6 @@ fn remove_owned_manual_worktree(
     Ok(())
 }
 
-/// Fetches `refs/pull/<N>/head` into `tracking_ref` and adds a linked worktree.
 pub fn prepare_pr_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -819,7 +751,7 @@ impl std::fmt::Display for PrCleanupArtifact {
 }
 
 #[derive(Debug)]
-pub struct PrCleanupReceipt;
+pub struct PrCleanupReceipt(());
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrCleanupError {
@@ -838,31 +770,7 @@ pub enum PrCleanupError {
     Remaining(Vec<PrCleanupArtifact>),
 }
 
-pub async fn cleanup_pr_worktree_off_runtime(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    expected_head: &str,
-    remove_synthetic_branch: bool,
-    command_control: PrCommandControlV1,
-) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
-    let repo_root = repo_root.to_path_buf();
-    let data_root = data_root.to_path_buf();
-    let expected_head = expected_head.to_owned();
-    tokio::task::spawn_blocking(move || {
-        cleanup_pr_worktree(
-            &repo_root,
-            &data_root,
-            pr,
-            &expected_head,
-            remove_synthetic_branch,
-            &command_control,
-        )
-    })
-    .await
-    .map_err(|error| PrCleanupError::Join(error.to_string()))?
-}
-
+#[hotpath::measure(label = "application.pr_tracking.cleanup_worktree")]
 pub fn cleanup_pr_worktree(
     repo_root: &Path,
     data_root: &Path,
@@ -926,7 +834,7 @@ pub fn cleanup_pr_worktree(
             })?;
         }
     }
-    let verification_control = default_pr_command_control().clone();
+    let verification_control = PrCommandControlV1::default();
     let remaining = remaining_pr_artifacts(
         repo_root,
         &worktree,
@@ -937,7 +845,7 @@ pub fn cleanup_pr_worktree(
     if !remaining.is_empty() {
         return Err(PrCleanupError::Remaining(remaining));
     }
-    Ok(PrCleanupReceipt)
+    Ok(PrCleanupReceipt(()))
 }
 
 pub fn ref_points_to(
@@ -1055,4 +963,332 @@ pub fn remove_worktree(
         })?;
     }
     Ok(())
+}
+
+pub async fn cleanup_owned_worktree_off_runtime(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let worktree = worktree.to_path_buf();
+    let tracking_ref = tracking_ref.to_owned();
+    let label = label.to_owned();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        cleanup_owned_worktree(
+            &repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch cleanup task did not complete: {error}"
+        ))
+    })?
+}
+
+pub async fn manual_branch_artifact_ownership_off_runtime(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let worktree = worktree.to_path_buf();
+    let tracking_ref = tracking_ref.to_owned();
+    let label = label.to_owned();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        manual_branch_artifact_ownership(
+            &repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch ownership check task did not complete: {error}"
+        ))
+    })?
+}
+
+pub async fn manual_branch_artifacts_match_off_runtime(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    expected_head: &str,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let artifacts = artifacts.clone();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        manual_branch_artifacts_match(&repo_root, &artifacts, &expected_head, &command_control)
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch exactness inspection task did not complete: {error}"
+        ))
+    })?
+}
+
+pub async fn cleanup_pr_worktree_off_runtime(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    expected_head: &str,
+    remove_synthetic_branch: bool,
+    command_control: PrCommandControlV1,
+) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
+    let repo_root = repo_root.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        cleanup_pr_worktree(
+            &repo_root,
+            &data_root,
+            pr,
+            &expected_head,
+            remove_synthetic_branch,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| PrCleanupError::Join(error.to_string()))?
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::{
+        ManualBranchActivationError, ManualBranchArtifactsV1, PrCommandControlV1,
+        cleanup_owned_worktree, prepare_manual_branch_worktree, ref_points_to, remove_worktree,
+        resolve_branch_head, successful_git_with_control,
+    };
+    use crate::pr_tracking::default_pr_command_control;
+    use std::path::Path;
+    use std::time::Duration;
+    #[test]
+    fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
+        let repo = tempfile::tempdir().unwrap();
+        let branch = "feature/exact-cleanup";
+        init_manual_branch_repo(repo.path(), branch);
+        let data = tempfile::tempdir().unwrap();
+        let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+            .expect("feature branch head");
+        let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
+
+        prepare_manual_branch_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("prepare exact worktree");
+        assert!(
+            cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                default_pr_command_control(),
+            )
+            .expect("exact cleanup")
+        );
+        assert!(
+            cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                default_pr_command_control(),
+            )
+            .expect("absent artifacts are an idempotent success")
+        );
+
+        prepare_manual_branch_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("prepare replacement exact worktree");
+        let foreign = resolve_branch_head(repo.path(), "main", default_pr_command_control())
+            .expect("main branch head");
+        assert_ne!(foreign, head, "fixture branches must have distinct heads");
+        assert!(
+            successful_git_with_control(
+                repo.path(),
+                &["update-ref", &artifacts.tracking_ref, &foreign],
+                default_pr_command_control(),
+            )
+            .is_ok()
+        );
+
+        assert!(
+            !cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                default_pr_command_control(),
+            )
+            .expect("foreign provenance must be a typed false result"),
+            "foreign ref replacement must survive an exact-source cleanup"
+        );
+        assert!(
+            ref_points_to(
+                repo.path(),
+                &artifacts.tracking_ref,
+                &foreign,
+                default_pr_command_control(),
+            )
+            .expect("foreign tracking ref remains readable"),
+            "the foreign tracking ref must remain untouched"
+        );
+        assert!(
+            artifacts.worktree.exists(),
+            "a foreign provenance mismatch must not delete the linked worktree"
+        );
+    }
+
+    #[test]
+    fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() {
+        let repo = tempfile::tempdir().unwrap();
+        let branch = "feature/retry-after-git-failure";
+        init_manual_branch_repo(repo.path(), branch);
+        let data = tempfile::tempdir().unwrap();
+        let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+            .expect("feature branch head");
+        let artifacts = ManualBranchArtifactsV1::for_head(data.path(), branch, &head);
+        let branch_ref = format!("refs/heads/{}", artifacts.label);
+
+        prepare_manual_branch_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("prepare exact worktree");
+        remove_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            default_pr_command_control(),
+        )
+        .expect("remove exact worktree");
+        assert!(
+            !artifacts.worktree.try_exists().expect("inspect worktree"),
+            "the sealed ref retry begins after the linked worktree is absent"
+        );
+
+        let unavailable = PrCommandControlV1::with_timeout(Duration::ZERO);
+        let error = cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            &unavailable,
+        )
+        .expect_err("unavailable Git must not be collapsed into an absent ref");
+        assert!(matches!(
+            &error,
+            ManualBranchActivationError::GitAuthorityUnavailable { .. }
+        ));
+        assert!(
+            error.retryable(),
+            "a bounded exact-ref read timeout must remain retryable"
+        );
+        assert_eq!(error.reason_code(), "git_authority_unavailable");
+        assert!(
+            git_ref_exists(repo.path(), &artifacts.tracking_ref)
+                && git_ref_exists(repo.path(), &branch_ref),
+            "a failed exact read must retain the sealed reference proof for retry"
+        );
+
+        assert!(
+            cleanup_owned_worktree(
+                repo.path(),
+                &artifacts.worktree,
+                &artifacts.tracking_ref,
+                &artifacts.label,
+                &head,
+                default_pr_command_control(),
+            )
+            .expect("restored Git authority must complete exact cleanup")
+        );
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn git_succeeds(repo: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn init_manual_branch_repo(repo: &Path, branch: &str) {
+        // Pin the files ref backend. This suite's exact-ref coverage opens the
+        // loose ref file directly, which a reftable repository never materializes.
+        // Git versions that predate `--ref-format` reject the option and already
+        // create files-backed repositories.
+        if !git_succeeds(repo, &["init", "-q", "-b", "main", "--ref-format=files"]) {
+            git(repo, &["init", "-q", "-b", "main"]);
+        }
+        git(repo, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            repo,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "initial"]);
+        git(repo, &["checkout", "-q", "-b", branch, "main"]);
+        std::fs::write(repo.join("src/feature.rs"), "pub fn on_feature() {}\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "feature content"]);
+        git(repo, &["checkout", "-q", "main"]);
+    }
+
+    fn git_ref_exists(repo: &Path, reference: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--end-of-options", reference])
+            .current_dir(repo)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
 }

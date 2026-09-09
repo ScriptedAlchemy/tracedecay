@@ -62,6 +62,7 @@
 //! transaction, so a failure anywhere leaves the store exactly as refused.
 
 use std::collections::BTreeSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -162,8 +163,9 @@ const IMMUTABLE_DERIVED_TEMPORAL_TABLES: &[&str] = &[
 ///
 /// Everything session-temporal that is not projector output stays: summary
 /// nodes and their FTS index, external payload manifests (see
-/// [`PRESERVED_DEPENDENT_TABLES`]), cursor keys, and the retrieval anchors the
-/// rebuilt projection re-attaches to.
+/// [`PRESERVED_DEPENDENT_TABLES`]), retained cursor keys, and the retrieval anchors
+/// the rebuilt projection re-attaches to. The active cursor key rotates so a
+/// rebuilt generation cannot alias a pre-reset frozen snapshot.
 const OBSERVATION_DERIVED_TEMPORAL_DELETES: &[&str] = &[
     "DELETE FROM session_refresh_batch_bindings",
     "DELETE FROM session_refresh_bindings",
@@ -297,11 +299,64 @@ pub struct ObservationAuthorityResetV1 {
     pub cleared_external_source_rows: u64,
 }
 
-fn reset_storage(error: rusqlite::Error) -> TraceDecayError {
+fn reset_storage(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         operation: OPERATION.to_string(),
         message: error.to_string(),
     }
+}
+
+/// Offline reset cannot reuse the async ensure-active adapter: it must rotate
+/// even an existing healthy key, in this exact maintenance transaction. The
+/// canonical INSERT triggers retire the previous key without deleting history.
+fn rotate_session_cursor_key(conn: &rusqlite::Connection) -> Result<(), TraceDecayError> {
+    if !table_exists(conn, "session_query_cursor_keys")? {
+        return Ok(());
+    }
+    let (count, active, version, latest_time): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(retired_at IS NULL), 0),
+                COALESCE(MAX(key_version), 0),
+                COALESCE(MAX(MAX(created_at, COALESCE(retired_at, created_at))), 0)
+         FROM session_query_cursor_keys",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(reset_storage)?;
+    if count == 0 {
+        return Ok(());
+    }
+    if active != 1 || version < 1 {
+        return Err(reset_storage(
+            "session cursor key rotation state is invalid",
+        ));
+    }
+    let next_version = version
+        .checked_add(1)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| reset_storage("session cursor key version exhausted"))?;
+    let minimum_created_at = latest_time
+        .checked_add(1)
+        .ok_or_else(|| reset_storage("session cursor key timestamp exhausted"))?;
+    let observed_at = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(reset_storage)?
+            .as_micros(),
+    )
+    .map_err(reset_storage)?;
+    let created_at = observed_at.max(minimum_created_at);
+    let mut random = [0_u8; 48];
+    getrandom::getrandom(&mut random).map_err(reset_storage)?;
+    let key_id = format!("cursor-key-{next_version}-{}", hex::encode(&random[..16]));
+    conn.execute(
+        "INSERT INTO session_query_cursor_keys
+            (key_id, key_version, key_material, created_at, retired_at)
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        rusqlite::params![key_id, i64::from(next_version), &random[16..], created_at],
+    )
+    .map_err(reset_storage)?;
+    Ok(())
 }
 
 fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, TraceDecayError> {
@@ -471,6 +526,7 @@ fn reset_within_maintenance_transaction(
             });
         }
     }
+    rotate_session_cursor_key(&transaction)?;
     // The session-temporal projection derives from the observation stream, so
     // it resets with it rather than being orphaned or refused over.
     let mut cleared_derived_temporal_rows = 0u64;

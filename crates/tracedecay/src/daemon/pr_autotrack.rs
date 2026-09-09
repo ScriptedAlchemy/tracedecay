@@ -36,21 +36,14 @@ use std::sync::Arc;
 #[cfg(test)]
 use tracedecay_application::pr_tracking::managed_summary;
 use tracedecay_application::pr_tracking::{
-    DiscoveredPr, ManagedPr, ManualBranchArtifactOwnershipV1, PrAutotrackState,
-    PrCommandControlV1 as PrCommandControl, PrDiscovery, cleanup_owned_worktree_off_runtime,
-    cleanup_pr_worktree_off_runtime, default_pr_command_control, discover_open_prs_with_control,
-    load_state, manual_branch_artifact_ownership_off_runtime,
-    manual_branch_artifacts_match_off_runtime, pr_label, pr_tracking_ref,
-    prepare_manual_branch_worktree, prepare_pr_worktree, resolve_branch_head, save_state,
-};
-pub(crate) use tracedecay_application::pr_tracking::{
-    ManualBranchActivation, ManualBranchActivationError, ManualBranchArtifactsV1,
-    ManualBranchLifecycleLeaseV1, ReconcileReport, cleanup_owned_worktree,
-    manual_branch_source_owns_artifacts, try_acquire_manual_branch_lifecycle,
-};
-#[cfg(test)]
-pub(crate) use tracedecay_application::pr_tracking::{
-    ref_points_to, remove_worktree, successful_git_with_control,
+    DiscoveredPr, ManagedPr, ManualBranchActivation, ManualBranchActivationError,
+    ManualBranchArtifactOwnershipV1, ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1,
+    PrAutotrackState, PrCommandControlV1 as PrCommandControl, PrDiscovery, ReconcileReport,
+    cleanup_owned_worktree, cleanup_owned_worktree_off_runtime, cleanup_pr_worktree_off_runtime,
+    default_pr_command_control, discover_open_prs_with_control, load_state,
+    manual_branch_artifact_ownership_off_runtime, manual_branch_artifacts_match_off_runtime,
+    manual_branch_source_owns_artifacts, pr_label, pr_tracking_ref, prepare_manual_branch_worktree,
+    prepare_pr_worktree, resolve_branch_head, save_state, try_acquire_manual_branch_lifecycle,
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::TraceDecayError;
@@ -949,7 +942,10 @@ async fn cleanup_failed_track(
 
 /// Fetches `refs/pull/<N>/head` into `tracking_ref` and adds a linked worktree
 /// checked out on a local branch named `label` at that ref.
-#[hotpath::measure(label = "daemon.pr_autotrack.prepare_worktree")]
+/// Untracks a managed PR: removes its branch store, its worktree, its local
+/// tracking branch, and its ref. The Git artifacts are released only after the
+/// coordinator reports that the store is gone (or was already absent).
+#[hotpath::measure(label = "daemon.pr_autotrack.untrack", future = true)]
 async fn untrack_pr(
     repo_root: &Path,
     data_root: &Path,

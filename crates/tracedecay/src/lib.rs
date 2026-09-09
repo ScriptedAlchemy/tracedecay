@@ -11,7 +11,6 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::wildcard_imports)]
 // Pedantic style lints allowed crate-wide (consistent with the allows above):
@@ -20,7 +19,6 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::trivially_copy_pass_by_ref)]
 #![allow(clippy::unused_self)]
-#![allow(clippy::too_many_arguments)]
 #![allow(clippy::items_after_statements)]
 #![allow(clippy::struct_field_names)]
 #![allow(clippy::match_same_arms)]
@@ -33,7 +31,6 @@
 #![allow(clippy::unused_async)]
 #![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::if_not_else)]
-#![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]

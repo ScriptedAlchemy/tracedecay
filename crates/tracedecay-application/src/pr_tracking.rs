@@ -1,17 +1,4 @@
-//! Git-backed pull-request discovery and durable managed-PR state.
-
-mod lifecycle;
-
-pub use lifecycle::{
-    ManualBranchActivation, ManualBranchActivationError, ManualBranchArtifactOwnershipV1,
-    ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1, PrCleanupArtifact, PrCleanupError,
-    PrCleanupReceipt, ReconcileReport, checkout_linked_worktree, cleanup_owned_worktree,
-    cleanup_owned_worktree_off_runtime, cleanup_pr_worktree, cleanup_pr_worktree_off_runtime,
-    manual_branch_artifact_ownership, manual_branch_artifact_ownership_off_runtime,
-    manual_branch_artifacts_match, manual_branch_artifacts_match_off_runtime,
-    manual_branch_source_owns_artifacts, prepare_manual_branch_worktree, prepare_pr_worktree,
-    ref_points_to, remove_worktree, resolve_branch_head, try_acquire_manual_branch_lifecycle,
-};
+//! Git-backed PR discovery, exact worktree ownership, and durable managed state.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -23,6 +10,18 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError};
+
+mod worktrees;
+pub use worktrees::{
+    ManualBranchActivation, ManualBranchActivationError, ManualBranchArtifactOwnershipV1,
+    ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1, PrCleanupArtifact, PrCleanupError,
+    PrCleanupReceipt, ReconcileReport, checkout_linked_worktree, cleanup_owned_worktree,
+    cleanup_owned_worktree_off_runtime, cleanup_pr_worktree, cleanup_pr_worktree_off_runtime,
+    manual_branch_artifact_ownership, manual_branch_artifact_ownership_off_runtime,
+    manual_branch_artifacts_match, manual_branch_artifacts_match_off_runtime,
+    manual_branch_source_owns_artifacts, prepare_manual_branch_worktree, prepare_pr_worktree,
+    ref_points_to, remove_worktree, resolve_branch_head, try_acquire_manual_branch_lifecycle,
+};
 
 const STATE_FILENAME: &str = "pr-autotrack.json";
 const PR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
