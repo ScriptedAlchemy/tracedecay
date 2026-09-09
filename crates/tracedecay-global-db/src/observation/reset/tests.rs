@@ -254,45 +254,48 @@ async fn populated_store_without_cline_like_sources_enrolls_on_attach() {
     install_registered_store(&database_path).await;
     {
         let raw = rusqlite::Connection::open(&database_path).unwrap();
-        let (observation, cursor) = authority_fixture(0, "enroll");
-        let receipt = observation.receipt();
-        let payload_digest = observation.payload_reference().digest().as_str().to_owned();
-        raw.execute(
-            "INSERT INTO sanitization_receipts
-                (receipt_id, sanitizer_version, payload_digest, receipt_json)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                receipt.receipt().receipt_id().as_str(),
-                receipt.receipt().sanitizer_version().as_str(),
-                payload_digest.as_str(),
-                serde_json::to_string(receipt).unwrap()
-            ],
-        )
-        .expect("seed a committed receipt");
-        raw.execute(
-            "INSERT INTO observations
-                (observation_id, payload_digest, receipt_id, observation_json,
-                 committed_cursor_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                observation.observation_id().as_str(),
-                payload_digest.as_str(),
-                receipt.receipt().receipt_id().as_str(),
-                serde_json::to_string(&observation).unwrap(),
-                serde_json::to_string(&cursor).unwrap()
-            ],
-        )
-        .expect("seed a committed Codex observation");
-        raw.execute(
-            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![
-                serde_json::to_string(cursor.source()).unwrap(),
-                serde_json::to_string(cursor.scope()).unwrap(),
-                serde_json::to_string(&cursor).unwrap()
-            ],
-        )
-        .expect("seed the committed cursor");
+        for index in 0..=super::super::schema::SOURCE_CURSOR_CENSUS_PAGE_ROWS {
+            let (observation, cursor) =
+                authority_fixture(u64::try_from(index).unwrap(), &format!("enroll-{index}"));
+            let receipt = observation.receipt();
+            let payload_digest = observation.payload_reference().digest().as_str().to_owned();
+            raw.execute(
+                "INSERT INTO sanitization_receipts
+                    (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    receipt.receipt().receipt_id().as_str(),
+                    receipt.receipt().sanitizer_version().as_str(),
+                    payload_digest.as_str(),
+                    serde_json::to_string(receipt).unwrap()
+                ],
+            )
+            .expect("seed a committed receipt");
+            raw.execute(
+                "INSERT INTO observations
+                    (observation_id, payload_digest, receipt_id, observation_json,
+                     committed_cursor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    observation.observation_id().as_str(),
+                    payload_digest.as_str(),
+                    receipt.receipt().receipt_id().as_str(),
+                    serde_json::to_string(&observation).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()
+                ],
+            )
+            .expect("seed a committed Codex observation");
+            raw.execute(
+                "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    serde_json::to_string(cursor.source()).unwrap(),
+                    serde_json::to_string(cursor.scope()).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()
+                ],
+            )
+            .expect("seed the committed cursor");
+        }
         raw.execute(
             "DELETE FROM global_schema_migrations WHERE migration = ?1",
             [super::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
@@ -310,8 +313,9 @@ async fn populated_store_without_cline_like_sources_enrolls_on_attach() {
         scheme_migration_recorded(&raw),
         "attach must enroll the scheme for a store the change never applied to"
     );
-    assert_eq!(count(&raw, "observations"), 1);
-    assert_eq!(count(&raw, "source_cursors"), 1);
+    let expected_rows = super::super::schema::SOURCE_CURSOR_CENSUS_PAGE_ROWS + 1;
+    assert_eq!(count(&raw, "observations"), expected_rows);
+    assert_eq!(count(&raw, "source_cursors"), expected_rows);
     assert!(
         super::reset_refused_observation_authority(
             &mut rusqlite::Connection::open(&database_path).unwrap()
@@ -319,6 +323,61 @@ async fn populated_store_without_cline_like_sources_enrolls_on_attach() {
         .is_err(),
         "an enrolled store is healthy and the scoped reset must refuse it"
     );
+}
+
+/// The observations scan is independently authoritative: a cursor can be
+/// absent after a committed observation, and a Cline-like row beyond the
+/// first bounded page must still refuse enrollment.
+#[tokio::test]
+async fn paged_census_finds_cline_observation_without_source_cursor() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        raw.pragma_update(None, "foreign_keys", false)
+            .expect("disable foreign keys for fixture seeding");
+        raw.execute_batch(
+            "INSERT INTO sanitization_receipts
+                (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES ('receipt.census', 'v1', 'digest.census', '{}');",
+        )
+        .expect("seed census receipt");
+        let rows = super::super::schema::OBSERVATION_SOURCE_CENSUS_PAGE_ROWS + 1;
+        for index in 0..rows {
+            let provider = if index + 1 == rows { "cline" } else { "codex" };
+            let observation = format!(
+                r#"{{"identity":{{"source":{{"provider":"{provider}","session_id":"session.{index}"}},"scope":{{"kind":"profile"}}}}}}"#
+            );
+            raw.execute(
+                "INSERT INTO observations
+                    (observation_id, payload_digest, receipt_id, observation_json,
+                     committed_cursor_json)
+                 VALUES (?1, 'digest.census', 'receipt.census', ?2, '{}')",
+                rusqlite::params![format!("observation.census-{index}"), observation],
+            )
+            .expect("seed census observation");
+        }
+        raw.execute(
+            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            [super::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+        )
+        .expect("make the fixture an old-scheme store");
+        assert_eq!(count(&raw, "source_cursors"), 0);
+    }
+
+    let error = reopen_registered_store(&database_path)
+        .await
+        .expect_err("a paged Cline observation census must refuse admission");
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("expected typed ResetRequired, got: {error}"));
+    assert_eq!(authority, super::OBSERVATION_AUTHORITY);
+    assert!(reason.contains("ui_messages.json"));
+
+    let raw = rusqlite::Connection::open(&database_path).unwrap();
+    assert!(!scheme_migration_recorded(&raw));
+    assert_eq!(count(&raw, "source_cursors"), 0);
 }
 
 /// A store that did admit a Cline-like task under the combined `<task>` source

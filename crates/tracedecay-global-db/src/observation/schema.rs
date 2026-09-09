@@ -40,6 +40,14 @@ pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
 /// crate's `ui_messages_source_key`).
 const CLINE_LIKE_UI_MESSAGES_SOURCE_SUFFIX: &str = ":ui_messages";
 
+/// Rows examined by one native-source census query. The schema transaction's
+/// long lease renews after each bounded query completes, so the census must
+/// expose progress between pages instead of running one full-table JSON scan.
+/// Observation payloads may approach the 1 MiB authority limit; keep their
+/// page smaller than the cursor-only page.
+pub(super) const OBSERVATION_SOURCE_CENSUS_PAGE_ROWS: i64 = 48;
+pub(super) const SOURCE_CURSOR_CENSUS_PAGE_ROWS: i64 = 128;
+
 /// Canonical `observations` column set. Shared by the admission refusal below
 /// and the scoped operator reset in [`super::reset`] so the two can never
 /// disagree about what counts as a refused shape.
@@ -109,6 +117,10 @@ async fn observation_authority_populated(
 /// without such rows was written by a scheme that never applied to it, so
 /// enrolling it is exact rather than a migration of ambiguous data; one with
 /// such rows carries no record of which scheme wrote them and must reset.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation.native_source_census"
+)]
 async fn cline_like_sources_present(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -118,30 +130,102 @@ async fn cline_like_sources_present(
         NativeHostIdentityV1::Kilo.hook_key(),
     ];
     let ui_messages_pattern = format!("%{CLINE_LIKE_UI_MESSAGES_SOURCE_SUFFIX}");
-    let mut rows = conn
-        .query(
-            "SELECT 1 WHERE EXISTS(
-                 SELECT 1 FROM observations
-                 WHERE json_extract(observation_json, '$.identity.source.provider') IN (?1, ?2, ?3)
-                    OR json_extract(observation_json, '$.identity.source.source_key') LIKE ?4
-             ) OR EXISTS(
-                 SELECT 1 FROM source_cursors
-                 WHERE json_extract(source_json, '$.provider') IN (?1, ?2, ?3)
-                    OR json_extract(source_json, '$.source_key') LIKE ?4
-             )",
-            params![
-                providers[0],
-                providers[1],
-                providers[2],
-                ui_messages_pattern
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    rows.next()
-        .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+
+    let mut cursor_rowid = i64::MIN;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT rowid,
+                        COALESCE(
+                            json_extract(source_json, '$.provider') IN (?1, ?2, ?3)
+                            OR json_extract(source_json, '$.source_key') LIKE ?4,
+                            0
+                        )
+                 FROM source_cursors
+                 WHERE rowid > ?5 ORDER BY rowid LIMIT ?6",
+                params![
+                    providers[0],
+                    providers[1],
+                    providers[2],
+                    &ui_messages_pattern,
+                    cursor_rowid,
+                    SOURCE_CURSOR_CENSUS_PAGE_ROWS
+                ],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+        {
+            page_rows += 1;
+            cursor_rowid = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+            if row
+                .get::<i64>(1)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+                != 0
+            {
+                return Ok(true);
+            }
+        }
+        drop(rows);
+        if page_rows < SOURCE_CURSOR_CENSUS_PAGE_ROWS {
+            break;
+        }
+    }
+
+    let mut observation_sequence = 0_i64;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT sequence,
+                        COALESCE(
+                            json_extract(observation_json, '$.identity.source.provider')
+                                IN (?1, ?2, ?3)
+                            OR json_extract(observation_json, '$.identity.source.source_key')
+                                LIKE ?4,
+                            0
+                        )
+                 FROM observations
+                 WHERE sequence > ?5 ORDER BY sequence LIMIT ?6",
+                params![
+                    providers[0],
+                    providers[1],
+                    providers[2],
+                    &ui_messages_pattern,
+                    observation_sequence,
+                    OBSERVATION_SOURCE_CENSUS_PAGE_ROWS
+                ],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+        {
+            page_rows += 1;
+            observation_sequence = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+            if row
+                .get::<i64>(1)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+                != 0
+            {
+                return Ok(true);
+            }
+        }
+        drop(rows);
+        if page_rows < OBSERVATION_SOURCE_CENSUS_PAGE_ROWS {
+            return Ok(false);
+        }
+    }
 }
 
 pub(super) async fn migration_recorded(
