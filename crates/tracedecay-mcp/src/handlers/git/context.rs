@@ -3,8 +3,8 @@
 use super::super::dependency_hints;
 use super::affected::collect_verified_affected_test_files;
 use super::pr_context_cursor::{
-    PrContextCursorBinding, decode_pr_context_cursor, encode_pr_context_cursor,
-    pr_context_cursor_authority,
+    PrContextCursorBinding, PrContextCursorComparison, decode_pr_context_cursor,
+    encode_pr_context_cursor, pr_context_cursor_authority,
 };
 use super::shell::{
     classify_file_role, default_pr_base_ref, git_changed_files, git_diff_file_changes,
@@ -228,6 +228,7 @@ pub async fn handle_diff_context(
     args: Value,
 ) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_diff_context")?;
+    ctx.verify_graph_scope(graph)?;
     let files = require_string_array_arg(&args, "files")?;
     let depth = clamped_depth_arg(&args, "depth", 2, 10);
 
@@ -397,6 +398,7 @@ where
         }
     };
     let graph = &hotpath::future!(graph, label = "mcp.git.changelog.graph_admission").await?;
+    ctx.verify_graph_scope(graph)?;
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
     let graph_symbols = hotpath::measure_block!(
@@ -468,6 +470,7 @@ pub async fn handle_commit_context(
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
+    ctx.verify_graph_scope(graph)?;
     let staged_only = args
         .get("staged_only")
         .and_then(serde_json::Value::as_bool)
@@ -881,7 +884,10 @@ where
 
     let stage_started = std::time::Instant::now();
     let graph = match hotpath::future!(graph, label = "mcp.pr_context.graph_admission").await {
-        Ok(graph) => graph,
+        Ok(graph) => {
+            ctx.verify_graph_scope(&graph)?;
+            graph
+        }
         Err(error) if encoded_cursor.is_some() || !graph_enrichment_is_transient(&error) => {
             return Err(error);
         }
@@ -968,21 +974,26 @@ where
     stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
 
     let graph_generation = graph.generation().as_str().to_owned();
-    let project_root = ctx.project_root().to_string_lossy();
-    let cursor_binding = PrContextCursorBinding {
-        protocol: "tracedecay.pr-context.cursor.v1",
-        project_root: &project_root,
-        base_oid: &base_oid,
-        head_oid: &head_oid,
-        merge_base: &merge_base,
-        graph_generation: &graph_generation,
-        maximum_symbols,
-        changes: &changes,
-    };
-    let cursor_authority = match ctx.project_session_db().map(std::ops::Deref::deref) {
-        Some(session_db) => Some(
+    // Byte-exact worktree identity: a lossy string would let two distinct
+    // non-UTF-8 roots mint interchangeable cursors.
+    let project_root =
+        tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(ctx.project_root().as_os_str());
+    let cursor_binding = PrContextCursorBinding::new(
+        ctx,
+        &project_root,
+        PrContextCursorComparison {
+            base_oid: &base_oid,
+            head_oid: &head_oid,
+            merge_base: &merge_base,
+            graph_generation: &graph_generation,
+            maximum_symbols,
+            changes: &changes,
+        },
+    );
+    let cursor_authority = match ctx.project_session_db() {
+        Some(_) => Some(
             hotpath::future!(
-                pr_context_cursor_authority(session_db, &cursor_binding),
+                pr_context_cursor_authority(ctx, &cursor_binding),
                 label = "mcp.pr_context.cursor_authority"
             )
             .await?,
