@@ -94,7 +94,7 @@ use self::hydration::GlobalDbTemporalHydrationPort;
 use self::participant_freeze::{
     freeze_participants, freeze_prepared_candidate_participants, root_readiness,
 };
-use self::retrieval::{GlobalDbPreparedCandidatePort, GlobalDbTemporalReadPort};
+use self::retrieval::GlobalDbTemporalReadPort;
 use self::sql::TemporalSqlRead;
 use tracedecay_lcm::payload::read_verified_payload_content_with_checkpoint;
 
@@ -893,16 +893,8 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                         request.direct_anchor(),
                         request.snapshot_request().semantic_filter().goals,
                     );
-                    let preparation = GlobalDbPreparedCandidatePort::new(
-                        &candidate_read,
-                        request.snapshot_request(),
-                        &plan,
-                    );
-                    let prepared =
-                        tracedecay_temporal_query::ports::prepare_temporal_candidate_cohort(
-                            request.snapshot_request(),
-                            &preparation,
-                        )
+                    let prepared = candidate_read
+                        .prepare_root_candidate_cohort(request.snapshot_request(), &plan)
                         .await
                         .map_err(map_control_error)?;
                     let readiness = root_readiness(&temporal_read, request).await?;

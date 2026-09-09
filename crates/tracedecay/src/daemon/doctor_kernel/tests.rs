@@ -1,9 +1,8 @@
-//! Daemon-owned Doctor signal-mapper tests.
+//! Daemon-owned Doctor signal-mapper and composition tests.
 //!
-//! Adapter structs, [`DaemonRuntimeHealthSignalV1`], and
-//! [`compose_doctor_report`] live in `tracedecay-contracts::doctor` and are
-//! covered there. This module keeps the mappers that still read daemon,
-//! global-db, LSP, and host-bundle types.
+//! Read mappers and [`DaemonRuntimeHealthSignalV1`] live in
+//! `tracedecay-contracts::doctor`. Composition from resolved kernel reads is
+//! owned here at the composition root.
 
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1,
@@ -321,4 +320,206 @@ fn one_unavailable_refusal_census_makes_the_merged_read_unknown() {
     ]);
 
     assert_eq!(merged, IngestRefusalCensusReadV1::Unknown);
+}
+
+#[tokio::test]
+async fn composed_report_carries_real_states_and_enumerates_coverage() {
+    use std::collections::BTreeSet;
+
+    use tracedecay_contracts::doctor::{
+        AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
+        ConfigurationAuthorityReadV1, ConfigurationDriftV1, DoctorCoverageCompletenessV1,
+        DoctorCoverageStatementV1, DoctorEvidenceRefV1, DoctorEvidenceReferenceV1,
+        DoctorEvidenceStateV1, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
+        DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorFindingV1,
+        DoctorKernelInputsV1, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
+        DoctorStorageFindingV1, OperationalAuditReadV1, ProfileAuthorityReadV1,
+        RemoteOperationalReadV1, SemanticOwnerReadV1, SemanticOwnerStateV1,
+    };
+    use tracedecay_contracts::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestContext, RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::{
+        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    let actor = ActorId::new("actor.doctor-kernel-compose-test").unwrap();
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.doctor-kernel-compose-test").unwrap(),
+        RepositoryId::new("repository.doctor-kernel-compose-test").unwrap(),
+        WorktreeId::new("worktree.doctor-kernel-compose-test").unwrap(),
+        None,
+    )
+    .unwrap();
+    let capability = CapabilityId::new("capability.doctor-kernel-compose-test").unwrap();
+    let use_case = UseCaseId::new("use-case.doctor-kernel-compose-test").unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.doctor-kernel-compose-test").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "11".repeat(32))).unwrap(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(10_000),
+        scope.clone(),
+        BTreeSet::from([capability]),
+        BTreeSet::from([use_case]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    let ctx = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.doctor-kernel-compose-test").unwrap(),
+        Deadline::new(UtcMicros(9_000)).unwrap(),
+        CancellationContext::active("cancel.doctor-kernel-compose-test").unwrap(),
+    )
+    .unwrap();
+
+    let orphan_evidence = DoctorEvidenceRefV1::new(
+        DoctorFindingFamilyV1::Storage,
+        DoctorEvidenceReferenceV1::new("storage.orphan_store.fixture.age-42d").unwrap(),
+    );
+    let orphan_coverage = DoctorCoverageStatementV1::new(
+        DoctorCoverageCompletenessV1::Complete,
+        "orphan store identity no longer resolves",
+    )
+    .unwrap();
+    let orphan_finding = DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Storage,
+        DoctorEvidenceStateV1::Degraded,
+        vec![orphan_evidence],
+        orphan_coverage,
+    )
+    .unwrap();
+    let orphan_storage =
+        DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, orphan_finding)
+            .unwrap();
+
+    let inputs = DoctorKernelInputsV1 {
+        configuration: ConfigurationAuthorityReadV1::Resolved {
+            drift: ConfigurationDriftV1::InSync,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
+            serving: true,
+            startup_converged: false,
+            ..DaemonRuntimeHealthSignalV1::default()
+        }),
+        operational_audit: OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::Unavailable,
+        },
+        host: HostIntegrationReadV1::Denied,
+        advisory_feedback: AdvisoryFeedbackReadV1::Absent,
+        language_server: LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Ready,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        code_index: CodeIndexMountReadV1::Observed {
+            state: CodeIndexMountStateV1::Mounted,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        semantic_owner: SemanticOwnerReadV1::Observed {
+            state: SemanticOwnerStateV1::Ready,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        observability: ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 7,
+            last_observed_at_micros: Some(42),
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        },
+        ingest_refusals: IngestRefusalCensusReadV1::Observed {
+            refusals: vec![IngestRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "admission_refused".to_owned(),
+                count: 160,
+            }],
+        },
+        storage: merge_storage_reads(
+            storage_family_read(vec![orphan_storage]),
+            DoctorStorageFamilyReadV1::Unknown,
+        ),
+    };
+
+    let report = compose_doctor_report(&ctx, &inputs).await.expect("report");
+
+    assert_eq!(report.coverage().families().len(), 7);
+
+    let family_state = |family: DoctorFindingFamilyV1| {
+        report
+            .findings()
+            .find(|finding| finding.family() == family)
+            .map(DoctorFindingV1::state)
+    };
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Configuration),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::StorageRuntime),
+        Some(DoctorEvidenceStateV1::Degraded)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Advisory),
+        Some(DoctorEvidenceStateV1::Denied)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::SemanticIndex),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Storage),
+        Some(DoctorEvidenceStateV1::Degraded)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::LanguageServer),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Observability),
+        Some(DoctorEvidenceStateV1::Partial)
+    );
+
+    assert!(!report.is_healthy_complete());
+    assert_ne!(
+        report.coverage().completeness(),
+        DoctorCoverageCompletenessV1::Complete
+    );
+
+    let consultation = |family: DoctorFindingFamilyV1| {
+        report
+            .coverage()
+            .families()
+            .iter()
+            .find(|record| record.family() == family)
+            .map(DoctorFamilyCoverageV1::consultation)
+    };
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::LanguageServer),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Observability),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Advisory),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason: DoctorFamilyUnavailableReasonV1::Denied,
+        })
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Configuration),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Storage),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason: DoctorFamilyUnavailableReasonV1::Unknown,
+        })
+    );
 }
