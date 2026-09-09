@@ -108,7 +108,7 @@ fn finalize_hotpath_report_within(bound: Duration) {
 fn watchdog_fire_after() -> Duration {
     #[cfg(feature = "hotpath")]
     {
-        return shutdown_exit_bound().saturating_sub(HOTPATH_FINALIZE_BOUND);
+        shutdown_exit_bound().saturating_sub(HOTPATH_FINALIZE_BOUND)
     }
     #[cfg(not(feature = "hotpath"))]
     shutdown_exit_bound()
