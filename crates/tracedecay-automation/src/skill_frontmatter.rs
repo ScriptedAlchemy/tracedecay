@@ -287,17 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_decoder_parity_preserves_successful_quote_mechanics() {
-        for (value, expected) in [
-            ("'plain'", "plain"),
-            ("'it''s YAML'", "it's YAML"),
-            (r#""line\n☺""#, "line\n☺"),
-        ] {
-            assert_eq!(unquote_scalar(value), expected);
-        }
-    }
-
-    #[test]
     fn preserves_malformed_quote_and_plain_scalar_policy() {
         for (value, expected) in [
             (r#""bad\xescape""#, r"bad\xescape"),

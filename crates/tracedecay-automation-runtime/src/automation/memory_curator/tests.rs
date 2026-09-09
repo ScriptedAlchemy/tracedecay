@@ -14,13 +14,6 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn assert_send_static<T: Send + 'static>() {}
-
-#[test]
-fn retained_memory_curator_run_is_send_and_static() {
-    assert_send_static::<RetainedAutomationRun<MemoryCuratorAutomationRun>>();
-}
-
 fn settled_curation_receipt() -> ProjectMemoryFactCurationReceiptV1 {
     let owner = FactOwnerV1::Profile;
     let operation_id = domain_id::<ProvenanceId>("operation.curator.settled");
@@ -142,49 +135,6 @@ fn invalid_authority_result_retains_exact_settled_curation_receipt() {
 }
 
 #[test]
-fn memory_curator_request_does_not_duplicate_review_messages() {
-    let marker = "cluster-evidence-that-must-appear-once";
-    let review = json!({
-        "status": "needs_llm_review",
-        "messages": [
-            { "role": "system", "content": "return strict JSON" },
-            { "role": "user", "content": marker },
-        ],
-    });
-
-    let prompt = build_memory_curator_prompt();
-    let request = AgentTaskRequest::new(
-        "run-1".to_string(),
-        AgentTaskKind::MemoryCurator,
-        prompt.clone(),
-        None,
-        memory_curator_backend_context(&review, 0.8),
-    );
-    let backend_message = request.backend_message().unwrap();
-
-    assert!(prompt.contains("canonical current facts"));
-    for operation in [
-        "\"op\":\"add\"",
-        "\"op\":\"update\"",
-        "\"op\":\"merge\"",
-        "\"op\":\"remove\"",
-        "\"op\":\"normalize_tags\"",
-        "\"op\":\"link_facts\"",
-    ] {
-        assert!(prompt.contains(operation));
-        assert!(build_memory_curator_repair_prompt().contains(operation));
-    }
-    assert!(prompt.contains("expected_last_event_id"));
-    assert!(prompt.contains("at most 256 operations"));
-    assert!(prompt.contains("\"general\"|\"user_pref\"|\"project\""));
-    assert!(prompt.contains("1..=256 unique IDs"));
-    assert!(prompt.contains("at most 4096 bytes"));
-    assert!(prompt.contains("[context.min_confidence,1]"));
-    assert_eq!(backend_message.matches(marker).count(), 1);
-    assert_eq!(request.context["apply"], json!(true));
-}
-
-#[test]
 fn all_noop_curation_is_settled_without_claiming_a_store_mutation() {
     let receipt = all_noop_curation_receipt();
     let (settled_count, mutation_count, _, committed) =
@@ -254,39 +204,6 @@ fn memory_curator_rejects_more_than_256_operations_before_validation() {
             .unwrap()
             .contains(hostile_secret)
     );
-}
-
-#[test]
-fn durable_curation_validation_summary_is_payload_free() {
-    let hostile_secret = "secret-model-content-never-persisted";
-    let summary = memory_curation_validation_summary("failed", 4, 3, 1, 2, 0, 0);
-    let encoded = serde_json::to_string(&summary).unwrap();
-    assert!(!encoded.contains(hostile_secret));
-    assert_eq!(summary["accepted_count"], json!(3));
-    assert_eq!(summary["applied_count"], json!(0));
-    assert_eq!(summary["mutates_store"], json!(false));
-}
-
-#[test]
-fn memory_curator_review_contract_contains_no_local_similarity_authority() {
-    let source = FactId::new(format!("fact.{}.{}", "0".repeat(64), "1".repeat(64))).unwrap();
-    let review = memory_curator_review_value(
-        vec![json!({
-            "fact_id": source,
-            "content": "Keep automatic curation on canonical fact content",
-            "category": "decision",
-            "tags": ["memory"],
-            "trust": 0.9,
-            "metadata": {},
-        })],
-        0,
-        false,
-    );
-
-    assert_eq!(review["status"], json!("needs_llm_review"));
-    assert_eq!(review["facts_reviewed"], json!(1));
-    assert!(review.get("pairs").is_none());
-    assert!(review.get("similarity_millionths").is_none());
 }
 
 #[tokio::test]

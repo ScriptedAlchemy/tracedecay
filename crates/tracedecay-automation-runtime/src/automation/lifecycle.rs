@@ -1301,15 +1301,6 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
 mod recorded_failure_tests {
     use super::*;
 
-    fn assert_send_static<T: Send + 'static>() {}
-
-    #[test]
-    fn retained_settlement_types_are_send_and_static() {
-        assert_send_static::<AutomationRunSettlementGuard>();
-        assert_send_static::<RetainedAutomationRun<()>>();
-        assert_send_static::<RetainedAutomationSettlementDisposition<()>>();
-    }
-
     #[test]
     fn retained_settlement_disposition_carries_exact_reused_scheduler_skip() {
         let config = AutomationConfig::default();

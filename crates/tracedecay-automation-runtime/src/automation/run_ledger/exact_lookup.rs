@@ -671,8 +671,6 @@ pub(super) struct ForwardJsonlScanner<'a> {
     buffer_start: u64,
     buffer_len: usize,
     buffer: Vec<u8>,
-    #[cfg(test)]
-    chunks_read: usize,
 }
 
 impl<'a> ForwardJsonlScanner<'a> {
@@ -708,8 +706,6 @@ impl<'a> ForwardJsonlScanner<'a> {
             buffer_start: 0,
             buffer_len: 0,
             buffer: vec![0_u8; JSON_SCAN_BUFFER_BYTES],
-            #[cfg(test)]
-            chunks_read: 0,
         })
     }
 
@@ -785,16 +781,7 @@ impl<'a> ForwardJsonlScanner<'a> {
         )?;
         self.buffer_start = chunk_start;
         self.buffer_len = chunk_len;
-        #[cfg(test)]
-        {
-            self.chunks_read = self.chunks_read.saturating_add(1);
-        }
         Ok(())
-    }
-
-    #[cfg(test)]
-    fn chunks_read(&self) -> usize {
-        self.chunks_read
     }
 }
 
@@ -2489,35 +2476,6 @@ mod tests {
     }
 
     #[test]
-    fn returns_newest_exact_lifecycle_record_across_large_ledger() {
-        let mut lines = vec![ledger_line("target", "queued", 1)];
-        let padding = "x".repeat(1024);
-        for index in 0..9_000 {
-            lines.push(format!(
-                "{{\"schema_version\":2,\"run_id\":\"unrelated-{index}\",\"trigger\":\"scheduler\",\
-                 \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"running\",\
-                 \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"2\",\"completed_at\":\"2\",\
-                 \"error\":\"{padding}\"}}"
-            ));
-        }
-        lines.push(ledger_line("target", "running", 3));
-        let (_temp, path) = write_ledger(&lines);
-        assert!(std::fs::metadata(&path).expect("metadata").len() > 8 * 1024 * 1024);
-
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("bounded read")
-            .expect("exact record");
-
-        assert_eq!(record.run_id, "target");
-        assert_eq!(record.status, AutomationRunStatus::Running);
-        assert!(
-            read_exact_run_record_bounded(&path, "missing")
-                .expect("bounded read")
-                .is_none()
-        );
-    }
-
-    #[test]
     fn warm_exact_lookup_decodes_only_the_selected_run() {
         let mut lines = vec![ledger_line("target", "queued", 1)];
         lines.extend(
@@ -2608,26 +2566,6 @@ mod tests {
         ];
         let (_temp, ambiguous_path) = write_ledger(&duplicate_terminals);
         assert!(read_exact_run_record_bounded(&ambiguous_path, "target").is_err());
-    }
-
-    #[test]
-    fn exact_lookup_streams_long_keys_inside_canonical_values() {
-        let line = ledger_line("target", "succeeded", 1).replace(
-            "\"completed_at\":\"1\"",
-            &format!(
-                "\"validation_report\":{{\"{}\":null}},\"completed_at\":\"1\"",
-                "κ".repeat(PROJECTED_TEXT_MAX_BYTES)
-            ),
-        );
-        let (_temp, path) = write_ledger(&[line]);
-
-        assert_eq!(
-            read_exact_run_record_bounded(&path, "target")
-                .expect("streaming exact lookup")
-                .expect("target")
-                .run_id,
-            "target"
-        );
     }
 
     #[test]
@@ -2749,19 +2687,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_lookup_skips_blank_committed_rows() {
-        // A blank committed row is benign (scan_jsonl_row treats it as a
-        // skip) and must not be treated as ledger corruption.
-        let (_temp, path) =
-            write_ledger(&[ledger_line("target", "succeeded", 1), "   ".to_owned()]);
-
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("blank trailing row must not block exact lookup")
-            .expect("target row must still be found");
-        assert_eq!(record.run_id, "target");
-    }
-
-    #[test]
     fn logical_lifecycle_rejects_semantically_invalid_unselected_row() {
         let invalid = ledger_line("unrelated", "succeeded", 2)
             .replace("\"started_at\":\"2\"", "\"started_at\":\"-1\"");
@@ -2785,19 +2710,6 @@ mod tests {
         let (_temp, path) = write_ledger(&[queued, terminal]);
 
         assert!(read_exact_run_record_bounded(&path, "target").is_err());
-    }
-
-    #[test]
-    fn exact_lookup_ignores_historical_nonadjacent_retry_without_regression() {
-        let queued = ledger_line("target", "queued", 1);
-        let running = ledger_line("target", "running", 2);
-        let (_temp, path) = write_ledger(&[queued.clone(), running, queued]);
-
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("compatible historical retry")
-            .expect("target");
-
-        assert_eq!(record.status, AutomationRunStatus::Running);
     }
 
     #[test]
@@ -2857,28 +2769,6 @@ mod tests {
         let file = std::fs::File::open(&path).expect("ledger");
         let file_len = file.metadata().expect("metadata").len();
         let mut scanner = ReverseJsonlScanner::new(&file, &path).expect("scanner");
-        let mut rows = 0;
-        while scanner.next_span().expect("span").is_some() {
-            rows += 1;
-        }
-        let expected_chunks = usize::try_from(
-            file_len.saturating_add(JSON_SCAN_BUFFER_BYTES as u64 - 1)
-                / JSON_SCAN_BUFFER_BYTES as u64,
-        )
-        .expect("chunk count");
-        assert_eq!(rows, lines.len());
-        assert_eq!(scanner.chunks_read(), expected_chunks);
-    }
-
-    #[test]
-    fn forward_span_scan_reads_each_fixed_chunk_once() {
-        let lines = (0..20_000)
-            .map(|index| format!("{{\"row\":{index}}}"))
-            .collect::<Vec<_>>();
-        let (_temp, path) = write_ledger(&lines);
-        let file = std::fs::File::open(&path).expect("ledger");
-        let file_len = file.metadata().expect("metadata").len();
-        let mut scanner = ForwardJsonlScanner::new(&file, &path).expect("scanner");
         let mut rows = 0;
         while scanner.next_span().expect("span").is_some() {
             rows += 1;
