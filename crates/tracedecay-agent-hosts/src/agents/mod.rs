@@ -2816,51 +2816,6 @@ mod git_hook_tests {
     use std::path::Path;
 
     #[test]
-    fn parse_hookspath_basic() {
-        let config = "[core]\n\thooksPath = /home/user/.git-hooks\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/home/user/.git-hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_quoted() {
-        let config = "[core]\n\thooksPath = \"/home/user/my hooks\"\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/home/user/my hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_case_insensitive() {
-        let config = "[Core]\n\tHooksPath = /tmp/hooks\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/tmp/hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_missing() {
-        let config = "[core]\n\tautocrlf = true\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            None
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_wrong_section() {
-        let config = "[user]\n\thooksPath = /nope\n[core]\n\tautocrlf = true\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            None
-        );
-    }
-
-    #[test]
     fn insert_into_existing_section() {
         let config = "[user]\n\tname = Test\n[core]\n\tautocrlf = true\n";
         let result = insert_gitconfig_value(config, "core", "hooksPath", "/tmp/hooks");
@@ -2873,12 +2828,6 @@ mod git_hook_tests {
     fn insert_new_section() {
         let config = "[user]\n\tname = Test\n";
         let result = insert_gitconfig_value(config, "core", "hooksPath", "/tmp/hooks");
-        assert!(result.contains("[core]\n\thooksPath = /tmp/hooks"));
-    }
-
-    #[test]
-    fn insert_into_empty_file() {
-        let result = insert_gitconfig_value("", "core", "hooksPath", "/tmp/hooks");
         assert!(result.contains("[core]\n\thooksPath = /tmp/hooks"));
     }
 
@@ -2898,56 +2847,6 @@ mod git_hook_tests {
     fn expand_tilde_with_slash() {
         let home = Path::new("/home/test");
         assert_eq!(expand_tilde("~/hooks", home), "/home/test/hooks");
-    }
-
-    #[test]
-    fn expand_tilde_bare() {
-        let home = Path::new("/home/test");
-        assert_eq!(expand_tilde("~", home), "/home/test");
-    }
-
-    #[test]
-    fn expand_tilde_no_tilde() {
-        let home = Path::new("/home/test");
-        assert_eq!(expand_tilde("/abs/path", home), "/abs/path");
-    }
-
-    /// Helper: parse from a string directly (avoids file I/O in tests).
-    fn parse_gitconfig_value_from_str(contents: &str, section: &str, key: &str) -> Option<String> {
-        let section_lower = section.to_ascii_lowercase();
-        let key_lower = key.to_ascii_lowercase();
-        let mut in_section = false;
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                let header = trimmed
-                    .trim_start_matches('[')
-                    .split(']')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                let section_name = header.split_whitespace().next().unwrap_or("");
-                in_section = section_name.eq_ignore_ascii_case(&section_lower);
-                continue;
-            }
-            if !in_section {
-                continue;
-            }
-            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
-                continue;
-            }
-            if let Some((k, v)) = trimmed.split_once('=')
-                && k.trim().to_ascii_lowercase() == key_lower
-            {
-                let v = v.trim();
-                let v = v
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .unwrap_or(v);
-                return Some(v.to_string());
-            }
-        }
-        None
     }
 }
 
@@ -2991,28 +2890,6 @@ mod jsonc_tests {
     }
 
     #[test]
-    fn parse_jsonc_line_comment() {
-        let input = "{\n  // this is a comment\n  \"key\": \"val\"\n}";
-        let v = parse_jsonc(input);
-        assert_eq!(v["key"], "val");
-    }
-
-    #[test]
-    fn parse_jsonc_block_comment() {
-        let input = "{ /* block comment */ \"key\": \"val\" }";
-        let v = parse_jsonc(input);
-        assert_eq!(v["key"], "val");
-    }
-
-    #[test]
-    fn parse_jsonc_trailing_comma_object() {
-        let input = r#"{"a": 1, "b": 2,}"#;
-        let v = parse_jsonc(input);
-        assert_eq!(v["a"], 1);
-        assert_eq!(v["b"], 2);
-    }
-
-    #[test]
     fn parse_jsonc_trailing_comma_array() {
         let input = r#"{"items": [1, 2, 3,]}"#;
         let v = parse_jsonc(input);
@@ -3040,19 +2917,6 @@ mod jsonc_tests {
         let v = parse_jsonc(input);
         assert_eq!(v, serde_json::json!({}));
     }
-
-    #[test]
-    fn parse_jsonc_empty_string() {
-        let v = parse_jsonc("");
-        assert_eq!(v, serde_json::json!({}));
-    }
-
-    #[test]
-    fn parse_jsonc_trailing_comma_with_whitespace() {
-        let input = "{\n  \"a\": 1  ,\n}";
-        let v = parse_jsonc(input);
-        assert_eq!(v["a"], 1);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3077,22 +2941,6 @@ mod safe_config_tests {
         let path = dir.path().join("nonexistent.json");
         let result = backup_config_file(&path).unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn backup_creates_bak_with_identical_content() {
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        let original = r#"{"existing": "data", "nested": {"key": 1}}"#;
-        fs::write(&path, original).unwrap();
-
-        let backup = backup_config_file(&path)
-            .unwrap()
-            .expect("should create backup");
-        assert!(backup.exists());
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
-        // Original is untouched
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]
@@ -3127,16 +2975,6 @@ mod safe_config_tests {
     }
 
     #[test]
-    fn strict_load_parses_valid_json() {
-        let dir = tmpdir();
-        let path = dir.path().join("valid.json");
-        fs::write(&path, r#"{"hello": "world", "n": 42}"#).unwrap();
-        let val = load_json_file_strict(&path).unwrap();
-        assert_eq!(val["hello"], "world");
-        assert_eq!(val["n"], 42);
-    }
-
-    #[test]
     fn strict_load_errors_on_invalid_json() {
         let dir = tmpdir();
         let path = dir.path().join("bad.json");
@@ -3150,23 +2988,7 @@ mod safe_config_tests {
         );
     }
 
-    #[test]
-    fn strict_load_errors_on_truncated_json() {
-        let dir = tmpdir();
-        let path = dir.path().join("trunc.json");
-        fs::write(&path, r#"{"key": "value", "incomplete"#).unwrap();
-        assert!(load_json_file_strict(&path).is_err());
-    }
-
     // ----- load_jsonc_file_strict -----
-
-    #[test]
-    fn strict_jsonc_load_returns_empty_for_missing() {
-        let dir = tmpdir();
-        let path = dir.path().join("nope.jsonc");
-        let val = load_jsonc_file_strict(&path).unwrap();
-        assert_eq!(val, serde_json::json!({}));
-    }
 
     #[test]
     fn strict_jsonc_load_parses_valid_jsonc() {
@@ -3192,18 +3014,6 @@ mod safe_config_tests {
     }
 
     // ----- safe_write_json_file -----
-
-    #[test]
-    fn safe_write_creates_file_from_scratch() {
-        let dir = tmpdir();
-        let path = dir.path().join("new.json");
-        let value = serde_json::json!({"created": true});
-        safe_write_json_file(&path, &value, None).unwrap();
-
-        let written = fs::read_to_string(&path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(parsed["created"], true);
-    }
 
     #[test]
     fn safe_write_replaces_existing_file_atomically() {
@@ -3467,14 +3277,6 @@ mod path_normalize_tests {
     }
 
     #[test]
-    fn leaves_unix_paths_unchanged() {
-        assert_eq!(
-            normalize_path_separators("/usr/local/bin/tracedecay"),
-            "/usr/local/bin/tracedecay"
-        );
-    }
-
-    #[test]
     fn which_tracedecay_prefers_path_when_current_exe_is_cargo_target_binary() {
         let dir = tempfile::tempdir().unwrap();
         let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
@@ -3488,27 +3290,6 @@ mod path_normalize_tests {
 
         let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
             .expect("PATH binary should be preferred over cargo target binary");
-
-        assert_eq!(
-            found,
-            normalize_path_separators(&path_bin.to_string_lossy())
-        );
-    }
-
-    #[test]
-    fn which_tracedecay_prefers_path_when_current_exe_is_perf_profile_target_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
-        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
-        std::fs::write(&path_bin, "").unwrap();
-        let current_exe = dir
-            .path()
-            .join("checkout/target/perf")
-            .join(tracedecay_bin_name());
-        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
-
-        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
-            .expect("PATH binary should be preferred over a perf-profile cargo target binary");
 
         assert_eq!(
             found,

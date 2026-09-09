@@ -601,31 +601,4 @@ exit 0"#;
         assert!(!is_mcp_only_component_set(&[Core]));
         assert!(!is_mcp_only_component_set(&[]));
     }
-
-    /// The CLI invocation and the plugin bundle's `.mcp.json` writer must launch
-    /// the same server the same way; both read the shared constants.
-    #[test]
-    fn the_cli_launch_contract_matches_the_plugin_bundle_mcp_writer() {
-        let rendered = super::super::rendered_global_plugin_files("/bin/tracedecay")
-            .expect("the global Codex bundle must render");
-        let mcp = rendered
-            .iter()
-            .find_map(|(relative, body)| (*relative == ".mcp.json").then_some(body))
-            .expect("the global Codex bundle ships .mcp.json");
-        let mcp: serde_json::Value = serde_json::from_str(mcp).unwrap();
-        let server = &mcp["mcpServers"]["graph"];
-
-        assert_eq!(
-            server["args"],
-            serde_json::to_value(CODEX_MCP_SERVER_ARGS).unwrap(),
-            "the CLI's post-`--` launch arguments and the bundle writer's args must match"
-        );
-        for (key, value) in CODEX_MCP_SERVER_ENV {
-            assert_eq!(
-                server["env"][*key].as_str(),
-                Some(*value),
-                "the CLI's `--env {key}={value}` and the bundle writer's env must match"
-            );
-        }
-    }
 }

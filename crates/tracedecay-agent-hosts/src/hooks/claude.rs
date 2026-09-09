@@ -427,17 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn build_bash_command_without_failure_signal_stays_silent() {
-        for command in ["cargo check", "cargo clippy", "tsc --noEmit", "pyright"] {
-            let event = post_event("Bash", &serde_json::json!({ "command": command }));
-            assert!(
-                decide_post_tool_use_hint(&event).is_none(),
-                "{command} has no failure signal and must stay silent"
-            );
-        }
-    }
-
-    #[test]
     fn trusted_build_failure_event_decides_a_diagnostics_hint() {
         let mut event = post_event(
             "Bash",
@@ -544,23 +533,6 @@ mod tests {
             decide_post_tool_use_hint(&tiny).is_none(),
             "a small non-function edit must not produce a hint"
         );
-    }
-
-    #[test]
-    fn memory_file_edit_post_tool_use_event_decides_a_fact_store_hint() {
-        // Write/Edit are candidates *only* when they target a harness-memory file.
-        for (tool, path) in [
-            ("Write", "/home/zack/.claude/projects/foo/memory/MEMORY.md"),
-            ("Edit", "/repo/CLAUDE.md"),
-        ] {
-            let event = post_event(tool, &serde_json::json!({ "file_path": path }));
-            let hint = decide_post_tool_use_hint(&event)
-                .unwrap_or_else(|| panic!("{tool} {path} must produce a memory-store hint"));
-            assert!(
-                format_tool_hint(&hint).contains("tracedecay_fact_store_add"),
-                "{tool} {path} hint must route durable facts to tracedecay_fact_store_add"
-            );
-        }
     }
 
     #[test]

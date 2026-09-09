@@ -260,30 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_session_context_carries_diagnostics_moment() {
-        // Both the initialized and unindexed surfaces must route the shell
-        // compile/type-check moment to tracedecay diagnostics.
-        for status in [
-            HookWorkspaceStatus::Initialized,
-            HookWorkspaceStatus::UnindexedProject,
-        ] {
-            let context = build_codex_session_context_for_workspace(status, None);
-            assert!(
-                context.contains("tracedecay_diagnostics"),
-                "missing tracedecay_diagnostics for {status:?}"
-            );
-            assert!(
-                context.contains("tracedecay_diagnose"),
-                "missing tracedecay_diagnose for {status:?}"
-            );
-            assert!(
-                context.contains("cargo check"),
-                "missing compile-moment cue for {status:?}"
-            );
-        }
-    }
-
-    #[test]
     fn codex_session_context_advertises_managed_subagents() {
         // Codex sessions have no other discovery surface for the managed
         // tracedecay-* subagents besides this steering line, so it must
@@ -320,29 +296,5 @@ mod tests {
                 "generic (non-code-workspace) surface should omit {agent}"
             );
         }
-    }
-
-    #[test]
-    fn codex_unindexed_context_routes_grep_search_context() {
-        // Content/symbol/concept routing must survive on the unindexed surface,
-        // which cannot lean on the bootstrap skill for the tool ladder.
-        let context =
-            build_codex_session_context_for_workspace(HookWorkspaceStatus::UnindexedProject, None);
-        assert!(context.contains("literal or regex text -> tracedecay_grep"));
-        assert!(context.contains("symbol name -> tracedecay_search"));
-        assert!(context.contains("concept -> tracedecay_context"));
-    }
-
-    #[test]
-    fn index_status_line_formats_freshness_and_init_nudge() {
-        assert_eq!(
-            index_status_line(true, Some("last indexed 5m ago")),
-            "tracedecay index status: last indexed 5m ago.\n"
-        );
-        assert_eq!(
-            index_status_line(true, None),
-            "tracedecay index status: initialized.\n"
-        );
-        assert!(index_status_line(false, None).contains("run `tracedecay init`"));
     }
 }

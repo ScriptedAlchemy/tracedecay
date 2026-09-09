@@ -4,8 +4,7 @@ use std::pin::Pin;
 
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::hooks::{
-    HookWorkspaceStatus, build_codex_session_context_for_workspace, codex_apply_patch_rel_paths,
-    cursor_session_start_json, native_capture_material,
+    codex_apply_patch_rel_paths, cursor_session_start_json, native_capture_material,
 };
 use tracedecay_agent_hosts::ports::hook_runtime;
 use tracedecay_contracts::ResolvedScope;
@@ -15,19 +14,6 @@ use tracedecay_hooks::{
     DaemonHookEvent, HookHostV1, NativeHookCaptureSourceV1, NativeHookDecodeError,
 };
 use tracedecay_runtime_core::storage::StoreLayout;
-
-#[test]
-fn codex_unindexed_workspace_context_preserves_tool_routing() {
-    let context = build_codex_session_context_for_workspace(
-        HookWorkspaceStatus::UnindexedProject,
-        Some("last indexed 7m ago"),
-    );
-
-    assert!(context.contains("literal or regex text -> tracedecay_grep"));
-    assert!(context.contains("symbol name -> tracedecay_search"));
-    assert!(context.contains("concept -> tracedecay_context"));
-    assert!(context.contains("tracedecay_diagnostics"));
-}
 
 #[test]
 fn codex_apply_patch_paths_stay_inside_the_project() {

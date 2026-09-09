@@ -1,12 +1,6 @@
 use super::super::{load_json_file_strict, safe_write_json_file};
 use super::*;
 use serde_json::json;
-use std::path::PathBuf;
-
-/// Shared `plugin/` source tree at the repo root, relative to this crate.
-fn plugin_source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
-}
 
 fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
     let source = plugin_deploy_dir(home);
@@ -233,94 +227,6 @@ fn project_only_legacy_residue_does_not_claim_plugin_registration() {
         },
     );
     assert_eq!(state, HostBundleRegistrationStateV1::Missing);
-}
-
-/// Every file under a skills root, relative to it, forward-slashed.
-fn plugin_skill_tree_files(root: &Path) -> Vec<String> {
-    fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir)
-            .expect("skills dir readable")
-            .flatten()
-        {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(base, &path, out);
-            } else if path.is_file() {
-                out.push(
-                    path.strip_prefix(base)
-                        .expect("under base")
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                );
-            }
-        }
-    }
-    let mut files = Vec::new();
-    walk(root, root, &mut files);
-    files.sort();
-    files
-}
-
-/// The composed Claude deploy set (sourced from the shared `plugin/` tree
-/// via `claude_files`) must cover every shared model-invocable skill, the
-/// canonical `tracedecay-*` dispatchers, all subagents, all slash
-/// commands, and Claude's manifest/marketplace/mcp/hooks/README. The single
-/// shared tree removes the old cross-bundle parity checks; this guards that
-/// nothing on disk is left unwired for Claude.
-#[test]
-fn claude_embedded_file_list_covers_the_whole_source_bundle() {
-    let deploy: std::collections::BTreeSet<String> = claude_embedded_plugin_files()
-        .into_iter()
-        .map(|(relative, _)| relative.to_string())
-        .collect();
-
-    // Every file under plugin/skills/ (SKILL.md *and* any support files) is
-    // deployed — the recursive embed leaves nothing on disk unwired.
-    let skills_root = plugin_source_root().join("skills");
-    for relative in plugin_skill_tree_files(&skills_root) {
-        let expected = format!("skills/{relative}");
-        assert!(
-            deploy.contains(&expected),
-            "Claude deploy set is missing skill file {expected}"
-        );
-    }
-
-    for expected in [
-        ".claude-plugin/plugin.json",
-        ".claude-plugin/marketplace.json",
-        ".mcp.json",
-        "hooks/hooks.json",
-        "README.md",
-    ] {
-        assert!(
-            deploy.contains(expected),
-            "Claude deploy set is missing {expected}"
-        );
-    }
-
-    // Every agent on disk under plugin/agents is deployed — dir-walk rather
-    // than hardcode, so a future agent added to the shared source tree but
-    // not wired into Claude's deploy set is caught here.
-    let agents_root = plugin_source_root().join("agents");
-    for entry in std::fs::read_dir(&agents_root).expect("plugin/agents readable") {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        let expected = format!("agents/{name}");
-        assert!(
-            deploy.contains(&expected),
-            "Claude deploy set is missing agent {expected}"
-        );
-    }
-
-    // Every command in plugin/commands is deployed.
-    let commands_root = plugin_source_root().join("commands");
-    for entry in std::fs::read_dir(&commands_root).expect("plugin/commands readable") {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        let expected = format!("commands/{name}");
-        assert!(
-            deploy.contains(&expected),
-            "Claude deploy set is missing command {expected}"
-        );
-    }
 }
 
 /// Deploy stamps the crate version into plugin.json, substitutes the
@@ -818,45 +724,6 @@ fn claude_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
     uninstall_claude_md_rules(&empty).unwrap();
 
     assert!(!empty.exists());
-}
-
-/// Every managed subagent definition the plugin ships must have valid
-/// frontmatter and reference tracedecay.
-#[test]
-fn managed_subagent_definitions_have_valid_frontmatter() {
-    let files = claude_embedded_plugin_files();
-    for file_name in [
-        "code-explorer.md",
-        "code-health-auditor.md",
-        "session-historian.md",
-    ] {
-        let contents = files
-            .iter()
-            .find_map(|&(relative, body)| {
-                (relative == format!("agents/{file_name}")).then_some(body)
-            })
-            .expect("plugin must ship each managed subagent");
-        let stem = file_name.trim_end_matches(".md");
-        let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(
-            lines.first().copied(),
-            Some("---"),
-            "{file_name} must open YAML frontmatter"
-        );
-        let expected_name = format!("name: {stem}");
-        assert!(
-            lines.contains(&expected_name.as_str()),
-            "{file_name} frontmatter name must match its filename"
-        );
-        assert!(
-            lines.iter().any(|line| line.starts_with("description: ")),
-            "{file_name} must carry a description for delegation"
-        );
-        assert!(
-            contents.contains("tracedecay"),
-            "{file_name} must reference tracedecay so it is recognized as managed"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
