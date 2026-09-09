@@ -85,7 +85,10 @@ pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize = 16_384;
 /// nonempty source is always admitted. Ties keep request order so admission
 /// is deterministic. Sources past the bound still weigh admitted candidates
 /// through scoring; a document matching only those sources is never hydrated.
-pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S> {
+pub(crate) fn admit_candidate_sources<S>(
+    mut sources: Vec<(usize, S)>,
+    mut on_pruned: impl FnMut(usize, &S),
+) -> Vec<S> {
     sources.retain(|(frequency, _)| *frequency > 0);
     sources.sort_by_key(|(frequency, _)| *frequency);
     let total = sources.len();
@@ -94,7 +97,8 @@ pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S>
     for (ordinal, (frequency, source)) in sources.into_iter().enumerate() {
         let next = admitted_documents.saturating_add(frequency);
         if ordinal > 0 && next > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 {
-            break;
+            on_pruned(frequency, &source);
+            continue;
         }
         admitted_documents = next;
         admitted.push(source);
@@ -105,6 +109,28 @@ pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S>
     hotpath::gauge!("query.lane.lexical.candidate_documents_admitted")
         .set(admitted_documents as u64);
     admitted
+}
+
+fn candidate_admission_outcome<E>(
+    batch: RetrieverBatch<E>,
+    term_sources: Vec<(String, u64)>,
+) -> RetrieverOutcome<RetrieverBatch<E>> {
+    if term_sources.is_empty() {
+        RetrieverOutcome::Complete(batch)
+    } else {
+        tracing::debug!(
+            ?term_sources,
+            document_frequency_budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+            "lexical candidate term sources pruned by retrieval policy"
+        );
+        RetrieverOutcome::Partial {
+            value: batch,
+            reason: RetrievalFailure::CandidateSourcesPruned {
+                term_sources,
+                document_frequency_budget: MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
