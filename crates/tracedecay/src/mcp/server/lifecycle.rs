@@ -69,6 +69,25 @@ impl McpBackgroundTaskOwner {
         true
     }
 
+    /// Close admission without joining. Daemon shutdown uses this at TERM so
+    /// a last read cannot start another reconcile while owners drain.
+    pub(crate) fn close_admission(&self) {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admission.closed = true;
+        admission.reap_finished();
+    }
+
+    fn admits(&self) -> bool {
+        !self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed
+    }
+
     /// Tasks currently retained by the owner: live work plus completions not
     /// yet reaped by an admission.
     #[cfg(test)]
@@ -421,6 +440,10 @@ impl McpServer {
         self.background_tasks.spawn(task)
     }
 
+    pub(crate) fn refuse_background_work(&self) {
+        self.background_tasks.close_admission();
+    }
+
     pub(crate) fn project_server_response_lifecycle(&self) -> ProjectServerResponseLifecycle {
         self.project_server_lifecycle.clone()
     }
@@ -673,6 +696,9 @@ impl McpServer {
     /// advances so every subsequent tool call does not retry immediately.
     #[hotpath::measure(label = "mcp.server.sync_if_stale", future = true)]
     pub async fn maybe_sync_if_stale(&self) {
+        if !self.background_tasks.admits() {
+            return;
+        }
         let cg = self.cg_snapshot().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -739,7 +765,7 @@ impl McpServer {
         cg: &Arc<TraceDecay>,
         live_branch: &tracedecay_runtime_core::branch::BranchMemo,
     ) {
-        if !self.sync_config.read_refresh {
+        if !self.sync_config.read_refresh || !self.background_tasks.admits() {
             return;
         }
         // A checkout racing this call would diff the new branch against the
@@ -961,6 +987,27 @@ mod background_task_owner_tests {
         assert!(owner.shutdown().await.is_empty());
         assert!(dropped.load(Ordering::Acquire));
         assert!(!owner.spawn(async {}));
+    }
+
+    #[tokio::test]
+    async fn close_admission_refuses_new_background_work_without_joining() {
+        let owner = McpBackgroundTaskOwner::default();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        assert!(owner.spawn(async move {
+            let _signal = DropSignal(task_dropped);
+            std::future::pending::<()>().await;
+        }));
+        tokio::task::yield_now().await;
+
+        owner.close_admission();
+        assert!(!owner.spawn(async {}));
+        assert!(
+            !dropped.load(Ordering::Acquire),
+            "close_admission must not join or abort live tasks"
+        );
+        assert!(owner.shutdown().await.is_empty());
+        assert!(dropped.load(Ordering::Acquire));
     }
 
     /// A sustained run of short tasks must not accumulate in the owner: once
