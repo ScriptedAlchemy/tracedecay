@@ -1,6 +1,4 @@
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_contracts::{
@@ -21,64 +19,56 @@ use tracedecay_configuration::{
 };
 use tracedecay_graph_query::CodeGraphReadError;
 
-type CurrentAccessFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, ApplicationProblem>> + Send + 'a>,
->;
-
-trait CurrentCallableCodeAccessPort: Send + Sync {
-    fn current_access(&self, observed_at: UtcMicros) -> CurrentAccessFuture<'_>;
-}
-
-struct ProductionCallableCodeAccessPort {
-    project_root: PathBuf,
-    scope: ResolvedScope,
-    configuration: Arc<ProjectConfigurationRuntime>,
-}
-
-impl CurrentCallableCodeAccessPort for ProductionCallableCodeAccessPort {
-    fn current_access(&self, observed_at: UtcMicros) -> CurrentAccessFuture<'_> {
-        Box::pin(async move {
-            let current = self
-                .configuration
-                .configuration_store()
-                .current()
-                .await
-                .map_err(configuration_current_problem)?;
-            let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
-                self.configuration.configuration_target().clone(),
-                current.revision_id,
-                current.snapshot,
-            )
-            .map_err(|_| concealed())?;
-            crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
-                &self.scope,
-                &self.project_root,
-                &configuration,
-                observed_at,
-            )
-            .map_err(|_| concealed())
-        })
-    }
-}
+type CurrentCallableCodeAccess =
+    dyn Fn(UtcMicros) -> CurrentCallableCodeAccessFuture<'static> + Send + Sync;
 
 #[derive(Clone)]
 pub(super) struct DaemonCallableCodeAuthorizationSource {
-    access: Arc<dyn CurrentCallableCodeAccessPort>,
+    access: Arc<CurrentCallableCodeAccess>,
 }
 
 impl DaemonCallableCodeAuthorizationSource {
+    fn new(
+        access: impl Fn(UtcMicros) -> CurrentCallableCodeAccessFuture<'static> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            access: Arc::new(access),
+        }
+    }
+
     pub(super) fn production(
         project_root: PathBuf,
         scope: ResolvedScope,
         configuration: Arc<ProjectConfigurationRuntime>,
     ) -> Self {
-        Self {
-            access: Arc::new(ProductionCallableCodeAccessPort {
-                project_root,
-                scope,
-                configuration,
-            }),
-        }
+        let project_root = Arc::new(project_root);
+        let scope = Arc::new(scope);
+        Self::new(move |observed_at| {
+            let project_root = Arc::clone(&project_root);
+            let scope = Arc::clone(&scope);
+            let configuration = Arc::clone(&configuration);
+            Box::pin(async move {
+                let current = configuration
+                    .configuration_store()
+                    .current()
+                    .await
+                    .map_err(configuration_current_problem)?;
+                let configuration =
+                    tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+                        configuration.configuration_target().clone(),
+                        current.revision_id,
+                        current.snapshot,
+                    )
+                    .map_err(|_| concealed())?;
+                crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
+                    &scope,
+                    &project_root,
+                    &configuration,
+                    observed_at,
+                )
+                .map_err(|_| concealed())
+            })
+        })
     }
 
     #[hotpath::skip]
@@ -86,7 +76,7 @@ impl DaemonCallableCodeAuthorizationSource {
         &self,
         observed_at: UtcMicros,
     ) -> Result<ProjectSourceAccessSnapshot, ApplicationProblem> {
-        self.access.current_access(observed_at).await
+        (self.access)(observed_at).await
     }
 
     pub(super) fn authorize(
@@ -102,7 +92,7 @@ impl DaemonCallableCodeAuthorizationSource {
 
 impl CallableCodeAuthorizationSourcePort for DaemonCallableCodeAuthorizationSource {
     fn current(&self, observed_at: UtcMicros) -> CurrentCallableCodeAccessFuture<'_> {
-        Box::pin(async move { self.access.current_access(observed_at).await })
+        (self.access)(observed_at)
     }
 
     fn authorize(
@@ -442,20 +432,18 @@ mod tests {
 
     use super::*;
 
-    struct MutableAccess {
-        current: Mutex<ProjectSourceAccessSnapshot>,
-    }
-
-    impl CurrentCallableCodeAccessPort for MutableAccess {
-        fn current_access(&self, _observed_at: UtcMicros) -> CurrentAccessFuture<'_> {
+    fn mutable_source(
+        current: Arc<Mutex<ProjectSourceAccessSnapshot>>,
+    ) -> DaemonCallableCodeAuthorizationSource {
+        DaemonCallableCodeAuthorizationSource::new(move |_observed_at| {
+            let current = Arc::clone(&current);
             Box::pin(async move {
-                Ok(self
-                    .current
+                Ok(current
                     .lock()
                     .unwrap_or_else(|_| panic!("mutable access lock"))
                     .clone())
             })
-        }
+        })
     }
 
     fn access(operation: &ApplicationOperation) -> ProjectSourceAccessSnapshot {
@@ -526,12 +514,8 @@ mod tests {
             .get(CallableCodeOperationKind::ExactOccurrence)
             .clone();
         let mounted = access(&operation);
-        let mutable = Arc::new(MutableAccess {
-            current: Mutex::new(mounted.clone()),
-        });
-        let source = DaemonCallableCodeAuthorizationSource {
-            access: mutable.clone(),
-        };
+        let mutable = Arc::new(Mutex::new(mounted.clone()));
+        let source = mutable_source(Arc::clone(&mutable));
         let authorization = source.authorize(mounted.clone());
         let context = context(&mounted, &operation);
         let admission = authorization
@@ -541,7 +525,6 @@ mod tests {
 
         {
             let mut current = mutable
-                .current
                 .lock()
                 .unwrap_or_else(|_| panic!("mutable access lock"));
             current.configuration_revision =
@@ -577,11 +560,7 @@ mod tests {
         let observed_at = tracedecay_contracts::now_micros();
         let mut mounted = access(&operation);
         mounted.grant_expires_at = UtcMicros(observed_at.0.saturating_add(60_000_000));
-        let source = DaemonCallableCodeAuthorizationSource {
-            access: Arc::new(MutableAccess {
-                current: Mutex::new(mounted.clone()),
-            }),
-        };
+        let source = mutable_source(Arc::new(Mutex::new(mounted.clone())));
         let admission = DaemonCodeGraphReadAdmission::new(mounted.scope.clone(), source);
         let request_id = RequestId::new("request.graph-read-admission").expect("request id");
         let cancellation =

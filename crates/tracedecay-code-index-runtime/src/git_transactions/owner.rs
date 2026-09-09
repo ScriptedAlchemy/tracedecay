@@ -19,7 +19,7 @@ use tracedecay_domain::{
     ProjectId, RepositoryIndexStateV1, RepositoryWorkingTreeStateV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
-use tracedecay_tool_catalog::CapabilityId;
+use tracedecay_tool_catalog::{CapabilityId, CatalogSnapshotV1};
 
 use super::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService,
@@ -27,7 +27,7 @@ use super::{
     GitIndexTransactionStoreRegistry, RepositoryMutationQueue,
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
-use crate::ports::ApplicationCatalogProviderV1;
+use crate::ports::ApplicationCatalogSnapshotErrorV1;
 use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_application::configuration::ConfigurationControlStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -37,6 +37,8 @@ const GIT_POLICY_REVISION: u64 = 2;
 
 type ProfiledStdRwLock<T> = hotpath::rw_locks::RwLock<T>;
 type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+type ApplicationCatalogComposer =
+    Arc<dyn Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct DaemonGitAuthorityStateV1 {
@@ -71,7 +73,7 @@ pub trait DaemonGitAuthoritySource: Send + Sync {
 struct ProductionDaemonGitAuthoritySource {
     access: ProjectSourceAccessSnapshot,
     configuration: OwnedGlobalDbConfigurationControlStore,
-    catalog: ApplicationCatalogProviderV1,
+    catalog: ApplicationCatalogComposer,
     runtime: tokio::runtime::Handle,
 }
 
@@ -158,10 +160,8 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         if !effective_capabilities.contains(capability_id) {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        let catalog = self
-            .catalog
-            .snapshot()
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let catalog =
+            (self.catalog)().map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let manifest = catalog
             .capability(capability_id)
             .ok_or(GitIndexTransactionPortError::PolicyDenied)?;
@@ -440,7 +440,7 @@ impl ServiceKey {
 /// worktrees share one session store actor without sharing native executors or
 /// mutation authority.
 pub struct DaemonGitIndexTransactionServiceRegistry {
-    catalog: ApplicationCatalogProviderV1,
+    catalog: ApplicationCatalogComposer,
     stores: GitIndexTransactionStoreRegistry,
     mutation_queue: Arc<RepositoryMutationQueue>,
     services: ProfiledTokioMutex<HashMap<ServiceKey, ServiceEntry>>,
@@ -453,9 +453,14 @@ impl DaemonGitIndexTransactionServiceRegistry {
     /// Root supplies the catalog composer here: every owner this registry
     /// mounts resolves capability manifests through it, so there is no window
     /// in which an owner exists without one.
-    pub fn new(catalog: ApplicationCatalogProviderV1) -> Self {
+    pub fn new(
+        catalog: impl Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
         Self {
-            catalog,
+            catalog: Arc::new(catalog),
             stores: GitIndexTransactionStoreRegistry::default(),
             mutation_queue: Arc::new(RepositoryMutationQueue::default()),
             services: hotpath::mutex!(

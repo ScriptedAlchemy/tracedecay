@@ -3,15 +3,12 @@
 # On every push, drops the cache entries the push supersedes. Cache entries
 # are restorable only from the ref that saved them or from the default
 # branch, and the Rust lanes restore by key prefix: rust-cache picks the
-# newest `v0-rust-<lane>-<env>-` entry, the kache composite the newest
-# `kache-store-<lane>-<os>-<version>-` entry. Everything older on
+# newest `v0-rust-<lane>-<env>-` entry. Everything older on
 # `refs/pull/N/merge` is unreachable, yet it counts against the repository's
 # 10 GB cache budget until GitHub's least-recently-used eviction removes it —
 # and LRU does not know which entries are dead. Measured 2026-09-08 (PR 707,
 # run 34231734416, 2.5 hours after the previous push's run): CI alone saved
-# 9.6 GB per push, so of the previous run's entries only the two test-lane
-# stores it had saved last were still there; the four other kache lanes
-# (`Cache not found`) and the `ci-dev`, `ci-clippy-full`, `hawk` and Windows
+# 9.6 GB per push, so the `ci-dev`, `ci-clippy-full`, `hawk` and Windows
 # rust-cache lanes (`No cache found`) all rebuilt cold. Deleting the
 # superseded generations here leaves LRU nothing to choose.
 #
