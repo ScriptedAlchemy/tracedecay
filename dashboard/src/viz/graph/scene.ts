@@ -117,7 +117,6 @@ function compose(
     realNodes,
     strands,
     field,
-    neighborsOf,
     theme,
     focus,
     paint,
@@ -136,10 +135,8 @@ function compose(
     roominess,
     frame,
     selectedId,
-    onNodeClick: (node) => {
-      onSelect(node);
-      overlay.fireNeighborhood(node);
-    },
+    // Selection is reader intent, never an admitted activity event.
+    onNodeClick: onSelect,
     onStageClick: () => onSelect(null),
     onFocusChange: () => overlay.wake(),
   });

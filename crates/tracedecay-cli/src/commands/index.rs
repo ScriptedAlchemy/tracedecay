@@ -523,7 +523,7 @@ pub(crate) async fn handle_sync(
         resolved.project_path.display()
     );
     if doctor {
-        tracedecay::doctor::run_doctor().await?;
+        tracedecay::doctor::run_doctor(crate::cloud::doctor_network_probes()).await?;
     }
     Ok(())
 }

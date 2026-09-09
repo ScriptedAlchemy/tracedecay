@@ -618,14 +618,15 @@ impl McpServer {
         // the daemon-owned code-index scheduler queue as soon as the routing
         // event is observed. Independent of host-admission durability so an
         // after-edit reaches indexing even when effect processing is deferred.
-        // Best-effort: a `false` return (no mounted worktree) is not an error.
+        // Best-effort: a policy refusal or unavailable scheduler emits no activity.
         if !event.rel_paths.is_empty()
             && let Some(sink) = &dispatch_server.code_index_hook_sink
         {
-            // A `true` return means the paths really entered a mounted
+            // An accepted admission means the paths really entered a mounted
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone()).await
+                == super::CodeIndexAdmission::Accepted
                 && let Some(activity_db) = dispatch_server.project_session_db.as_deref()
             {
                 tracedecay_session_memory::event_lane::publish(
@@ -1312,10 +1313,12 @@ impl McpServer {
         analytics_arguments: Value,
         analytics_session_id: Option<String>,
         dispatch: DispatchedToolCall,
-        connection_client_name: Option<&str>,
-        connection_instance_id: Option<&str>,
-        connection_notifications: &std::sync::Mutex<Vec<Value>>,
+        connection_server: &Self,
     ) -> JsonRpcResponse {
+        let client_name = connection_server.client_name();
+        let connection_client_name = client_name.as_deref();
+        let connection_instance_id = connection_server.connection_identity.instance_id();
+        let connection_notifications = &connection_server.pending_notifications;
         let DispatchedToolCall {
             cg,
             selected_owner,
@@ -1711,8 +1714,6 @@ impl McpServer {
         if fast_unavailable {
             return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
         }
-        let connection_client_name = self.client_name();
-        let connection_instance_id = self.connection_identity.instance_id();
         let response = dispatch_server
             .complete_tool_call(
                 id.clone(),
@@ -1720,9 +1721,7 @@ impl McpServer {
                 analytics_arguments,
                 analytics_session_id,
                 dispatch,
-                connection_client_name.as_deref(),
-                connection_instance_id,
-                &self.pending_notifications,
+                self,
             )
             .await;
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {

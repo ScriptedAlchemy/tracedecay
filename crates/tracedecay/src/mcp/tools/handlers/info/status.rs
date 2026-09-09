@@ -21,7 +21,7 @@ pub(crate) async fn handle_admin_sync(
     })?;
     // The operator named this route (`tracedecay init` / `tracedecay sync`):
     // the one demand that may index a route the watcher policy keeps quiet.
-    if !hotpath::future!(
+    if hotpath::future!(
         reconcile_sink(
             cg.project_root().to_path_buf(),
             crate::mcp::server::CodeIndexReconcileDemandV1::Explicit,
@@ -29,6 +29,7 @@ pub(crate) async fn handle_admin_sync(
         label = "mcp.info.admin_sync.reconcile"
     )
     .await
+        != crate::mcp::server::CodeIndexAdmission::Accepted
     {
         return Err(TraceDecayError::project_route(
             "code_index_scheduler_unavailable",
@@ -213,6 +214,10 @@ pub(crate) async fn graph_statistics_value(
 }
 
 #[hotpath::measure(label = "mcp.info.status.total")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Status combines independent index, session, generation, and daemon readers without making any one reader authoritative for another"
+)]
 pub(crate) async fn handle_status(
     cg: &TraceDecay,
     args: Value,
@@ -344,7 +349,7 @@ pub(crate) async fn handle_status(
     if include_storage_health {
         let mut storage_health = serde_json::to_value(
             hotpath::future!(
-                crate::runtime_telemetry::collect_database(cg, false),
+                crate::mcp::tools::handlers::health::collect_database_snapshot(cg, false, None),
                 label = "mcp.info.status.storage_health"
             )
             .await?,

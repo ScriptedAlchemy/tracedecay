@@ -14,6 +14,10 @@ use super::{
 use tracedecay_mcp::{TestRunFailure, TestRunOutput, ToolResult};
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Failure settlement retains the admitted emitter and deadline alongside the exact dispatched target set and observed failure"
+)]
 pub(super) async fn terminal_failure(
     emitter: &OperationEmitter,
     args: &Value,
@@ -126,13 +130,11 @@ pub(super) async fn terminal_failure(
     });
     let body = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
         let mut body = run_affected_tests_body(
-            partial.exit_code.or(failure_exit_code),
+            &partial,
             &results,
             test_names,
             truncated,
             selected_targets,
-            &partial.stderr,
-            &partial.stdout,
             managed_test_terminal(emitter, &receipt),
         );
         body["error"] = json!({

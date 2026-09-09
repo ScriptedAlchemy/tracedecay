@@ -203,16 +203,26 @@ impl SharedRetainedParsePool {
         source: &str,
         extractor: &dyn LanguageExtractor,
     ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
+        self.parse_and_extract_artifact_with_control(identity, language_id, source, extractor, None)
+    }
+
+    pub fn parse_and_extract_artifact_with_control(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        extractor: &dyn LanguageExtractor,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
         crate::hotpath_observe::measure_hot_loop!("code_index.collect.retained_artifact", {
-            let grammar_key = extractor.retained_grammar_key(identity.logical_path());
             let prepared_source = extractor.prepare_parse_source(source);
             let (report, extraction) = self.parse_internal(
                 identity,
                 language_id,
                 source,
                 prepared_source.as_ref(),
-                Some(&grammar_key),
                 Some(extractor),
+                control,
             )?;
             match extraction {
                 Some(extraction) => Ok((report, extraction)),
@@ -227,9 +237,12 @@ impl SharedRetainedParsePool {
         language_id: &str,
         source: &str,
         prepared_source: &str,
-        grammar_key: Option<&str>,
         extractor: Option<&dyn LanguageExtractor>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<(ParseReport, Option<ParsedExtractionArtifactV1>), ParseError> {
+        let grammar_key =
+            extractor.map(|extractor| extractor.retained_grammar_key(identity.logical_path()));
+        let grammar_key = grammar_key.as_deref();
         crate::hotpath_observe::measure_hot_loop!("code_index.collect.parse", {
             if source.len() > self.limits.max_total_source_bytes {
                 self.record_failure();
@@ -258,6 +271,7 @@ impl SharedRetainedParsePool {
                     prepared_source,
                     grammar_key,
                     extractor,
+                    control,
                 ),
                 None => {
                     // Serialize first admission per document. Unrelated documents
@@ -283,17 +297,19 @@ impl SharedRetainedParsePool {
                             prepared_source,
                             grammar_key,
                             extractor,
+                            control,
                         );
                     }
                     drop(state);
                     let opened = match grammar_key {
-                        Some(grammar_key) => RetainedParseDocument::open_prepared(
+                        Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
                             identity,
                             language_id,
                             grammar_key,
                             source,
                             prepared_source,
                             self.limits.document,
+                            control,
                         ),
                         None => RetainedParseDocument::open(
                             identity,
@@ -359,6 +375,7 @@ impl SharedRetainedParsePool {
         prepared_source: &str,
         grammar_key: Option<&str>,
         extractor: Option<&dyn LanguageExtractor>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<(ParseReport, Option<ParsedExtractionArtifactV1>), ParseError> {
         let mut retained = entry
             .lock()
@@ -366,20 +383,24 @@ impl SharedRetainedParsePool {
         let language_changed = retained.document.language_id() != language_id;
         let report = if !language_changed {
             match grammar_key {
-                Some(_) => retained
-                    .document
-                    .reparse_prepared(identity, source, prepared_source),
+                Some(_) => retained.document.reparse_prepared_with_control(
+                    identity,
+                    source,
+                    prepared_source,
+                    control,
+                ),
                 None => retained.document.reparse(identity, source),
             }
         } else {
             let opened = match grammar_key {
-                Some(grammar_key) => RetainedParseDocument::open_prepared(
+                Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
                     identity,
                     language_id,
                     grammar_key,
                     source,
                     prepared_source,
                     self.limits.document,
+                    control,
                 ),
                 None => {
                     RetainedParseDocument::open(identity, language_id, source, self.limits.document)

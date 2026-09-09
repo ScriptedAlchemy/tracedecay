@@ -308,8 +308,6 @@ axum = "0.8"
 # `tokio` always: `hotpath::wrap::tokio::sync::Mutex` names the lock type in
 # both modes (the plain tokio mutex until a binary selects the backend).
 hotpath = { workspace = true, features = ["tokio"] }
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["service", "tokio"] }
 tower = "0.5"
 tree-sitter = "0.26"
 constant_time_eq = "0.5.0"
@@ -360,7 +358,6 @@ tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 clap = { version = "4.6", features = ["derive"] }
-semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -376,7 +373,7 @@ sha2 = "0.11"
 glob = "0.3"
 walkdir = "2"
 ignore = "0.4"
-gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix.workspace = true
 dirs = "6"
 hex = "0.4"
 fs2 = "0.4"
@@ -394,8 +391,6 @@ schemars = "1.2.1"
 futures-util = "0.3.33"
 tokio-util = { version = "0.7.19", features = ["codec"] }
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
 # (tests/daemon_suite). Store-locality detection moved with the locator
@@ -404,6 +399,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 libc = "0.2"
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 sha2 = "0.11"
 hex = "0.4"
 regex = "1.12.3"

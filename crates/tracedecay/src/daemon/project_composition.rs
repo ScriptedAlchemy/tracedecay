@@ -258,6 +258,10 @@ struct ProjectOpenInputs<'a> {
 /// wrapper (and every instrumented caller) a few words wide instead of
 /// inlining the whole open.
 #[hotpath::measure(label = "daemon.project.compose.server", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "This composition entry binds route admission, store lifetime, invocation and HTTP owners before publishing a server."
+)]
 pub(super) async fn production_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
@@ -519,6 +523,7 @@ impl ComposedCoreServer {
                 ),
             )
             .with_code_index_search_authority(code_index.search_authority.clone())
+            .with_admitted_project_scope(code_index.scope.clone())
             .with_project_server_live(Arc::clone(&self.route_registered))
             .with_application_invocation_executor(Arc::clone(
                 &ports.application_invocation_executor,
@@ -840,8 +845,10 @@ impl ProjectOpenInputs<'_> {
             self.invocation.code_index_schedulers.clone(),
             Arc::clone(&code_index_activation),
         );
-        let code_index_freshness_probe_sink =
-            code_index_freshness_probe_sink(self.invocation.code_index_schedulers.clone());
+        let code_index_freshness_probe_sink = code_index_freshness_probe_sink(
+            self.invocation.code_index_schedulers.clone(),
+            Arc::clone(&code_index_activation),
+        );
         // The daemon mounts the same broker the MCP server and the directly
         // served dashboard open: persisted analyzer settings (with a recorded
         // degradation for an unreadable file) plus the home-level OpenCode
@@ -1951,16 +1958,18 @@ fn project_dashboard_freshness_reader(
 fn project_dashboard_pr_autotrack_reader()
 -> tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader {
     Arc::new(|store_root| {
-        crate::daemon::pr_autotrack::managed_summary(&store_root)
-            .into_iter()
-            .map(
-                |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
-                    branch: entry.branch,
-                    pr: entry.pr,
-                    head_branch: entry.head_branch,
-                },
-            )
-            .collect()
+        tracedecay_application::pr_tracking::managed_summary(&store_root).map(|entries| {
+            entries
+                .into_iter()
+                .map(
+                    |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                        branch: entry.branch,
+                        pr: entry.pr,
+                        head_branch: entry.head_branch,
+                    },
+                )
+                .collect()
+        })
     })
 }
 

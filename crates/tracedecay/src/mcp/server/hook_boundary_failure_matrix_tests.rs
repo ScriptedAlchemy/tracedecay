@@ -53,7 +53,7 @@ async fn server_without_broker(
 }
 
 fn failing_reconcile_sink() -> CodeIndexReconcileSink {
-    Arc::new(|_request: PathBuf, _demand| Box::pin(async { false }))
+    Arc::new(|_request: PathBuf, _demand| Box::pin(async { false.into() }))
 }
 
 fn counting_success_reconcile_sink(attempts: Arc<Mutex<usize>>) -> CodeIndexReconcileSink {
@@ -61,7 +61,7 @@ fn counting_success_reconcile_sink(attempts: Arc<Mutex<usize>>) -> CodeIndexReco
         let attempts = Arc::clone(&attempts);
         Box::pin(async move {
             *attempts.lock().unwrap() += 1;
-            true
+            true.into()
         })
     })
 }
@@ -203,7 +203,7 @@ async fn matrix_daemon_unavailable_without_broker_skips_reconcile_and_frontier()
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() = true;
-                true
+                true.into()
             })
         })
     };
@@ -244,7 +244,7 @@ async fn matrix_backpressure_overflow_rejects_before_reconcile_without_pending_g
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() += 1;
-                false
+                false.into()
             })
         })
     };
@@ -340,7 +340,7 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
         Box::pin(async move {
             sink_recorded.lock().unwrap().push((root, rel_paths));
             // Report "delivered": a mounted worktree accepted the paths.
-            true
+            true.into()
         })
     });
     let context = registered_context(cg, &authority).with_code_index_hook_sink(sink);
