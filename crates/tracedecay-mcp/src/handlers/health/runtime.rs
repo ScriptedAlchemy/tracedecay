@@ -144,6 +144,9 @@ fn attach_doctor_report(value: &mut Value, report: McpDoctorReportV1<'_>) {
 pub async fn collect_database_snapshot(
     ctx: &McpToolContext<'_>,
     include_integrity: bool,
+    generation_census: Option<
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot,
+    >,
 ) -> Result<tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot> {
     let database = ctx.graph_database().ok_or_else(|| {
         TraceDecayError::project_route(
@@ -173,7 +176,7 @@ pub async fn collect_database_snapshot(
         include_integrity,
     )
     .await?;
-    let generation_census = ctx.generation_census().cloned().unwrap_or(
+    let generation_census = generation_census.cloned().unwrap_or(
         tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
             reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
@@ -198,7 +201,8 @@ async fn collect_runtime_snapshot(
     tracedecay_version: &str,
 ) -> Result<tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot> {
     tracedecay_session_memory::runtime_telemetry::read_cached_process_sample();
-    let database = collect_database_snapshot(ctx, include_integrity).await?;
+    let database =
+        collect_database_snapshot(ctx, include_integrity, ctx.generation_census()).await?;
     let process = tracedecay_session_memory::runtime_telemetry::read_cached_process_sample_at_response_boundary()
         .await;
     Ok(
