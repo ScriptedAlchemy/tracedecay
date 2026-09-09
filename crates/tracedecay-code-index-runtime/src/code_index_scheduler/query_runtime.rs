@@ -5,8 +5,9 @@
 //! accepted profile/evaluation from the configured authority port.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 use tracedecay_contracts::ResolvedScope;
@@ -150,6 +151,114 @@ pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
         )
         .await
         .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
+}
+
+/// Which project-open mount to retry once a generation exists.
+#[derive(Clone)]
+pub enum DeferredQueryAuthorityMountV1 {
+    /// The configured accepted authority (committed activation present).
+    Configured {
+        profile_id: tracedecay_domain::configuration::UserProfileId,
+    },
+    /// The checked-in core exact/lexical/graph fallback. When a committed
+    /// activation is warming, its exact revision keeps the retry inside that
+    /// fence; otherwise this is the ordinary standalone fallback. Cursor keys
+    /// are reloaded from the same durable store used at project open.
+    CoreFallback {
+        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        committed_revision: Option<tracedecay_domain::configuration::ConfigurationRevisionId>,
+    },
+}
+
+/// One deferred mount attempt, terminal unless the generation is still
+/// unpublished for this exact scope.
+#[derive(PartialEq, Eq)]
+pub enum DeferredMountAttemptV1 {
+    Terminal,
+    AwaitNextPublication,
+}
+
+/// Waits for the first authenticated text generation of `project_root` and then
+/// retries the query-authority mount. Exits when the mount reaches any terminal
+/// outcome or the publication channel closes (daemon shutdown).
+///
+/// The open-time mount runs before code-index activation, so the first ready
+/// check usually misses. A later `Published` event wakes the waiter on a
+/// fresh build; a restart that restores the same sealed generation records
+/// `Noop` and never repeats that event, so the serving slot is polled too.
+pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: PathBuf,
+    scope: ResolvedScope,
+    mut attempt: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = DeferredMountAttemptV1>,
+{
+    if crate::project_reads::code_index_disabled_for_scope(registry, &scope) {
+        tracing::info!(
+            event = "query_authority_mount",
+            outcome = "code_index_disabled",
+            project_id = %scope.project_id,
+            deferred = true,
+            "route indexes no code by contract; deferred query authority is terminal"
+        );
+        return;
+    }
+    let mut publications = registry.subscribe_generation_publications();
+    let mut ready_poll = tokio::time::interval(Duration::from_secs(1));
+    ready_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        if registry
+            .latest_text_serving_for_root(&project_root)
+            .await
+            .is_some()
+            && attempt().await != DeferredMountAttemptV1::AwaitNextPublication
+        {
+            return;
+        }
+        tokio::select! {
+            _ = ready_poll.tick() => {}
+            publication = publications.recv() => match publication {
+                Ok(publication) if publication.project_root == project_root => {}
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+/// Classify one deferred mount outcome. `GenerationUnavailable` keeps waiting;
+/// every other result is terminal.
+pub fn classify_deferred_query_authority_mount(
+    scope: &ResolvedScope,
+    outcome: Result<(), QueryRuntimeMountErrorV1>,
+) -> DeferredMountAttemptV1 {
+    match outcome {
+        Ok(()) => {
+            tracing::info!(
+                event = "query_authority_mount",
+                outcome = "mounted",
+                project_id = %scope.project_id,
+                deferred = true,
+            );
+            DeferredMountAttemptV1::Terminal
+        }
+        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
+            DeferredMountAttemptV1::AwaitNextPublication
+        }
+        Err(error) => {
+            tracing::warn!(
+                event = "query_authority_mount",
+                outcome = "deferred_failed",
+                project_id = %scope.project_id,
+                reason = %error,
+                "deferred query authority mount abandoned"
+            );
+            DeferredMountAttemptV1::Terminal
+        }
+    }
 }
 
 async fn prepare_core_query_authority_on_project_open(
