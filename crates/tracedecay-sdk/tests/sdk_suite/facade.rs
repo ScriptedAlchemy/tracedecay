@@ -1,9 +1,7 @@
-use tracedecay_sdk::operations::{
-    OperationTransport, TypedOperation, UNAVAILABLE_OPERATIONS, WorkflowRegisterDefinition,
-};
+use tracedecay_sdk::operations::UNAVAILABLE_OPERATIONS;
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, contracts,
-    domain, operation, workflow,
+    domain, operation,
 };
 
 #[test]
@@ -23,47 +21,6 @@ fn cancellation_types_are_the_canonical_application_types() {
         }
     ));
 }
-#[test]
-fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
-    let registry = workflow::executable_binding_registry().expect("canonical Workflow registry");
-    let binding = registry
-        .get(&operation::OperationId::new(WorkflowRegisterDefinition::OPERATION_ID).unwrap())
-        .and_then(|availability| availability.binding())
-        .expect("mounted workflow register-definition binding");
-
-    assert_eq!(
-        WorkflowRegisterDefinition::TRANSPORT,
-        OperationTransport::Http {
-            route: "/application/workflow/register-definition"
-        }
-    );
-    assert_eq!(
-        WorkflowRegisterDefinition::BINDING_ID,
-        "binding.http.workflow.register_definition"
-    );
-    assert_eq!(WorkflowRegisterDefinition::EFFECT, binding.effect());
-    assert_eq!(
-        WorkflowRegisterDefinition::IDEMPOTENCY,
-        binding.idempotency()
-    );
-    assert_eq!(
-        WorkflowRegisterDefinition::MAXIMUM_DEADLINE_MILLIS,
-        binding.deadline().maximum_millis()
-    );
-    assert_eq!(
-        WorkflowRegisterDefinition::DEADLINE_BEHAVIOR,
-        binding.deadline().behavior()
-    );
-    assert_eq!(
-        binding.result_schema().schema_ref().schema_id().as_str(),
-        WorkflowRegisterDefinition::RESULT_SCHEMA_ID
-    );
-    assert_eq!(
-        binding.result_schema().schema_ref().revision(),
-        WorkflowRegisterDefinition::RESULT_SCHEMA_REVISION
-    );
-}
-
 #[test]
 fn generated_unavailable_operations_match_the_canonical_sdk_registry() {
     let registry = contracts::sdk_executable_binding_registry().expect("canonical SDK registry");

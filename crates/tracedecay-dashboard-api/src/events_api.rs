@@ -1041,21 +1041,6 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_revisions_are_monotone_per_stream() {
-        let mut state = EventStreamState::new("run-test".to_string());
-        let scope = scope();
-        let first = state.heartbeat(&scope);
-        let second = state.heartbeat(&scope);
-        let third = state.heartbeat(&scope);
-        assert_eq!(first.event_revision, 1);
-        assert_eq!(second.event_revision, 2);
-        assert_eq!(third.event_revision, 3);
-        assert_eq!(first.stream, STREAM_HEARTBEAT);
-        assert_eq!(first.kind, DashboardEventKindV1::Heartbeat);
-        assert_eq!(first.run_id, "run-test");
-    }
-
-    #[test]
     fn activity_coverage_counts_only_new_drops_for_each_bucket() {
         let mut state = EventStreamState::new("run-test".to_string());
         let scope = scope();

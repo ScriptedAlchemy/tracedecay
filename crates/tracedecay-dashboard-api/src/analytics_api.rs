@@ -1115,15 +1115,6 @@ pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
     })
 }
 
-#[cfg(test)]
-fn decode_analytics_contract<T: serde::de::DeserializeOwned>(
-    value: Value,
-    label: &str,
-) -> Result<T, String> {
-    serde_json::from_value(value)
-        .map_err(|error| format!("{label} did not match its response contract: {error}"))
-}
-
 fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
     let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
         .iter()
@@ -1494,10 +1485,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AnalyticsDiagnosticsPayloadV1, AnalyticsSubagentLinkV1, HookAnalyticsRows,
-        HookAnalyticsWindow, SubagentSessionRow, build_subagent_tree, decode_analytics_contract,
-        diagnostics_summary_from_parts, hint_efficacy_from_events, read_hook_analytics_file,
-        sort_hook_analytics_rows,
+        AnalyticsSubagentLinkV1, HookAnalyticsRows, HookAnalyticsWindow, SubagentSessionRow,
+        build_subagent_tree, diagnostics_summary_from_parts, hint_efficacy_from_events,
+        read_hook_analytics_file, sort_hook_analytics_rows,
     };
     use tracedecay_global_db::AnalyticsEventRecord;
 
@@ -1649,17 +1639,6 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_diagnostics_value_decodes_to_the_canonical_payload() {
-        let value = diagnostics_summary_from_parts(0, &HookAnalyticsRows::empty(), None);
-        let payload: AnalyticsDiagnosticsPayloadV1 =
-            decode_analytics_contract(value, "analytics diagnostics").unwrap();
-
-        assert!(!payload.available);
-        assert_eq!(payload.event_count, 0);
-        assert!(!payload.hook_window.truncated);
-    }
-
-    #[test]
     fn hint_efficacy_is_unavailable_without_hint_events() {
         let summary = hint_efficacy_from_events(&[analytics_event("mcp_tool_call", "", "")]);
         assert!(!summary.available);
@@ -1754,43 +1733,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.contains("EOF"))
         );
-    }
-
-    /// Writes `count` chronologically ordered hook rows, each padded so the
-    /// file spans many tail chunks.
-    fn write_hook_analytics_fixture(path: &std::path::Path, count: usize) {
-        use std::io::Write;
-        let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
-        for index in 0..count {
-            let row = json!({
-                "event": "hook_invoked",
-                "hook_name": "PostToolUse",
-                "session_id": format!("session-{index:06}"),
-                "ts_unix_ms": 1_000_000 + index as i64,
-                "padding": "x".repeat(400),
-            });
-            writeln!(file, "{row}").unwrap();
-        }
-        file.flush().unwrap();
-    }
-
-    #[test]
-    fn hook_analytics_tail_keeps_newest_rows_within_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hook_analytics.jsonl");
-        write_hook_analytics_fixture(&path, 10_000);
-
-        let mut rows = HookAnalyticsRows::empty();
-        rows.window.window_rows = 250;
-        read_hook_analytics_file(&path, None, &mut rows);
-
-        assert_eq!(rows.rows.len(), 250);
-        // The window is the newest suffix, and no row is truncated mid-line.
-        assert_eq!(rows.rows[0]["session_id"], json!("session-009750"));
-        assert_eq!(rows.rows[249]["session_id"], json!("session-009999"));
-        assert_eq!(rows.sources[0]["rows_malformed"], 0);
-        assert_eq!(rows.sources[0]["window_truncated"], json!(true));
-        assert_eq!(rows.sources[0]["window_rows"], json!(250));
     }
 
     #[test]

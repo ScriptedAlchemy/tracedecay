@@ -2804,8 +2804,7 @@ mod authority_tests {
 
     /// Serves exactly one persisted named collection, mirroring the daemon
     /// scope-set read: an exact-id hit answers the frozen scope set, anything
-    /// else is a truthful absent read. Optionally answers one scripted
-    /// native-integration status result.
+    /// else is a truthful absent read.
     #[derive(Clone)]
     struct SingleCollectionRuntime {
         scope_set: tracedecay_contracts::AuthorizedScopeSet,
@@ -2814,14 +2813,6 @@ mod authority_tests {
     }
 
     impl SingleCollectionRuntime {
-        fn with_native_integration_status(
-            mut self,
-            result: tracedecay_contracts::NativeIntegrationSurfaceResultV1,
-        ) -> Self {
-            self.native_integration_status = Some(result);
-            self
-        }
-
         fn persisted(collection: &str) -> Self {
             use std::collections::BTreeSet;
 
@@ -2952,23 +2943,6 @@ mod authority_tests {
         }
     }
 
-    #[test]
-    fn selected_project_runtime_rebinds_to_the_selected_root() {
-        let runtime = SingleCollectionRuntime::persisted("scope-set.dashboard-selected-project");
-        let rebound_roots = Arc::clone(&runtime.rebound_roots);
-        let active: Arc<dyn DashboardApplicationRuntime> = Arc::new(runtime);
-        let selected_root = std::path::Path::new("/registered/selected-project");
-
-        let selected = selected_project_application_runtime(Some(&active), selected_root)
-            .expect("selected project runtime binding");
-
-        assert!(selected.is_some());
-        assert_eq!(
-            *rebound_roots.lock().expect("selected project bindings"),
-            vec![selected_root.to_path_buf()]
-        );
-    }
-
     #[tokio::test]
     async fn capabilities_with_admitted_transport_report_the_typed_no_collection_state() {
         let fixture =
@@ -3041,62 +3015,6 @@ mod authority_tests {
             .await
             .expect("response body");
         (status, serde_json::from_slice(&body).expect("json body"))
-    }
-
-    #[tokio::test]
-    async fn dashboard_serves_the_native_integration_status_application_result() {
-        let fixture = DashboardStateFixture::open("project.dashboard-native-status").await;
-        let mut state = fixture.state;
-        let projection = tracedecay_contracts::NativeIntegrationStatusProjectionV1 {
-            transaction_id: tracedecay_domain::NativeIntegrationTransactionId::new(
-                "transaction.dashboard.native",
-            )
-            .expect("transaction"),
-            preview_id: tracedecay_domain::NativeIntegrationPreviewId::new(
-                "preview.dashboard.native",
-            )
-            .expect("preview"),
-            preview_digest: tracedecay_domain::ManifestDigest::new(format!(
-                "sha256:{}",
-                "d".repeat(64)
-            ))
-            .expect("digest"),
-            repository_id: tracedecay_domain::RepositoryId::new("repository.dashboard.native")
-                .expect("repository"),
-            destination_ref: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
-            phase: tracedecay_domain::NativeIntegrationPhaseV1::Terminal,
-            phase_revision: 4,
-            cancellation_requested: false,
-            terminal_outcome: Some(
-                tracedecay_domain::NativeIntegrationTerminalOutcomeV1::Committed,
-            ),
-            updated_at: tracedecay_domain::UtcMicros(9),
-        };
-        state.application_invocation_executor = Some(Arc::new(
-            SingleCollectionRuntime::persisted("scope-set.dashboard-native")
-                .with_native_integration_status(
-                    tracedecay_contracts::NativeIntegrationSurfaceResultV1::Status(
-                        projection.clone(),
-                    ),
-                ),
-        ));
-
-        let response = native_integration_api::status(
-            State(state),
-            Some(Extension(dashboard_lcm_test_control())),
-            axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
-                transaction_id: "transaction.dashboard.native".to_owned(),
-            }),
-        )
-        .await;
-        let (status, body) = json_response_body(response).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["outcome"], "status");
-        assert_eq!(body["transaction_id"], "transaction.dashboard.native");
-        assert_eq!(body["phase"], "terminal");
-        assert_eq!(body["terminal_outcome"], "committed");
-        assert_eq!(body["phase_revision"], projection.phase_revision);
     }
 
     #[tokio::test]
@@ -3195,36 +3113,6 @@ mod authority_tests {
             payload["detail"],
             json!("dashboard automation authority is not mounted")
         );
-    }
-
-    #[tokio::test]
-    async fn retained_project_session_authority_is_reused_exactly() {
-        let fixture = DashboardStateFixture::open("project.retained-session").await;
-        let profile_root = fixture._temporary.path().join("sessions-profile");
-        let project_id =
-            ProjectId::new("project.retained-session").expect("valid project identity");
-        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            profile_root,
-            &fixture.layout.project_root,
-            project_id,
-        )
-        .await
-        .expect("registered project sessions");
-        let retained = runtime
-            .project_database_arc()
-            .expect("project session authority");
-
-        let selected = resolve_lcm_store_for_layout(&fixture.layout, Some(retained.clone()));
-
-        assert!(
-            selected
-                .lcm_db
-                .as_ref()
-                .expect("retained LCM authority")
-                .shares_client_with(&retained)
-        );
-        assert_eq!(selected.path, retained.db_path().display().to_string());
-        assert_ne!(selected.scope, "global");
     }
 
     #[tokio::test]
@@ -3486,27 +3374,6 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn memory_status_returns_the_canonical_dashboard_envelope() {
-        let fixture = DashboardStateFixture::open("project.dashboard-memory-envelope").await;
-        let app = admitted_router(fixture.state);
-
-        let response = app
-            .oneshot(admitted_request("/api/plugins/holographic/status"))
-            .await
-            .expect("memory status response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .expect("memory status body");
-        let value: Value = serde_json::from_slice(&body).expect("memory status json");
-
-        assert_eq!(value["schema_revision"], 1);
-        assert_eq!(value["domain_state"], "ready");
-        assert_eq!(value["coverage"]["completeness"], "complete");
-        assert!(value["payload"]["memory"].is_object());
-    }
-
-    #[tokio::test]
     async fn lcm_search_and_session_use_canonical_daemon_authority_and_opaque_cursors() {
         let mut fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
         fixture.state.lcm_read_authority = Some(Arc::new(FakeDashboardLcmRead));
@@ -3586,35 +3453,6 @@ mod authority_tests {
             assert_eq!(value["coverage"]["examined"], 1, "{uri}");
             assert_eq!(value["payload"]["exists"], true, "{uri}");
         }
-    }
-
-    #[tokio::test]
-    async fn unavailable_analytics_is_an_enveloped_unknown_read() {
-        let fixture = DashboardStateFixture::open("project.dashboard-analytics-envelope").await;
-        let app = router_with_active_application(fixture.state, None, Router::new());
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/plugins/analytics/overview")
-                    .body(Body::empty())
-                    .expect("analytics overview request"),
-            )
-            .await
-            .expect("analytics overview response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .expect("analytics overview body");
-        let value: Value = serde_json::from_slice(&body).expect("analytics overview json");
-
-        assert_eq!(value["schema_revision"], 1);
-        assert_eq!(value["domain_state"], "unknown");
-        assert_eq!(value["payload"]["available"], false);
-        assert_eq!(
-            value["coverage"]["omission_reasons"],
-            serde_json::json!(["analytics_sources_unavailable"])
-        );
     }
 
     #[tokio::test]

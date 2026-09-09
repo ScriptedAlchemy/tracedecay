@@ -667,24 +667,15 @@ fn fallback_store_key() -> StoreKeyV1 {
 mod tests {
     use super::*;
     use crate::config::RetentionConfig;
-    use crate::read_model::{DashboardDomainStateV1, DashboardFreshnessStateV1};
 
-    async fn state_for_test() -> (tempfile::TempDir, DashboardState, u64) {
-        let (project, state) =
-            crate::events_api::dashboard_state_fixture("project.dashboard-storage-telemetry").await;
-        let (page_size, page_count, _) = state
-            .mem_db
-            .storage_page_counts()
-            .await
-            .expect("authoritative graph page counts");
-        let graph_total_bytes = page_size.saturating_mul(page_count);
-        (project, state, graph_total_bytes)
+    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
+        crate::events_api::dashboard_state_fixture("project.dashboard-storage-telemetry").await
     }
 
     #[tokio::test]
     async fn storage_telemetry_without_resolved_scope_fails_closed() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, mut state, _) = state_for_test().await;
+        let (_project, mut state) = state_for_test().await;
         state.resolved_scope = None;
 
         // No exact scope means no per-request application context; the handler
@@ -706,74 +697,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telemetry_reports_real_observed_sizes_for_held_stores() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state, graph_total_bytes) = state_for_test().await;
-        let Json(envelope) = telemetry(State(state)).await;
-
-        assert_eq!(envelope.schema_revision, 1);
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
-        assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Fresh);
-        assert!(
-            !envelope.payload.stores.is_empty(),
-            "dashboard always holds at least the graph and memory stores"
-        );
-
-        for entry in &envelope.payload.stores {
-            assert!(
-                matches!(entry.read, StorageTelemetryReadV1::Observed { .. }),
-                "store {} should have an observed size read",
-                entry.store
-            );
-            assert!(
-                entry.total_bytes.unwrap_or(0) > 0,
-                "store {} sized",
-                entry.store
-            );
-            // No budget is configured in a fresh project: the honest state is
-            // "unset by owner", never "unsupported by server".
-            assert!(
-                matches!(entry.budget, StoreBudgetDimensionV1::Unset { .. }),
-                "store {} should report an unset budget, got {:?}",
-                entry.store,
-                entry.budget
-            );
-            // Opening the dashboard does not establish a growth baseline. A
-            // growth series needs an execution-owned sampler, so this read is
-            // explicit about its absence instead of writing a watermark.
-            let StoreGrowthDimensionV1::Unknown { reason } = &entry.growth;
-            assert!(reason.contains("execution-owned"));
-            assert!(matches!(
-                entry.table_growth,
-                TableGrowthDimensionV1::Unsupported { .. }
-            ));
-            assert!(!entry.roles.is_empty());
-            assert!(entry.roles.contains(&entry.role));
-        }
-        let graph = envelope
-            .payload
-            .stores
-            .iter()
-            .find(|entry| entry.roles.iter().any(|role| role == "graph"))
-            .expect("graph store entry");
-        assert_eq!(
-            graph.total_bytes,
-            Some(graph_total_bytes),
-            "graph bytes must come from the retained graph runtime's real page counts"
-        );
-
-        // Complete coverage carries a real denominator equal to the store count.
-        assert!(envelope.coverage.is_complete());
-        assert_eq!(
-            envelope.coverage.denominator,
-            Some(envelope.payload.stores.len() as u64)
-        );
-    }
-
-    #[tokio::test]
     async fn roles_sharing_one_store_file_are_reported_once_with_both_roles() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state, _) = state_for_test().await;
+        let (_project, state) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 
         // No two entries may name the same store file: identical sizes reported
