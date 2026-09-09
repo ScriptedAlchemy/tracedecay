@@ -58,6 +58,7 @@ impl BoundSettlement {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
     pub fn with_test_hooks(
         mut self,
         phase_hook: Option<SettlementPhaseHook>,
