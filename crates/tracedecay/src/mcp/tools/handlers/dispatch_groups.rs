@@ -505,8 +505,6 @@ fn dispatch_graph_tools_inner<'a>(
                     admitted_graph_query(cg, &options, "code_symbol_search"),
                     args,
                     selected_scope_prefix,
-                    options.code_index_search_executor.as_ref(),
-                    options.code_index_search_authority.as_ref(),
                     options.code_index_ignored_dependency_admission.as_deref(),
                     options.code_index_freshness_reader.as_ref(),
                     &admitted_tool_context(cg, &options)?,
@@ -542,8 +540,6 @@ fn dispatch_graph_tools_inner<'a>(
                     admitted_graph_query(cg, &options, "context"),
                     args,
                     selected_scope_prefix,
-                    options.code_index_search_executor.as_ref(),
-                    options.code_index_search_authority.as_ref(),
                     options.code_index_freshness_reader.as_ref(),
                     &admitted_tool_context(cg, &options)?,
                 )
@@ -882,8 +878,10 @@ fn dispatch_application_surface_tools_inner<'a>(
             options.application_invocation_executor,
             options.application_invocation_target,
             options.application_request_id.clone(),
-            options.application_deadline.clone(),
-            options.application_cancellation.clone(),
+            RequestControls {
+                deadline: options.application_deadline.as_ref(),
+                cancellation: options.application_cancellation.as_ref(),
+            },
         )
         .await
     })

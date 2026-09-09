@@ -714,13 +714,11 @@ where
     let body = hotpath::measure_block!(
         "mcp.workflow.affected_tests.assemble",
         run_affected_tests_body(
-            output.exit_code,
+            &output,
             &results,
             &test_names,
             truncated,
             &selected_targets,
-            &output.stderr,
-            &output.stdout,
             managed_test_terminal(&emitter, &receipt)
         )
     );
@@ -1184,20 +1182,18 @@ fn missing_requested_test<'a>(
 }
 
 fn run_affected_tests_body(
-    exit_code: Option<i32>,
+    output: &tracedecay_mcp::TestRunOutput,
     results: &[(String, bool)],
     test_names: &[String],
     truncated: bool,
     selected_targets: &[TestTarget],
-    stderr: &str,
-    stdout: &str,
     terminal: Value,
 ) -> Value {
     let passed = results.iter().filter(|(_, ok)| *ok).count();
     let failed = results.iter().filter(|(_, ok)| !*ok).count();
 
     json!({
-        "exit_code": exit_code,
+        "exit_code": output.exit_code,
         "passed": passed,
         "failed": failed,
         "total_observed": results.len(),
@@ -1213,8 +1209,8 @@ fn run_affected_tests_body(
                 })
             })
             .collect::<Vec<_>>(),
-        "stderr_tail": tail(stderr, 2000),
-        "stdout_tail": tail(stdout, 2000),
+        "stderr_tail": tail(&output.stderr, 2000),
+        "stdout_tail": tail(&output.stdout, 2000),
         "terminal": terminal,
     })
 }
