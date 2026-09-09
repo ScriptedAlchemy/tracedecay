@@ -3,8 +3,8 @@
 use super::super::dependency_hints;
 use super::affected::collect_verified_affected_test_files;
 use super::pr_context_cursor::{
-    PrContextCursorBinding, decode_pr_context_cursor, encode_pr_context_cursor,
-    pr_context_cursor_authority,
+    PrContextCursorBinding, PrContextCursorComparison, decode_pr_context_cursor,
+    encode_pr_context_cursor, pr_context_cursor_authority,
 };
 use super::shell::{
     classify_file_role, default_pr_base_ref, git_changed_files, git_diff_file_changes,
@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
@@ -223,12 +222,13 @@ where
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.diff_context.total")]
-pub(crate) async fn handle_diff_context(
-    cg: &TraceDecay,
+pub async fn handle_diff_context(
+    ctx: &McpToolContext<'_>,
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_diff_context")?;
+    ctx.verify_graph_scope(graph)?;
     let files = require_string_array_arg(&args, "files")?;
     let depth = clamped_depth_arg(&args, "depth", 2, 10);
 
@@ -295,7 +295,7 @@ pub(crate) async fn handle_diff_context(
         )?
     );
     let has_tests = |path: &str| {
-        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
+        tracedecay_code_index::is_test_file(path) || files_with_inline_tests.contains(path)
     };
     for impacted_symbol in &impacted.impacted {
         let impacted_node = &impacted_symbol.summary;
@@ -344,7 +344,7 @@ pub(crate) async fn handle_diff_context(
     );
 
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         &args,
         &output,
         touched_files,
@@ -352,8 +352,8 @@ pub(crate) async fn handle_diff_context(
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
-pub(crate) async fn handle_changelog<F>(
-    cg: &TraceDecay,
+pub async fn handle_changelog<F>(
+    ctx: &McpToolContext<'_>,
     graph: F,
     args: Value,
 ) -> Result<ToolResult>
@@ -380,7 +380,7 @@ where
     // that git itself refuses must report its typed git error rather than
     // whatever state the graph projection mount is in.
     let changes = {
-        let project_root = cg.project_root().to_path_buf();
+        let project_root = ctx.project_root().to_path_buf();
         let from_ref = from_ref.to_owned();
         let to_ref = to_ref.to_owned();
         match hotpath::future!(
@@ -393,11 +393,12 @@ where
         {
             Ok(files) => files,
             Err(e) => {
-                return Ok(git_error_result(cg, &args, "diff", &e));
+                return Ok(git_error_result(ctx, &args, "diff", &e));
             }
         }
     };
     let graph = &hotpath::future!(graph, label = "mcp.git.changelog.graph_admission").await?;
+    ctx.verify_graph_scope(graph)?;
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
     let graph_symbols = hotpath::measure_block!(
@@ -456,7 +457,7 @@ where
     );
 
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         &args,
         &result,
         touched_files,
@@ -464,11 +465,12 @@ where
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.commit_context.total")]
-pub(crate) async fn handle_commit_context(
-    cg: &TraceDecay,
+pub async fn handle_commit_context(
+    ctx: &McpToolContext<'_>,
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
+    ctx.verify_graph_scope(graph)?;
     let staged_only = args
         .get("staged_only")
         .and_then(serde_json::Value::as_bool)
@@ -477,7 +479,7 @@ pub(crate) async fn handle_commit_context(
     // gix status classification walks the whole worktree; keep it off the
     // request runtime's workers so the carried dispatch deadline can preempt it.
     let changed_files = {
-        let project_root = cg.project_root().to_path_buf();
+        let project_root = ctx.project_root().to_path_buf();
         match hotpath::future!(
             blocking_git_span("status", move || {
                 git_changed_files(&project_root, staged_only)
@@ -488,13 +490,13 @@ pub(crate) async fn handle_commit_context(
         {
             Ok(files) => files,
             Err(e) => {
-                return Ok(git_error_result(cg, &args, "status", &e));
+                return Ok(git_error_result(ctx, &args, "status", &e));
             }
         }
     };
 
     if changed_files.is_empty() {
-        let project_root = cg.project_root().to_path_buf();
+        let project_root = ctx.project_root().to_path_buf();
         let recent_commits = match hotpath::future!(
             blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
             label = "mcp.git.commit_context.recent_commits"
@@ -503,7 +505,7 @@ pub(crate) async fn handle_commit_context(
         {
             Ok(commits) => commits,
             Err(e) => {
-                return Ok(git_error_result(cg, &args, "log", &e));
+                return Ok(git_error_result(ctx, &args, "log", &e));
             }
         };
         let output = hotpath::measure_block!(
@@ -517,7 +519,7 @@ pub(crate) async fn handle_commit_context(
             })
         );
         return Ok(generic_tool_result(
-            Some(cg.project_root()),
+            Some(ctx.project_root()),
             &args,
             &output,
             vec![],
@@ -586,7 +588,7 @@ pub(crate) async fn handle_commit_context(
     };
 
     let recent_commits = {
-        let project_root = cg.project_root().to_path_buf();
+        let project_root = ctx.project_root().to_path_buf();
         match hotpath::future!(
             blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
             label = "mcp.git.commit_context.recent_commits"
@@ -595,7 +597,7 @@ pub(crate) async fn handle_commit_context(
         {
             Ok(commits) => commits,
             Err(e) => {
-                return Ok(git_error_result(cg, &args, "log", &e));
+                return Ok(git_error_result(ctx, &args, "log", &e));
             }
         }
     };
@@ -613,7 +615,7 @@ pub(crate) async fn handle_commit_context(
     );
 
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         &args,
         &output,
         changed_files,
@@ -797,21 +799,18 @@ fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
 }
 
 #[hotpath::measure(future = true, label = "mcp.pr_context.total")]
-pub(crate) async fn handle_pr_context<F>(
-    cg: &TraceDecay,
+pub async fn handle_pr_context<F>(
+    ctx: &McpToolContext<'_>,
     graph: F,
     args: Value,
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
-    registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<VerifiedGraphQuery>>,
 {
     require_object_args(&args, "tracedecay_pr_context")?;
     let controls = PrContextControls {
-        deadline,
-        cancellation,
+        deadline: ctx.deadline().cloned(),
+        cancellation: ctx.cancellation().cloned(),
     };
     controls.checkpoint()?;
     let total_started = std::time::Instant::now();
@@ -819,7 +818,7 @@ where
     let base = args
         .get("base_ref")
         .and_then(|v| v.as_str())
-        .map_or_else(|| default_pr_base_ref(cg.project_root()), str::to_owned);
+        .map_or_else(|| default_pr_base_ref(ctx.project_root()), str::to_owned);
     let head = args
         .get("head_ref")
         .and_then(|v| v.as_str())
@@ -827,7 +826,7 @@ where
 
     let stage_started = std::time::Instant::now();
     let comparison = {
-        let project_root = cg.project_root().to_path_buf();
+        let project_root = ctx.project_root().to_path_buf();
         let base_ref = base.clone();
         let head_ref = head.to_owned();
         match hotpath::future!(
@@ -846,7 +845,7 @@ where
             Ok(comparison) => comparison,
             Err(e) => {
                 controls.checkpoint()?;
-                return Ok(git_error_result(cg, &args, "diff", &e));
+                return Ok(git_error_result(ctx, &args, "diff", &e));
             }
         }
     };
@@ -885,7 +884,10 @@ where
 
     let stage_started = std::time::Instant::now();
     let graph = match hotpath::future!(graph, label = "mcp.pr_context.graph_admission").await {
-        Ok(graph) => graph,
+        Ok(graph) => {
+            ctx.verify_graph_scope(&graph)?;
+            graph
+        }
         Err(error) if encoded_cursor.is_some() || !graph_enrichment_is_transient(&error) => {
             return Err(error);
         }
@@ -893,7 +895,7 @@ where
             stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
             let test_files_changed = changes
                 .iter()
-                .filter(|change| crate::tracedecay::is_test_file(&change.path))
+                .filter(|change| tracedecay_code_index::is_test_file(&change.path))
                 .map(|change| change.path.clone())
                 .collect::<Vec<_>>();
             let output = hotpath::measure_block!(
@@ -957,33 +959,41 @@ where
                 timings = %timing_value,
                 "PR context returned Git evidence while graph enrichment was unavailable"
             );
-            return Ok(
-                generic_tool_result(Some(cg.project_root()), &args, &output, changed_files)
-                    .with_internal_analytics(json!({
-                        "stage_timings_us": stage_timings,
-                        "symbol_coverage": output["symbol_page"],
-                    })),
-            );
+            return Ok(generic_tool_result(
+                Some(ctx.project_root()),
+                &args,
+                &output,
+                changed_files,
+            )
+            .with_internal_analytics(json!({
+                "stage_timings_us": stage_timings,
+                "symbol_coverage": output["symbol_page"],
+            })));
         }
     };
     stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
 
     let graph_generation = graph.generation().as_str().to_owned();
-    let project_root = cg.project_root().to_string_lossy();
-    let cursor_binding = PrContextCursorBinding {
-        protocol: "tracedecay.pr-context.cursor.v1",
-        project_root: &project_root,
-        base_oid: &base_oid,
-        head_oid: &head_oid,
-        merge_base: &merge_base,
-        graph_generation: &graph_generation,
-        maximum_symbols,
-        changes: &changes,
-    };
-    let cursor_authority = match registered_project_session_db.as_deref() {
-        Some(session_db) => Some(
+    // Byte-exact worktree identity: a lossy string would let two distinct
+    // non-UTF-8 roots mint interchangeable cursors.
+    let project_root =
+        tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(ctx.project_root().as_os_str());
+    let cursor_binding = PrContextCursorBinding::new(
+        ctx,
+        &project_root,
+        PrContextCursorComparison {
+            base_oid: &base_oid,
+            head_oid: &head_oid,
+            merge_base: &merge_base,
+            graph_generation: &graph_generation,
+            maximum_symbols,
+            changes: &changes,
+        },
+    );
+    let cursor_authority = match ctx.authorized_project_session_db() {
+        Some(_) => Some(
             hotpath::future!(
-                pr_context_cursor_authority(session_db, &cursor_binding),
+                pr_context_cursor_authority(ctx, &cursor_binding),
                 label = "mcp.pr_context.cursor_authority"
             )
             .await?,
@@ -1037,7 +1047,7 @@ where
         .collect();
     let added_path_set: HashSet<&str> = added_paths.iter().map(String::as_str).collect();
     for change in &changes {
-        if crate::tracedecay::is_test_file(&change.path)
+        if tracedecay_code_index::is_test_file(&change.path)
             || files_with_inline_tests.contains(&change.path)
         {
             test_files_changed.push(change.path.clone());
@@ -1144,7 +1154,7 @@ where
     for impacted in &impact.nodes {
         let path = symbol_path(impacted)?;
         if !changed_paths.contains(path)
-            && (crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path))
+            && (tracedecay_code_index::is_test_file(path) || files_with_inline_tests.contains(path))
         {
             affected_tests.insert(path.to_owned());
         }
@@ -1243,7 +1253,7 @@ where
     );
 
     Ok(
-        generic_tool_result(Some(cg.project_root()), &args, &output, changed_files)
+        generic_tool_result(Some(ctx.project_root()), &args, &output, changed_files)
             .with_internal_analytics(json!({
                 "stage_timings_us": stage_timings,
                 "symbol_coverage": output["symbol_page"],

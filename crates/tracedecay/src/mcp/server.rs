@@ -63,10 +63,9 @@ pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::VersionCheckState;
-pub(crate) use rmcp::{
-    RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
-    RmcpWorkDeliverySettlement,
-};
+pub(crate) use rmcp::{RmcpConnectionAdapter, RmcpInitializeResponseDecorator};
+#[cfg(test)]
+pub(crate) use rmcp::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 use tracedecay_daemon_service::{DaemonProjectRegistryReadService, DaemonWorkflowIndexReadService};
@@ -432,6 +431,10 @@ pub struct McpServer {
     /// Admission supplied by an authenticated daemon application route. It is
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
+    /// The checkout project open resolved for this route. Handler dispatch
+    /// binds every scoped authority against it, so a store lease or code-index
+    /// executor admitted for another project cannot be presented here.
+    admitted_project_scope: Option<tracedecay_contracts::ResolvedScope>,
     retained_project_server_resolver: Option<RetainedProjectServerResolver>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -910,6 +913,7 @@ impl McpServer {
             verified_graph_query_port,
             code_index_ignored_dependency_admission,
             code_index_search_authority,
+            admitted_project_scope,
             retained_project_server_resolver,
             project_routes,
             application_invocation_executor,
@@ -1176,6 +1180,7 @@ impl McpServer {
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             source_edit_rollback_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
+            admitted_project_scope,
             retained_project_server_resolver,
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,

@@ -105,11 +105,12 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.affected.total")]
-pub(crate) async fn handle_affected(
-    cg: &TraceDecay,
+pub async fn handle_affected(
+    ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
+    ctx.verify_graph_scope(graph)?;
     let files = require_string_array_arg(&args, "files")?;
     let max_depth = clamped_depth_arg(&args, "depth", 5, 10);
 
@@ -173,7 +174,7 @@ pub(crate) async fn handle_affected(
     );
 
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         &args,
         &output,
         touched_files,
@@ -245,7 +246,7 @@ mod tests {
         let mut visited = HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         for file in files {
-            if crate::tracedecay::is_test_file(file) {
+            if tracedecay_code_index::is_test_file(file) {
                 affected.insert(file.clone());
             }
             if visited.insert(file.clone()) {
@@ -260,7 +261,7 @@ mod tests {
                 if !visited.insert(dependent.clone()) {
                     continue;
                 }
-                if crate::tracedecay::is_test_file(dependent) {
+                if tracedecay_code_index::is_test_file(dependent) {
                     affected.insert(dependent.clone());
                 } else {
                     queue.push_back((dependent.clone(), depth + 1));

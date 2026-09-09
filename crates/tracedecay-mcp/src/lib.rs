@@ -1,12 +1,16 @@
 //! Portable MCP catalog, rendering, JSON-RPC transport, and server-adjacent
 //! protocol helpers.
 //!
-//! This crate owns daemon-free MCP surface: JSON-RPC contracts, concrete
+//! This crate owns the MCP surface itself: JSON-RPC contracts, concrete
 //! stdio/channel/replay transports, tool definitions, response truncation,
 //! canonical application-result presentation, request-deadline decoding,
 //! tool-error classification, hook-event plan decoding, connection scheduling,
-//! typed RMCP adaptation, and request lifecycle state. Product dependency
-//! construction and handlers that reach daemon internals stay above this crate.
+//! typed RMCP adaptation, request lifecycle state, and tool handlers that
+//! translate transport requests into business-owner calls.
+//!
+//! Handlers reach daemon state through [`McpToolContext`], filled by the
+//! composition root with the authorities admitted for the call. Product
+//! dependency construction and concrete lifecycle adapters stay in that root.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -51,6 +55,7 @@ pub mod project_access;
 pub mod response_handles;
 pub mod server;
 pub mod tool_call_deadline;
+pub mod tool_context;
 pub mod tool_errors;
 pub mod tools;
 pub mod transport;
@@ -87,6 +92,10 @@ pub use project_access::registered_project_reader_tool_names;
 pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, caller_tool_call_deadline_from_meta,
     tool_call_deadline_meta,
+};
+pub use tool_context::{
+    AdmittedCodeIndex, AdmittedProjectStore, McpToolBinding, McpToolBindingError, McpToolContext,
+    RequestControls,
 };
 pub use tool_errors::{
     mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
