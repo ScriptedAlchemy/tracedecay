@@ -344,7 +344,7 @@ pub(crate) async fn handle_status(
     if include_storage_health {
         let mut storage_health = serde_json::to_value(
             hotpath::future!(
-                crate::runtime_telemetry::collect_database(cg, false),
+                crate::mcp::tools::handlers::health::collect_database_snapshot(cg, false, None),
                 label = "mcp.info.status.storage_health"
             )
             .await?,

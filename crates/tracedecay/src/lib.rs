@@ -69,7 +69,6 @@ pub use product_runtime::{
 mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports};
-mod runtime_telemetry;
 pub mod serve;
 // Benchmark harness, not product surface: the shipped library must not carry
 // its fixture provisioning or process-environment mutation. The `session_temporal`
