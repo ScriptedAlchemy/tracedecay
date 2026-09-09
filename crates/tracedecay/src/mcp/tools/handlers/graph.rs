@@ -253,7 +253,6 @@ where
     let lexical_routing = lexical_routing::routing_from_args(&args)?;
     let lazy_indexing_requested = dependency_hints::lazy_indexing_requested(&args);
     let cursor = retrieval_cursor(&args)?;
-    let include_graph_node_ids = render::wants_json(&args);
     let limit = args
         .get("limit")
         .and_then(serde_json::Value::as_u64)
@@ -278,191 +277,48 @@ where
         deadline: deadline.clone(),
         cancellation: cancellation.clone(),
     };
-    let search = execute_code_index_search(search_executor, search_request.clone());
-    let (mut outcome, graph) = race_primary_search_with_graph(
-        search,
+    let (outcome, graph) = search_with_optional_graph(
+        search_executor,
+        search_request,
         graph,
         lazy_indexing_requested,
-        Some(limit),
         scope_prefix.is_some(),
     )
     .await;
-    let refresh_after_generation_mismatch = matches!(
-        (&outcome, &graph),
-        (
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete),
-            Ok(graph),
-        ) if graph.generation().as_str() != complete.code_generation
-            && (scope_prefix.is_some()
-                || dependency_hints::should_check_external_import_hint(
-                    complete.ordered_candidates.len(),
-                    limit,
-                ))
-    );
-    if refresh_after_generation_mismatch {
-        let refreshed = execute_code_index_search(search_executor, search_request).await;
-        if matches!(
-            refreshed,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(_)
-        ) {
-            outcome = refreshed;
-        }
-    }
     // Read after the search settles: the verdict must describe the scheduler
     // state at serve time, not a snapshot taken before the lanes ran.
     let worktree_freshness = read_worktree_freshness(freshness_reader, cg.project_root()).await;
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
-                // Explicit ignored-dependency admission is generation-checked
-                // by the canonical admission port against the graph's own
-                // active generation. It must therefore inspect the verified
-                // graph before binding optional enrichment to the text-search
-                // generation: text can truthfully serve one generation while
-                // graph activation has already advanced to its successor.
-                let graph = graph?;
-                preserve_complete_search_after_lazy_admission(
-                    hotpath::future!(
-                        dependency_hints::admit_verified_ignored_dependency(
-                            ctx,
-                            ignored_dependency_admission,
-                            &graph,
-                            query,
-                            scope_prefix
-                        ),
-                        label = "mcp.graph.search.admit"
-                    )
-                    .await,
-                )?;
-                bind_verified_graph_to_search(Ok(graph), &complete.code_generation)
-            } else {
-                bind_verified_graph_to_search(graph, &complete.code_generation)
-            };
-            let mut results = Vec::with_capacity(complete.ordered_candidates.len());
-            let mut graph_evidence = SearchGraphEvidence::new(graph.as_ref());
-            // The generation-bound display metadata names each result's
-            // declaring file; that set is the raw-read counterfactual the
-            // savings accounting charges this response against.
-            let touched_files = unique_file_paths(
-                complete
-                    .ordered_candidates
-                    .iter()
-                    .filter_map(|ranked| {
-                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
-                    })
-                    .map(|display| display.path.as_str()),
-            );
-            hotpath::measure_block!("mcp.graph.search.graph", {
-                for ranked in &complete.ordered_candidates {
-                    let mut result = json!(ranked);
-                    if let Some(display) =
-                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
-                    {
-                        result["display"] = json!({
-                            "name": display.name,
-                            "qualified_name": display.qualified_name,
-                            "kind": display.kind,
-                            "path": display.path,
-                        });
-                        if include_graph_node_ids {
-                            graph_evidence.enrich_node_id(&mut result, display);
-                        }
-                    }
-                    results.push(result);
-                }
-            });
-            let result_count = results.len();
-            let freshness = search_freshness(
-                ServedGenerationV1::Served(&complete.code_generation),
-                &complete.coverage,
-                &worktree_freshness,
-            );
-            let mut output = hotpath::measure_block!(
-                "mcp.graph.search.serialize",
-                json!({
-                "freshness": freshness,
-                "code_generation": complete.code_generation,
-                "query_fallback_digest": &complete.query_fallback.digest,
-                "semantic": semantic_status_value(semantic_mode, &complete.semantic),
-                "next_cursor": complete.next_cursor
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?,
-                "coverage": coverage_value(&complete.coverage),
-                })
-            );
-            lexical_routing::attach_route_evidence(
-                &mut output,
-                &mut results,
-                &complete.lexical_routes,
-            )?;
-            output["results"] = Value::Array(results);
-            if let Some(scope) = scope_prefix {
-                output["scope_prefix"] = json!(scope);
-                output["scope_prefix_applied"] = json!(false);
-            }
-            if let Some(unavailable) = graph_evidence.unavailable() {
-                output["verified_graph_evidence"] = unavailable.clone();
-            }
-            if (scope_prefix.is_some()
-                || dependency_hints::should_check_external_import_hint(result_count, limit))
-                && let Some(hint) =
-                    graph_evidence.external_import_hint(ctx, query, limit, scope_prefix)
-            {
-                output["external_import_hint"] = hint;
-            }
-            let output = output;
-            Ok(rendered_tool_result(
+            let graph = admit_search_graph(
+                &complete,
+                graph,
+                query,
+                scope_prefix,
+                lazy_indexing_requested,
+                ignored_dependency_admission,
+                ctx,
+            )
+            .await?;
+            render_completed_search(
                 cg,
                 &args,
-                &output,
-                touched_files,
-                || {
-                    format!(
-                        "{}{}",
-                        freshness_lines(&freshness),
-                        render_search_md(&output)
-                    )
-                },
-            ))
+                complete,
+                graph,
+                scope_prefix,
+                &worktree_freshness,
+                ctx,
+            )
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
-            let reason = unavailable.reason.as_str();
-            let graph_evidence = SearchGraphEvidence::new(graph.as_ref());
-            let freshness = search_freshness(
-                ServedGenerationV1::Unavailable { reason },
-                &unavailable.coverage,
+            Ok(render_unavailable_search(
+                cg,
+                &args,
+                unavailable,
+                graph,
+                semantic_mode,
                 &worktree_freshness,
-            );
-            let mut output = hotpath::measure_block!(
-                "mcp.graph.search.serialize",
-                json!({
-                    "freshness": freshness,
-                    "results": [],
-                    "code_generation": unavailable.code_generation,
-                    "query_fallback_digest": Value::Null,
-                    "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
-                    "status": "unavailable",
-                    "reason": reason,
-                    "coverage": coverage_value(&unavailable.coverage),
-                })
-            );
-            if let Some(unavailable_graph) = graph_evidence.unavailable() {
-                output["verified_graph_evidence"] = unavailable_graph.clone();
-            }
-            let failure = format!("code-index search unavailable: {reason}");
-            let mut result = rendered_tool_result(cg, &args, &output, Vec::new(), || {
-                format!(
-                    "{}{}",
-                    freshness_lines(&freshness),
-                    render_search_md(&output)
-                )
-            })
-            .with_failure_message(failure);
-            if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic {
-                result = result.with_semantic_error(true);
-            }
-            Ok(result)
+            ))
         }
     }
 }
@@ -795,7 +651,6 @@ where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
     let search_executor = ctx.code_index_search_executor();
-    let search_authority = ctx.code_index_search_authority();
     let deadline = ctx.deadline().cloned();
     let cancellation = ctx.cancellation().cloned();
     let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
@@ -809,10 +664,6 @@ where
         .max_code_blocks
         .map_or(5, |value| value.clamp(1, 20) as usize);
     let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
-    let lexical_routing = lexical_routing::routing_from_parts(
-        request.lexical_anchors.clone().unwrap_or_default(),
-        request.prefer_symbol.unwrap_or(false),
-    )?;
     let memory_options = context_memory_options(&args);
     let memory_read_control =
         context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
@@ -821,20 +672,7 @@ where
     // lexical/exact results or memory hostage.
     let search = execute_code_index_search(
         search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            query: task.to_owned(),
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit: max_nodes,
-            cursor: None,
-            mode: semantic_mode,
-            lexical_routing,
-            authority: search_authority.cloned(),
-            deadline,
-            cancellation,
-        },
+        context_code_search_request(cg, &request, ctx)?,
     );
     let memory = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref());
     let search_and_graph = race_primary_search_with_graph(search, graph, false, None, false);
@@ -846,79 +684,22 @@ where
             &outcome,
             crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_)
         );
-    let (complete, code_generation, coverage, freshness, search_matches) = match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let search_matches = context_search_matches(&complete, scope_prefix);
-            let code_generation = Some(complete.code_generation.clone());
-            let coverage = primitive_search_coverage(&complete.coverage);
-            let freshness = search_freshness(
-                ServedGenerationV1::Served(&complete.code_generation),
-                &complete.coverage,
-                &worktree_freshness,
-            );
-            (
-                Some(complete),
-                code_generation,
-                coverage,
-                freshness,
-                search_matches,
-            )
-        }
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
-            None,
-            unavailable.code_generation,
-            primitive_search_coverage(&unavailable.coverage),
-            search_freshness(
-                ServedGenerationV1::Unavailable {
-                    reason: unavailable.reason.as_str(),
-                },
-                &unavailable.coverage,
-                &worktree_freshness,
-            ),
-            Vec::new(),
-        ),
-    };
-    let graph = match complete.as_ref() {
-        Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
-        None => graph,
-    };
-    let (graph, projection, verified_graph_evidence) = match (graph, complete.as_ref()) {
-        (Ok(graph), Some(complete)) => match hotpath::measure_block!(
-            "mcp.graph.context.graph",
-            context_graph_projection(
-                cg,
-                &graph,
-                complete,
-                scope_prefix,
-                max_nodes,
-                include_code,
-                max_code_blocks,
-            )
-        ) {
-            Ok(projection) => (Some(graph), projection, None),
-            Err(error) => (
-                None,
-                ContextGraphProjection::default(),
-                Some(dependency_hints::unavailable_evidence(&error)),
-            ),
-        },
-        (Ok(graph), None) => (Some(graph), ContextGraphProjection::default(), None),
-        (Err(error), _) => (
-            None,
-            ContextGraphProjection::default(),
-            Some(dependency_hints::unavailable_evidence(&error)),
-        ),
-    };
+    let (complete, code_generation, coverage, freshness, search_matches) =
+        context_search_projection(outcome, scope_prefix, &worktree_freshness);
+    let (graph, projection, verified_graph_evidence) = project_context_graph(
+        cg,
+        graph,
+        complete.as_ref(),
+        scope_prefix,
+        max_nodes,
+        include_code,
+        max_code_blocks,
+    );
     let ContextMemoryOutcome {
         hits: memory_matches,
         graph_coverage: memory_graph_coverage,
         error: memory_matches_error,
     } = memory_outcome;
-    let seeds = projection
-        .selected
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect::<Vec<_>>();
     let symbol_values = projection
         .selected
         .iter()
@@ -929,87 +710,6 @@ where
         .iter()
         .map(primitive_symbol_location)
         .collect::<Result<Vec<_>>>()?;
-    let symbol_render_values = symbol_values
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let related_render_values = related_values
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let code_render_values = projection
-        .code_blocks
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut output = freshness_lines(&freshness);
-    output.push_str(&verified_context_markdown(
-        task,
-        &symbol_render_values,
-        &related_render_values,
-        &code_render_values,
-    )?);
-    if symbol_values.is_empty() {
-        append_context_search_matches(&mut output, &search_matches);
-    }
-    insert_context_memory_section(
-        &mut output,
-        &memory_matches,
-        memory_matches_error.as_deref(),
-    );
-    if mode == ContextModeV1::Plan
-        && let Some(graph) = graph.as_ref()
-    {
-        append_verified_plan_context(graph, &projection.selected, &mut output)?;
-    }
-
-    if !seeds.is_empty() {
-        let _ = write!(
-            output,
-            "\n{} {}\n",
-            CONTEXT_SEEN_NODE_IDS_LABEL,
-            serde_json::to_string(&seeds)?
-        );
-    }
-
-    let result = ContextResultV1 {
-        task: request.task,
-        mode,
-        freshness,
-        code_generation,
-        search_matches: search_matches.clone(),
-        symbols: symbol_values,
-        related_symbols: related_values,
-        code: projection.code_blocks,
-        coverage,
-        memory_matches: memory_matches.clone(),
-        memory_graph_coverage,
-        memory_matches_error: memory_matches_error.clone(),
-        verified_graph_evidence,
-    };
-    let mut value =
-        hotpath::measure_block!("mcp.graph.context.serialize", serde_json::to_value(result)?);
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
-            json!({
-                "context_memory": context_memory_analytics_value(
-                    &memory_options,
-                    &memory_matches,
-                    memory_matches_error.as_deref()
-                ),
-            }),
-        );
-    }
-    append_context_semantic_pending(&mut output, &value);
-    let mut degradation = Md::new();
-    append_coverage_md(&mut degradation, &value);
-    search_evidence::append_verified_graph_evidence_md(&mut degradation, &value);
-    let degradation = degradation.render();
-    if !degradation.is_empty() {
-        output.push('\n');
-        output.push_str(&degradation);
-    }
     let touched_files = unique_file_paths(
         projection.touched_files.iter().map(String::as_str).chain(
             search_matches
@@ -1017,14 +717,35 @@ where
                 .map(|search_match| search_match.file.as_str()),
         ),
     );
-    let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
-    let result =
-        rendered_context_tool_result(cg, &args, value, touched_files, output, preview.as_deref());
-    if strict_semantic_unavailable {
-        Ok(result.with_semantic_error(true))
+    let result = ContextResultV1 {
+        task: request.task,
+        mode,
+        freshness,
+        code_generation,
+        search_matches,
+        symbols: symbol_values,
+        related_symbols: related_values,
+        code: projection.code_blocks,
+        coverage,
+        memory_matches,
+        memory_graph_coverage,
+        memory_matches_error,
+        verified_graph_evidence,
+    };
+    let result = render_context_response(
+        cg,
+        &args,
+        result,
+        graph.as_ref(),
+        &projection.selected,
+        touched_files,
+        &memory_options,
+    )?;
+    Ok(if strict_semantic_unavailable {
+        result.with_semantic_error(true)
     } else {
-        Ok(result)
-    }
+        result
+    })
 }
 
 /// Bare-name lookup against `idx_nodes_name` — no BM25 scoring, no fuzzy
@@ -1372,60 +1093,8 @@ pub(super) async fn handle_rename_preview(
             Vec<RenamePreviewReferenceV1>,
             Vec<RenamePreviewTextOnlyMatchV1>,
         )> {
-            let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
-            let decl_snippet =
-                cached_file_lines(&project_root, &mut lines_cache, &declaration_file).and_then(
-                    |lines| {
-                        lines
-                            .get(declaration_line as usize)
-                            .map(|line| snippet_text(line))
-                    },
-                );
+            scan_rename_reference_sources(&project_root, &declaration_file, declaration_line, &walk_symbol_name, reference_inputs, &walk_touched_files, &walk_graph_counts)
 
-            let mut references =
-                Vec::<RenamePreviewReferenceV1>::with_capacity(reference_inputs.len());
-            for input in reference_inputs {
-                let source = tracedecay_runtime_core::sync::read_source_file(&project_root.join(&input.file))?;
-                let line = line_for_byte_offset(&source, input.evidence_start_byte)?;
-                let snippet = cached_file_lines(&project_root, &mut lines_cache, &input.file)
-                    .and_then(|lines| reference_line_snippet(lines, Some(line), &walk_symbol_name));
-                references.push(RenamePreviewReferenceV1 {
-                    from_node_id: input.from_node_id,
-                    from_name: input.from_name,
-                    from_kind: input.from_kind,
-                    edge_kind: input.edge_kind,
-                    file: input.file,
-                    line: user_line(line),
-                    snippet,
-                });
-            }
-
-            // Text-only matches per touched file: literal identifier occurrences
-            // of the name minus the graph occurrences already accounted for.
-            // These are the comments/strings/dynamic-dispatch/unresolved sites a
-            // graph-only rename would miss — the scan is bounded to files that
-            // already appear in the preview, so occurrences in wholly unrelated
-            // files are not counted.
-            let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
-            for file in &walk_touched_files {
-                let total =
-                    cached_file_lines(&project_root, &mut lines_cache, file).map_or(0, |lines| {
-                        lines
-                            .iter()
-                            .map(|line| count_identifier_occurrences(line, &walk_symbol_name))
-                            .sum::<usize>()
-                    });
-                let graph = walk_graph_counts.get(file).copied().unwrap_or(0);
-                let text_only = total.saturating_sub(graph);
-                if text_only > 0 {
-                    text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
-                        file: file.clone(),
-                        text_only_count: text_only,
-                        note: "text-only matches — review manually".to_owned(),
-                    });
-                }
-            }
-            Ok((decl_snippet, references, text_only_matches))
         }
         ),
         label = "mcp.graph.rename_preview.walk"
@@ -1456,6 +1125,524 @@ pub(super) async fn handle_rename_preview(
     );
 
     Ok(generic_tool_result(cg, &args, &output, touched_files))
+}
+
+fn render_completed_search(
+    cg: &TraceDecay,
+    args: &Value,
+    complete: crate::mcp::server::CodeIndexSearchCompletedV1,
+    graph: Result<tracedecay_graph_query::VerifiedGraphQuery>,
+    scope_prefix: Option<&str>,
+    worktree_freshness: &search_freshness::WorktreeFreshnessSourceV1,
+    ctx: &McpToolContext<'_>,
+) -> Result<ToolResult> {
+    let query = args["query"]
+        .as_str()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "missing required parameter: query".to_owned(),
+        })?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(10, |v| v.min(500) as usize);
+    let semantic_mode = semantic_search_mode(args)?;
+    let include_graph_node_ids = render::wants_json(args);
+    let (mut results, touched_files, graph_evidence) =
+        search_candidate_projection(&complete, &graph, include_graph_node_ids);
+    let result_count = results.len();
+    let freshness = search_freshness(
+        ServedGenerationV1::Served(&complete.code_generation),
+        &complete.coverage,
+        worktree_freshness,
+    );
+    let mut output = hotpath::measure_block!(
+        "mcp.graph.search.serialize",
+        json!({
+        "freshness": freshness,
+        "code_generation": complete.code_generation,
+        "query_fallback_digest": &complete.query_fallback.digest,
+        "semantic": semantic_status_value(semantic_mode, &complete.semantic),
+        "next_cursor": complete.next_cursor
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+        "coverage": coverage_value(&complete.coverage),
+        })
+    );
+    lexical_routing::attach_route_evidence(&mut output, &mut results, &complete.lexical_routes)?;
+    output["results"] = Value::Array(results);
+    if let Some(scope) = scope_prefix {
+        output["scope_prefix"] = json!(scope);
+        output["scope_prefix_applied"] = json!(false);
+    }
+    if let Some(unavailable) = graph_evidence.unavailable() {
+        output["verified_graph_evidence"] = unavailable.clone();
+    }
+    if (scope_prefix.is_some()
+        || dependency_hints::should_check_external_import_hint(result_count, limit))
+        && let Some(hint) = graph_evidence.external_import_hint(ctx, query, limit, scope_prefix)
+    {
+        output["external_import_hint"] = hint;
+    }
+    let output = output;
+    Ok(rendered_tool_result(
+        cg,
+        args,
+        &output,
+        touched_files,
+        || {
+            format!(
+                "{}{}",
+                freshness_lines(&freshness),
+                render_search_md(&output)
+            )
+        },
+    ))
+}
+
+fn search_candidate_projection<'a>(
+    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
+    graph: &'a Result<tracedecay_graph_query::VerifiedGraphQuery>,
+    include_graph_node_ids: bool,
+) -> (Vec<Value>, Vec<String>, SearchGraphEvidence<'a>) {
+    let mut results = Vec::with_capacity(complete.ordered_candidates.len());
+    let mut graph_evidence = SearchGraphEvidence::new(graph.as_ref());
+    // The generation-bound display metadata names each result's
+    // declaring file; that set is the raw-read counterfactual the
+    // savings accounting charges this response against.
+    let touched_files = unique_file_paths(
+        complete
+            .ordered_candidates
+            .iter()
+            .filter_map(|ranked| complete.display_by_anchor.get(&ranked.candidate.anchor_id))
+            .map(|display| display.path.as_str()),
+    );
+    hotpath::measure_block!("mcp.graph.search.graph", {
+        for ranked in &complete.ordered_candidates {
+            let mut result = json!(ranked);
+            if let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) {
+                result["display"] = json!({
+                    "name": display.name,
+                    "qualified_name": display.qualified_name,
+                    "kind": display.kind,
+                    "path": display.path,
+                });
+                if include_graph_node_ids {
+                    graph_evidence.enrich_node_id(&mut result, display);
+                }
+            }
+            results.push(result);
+        }
+    });
+    (results, touched_files, graph_evidence)
+}
+
+fn render_unavailable_search(
+    cg: &TraceDecay,
+    args: &Value,
+    unavailable: crate::mcp::server::CodeIndexSearchUnavailableV1,
+    graph: Result<tracedecay_graph_query::VerifiedGraphQuery>,
+    semantic_mode: crate::mcp::server::CodeIndexSearchModeV1,
+    worktree_freshness: &search_freshness::WorktreeFreshnessSourceV1,
+) -> ToolResult {
+    let reason = unavailable.reason.as_str();
+    let graph_evidence = SearchGraphEvidence::new(graph.as_ref());
+    let freshness = search_freshness(
+        ServedGenerationV1::Unavailable { reason },
+        &unavailable.coverage,
+        worktree_freshness,
+    );
+    let mut output = hotpath::measure_block!(
+        "mcp.graph.search.serialize",
+        json!({
+            "freshness": freshness,
+            "results": [],
+            "code_generation": unavailable.code_generation,
+            "query_fallback_digest": Value::Null,
+            "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
+            "status": "unavailable",
+            "reason": reason,
+            "coverage": coverage_value(&unavailable.coverage),
+        })
+    );
+    if let Some(unavailable_graph) = graph_evidence.unavailable() {
+        output["verified_graph_evidence"] = unavailable_graph.clone();
+    }
+    let failure = format!("code-index search unavailable: {reason}");
+    let mut result = rendered_tool_result(cg, args, &output, Vec::new(), || {
+        format!(
+            "{}{}",
+            freshness_lines(&freshness),
+            render_search_md(&output)
+        )
+    })
+    .with_failure_message(failure);
+    if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic {
+        result = result.with_semantic_error(true);
+    }
+    result
+}
+
+fn scan_rename_reference_sources(
+    project_root: &Path,
+    declaration_file: &str,
+    declaration_line: u32,
+    walk_symbol_name: &str,
+    reference_inputs: Vec<RenameReferenceSiteInput>,
+    walk_touched_files: &[String],
+    walk_graph_counts: &HashMap<String, usize>,
+) -> Result<(
+    Option<String>,
+    Vec<RenamePreviewReferenceV1>,
+    Vec<RenamePreviewTextOnlyMatchV1>,
+)> {
+    let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let decl_snippet = cached_file_lines(project_root, &mut lines_cache, declaration_file)
+        .and_then(|lines| {
+            lines
+                .get(declaration_line as usize)
+                .map(|line| snippet_text(line))
+        });
+
+    let mut references = Vec::<RenamePreviewReferenceV1>::with_capacity(reference_inputs.len());
+    for input in reference_inputs {
+        let source =
+            tracedecay_runtime_core::sync::read_source_file(&project_root.join(&input.file))?;
+        let line = line_for_byte_offset(&source, input.evidence_start_byte)?;
+        let snippet = cached_file_lines(project_root, &mut lines_cache, &input.file)
+            .and_then(|lines| reference_line_snippet(lines, Some(line), walk_symbol_name));
+        references.push(RenamePreviewReferenceV1 {
+            from_node_id: input.from_node_id,
+            from_name: input.from_name,
+            from_kind: input.from_kind,
+            edge_kind: input.edge_kind,
+            file: input.file,
+            line: user_line(line),
+            snippet,
+        });
+    }
+
+    // Text-only matches per touched file: literal identifier occurrences
+    // of the name minus the graph occurrences already accounted for.
+    // These are the comments/strings/dynamic-dispatch/unresolved sites a
+    // graph-only rename would miss — the scan is bounded to files that
+    // already appear in the preview, so occurrences in wholly unrelated
+    // files are not counted.
+    let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
+    for file in walk_touched_files {
+        let total = cached_file_lines(project_root, &mut lines_cache, file).map_or(0, |lines| {
+            lines
+                .iter()
+                .map(|line| count_identifier_occurrences(line, walk_symbol_name))
+                .sum::<usize>()
+        });
+        let graph = walk_graph_counts.get(file).copied().unwrap_or(0);
+        let text_only = total.saturating_sub(graph);
+        if text_only > 0 {
+            text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
+                file: file.clone(),
+                text_only_count: text_only,
+                note: "text-only matches — review manually".to_owned(),
+            });
+        }
+    }
+    Ok((decl_snippet, references, text_only_matches))
+}
+
+fn render_context_response(
+    cg: &TraceDecay,
+    args: &Value,
+    result: ContextResultV1,
+    graph: Option<&tracedecay_graph_query::VerifiedGraphQuery>,
+    selected: &[CodeGraphSymbolSummaryV1],
+    touched_files: Vec<String>,
+    memory_options: &context_support::ContextMemoryOptions,
+) -> Result<ToolResult> {
+    let seeds = selected
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    let symbol_render_values = result
+        .symbols
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let related_render_values = result
+        .related_symbols
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let code_render_values = result
+        .code
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut output = freshness_lines(&result.freshness);
+    output.push_str(&verified_context_markdown(
+        &result.task,
+        &symbol_render_values,
+        &related_render_values,
+        &code_render_values,
+    )?);
+    if result.symbols.is_empty() {
+        append_context_search_matches(&mut output, &result.search_matches);
+    }
+    insert_context_memory_section(
+        &mut output,
+        &result.memory_matches,
+        result.memory_matches_error.as_deref(),
+    );
+    if result.mode == ContextModeV1::Plan
+        && let Some(graph) = graph.as_ref()
+    {
+        append_verified_plan_context(graph, selected, &mut output)?;
+    }
+
+    if !seeds.is_empty() {
+        let _ = write!(
+            output,
+            "\n{} {}\n",
+            CONTEXT_SEEN_NODE_IDS_LABEL,
+            serde_json::to_string(&seeds)?
+        );
+    }
+
+    let mut value = hotpath::measure_block!(
+        "mcp.graph.context.serialize",
+        serde_json::to_value(&result)?
+    );
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
+            json!({
+                "context_memory": context_memory_analytics_value(
+                    memory_options,
+                    &result.memory_matches,
+                    result.memory_matches_error.as_deref()
+                ),
+            }),
+        );
+    }
+    append_context_semantic_pending(&mut output, &value);
+    let mut degradation = Md::new();
+    append_coverage_md(&mut degradation, &value);
+    search_evidence::append_verified_graph_evidence_md(&mut degradation, &value);
+    let degradation = degradation.render();
+    if !degradation.is_empty() {
+        output.push('\n');
+        output.push_str(&degradation);
+    }
+    let preview = (!render::wants_json(args)).then(|| context_markdown_lane_preview(&output));
+    let result =
+        rendered_context_tool_result(cg, args, value, touched_files, output, preview.as_deref());
+    Ok(result)
+}
+
+fn context_search_projection(
+    outcome: crate::mcp::server::CodeIndexSearchOutcomeV1,
+    scope_prefix: Option<&str>,
+    worktree_freshness: &search_freshness::WorktreeFreshnessSourceV1,
+) -> (
+    Option<crate::mcp::server::CodeIndexSearchCompletedV1>,
+    Option<String>,
+    tracedecay_contracts::retrieval::PrimitiveSearchCoverageV1,
+    tracedecay_contracts::retrieval::PrimitiveSearchFreshnessV1,
+    Vec<ContextSearchMatchV1>,
+) {
+    let (complete, code_generation, coverage, freshness, search_matches) = match outcome {
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+            let search_matches = context_search_matches(&complete, scope_prefix);
+            let code_generation = Some(complete.code_generation.clone());
+            let coverage = primitive_search_coverage(&complete.coverage);
+            let freshness = search_freshness(
+                ServedGenerationV1::Served(&complete.code_generation),
+                &complete.coverage,
+                worktree_freshness,
+            );
+            (
+                Some(complete),
+                code_generation,
+                coverage,
+                freshness,
+                search_matches,
+            )
+        }
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
+            None,
+            unavailable.code_generation,
+            primitive_search_coverage(&unavailable.coverage),
+            search_freshness(
+                ServedGenerationV1::Unavailable {
+                    reason: unavailable.reason.as_str(),
+                },
+                &unavailable.coverage,
+                worktree_freshness,
+            ),
+            Vec::new(),
+        ),
+    };
+    (
+        complete,
+        code_generation,
+        coverage,
+        freshness,
+        search_matches,
+    )
+}
+
+fn project_context_graph(
+    cg: &TraceDecay,
+    graph: Result<tracedecay_graph_query::VerifiedGraphQuery>,
+    complete: Option<&crate::mcp::server::CodeIndexSearchCompletedV1>,
+    scope_prefix: Option<&str>,
+    max_nodes: usize,
+    include_code: bool,
+    max_code_blocks: usize,
+) -> (
+    Option<tracedecay_graph_query::VerifiedGraphQuery>,
+    ContextGraphProjection,
+    Option<tracedecay_contracts::retrieval::PrimitiveUnavailableEvidenceV1>,
+) {
+    let graph = match complete {
+        Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
+        None => graph,
+    };
+    let (graph, projection, verified_graph_evidence) = match (graph, complete) {
+        (Ok(graph), Some(complete)) => match hotpath::measure_block!(
+            "mcp.graph.context.graph",
+            context_graph_projection(
+                cg,
+                &graph,
+                complete,
+                scope_prefix,
+                max_nodes,
+                include_code,
+                max_code_blocks,
+            )
+        ) {
+            Ok(projection) => (Some(graph), projection, None),
+            Err(error) => (
+                None,
+                ContextGraphProjection::default(),
+                Some(dependency_hints::unavailable_evidence(&error)),
+            ),
+        },
+        (Ok(graph), None) => (Some(graph), ContextGraphProjection::default(), None),
+        (Err(error), _) => (
+            None,
+            ContextGraphProjection::default(),
+            Some(dependency_hints::unavailable_evidence(&error)),
+        ),
+    };
+    (graph, projection, verified_graph_evidence)
+}
+
+async fn admit_search_graph(
+    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
+    graph: Result<tracedecay_graph_query::VerifiedGraphQuery>,
+    query: &str,
+    scope_prefix: Option<&str>,
+    lazy_indexing_requested: bool,
+    ignored_dependency_admission: Option<
+        &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
+    >,
+    ctx: &McpToolContext<'_>,
+) -> Result<Result<tracedecay_graph_query::VerifiedGraphQuery>> {
+    let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
+        // Explicit ignored-dependency admission is generation-checked
+        // by the canonical admission port against the graph's own
+        // active generation. It must therefore inspect the verified
+        // graph before binding optional enrichment to the text-search
+        // generation: text can truthfully serve one generation while
+        // graph activation has already advanced to its successor.
+        let graph = graph?;
+        preserve_complete_search_after_lazy_admission(
+            hotpath::future!(
+                dependency_hints::admit_verified_ignored_dependency(
+                    ctx,
+                    ignored_dependency_admission,
+                    &graph,
+                    query,
+                    scope_prefix
+                ),
+                label = "mcp.graph.search.admit"
+            )
+            .await,
+        )?;
+        bind_verified_graph_to_search(Ok(graph), &complete.code_generation)
+    } else {
+        bind_verified_graph_to_search(graph, &complete.code_generation)
+    };
+    Ok(graph)
+}
+
+async fn search_with_optional_graph<F>(
+    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
+    search_request: crate::mcp::server::CodeIndexSearchRequestV1,
+    graph: F,
+    lazy_indexing_requested: bool,
+    scoped: bool,
+) -> (
+    crate::mcp::server::CodeIndexSearchOutcomeV1,
+    Result<tracedecay_graph_query::VerifiedGraphQuery>,
+)
+where
+    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
+{
+    let limit = search_request.limit;
+    let search = execute_code_index_search(search_executor, search_request.clone());
+    let (mut outcome, graph) =
+        race_primary_search_with_graph(search, graph, lazy_indexing_requested, Some(limit), scoped)
+            .await;
+    let refresh_after_generation_mismatch = matches!(
+        (&outcome, &graph),
+        (
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete),
+            Ok(graph),
+        ) if graph.generation().as_str() != complete.code_generation
+            && (scoped
+                || dependency_hints::should_check_external_import_hint(
+                    complete.ordered_candidates.len(),
+                    limit,
+                ))
+    );
+    if refresh_after_generation_mismatch {
+        let refreshed = execute_code_index_search(search_executor, search_request).await;
+        if matches!(
+            refreshed,
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(_)
+        ) {
+            outcome = refreshed;
+        }
+    }
+    (outcome, graph)
+}
+
+fn context_code_search_request(
+    cg: &TraceDecay,
+    request: &ContextSurfaceRequestV1,
+    ctx: &McpToolContext<'_>,
+) -> Result<crate::mcp::server::CodeIndexSearchRequestV1> {
+    let lexical_routing = lexical_routing::routing_from_parts(
+        request.lexical_anchors.clone().unwrap_or_default(),
+        request.prefer_symbol.unwrap_or(false),
+    )?;
+    Ok(crate::mcp::server::CodeIndexSearchRequestV1 {
+        project_root: cg.project_root().to_path_buf(),
+        query: request.task.clone(),
+        source_revision: None,
+        source_tree: None,
+        source_reference: None,
+        limit: request
+            .max_nodes
+            .map_or(20, |value| value.clamp(1, 200) as usize),
+        cursor: None,
+        mode: primitive_semantic_search_mode(request.semantic_mode),
+        lexical_routing,
+        authority: ctx.code_index_search_authority().cloned(),
+        deadline: ctx.deadline().cloned(),
+        cancellation: ctx.cancellation().cloned(),
+    })
 }
 
 #[cfg(test)]
@@ -2023,6 +2210,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One ordered fixture follows lexical route admission through both request forwarding and rendered evidence"
+    )]
     async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
         let dir = tempfile::TempDir::new().expect("lexical routing isolation");
         let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());

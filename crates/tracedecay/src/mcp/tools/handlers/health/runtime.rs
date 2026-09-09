@@ -238,6 +238,67 @@ pub(crate) async fn handle_runtime(
             .get("session_temporal_health")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    attach_runtime_authority_health(
+        &mut value,
+        authority_audit,
+        include_session_temporal_health,
+        registry,
+        project_session_db,
+    )
+    .await;
+    if args
+        .get("session_ingest_health")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        attach_session_ingest_health(&mut value, project_session_db).await;
+    }
+    if args
+        .get("doctor_report")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        hotpath::future!(
+            attach_doctor_report(&mut value, doctor_report_reader),
+            label = "mcp.health.runtime.doctor_report"
+        )
+        .await;
+    }
+    let semantic_configuration = hotpath::future!(
+        cg.configuration_runtime().client().current(),
+        label = "mcp.health.runtime.semantic"
+    )
+    .await
+    .ok()
+    .and_then(|pinned| {
+        tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
+            &pinned.into_current_state(),
+        )
+        .ok()
+    });
+    value["semantic_runtime"] = serde_json::to_value(
+        tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
+            Some(cg.project_root()),
+            semantic_configuration,
+        ),
+    )
+    .unwrap_or_else(|_| json!({}));
+    value["semantic_model"] = json!(project_lifecycle_status(cg.project_root()));
+    Ok(generic_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &value,
+        vec![],
+    ))
+}
+
+async fn attach_runtime_authority_health(
+    value: &mut Value,
+    authority_audit: bool,
+    include_session_temporal_health: bool,
+    registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+    project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) {
     if authority_audit || include_session_temporal_health {
         let (authority, temporal) = tokio::join!(
             async {
@@ -284,98 +345,61 @@ pub(crate) async fn handle_runtime(
             value["session_temporal_health"] = temporal;
         }
     }
-    if args
-        .get("session_ingest_health")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        match project_session_db {
-            Some(db) => {
-                value["cursor_session_ingest"] = match hotpath::future!(
-                    db.cursor_session_ingest_health(),
-                    label = "mcp.health.runtime.session_ingest"
-                )
-                .await
-                {
-                    Ok(health) => serde_json::to_value(health).unwrap_or_else(|error| {
-                        json!({
-                            "status": "unavailable",
-                            "reason": "session_ingest_serialization_failed",
-                            "message": error.to_string(),
-                        })
-                    }),
-                    Err(error) => json!({
+}
+
+async fn attach_session_ingest_health(
+    value: &mut Value,
+    project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) {
+    match project_session_db {
+        Some(db) => {
+            value["cursor_session_ingest"] = match hotpath::future!(
+                db.cursor_session_ingest_health(),
+                label = "mcp.health.runtime.session_ingest"
+            )
+            .await
+            {
+                Ok(health) => serde_json::to_value(health).unwrap_or_else(|error| {
+                    json!({
                         "status": "unavailable",
-                        "reason": "session_ingest_query_failed",
-                        "message": error,
-                    }),
-                };
-                match hotpath::future!(
-                    db.read_snapshot(),
-                    label = "mcp.health.runtime.session_snapshot"
-                )
-                .await
-                {
-                    Ok(snapshot) => {
-                        value["cursor_session_placeholder_paths"] = json!(
-                            hotpath::future!(
-                                literal_workspace_placeholder_transcript_paths(&snapshot, 10),
-                                label = "mcp.health.runtime.placeholder_paths"
-                            )
-                            .await
-                        );
-                    }
-                    Err(_) => {
-                        value["cursor_session_placeholder_paths"] = json!([]);
-                    }
+                        "reason": "session_ingest_serialization_failed",
+                        "message": error.to_string(),
+                    })
+                }),
+                Err(error) => json!({
+                    "status": "unavailable",
+                    "reason": "session_ingest_query_failed",
+                    "message": error,
+                }),
+            };
+            match hotpath::future!(
+                db.read_snapshot(),
+                label = "mcp.health.runtime.session_snapshot"
+            )
+            .await
+            {
+                Ok(snapshot) => {
+                    value["cursor_session_placeholder_paths"] = json!(
+                        hotpath::future!(
+                            literal_workspace_placeholder_transcript_paths(&snapshot, 10),
+                            label = "mcp.health.runtime.placeholder_paths"
+                        )
+                        .await
+                    );
+                }
+                Err(_) => {
+                    value["cursor_session_placeholder_paths"] = json!([]);
                 }
             }
-            None => {
-                value["cursor_session_ingest"] = json!({
-                    "status": "unavailable",
-                    "reason": "session_store_unavailable",
-                    "message": "daemon project session authority is unavailable",
-                });
-            }
+        }
+        None => {
+            value["cursor_session_ingest"] = json!({
+                "status": "unavailable",
+                "reason": "session_store_unavailable",
+                "message": "daemon project session authority is unavailable",
+            });
         }
     }
-    if args
-        .get("doctor_report")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        hotpath::future!(
-            attach_doctor_report(&mut value, doctor_report_reader),
-            label = "mcp.health.runtime.doctor_report"
-        )
-        .await;
-    }
-    let semantic_configuration = hotpath::future!(
-        cg.configuration_runtime().client().current(),
-        label = "mcp.health.runtime.semantic"
-    )
-    .await
-    .ok()
-    .and_then(|pinned| {
-        tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
-            &pinned.into_current_state(),
-        )
-        .ok()
-    });
-    value["semantic_runtime"] = serde_json::to_value(
-        tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
-            Some(cg.project_root()),
-            semantic_configuration,
-        ),
-    )
-    .unwrap_or_else(|_| json!({}));
-    value["semantic_model"] = json!(project_lifecycle_status(cg.project_root()));
-    Ok(generic_tool_result(
-        Some(cg.project_root()),
-        &args,
-        &value,
-        vec![],
-    ))
 }
 
 #[cfg(test)]
