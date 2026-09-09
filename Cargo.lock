@@ -6723,8 +6723,11 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-code-index-retention",
+ "tracedecay-code-index-runtime",
+ "tracedecay-configuration",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6733,6 +6736,13 @@ dependencies = [
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-semantic-contracts",
+ "tracedecay-session-memory",
+ "tracedecay-store",
+ "tracedecay-store-runtime",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

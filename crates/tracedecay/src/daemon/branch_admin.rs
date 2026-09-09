@@ -23,8 +23,6 @@ use super::ProjectServerKey;
 use super::StoreOwnerKey;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
-use super::store_writer_gate::StoreWriterGates;
-pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
 use crate::mcp::tools::replay_projectless_hermes_host_admission;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -35,6 +33,8 @@ use tracedecay_daemon_service::{
     ProfileHostAdmissionReplayRegistry,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_store_runtime::StoreWriterGates;
+pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
@@ -436,7 +436,7 @@ impl ProfileHostAdmissionBootstrapContext {
 /// administration cannot prove ownership against stale daemon state.
 ///
 /// Writer admission itself is *per store* — see
-/// [`store_writer_gate`](super::store_writer_gate) for the hierarchy and the
+/// [`tracedecay_store_runtime::writer_gate`] for the hierarchy and the
 /// exclusivity argument. The proof branch administration performs is computed
 /// from one store family's database paths, so a writer on another store can
 /// never invalidate it; a single daemon-wide gate only meant a sync of project
@@ -460,7 +460,7 @@ pub(super) struct StoreAdministration {
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
-    store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
+    store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
@@ -575,7 +575,8 @@ impl Default for StoreAdministration {
             session_sync_service: Arc::new(
                 tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default(),
             ),
-            store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry::default(),
+            store_telemetry_sampling:
+                tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(unix)]
@@ -720,7 +721,7 @@ impl StoreAdministration {
 
     pub(super) fn store_telemetry_sampling(
         &self,
-    ) -> super::maintenance::StoreTelemetrySamplingRegistry {
+    ) -> tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry {
         self.store_telemetry_sampling.clone()
     }
 
