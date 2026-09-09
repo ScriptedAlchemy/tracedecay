@@ -115,7 +115,7 @@ pub(crate) async fn open_project_retained_memory_target<'a>(
         {
             return denied();
         }
-        let database = cg.project_memory_db().await.map_err(map_execution_error)?;
+        let database = cg.project_memory_db().map_err(map_execution_error)?;
         return Ok(RetainedMemoryTargetV1::new(database, owner));
     }
     if access == MemoryTargetAccessV1::Write {

@@ -1384,19 +1384,17 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     let racing_data_root = data_root.clone();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let open = tasks
-        .start(route, async move {
-            started_tx.send(()).map_err(|()| TraceDecayError::Config {
-                message: "account deletion race observer dropped".to_owned(),
-            })?;
-            release_rx.await.map_err(|_| TraceDecayError::Config {
-                message: "account deletion race release dropped".to_owned(),
-            })?;
-            std::fs::create_dir_all(&racing_data_root)?;
-            std::fs::write(racing_data_root.join("post-tombstone.txt"), "owned write")?;
-            Ok(())
-        })
-        .await;
+    let open = tasks.start(route, async move {
+        started_tx.send(()).map_err(|()| TraceDecayError::Config {
+            message: "account deletion race observer dropped".to_owned(),
+        })?;
+        release_rx.await.map_err(|_| TraceDecayError::Config {
+            message: "account deletion race release dropped".to_owned(),
+        })?;
+        std::fs::create_dir_all(&racing_data_root)?;
+        std::fs::write(racing_data_root.join("post-tombstone.txt"), "owned write")?;
+        Ok(())
+    });
     let open = match open {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
@@ -1449,7 +1447,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     };
     assert!(
         matches!(
-            tasks.start(late_route, async { Ok(()) }).await,
+            tasks.start(late_route, async { Ok(()) }),
             super::super::ProjectOpenTaskClaim::Failed(_)
         ),
         "account deletion must leave profile project-open admission closed"
@@ -1884,15 +1882,13 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
     let route = project_open_test_route("rejected");
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let first_attempts = Arc::clone(&attempts);
-    let first = tasks
-        .start(route.clone(), async move {
-            first_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(tracedecay_domain::errors::TraceDecayError::Database {
-                message: "session temporal receipts or cursor keys are mutable".to_string(),
-                operation: "ensure global database authority invariants".to_string(),
-            })
+    let first = tasks.start(route.clone(), async move {
+        first_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(tracedecay_domain::errors::TraceDecayError::Database {
+            message: "session temporal receipts or cursor keys are mutable".to_string(),
+            operation: "ensure global database authority invariants".to_string(),
         })
-        .await;
+    });
     let first = match first {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
@@ -1905,15 +1901,15 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
 
     for _ in 0..32 {
         let repeated_attempts = Arc::clone(&attempts);
-        let claim = tokio::time::timeout(
-            tokio::time::Duration::from_millis(50),
-            tasks.start(route.clone(), async move {
-                repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(())
-            }),
-        )
-        .await
-        .expect("repeated initialize/tools-list routing must return promptly");
+        let started = std::time::Instant::now();
+        let claim = tasks.start(route.clone(), async move {
+            repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        });
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "repeated initialize/tools-list routing must return promptly"
+        );
         assert!(
             matches!(
                 claim,
@@ -1923,7 +1919,7 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
             "same route must reuse its one opening or cached failure"
         );
         assert!(
-            tasks.tracked_task_count().await <= 1,
+            tasks.tracked_task_count() <= 1,
             "same route must never accumulate detached open tasks"
         );
     }
@@ -1938,16 +1934,16 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         "cached route failure must carry the stable backoff marker: {error}"
     );
     let repeated_attempts = Arc::clone(&attempts);
-    let repeated_error = match tokio::time::timeout(
-        tokio::time::Duration::from_millis(50),
-        tasks.start(route, async move {
-            repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        }),
-    )
-    .await
-    .expect("cached invariant failure must return promptly")
-    {
+    let started = std::time::Instant::now();
+    let claim = tasks.start(route, async move {
+        repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    });
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(50),
+        "cached invariant failure must return promptly"
+    );
+    let repeated_error = match claim {
         super::super::ProjectOpenTaskClaim::Failed(failure) => failure.to_error(),
         super::super::ProjectOpenTaskClaim::InFlight(_) => {
             panic!("cached invariant failure must not re-open the route")
@@ -1968,7 +1964,7 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         "repeated bootstrap requests must use one bounded open attempt"
     );
     assert_eq!(
-        tasks.tracked_route_count().await,
+        tasks.tracked_route_count(),
         1,
         "the rejected route must retain one backoff entry"
     );
@@ -1990,25 +1986,21 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
 async fn project_open_task_registry_caps_distinct_inflight_routes() {
     let tasks = super::super::ProjectOpenTasks::default();
     for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
-        let claim = tasks
-            .start(
-                project_open_test_route(&format!("bounded-{index}")),
-                std::future::pending::<tracedecay_domain::errors::Result<()>>(),
-            )
-            .await;
+        let claim = tasks.start(
+            project_open_test_route(&format!("bounded-{index}")),
+            std::future::pending::<tracedecay_domain::errors::Result<()>>(),
+        );
         assert!(
             matches!(claim, super::super::ProjectOpenTaskClaim::InFlight(_)),
             "each route inside the configured bound must get one task"
         );
     }
     assert_eq!(
-        tasks.tracked_task_count().await,
+        tasks.tracked_task_count(),
         super::super::MAX_TRACKED_PROJECT_OPEN_TASKS
     );
 
-    let overflow = tasks
-        .start(project_open_test_route("overflow"), async { Ok(()) })
-        .await;
+    let overflow = tasks.start(project_open_test_route("overflow"), async { Ok(()) });
     assert!(
         matches!(overflow, super::super::ProjectOpenTaskClaim::Saturated),
         "a new route must not create an unbounded detached task"
@@ -2030,25 +2022,22 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
     );
 
     tasks.shutdown().await;
-    assert_eq!(tasks.tracked_task_count().await, 0);
-    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert_eq!(tasks.tracked_task_count(), 0);
+    assert_eq!(tasks.tracked_route_count(), 0);
 }
 
 #[tokio::test]
 async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
     let tasks = super::super::ProjectOpenTasks::default();
     for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
-        let state = match tasks
-            .start(
-                project_open_test_route(&format!("cached-failure-{index}")),
-                async {
-                    Err(authority_invariant_error(
-                        "invalid committed observation authority JSON",
-                    ))
-                },
-            )
-            .await
-        {
+        let state = match tasks.start(
+            project_open_test_route(&format!("cached-failure-{index}")),
+            async {
+                Err(authority_invariant_error(
+                    "invalid committed observation authority JSON",
+                ))
+            },
+        ) {
             super::super::ProjectOpenTaskClaim::InFlight(state) => state,
             super::super::ProjectOpenTaskClaim::Failed(_) => {
                 panic!("first route attempt must start")
@@ -2062,11 +2051,9 @@ async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
             .expect_err("injected authority failure must surface");
     }
 
-    let healthy = tasks
-        .start(project_open_test_route("healthy-after-failures"), async {
-            Ok(())
-        })
-        .await;
+    let healthy = tasks.start(project_open_test_route("healthy-after-failures"), async {
+        Ok(())
+    });
     let state = match healthy {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
@@ -2085,17 +2072,14 @@ async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
 async fn project_open_failure_cache_is_bounded_separately() {
     let tasks = super::super::ProjectOpenTasks::default();
     for index in 0..(super::super::MAX_CACHED_PROJECT_OPEN_FAILURES + 8) {
-        let state = match tasks
-            .start(
-                project_open_test_route(&format!("bounded-failure-{index}")),
-                async {
-                    Err(authority_invariant_error(
-                        "invalid committed observation authority JSON",
-                    ))
-                },
-            )
-            .await
-        {
+        let state = match tasks.start(
+            project_open_test_route(&format!("bounded-failure-{index}")),
+            async {
+                Err(authority_invariant_error(
+                    "invalid committed observation authority JSON",
+                ))
+            },
+        ) {
             super::super::ProjectOpenTaskClaim::InFlight(state) => state,
             super::super::ProjectOpenTaskClaim::Failed(_) => {
                 panic!("each distinct route must start once")
@@ -2109,7 +2093,7 @@ async fn project_open_failure_cache_is_bounded_separately() {
             .expect_err("injected authority failure must surface");
     }
     assert!(
-        tasks.tracked_route_count().await <= super::super::MAX_CACHED_PROJECT_OPEN_FAILURES,
+        tasks.tracked_route_count() <= super::super::MAX_CACHED_PROJECT_OPEN_FAILURES,
         "failure cache must stay independently bounded"
     );
 }
@@ -2238,15 +2222,12 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let rejected_attempts = Arc::clone(&attempts);
-    let rejected_state = match tasks
-        .start(rejected.clone(), async move {
-            rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "identity cutover conflict: strict route invariant".to_string(),
-            })
+    let rejected_state = match tasks.start(rejected.clone(), async move {
+        rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "identity cutover conflict: strict route invariant".to_string(),
         })
-        .await
-    {
+    }) {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
             panic!("first rejected route attempt must start")
@@ -2258,13 +2239,10 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
         .expect_err("rejected route must fail");
 
     let healthy_attempts = Arc::clone(&attempts);
-    let healthy_state = match tasks
-        .start(healthy, async move {
-            healthy_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        })
-        .await
-    {
+    let healthy_state = match tasks.start(healthy, async move {
+        healthy_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }) {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
             panic!("a rejected route must not poison another route")
@@ -2282,13 +2260,10 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
     )
     .await;
     let retry_attempts = Arc::clone(&attempts);
-    let retry_state = match tasks
-        .start(rejected, async move {
-            retry_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        })
-        .await
-    {
+    let retry_state = match tasks.start(rejected, async move {
+        retry_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }) {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
             panic!("backoff expiry must allow a new route attempt")
@@ -2313,27 +2288,24 @@ async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
     let route = project_open_test_route("shutdown");
     let started = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
-    let state = match tasks
-        .start_cancellable(route, move |cancellation| async move {
-            task_started.notify_one();
-            cancellation.cancelled().await;
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "project open cancelled".to_string(),
-            })
+    let state = match tasks.start_cancellable(route, move |cancellation| async move {
+        task_started.notify_one();
+        cancellation.cancelled().await;
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "project open cancelled".to_string(),
         })
-        .await
-    {
+    }) {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
         super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
     };
     started.notified().await;
-    assert_eq!(tasks.tracked_task_count().await, 1);
+    assert_eq!(tasks.tracked_task_count(), 1);
 
     tasks.shutdown().await;
 
-    assert_eq!(tasks.tracked_task_count().await, 0);
-    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert_eq!(tasks.tracked_task_count(), 0);
+    assert_eq!(tasks.tracked_route_count(), 0);
     assert!(
         super::super::ProjectOpenTasks::wait_for_completion(state)
             .await
@@ -2353,27 +2325,24 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
     let (unit_finished_tx, unit_finished_rx) = tokio::sync::oneshot::channel();
 
     let task_lifecycle = lifecycle.clone();
-    let state = match tasks
-        .start_cancellable(route, move |cancellation| async move {
-            let _activity = task_lifecycle
-                .try_enter()
-                .expect("project open lifecycle activity");
-            let published_cancellation = cancellation.clone();
-            cancellation_tx
-                .send(published_cancellation)
-                .expect("publish project-open cancellation");
-            unit_started_tx.send(()).expect("publish safe unit start");
-            unit_release_rx.await.expect("release safe unit");
-            unit_finished_tx
-                .send(())
-                .expect("publish safe unit completion");
-            cancellation.cancelled().await;
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "project open cancelled after safe unit".to_string(),
-            })
+    let state = match tasks.start_cancellable(route, move |cancellation| async move {
+        let _activity = task_lifecycle
+            .try_enter()
+            .expect("project open lifecycle activity");
+        let published_cancellation = cancellation.clone();
+        cancellation_tx
+            .send(published_cancellation)
+            .expect("publish project-open cancellation");
+        unit_started_tx.send(()).expect("publish safe unit start");
+        unit_release_rx.await.expect("release safe unit");
+        unit_finished_tx
+            .send(())
+            .expect("publish safe unit completion");
+        cancellation.cancelled().await;
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "project open cancelled after safe unit".to_string(),
         })
-        .await
-    {
+    }) {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => panic!("project open must start"),
         super::super::ProjectOpenTaskClaim::Saturated => panic!("project open must fit"),
@@ -2412,7 +2381,7 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
     )
     .await
     .expect("client-drain lifecycle activity must be released");
-    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert_eq!(tasks.tracked_route_count(), 0);
     super::super::ProjectOpenTasks::wait_for_completion(state)
         .await
         .expect_err("cancelled project open must report a terminal failure");
@@ -2429,14 +2398,11 @@ async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
     let route = project_open_test_route("shutdown-backstop");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    match tasks
-        .start_cancellable(route, move |_| async move {
-            started_tx.send(()).expect("publish task start");
-            release_rx.await.expect("release task");
-            Ok(())
-        })
-        .await
-    {
+    match tasks.start_cancellable(route, move |_| async move {
+        started_tx.send(()).expect("publish task start");
+        release_rx.await.expect("release task");
+        Ok(())
+    }) {
         super::super::ProjectOpenTaskClaim::InFlight(_) => {}
         super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
         super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
@@ -2454,7 +2420,7 @@ async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
             .await,
         "the abort backstop must join a task that ignored its cancellation"
     );
-    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert_eq!(tasks.tracked_route_count(), 0);
     // The abort dropped the task body, and with it the release receiver:
     // there is nothing left for a retry to join.
     assert!(
@@ -2470,21 +2436,19 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
     let target = project_open_test_route("target-project-open");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let state = tasks
-        .start(unrelated.clone(), async move {
-            started_tx.send(()).map_err(|()| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "unrelated open observer dropped".to_owned(),
-                }
+    let state = tasks.start(unrelated.clone(), async move {
+        started_tx
+            .send(())
+            .map_err(|()| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unrelated open observer dropped".to_owned(),
             })?;
-            release_rx
-                .await
-                .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "unrelated open release dropped".to_owned(),
-                })?;
-            Ok(())
-        })
-        .await;
+        release_rx
+            .await
+            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unrelated open release dropped".to_owned(),
+            })?;
+        Ok(())
+    });
     let state = match state {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
@@ -2557,13 +2521,11 @@ async fn project_deletion_retires_rootless_open_by_persisted_project_identity() 
     let tasks = super::super::ProjectOpenTasks::default();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let _claim = tasks
-        .start_cancellable(route, move |_| async move {
-            started_tx.send(()).expect("publish start");
-            release_rx.await.expect("release rootless open");
-            Ok(())
-        })
-        .await;
+    let _claim = tasks.start_cancellable(route, move |_| async move {
+        started_tx.send(()).expect("publish start");
+        release_rx.await.expect("release rootless open");
+        Ok(())
+    });
     started_rx.await.expect("rootless open started");
     let roots = std::collections::BTreeSet::new();
     assert!(
@@ -2577,7 +2539,7 @@ async fn project_deletion_retires_rootless_open_by_persisted_project_identity() 
             .await,
         "in-flight rootless open must remain owned while settling"
     );
-    assert_eq!(tasks.tracked_route_count().await, 1);
+    assert_eq!(tasks.tracked_route_count(), 1);
     release_tx.send(()).expect("release rootless open");
     assert!(
         tasks
@@ -2600,16 +2562,13 @@ async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
     let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let task_started = Arc::clone(&started);
     let task_release = Arc::clone(&release);
-    match tasks
-        .start_cancellable(route, move |_| async move {
-            task_started.store(true, std::sync::atomic::Ordering::Release);
-            while !task_release.load(std::sync::atomic::Ordering::Acquire) {
-                std::hint::spin_loop();
-            }
-            Ok(())
-        })
-        .await
-    {
+    match tasks.start_cancellable(route, move |_| async move {
+        task_started.store(true, std::sync::atomic::Ordering::Release);
+        while !task_release.load(std::sync::atomic::Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        Ok(())
+    }) {
         super::super::ProjectOpenTaskClaim::InFlight(_) => {}
         super::super::ProjectOpenTaskClaim::Failed(_) => panic!("synchronous task must start"),
         super::super::ProjectOpenTaskClaim::Saturated => panic!("synchronous task must fit"),
@@ -2629,7 +2588,7 @@ async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
     .expect("shutdown must return a settling state at its deadline");
 
     assert!(!cooperative, "synchronous work must reach the backstop");
-    assert_eq!(tasks.tracked_route_count().await, 1);
+    assert_eq!(tasks.tracked_route_count(), 1);
     release.store(true, std::sync::atomic::Ordering::Release);
     assert!(
         tasks
@@ -2639,7 +2598,7 @@ async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
             )
             .await
     );
-    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert_eq!(tasks.tracked_route_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2921,7 +2880,7 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     idle_while_writer_held.expect("draining must cancel project warmup before writer release");
     let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
     assert_eq!(
-        tasks.tracked_task_count().await,
+        tasks.tracked_task_count(),
         0,
         "daemon shutdown must clear its tracked project-open task"
     );

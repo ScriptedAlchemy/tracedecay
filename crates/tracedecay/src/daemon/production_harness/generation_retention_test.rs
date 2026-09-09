@@ -709,16 +709,13 @@ async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progr
     };
     let route_started = Arc::new(tokio::sync::Notify::new());
     let route_started_by_task = Arc::clone(&route_started);
-    let route_state = match route_tasks
-        .start_cancellable(route, move |cancellation| async move {
-            route_started_by_task.notify_one();
-            cancellation.cancelled().await;
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "CPU-quota route cancelled".to_owned(),
-            })
+    let route_state = match route_tasks.start_cancellable(route, move |cancellation| async move {
+        route_started_by_task.notify_one();
+        cancellation.cancelled().await;
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "CPU-quota route cancelled".to_owned(),
         })
-        .await
-    {
+    }) {
         crate::daemon::ProjectOpenTaskClaim::InFlight(state) => state,
         crate::daemon::ProjectOpenTaskClaim::Failed(_) => {
             panic!("route cancellation fixture must start")
@@ -761,8 +758,8 @@ async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progr
     );
 
     route_tasks.shutdown().await;
-    assert_eq!(route_tasks.tracked_task_count().await, 0);
-    assert_eq!(route_tasks.tracked_route_count().await, 0);
+    assert_eq!(route_tasks.tracked_task_count(), 0);
+    assert_eq!(route_tasks.tracked_route_count(), 0);
     crate::daemon::ProjectOpenTasks::wait_for_completion(route_state)
         .await
         .expect_err("route shutdown publishes terminal cancellation");

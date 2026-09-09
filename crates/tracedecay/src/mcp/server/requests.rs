@@ -508,7 +508,7 @@ impl McpServer {
             // Hook events were consumed by the early notification dispatch
             // above and can never reach this match with a response due.
             McpMethod::InitializedAck | McpMethod::HookEvent | McpMethod::Cancelled => None,
-            McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
+            McpMethod::ToolsList => Some(self.handle_tools_list(id)),
             McpMethod::ToolsCall => Some(
                 Box::pin(self.handle_tools_call(
                     id,
@@ -714,8 +714,8 @@ impl McpServer {
         recover_lock(&self.client_name).clone()
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_list", future = true)]
-    pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
+    #[hotpath::measure(label = "mcp.server.tools_list")]
+    pub(crate) fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
             tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
@@ -783,7 +783,7 @@ impl McpServer {
 
         match uri {
             "tracedecay://status" => self.read_resource_status(id).await,
-            "tracedecay://files" => self.read_resource_files(id).await,
+            "tracedecay://files" => self.read_resource_files(id),
             "tracedecay://overview" => self.read_resource_overview(id).await,
             "tracedecay://branches" => self.read_resource_branches(id).await,
             "tracedecay://schema" => Self::read_resource_schema(id),
@@ -828,7 +828,7 @@ impl McpServer {
     /// from another store would make an unverified or stale inventory look
     /// authoritative.
     #[hotpath::skip]
-    pub(crate) async fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
+    pub(crate) fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
         Self::resource_contents(
             id,
             "tracedecay://files",
@@ -1254,8 +1254,8 @@ impl McpServer {
         );
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call.complete.version_check", future = true)]
-    async fn append_version_notice(
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.version_check")]
+    fn append_version_notice(
         &self,
         result: &mut ToolResult,
         connection_notifications: &std::sync::Mutex<Vec<Value>>,
@@ -1283,8 +1283,8 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call.complete.index_warnings", future = true)]
-    async fn prepend_index_warnings(
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.index_warnings")]
+    fn prepend_index_warnings(
         &self,
         include_connection_worktree_warning: bool,
         result: &mut ToolResult,
@@ -1378,10 +1378,8 @@ impl McpServer {
                     )
                     .await;
                 }
-                self.append_version_notice(&mut result, connection_notifications)
-                    .await;
-                self.prepend_index_warnings(selected_owner.is_none(), &mut result)
-                    .await;
+                self.append_version_notice(&mut result, connection_notifications);
+                self.prepend_index_warnings(selected_owner.is_none(), &mut result);
                 hotpath::measure_block!(
                     "mcp.server.tools_call.complete.response",
                     JsonRpcResponse::success(id, result.value)

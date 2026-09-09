@@ -114,8 +114,7 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
             }
             if !cancellation.is_cancelled() {
                 let branch_compacted =
-                    crate::daemon::store_maintenance::run_branch_compaction(graph, compaction)
-                        .await;
+                    crate::daemon::store_maintenance::run_branch_compaction(graph, compaction);
                 if !branch_compacted {
                     outcome = MaintenanceTickOutcome::Retry;
                 }

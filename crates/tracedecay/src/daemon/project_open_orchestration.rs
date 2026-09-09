@@ -42,56 +42,50 @@ where
             "daemon is draining before project warm-up".to_string(),
         ));
     }
-    tasks
-        .start_cancellable(route, move |cancellation| async move {
-            let Some(activity) = lifecycle.try_enter() else {
-                hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
-                return Err(TraceDecayError::Config {
-                    message: "daemon is draining before project warm-up".to_string(),
-                });
-            };
-            let _activity = activity;
-            // Once admitted, warm-up may be inside a schema migration. The
-            // cancellation token is observed only at explicit boundaries around
-            // those transactionally safe units; dropping this future on drain
-            // would untrack the database owner and can interrupt SQLite
-            // mid-statement. The lifecycle activity remains held until the task
-            // reports its terminal outcome and shutdown explicitly joins it.
-            let result = Box::pin(open_project_server(cancellation.clone())).await;
-            match result {
-                Ok(server) => {
-                    project_open_cancellation_checkpoint(&cancellation)?;
-                    if let Some(initialize_request) = initialize_request {
-                        // Preserve the regular initialize side effect that records
-                        // the negotiated MCP client name on the real server.
-                        let initialize: std::pin::Pin<
-                            Box<
-                                dyn std::future::Future<Output = Option<JsonRpcResponse>>
-                                    + Send
-                                    + '_,
-                            >,
-                        > = Box::pin(server.handle_request(&initialize_request));
-                        let _ = initialize.await;
-                    }
-                    Ok(())
+    tasks.start_cancellable(route, move |cancellation| async move {
+        let Some(activity) = lifecycle.try_enter() else {
+            hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
+            return Err(TraceDecayError::Config {
+                message: "daemon is draining before project warm-up".to_string(),
+            });
+        };
+        let _activity = activity;
+        // Once admitted, warm-up may be inside a schema migration. The
+        // cancellation token is observed only at explicit boundaries around
+        // those transactionally safe units; dropping this future on drain
+        // would untrack the database owner and can interrupt SQLite
+        // mid-statement. The lifecycle activity remains held until the task
+        // reports its terminal outcome and shutdown explicitly joins it.
+        let result = Box::pin(open_project_server(cancellation.clone())).await;
+        match result {
+            Ok(server) => {
+                project_open_cancellation_checkpoint(&cancellation)?;
+                if let Some(initialize_request) = initialize_request {
+                    // Preserve the regular initialize side effect that records
+                    // the negotiated MCP client name on the real server.
+                    let initialize: std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Option<JsonRpcResponse>> + Send + '_>,
+                    > = Box::pin(server.handle_request(&initialize_request));
+                    let _ = initialize.await;
                 }
-                Err(error) => {
-                    if cancellation.is_cancelled() {
-                        return Err(error);
-                    }
-                    log_daemon_event(
-                        "project_server_warmup",
-                        &[
-                            ("outcome", "error".to_string()),
-                            ("project", project_path.display().to_string()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                    Err(error)
-                }
+                Ok(())
             }
-        })
-        .await
+            Err(error) => {
+                if cancellation.is_cancelled() {
+                    return Err(error);
+                }
+                log_daemon_event(
+                    "project_server_warmup",
+                    &[
+                        ("outcome", "error".to_string()),
+                        ("project", project_path.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                Err(error)
+            }
+        }
+    })
 }
 
 #[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
@@ -549,5 +543,5 @@ pub(super) async fn portable_cached_project_open_failure(
 ) -> Result<Option<ProjectOpenFailure>> {
     let (_, route) = project_route_for_handshake(handshake)?;
     let tasks = project_open_tasks(project_open_gates).await;
-    Ok(tasks.cached_failure(&route).await)
+    Ok(tasks.cached_failure(&route))
 }

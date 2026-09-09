@@ -356,7 +356,7 @@ struct ResolvedScope {
     project_id: ProjectId,
 }
 
-async fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
+fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
     let FactOwnerV1::Project { project_id } = cg.project_memory_owner().map_err(config_error)?
     else {
         return Err(config_error("active analytics target is not a project"));
@@ -396,7 +396,7 @@ pub(super) async fn handle_analytics(
         config_error("registered global analytics store is unavailable for tracedecay_analytics")
     })?;
 
-    let scope = resolve_scope(cg, all_projects).await?;
+    let scope = resolve_scope(cg, all_projects)?;
 
     let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
     let event_count = hotpath::future!(

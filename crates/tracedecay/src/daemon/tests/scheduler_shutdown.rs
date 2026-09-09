@@ -238,7 +238,7 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
         "shutdown must transfer scheduler-map ownership to the tracked reaper"
     );
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         1,
         "timed-out automation shutdown must retain one tracked join reaper"
     );
@@ -256,7 +256,7 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
                 .lock()
                 .await
                 .is_empty()
-                && engine.store_administration.retirement_reaper_count().await == 0
+                && engine.store_administration.retirement_reaper_count() == 0
             {
                 break;
             }
@@ -427,7 +427,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
         .await
         .expect("repeated automation retirement must reuse the tombstone");
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         1,
         "repeated retirement must not add a second reaper"
     );
@@ -471,7 +471,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
         "the first reaper shutdown must be cancelled at its wait point"
     );
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         1,
         "cancelled shutdown must leave registry ownership intact"
     );
@@ -505,10 +505,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
     tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, repeated.wait())
         .await
         .expect("repeated automation retirement did not complete");
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        0
-    );
+    assert_eq!(engine.store_administration.retirement_reaper_count(), 0);
     assert!(
         engine
             .store_administration
@@ -564,10 +561,7 @@ async fn deletion_drain_retains_already_transferred_maintenance_reaper_until_ret
             .await,
         "deletion must remain settling while a transferred owner can still write"
     );
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        1
-    );
+    assert_eq!(engine.store_administration.retirement_reaper_count(), 1);
     release.release();
     completed_rx.await.expect("maintenance owner completed");
     assert!(
@@ -578,10 +572,7 @@ async fn deletion_drain_retains_already_transferred_maintenance_reaper_until_ret
         "retry must join the retained retirement reaper"
     );
     retirement.wait().await;
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        0
-    );
+    assert_eq!(engine.store_administration.retirement_reaper_count(), 0);
 }
 
 #[cfg(unix)]
