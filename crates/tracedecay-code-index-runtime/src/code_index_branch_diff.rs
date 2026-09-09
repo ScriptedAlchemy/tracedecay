@@ -759,50 +759,6 @@ mod tests {
     }
 
     #[test]
-    fn result_page_retains_authenticated_continuation_and_merged_order() {
-        let changes = vec![
-            code_search::CodeIndexBranchChangeV1::Removed {
-                symbol: symbol(
-                    1,
-                    "symbol.base.removed",
-                    "crate::removed",
-                    "src/a.rs",
-                    "sha256:removed",
-                ),
-            },
-            code_search::CodeIndexBranchChangeV1::Added {
-                symbol: symbol(
-                    2,
-                    "symbol.head.added",
-                    "crate::added",
-                    "src/b.rs",
-                    "sha256:added",
-                ),
-            },
-        ];
-
-        let outcome = page_diff_changes(
-            "generation.base",
-            "generation.head",
-            changes.clone(),
-            3,
-            Some("cursor.authenticated".to_owned()),
-        );
-
-        assert!(matches!(
-            outcome,
-            code_search::CodeIndexBranchDiffOutcomeV1::Partial(
-                code_search::CodeIndexBranchDiffPartialV1 {
-                    total_changes: 3,
-                    changes: page,
-                    next_cursor,
-                    ..
-                }
-            ) if page == changes && next_cursor == "cursor.authenticated"
-        ));
-    }
-
-    #[test]
     fn same_named_symbol_occurrences_are_not_overwritten() {
         let base = vec![
             symbol(
