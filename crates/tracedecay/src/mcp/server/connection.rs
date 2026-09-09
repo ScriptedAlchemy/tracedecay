@@ -364,56 +364,10 @@ impl McpServer {
                 }
                 continue;
             }
-            let plan = match hook_events::decode_durable_hook_event_plan(&record.payload) {
-                Ok(plan) => plan,
-                Err(hook_events::DurableHookEventDecodeError::UnsupportedVersion) => {
-                    let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
-                    blocked_sources.insert(record.source);
-                    retained_leases.push(record.seq);
-                    non_committed_outcome.get_or_insert(outcome.clone());
-                    if target_seq == Some(record.seq) {
-                        target_outcome = Some(outcome);
-                    }
-                    continue;
-                }
-                Err(hook_events::DurableHookEventDecodeError::Malformed) => {
-                    let outcome = HostAdmissionOutcome::durable_payload_malformed();
-                    match replay
-                        .quarantine(record.seq, TerminalReason::MalformedPayload)
-                        .await
-                    {
-                        Ok(_) => {
-                            non_committed_outcome.get_or_insert(outcome.clone());
-                            if target_seq == Some(record.seq) {
-                                target_outcome = Some(outcome);
-                            }
-                        }
-                        Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
-                            blocked_sources.insert(record.source);
-                            retained_leases.push(record.seq);
-                            non_committed_outcome.get_or_insert(failure.clone());
-                            if target_seq == Some(record.seq) {
-                                target_outcome = Some(failure);
-                            }
-                        }
-                        Err(failure) => {
-                            terminal_outcome = Some(failure);
-                            break;
-                        }
-                    }
-                    continue;
-                }
-            };
-            let cg = self.reopen_if_branch_drifted().await;
-            let root = cg.project_root().to_path_buf();
-            let canonical_outcome = Box::pin(self.run_hook_event_plan(cg, &root, plan)).await;
-            let outcome = if canonical_outcome.reason_code == Some("stale_branch_authorization")
-                && !canonical_outcome.retryable
-            {
-                match replay
-                    .quarantine(record.seq, TerminalReason::StaleBranchAuthorization)
-                    .await
-                {
+            let (canonical_outcome, quarantine_reason) =
+                self.replay_hook_payload(&record.payload).await;
+            let outcome = if let Some(reason) = quarantine_reason {
+                match replay.quarantine(record.seq, reason).await {
                     Ok(_) => {
                         non_committed_outcome.get_or_insert(canonical_outcome.clone());
                         canonical_outcome
@@ -459,6 +413,34 @@ impl McpServer {
             .or(target_outcome)
             .or(non_committed_outcome)
             .unwrap_or_else(HostAdmissionOutcome::accepted_for_replay)
+    }
+
+    async fn replay_hook_payload(
+        &self,
+        payload: &[u8],
+    ) -> (HostAdmissionOutcome, Option<TerminalReason>) {
+        let plan = match hook_events::decode_durable_hook_event_plan(payload) {
+            Ok(plan) => plan,
+            Err(hook_events::DurableHookEventDecodeError::UnsupportedVersion) => {
+                return (
+                    HostAdmissionOutcome::durable_payload_unsupported_version(),
+                    None,
+                );
+            }
+            Err(hook_events::DurableHookEventDecodeError::Malformed) => {
+                return (
+                    HostAdmissionOutcome::durable_payload_malformed(),
+                    Some(TerminalReason::MalformedPayload),
+                );
+            }
+        };
+        let cg = self.reopen_if_branch_drifted().await;
+        let root = cg.project_root().to_path_buf();
+        let outcome = Box::pin(self.run_hook_event_plan(cg, &root, plan)).await;
+        let reason = (outcome.reason_code == Some("stale_branch_authorization")
+            && !outcome.retryable)
+            .then_some(TerminalReason::StaleBranchAuthorization);
+        (outcome, reason)
     }
 
     pub(crate) fn report_host_admission_outcome(outcome: &HostAdmissionOutcome) {
@@ -1156,6 +1138,10 @@ mod cancellable_queue_tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The ordered route-resolution race keeps transport cancellation, caller retirement, target accounting, and teardown in one scenario."
+    )]
     async fn cancellation_during_route_resolution_reaches_selected_live_target() {
         let _fixture_guard = DELAYED_ROUTE_FIXTURE_LOCK.lock().await;
         let isolation = tempfile::TempDir::new().expect("route cancellation isolation");
