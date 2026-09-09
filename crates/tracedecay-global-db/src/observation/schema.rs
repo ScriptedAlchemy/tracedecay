@@ -117,10 +117,7 @@ async fn observation_authority_populated(
 /// without such rows was written by a scheme that never applied to it, so
 /// enrolling it is exact rather than a migration of ambiguous data; one with
 /// such rows carries no record of which scheme wrote them and must reset.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation.native_source_census"
-)]
+#[hotpath::measure(future = true, label = "global_db.observation.native_source_census")]
 async fn cline_like_sources_present(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
