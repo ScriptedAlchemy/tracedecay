@@ -10,10 +10,10 @@ use tokio::task::JoinSet;
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
-use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 
 use super::*;
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
 use super::{StoreAdministration, StoreOwnerKey};
+use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
 
 pub(super) struct ProjectServerRetirement {
     pub(super) owner: StoreOwnerKey,
