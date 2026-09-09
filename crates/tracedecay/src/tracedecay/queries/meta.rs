@@ -1,69 +1,36 @@
 use std::path::Path;
 
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::tracedecay::{
+    add_local_counter, get_local_counter, get_tokens_saved, reset_local_counter, set_tokens_saved,
+};
 use tracedecay_configuration::TraceDecayConfig;
-use tracedecay_domain::errors::{Result, TraceDecayError};
-
-fn parse_counter(key: &'static str, value: Option<String>) -> Result<u64> {
-    let Some(value) = value else {
-        return Ok(0);
-    };
-    value
-        .parse::<u64>()
-        .map_err(|error| TraceDecayError::Database {
-            operation: format!("read {key}"),
-            message: format!("persisted {key} counter is invalid: {error}"),
-        })
-}
+use tracedecay_domain::errors::Result;
 
 impl TraceDecay {
     /// Returns the persisted tokens-saved counter.
-    #[hotpath::measure(label = "daemon.store_meta.read_tokens_saved", future = true)]
     pub async fn get_tokens_saved(&self) -> Result<u64> {
-        parse_counter("tokens_saved", self.db.get_metadata("tokens_saved").await?)
+        get_tokens_saved(&self.db).await
     }
 
     /// Persists the tokens-saved counter to the database.
-    #[hotpath::measure(label = "daemon.store_meta.write_tokens_saved", future = true)]
     pub async fn set_tokens_saved(&self, value: u64) -> Result<()> {
-        self.db
-            .set_metadata("tokens_saved", &value.to_string())
-            .await
+        set_tokens_saved(&self.db, value).await
     }
 
     /// Returns the resettable project-local token counter.
-    ///
-    /// This is separate from the main `tokens_saved` counter and can be
-    /// independently reset via [`Self::reset_local_counter`].
-    #[hotpath::measure(label = "daemon.store_meta.read_local_counter", future = true)]
     pub async fn get_local_counter(&self) -> Result<u64> {
-        parse_counter(
-            "local_counter",
-            self.db.get_metadata("local_counter").await?,
-        )
+        get_local_counter(&self.db).await
     }
 
     /// Resets the project-local token counter to zero.
-    #[hotpath::measure(label = "daemon.store_meta.reset_local_counter", future = true)]
     pub async fn reset_local_counter(&self) -> Result<()> {
-        self.db.set_metadata("local_counter", "0").await
+        reset_local_counter(&self.db).await
     }
 
     /// Increments the project-local token counter by the given amount.
-    #[hotpath::measure(label = "daemon.store_meta.add_local_counter", future = true)]
     pub async fn add_local_counter(&self, delta: u64) -> Result<()> {
-        let transaction = self.db.begin_write_transaction("add local counter").await?;
-        let current = self.get_local_counter().await?;
-        let updated = current
-            .checked_add(delta)
-            .ok_or_else(|| TraceDecayError::Database {
-                operation: "add local counter".to_owned(),
-                message: "local_counter overflowed u64".to_owned(),
-            })?;
-        self.db
-            .set_metadata_unguarded(&transaction, "local_counter", &updated.to_string())
-            .await?;
-        transaction.commit().await
+        add_local_counter(&self.db, delta).await
     }
 
     /// Checkpoints the WAL and closes the database connection.

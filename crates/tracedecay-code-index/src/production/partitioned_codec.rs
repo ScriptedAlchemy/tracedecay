@@ -704,6 +704,10 @@ where
         ) {
             return Err(self.remember_error(error));
         }
+        // Serde writes small fragments into the already bounded page. Hash its
+        // complete byte stream once here instead of updating SHA for every
+        // punctuation mark and string fragment.
+        self.segment_hasher.update(&self.page);
         self.descriptors.push(PartitionedEvidencePageDescriptorV1 {
             page_ordinal,
             page_digest,
@@ -790,7 +794,6 @@ where
             let consumed = available.min(bytes.len());
             let (head, tail) = bytes.split_at(consumed);
             self.page.extend_from_slice(head);
-            self.segment_hasher.update(head);
             self.segment_size_bytes = self
                 .segment_size_bytes
                 .checked_add(u64::try_from(consumed).map_err(|_| {
@@ -1017,6 +1020,7 @@ impl PartitionedSegmentEncoderV1 {
         &self.segment
     }
 
+    #[hotpath::measure(label = "code_index.sealed_encode.file")]
     fn encode_file_segment(
         &mut self,
         generation_id: &CodeGenerationId,
@@ -1052,6 +1056,7 @@ impl PartitionedSegmentEncoderV1 {
     /// Rewrite the serialization already staged in `payload` into one canonical
     /// segment. The typed and test entry points share this single authority so
     /// production never carries a second encoder.
+    #[hotpath::measure(label = "code_index.sealed_encode.file_rewrite")]
     fn encode_serialized_file_segment<'s>(
         &mut self,
         format_revision: u32,
@@ -1141,6 +1146,7 @@ impl PartitionedSegmentEncoderV1 {
         })
     }
 
+    #[hotpath::measure(label = "code_index.sealed_encode.evidence")]
     fn encode_generation_evidence(
         &mut self,
         generation: &CodeIndexPublishedGenerationV1,

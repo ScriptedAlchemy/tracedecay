@@ -1,5 +1,3 @@
-//! Read-side query surface for admitted graph projections and retained
-//! project metadata.
+//! Read-side store-metadata accessors for an open [`super::TraceDecay`].
 
-pub(crate) mod graph;
 mod meta;

@@ -700,7 +700,7 @@ mod projectless_admission_tests {
                 .expect("restrict foreign profile root");
         }
         crate::product_runtime::register_fixture_product_runtime();
-        crate::host_admission::ensure_process_background_cpu_authority()
+        crate::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install fixture worker authority");
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");
@@ -769,7 +769,7 @@ mod projectless_admission_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let (real_root, linked_root) = linked_profile_root(temp.path());
         crate::product_runtime::register_fixture_product_runtime();
-        crate::host_admission::ensure_process_background_cpu_authority()
+        crate::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install fixture worker authority");
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");

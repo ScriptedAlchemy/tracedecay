@@ -25,9 +25,10 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
 
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .unwrap();
+    let gdb =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -102,9 +103,10 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
 async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .unwrap();
+    let gdb =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -173,9 +175,10 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .unwrap();
+    let gdb =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let parent_dir = TempDir::new().unwrap();
     let parent_root = parent_dir.path().canonicalize().unwrap();
@@ -261,7 +264,7 @@ mod runtime_configuration_cutover {
         cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
         install_pinned_runtime_configuration, runtime_configuration_for_layout,
     };
-    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_configuration::TraceDecayConfig;
     use tracedecay_configuration::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,

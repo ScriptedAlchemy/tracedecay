@@ -38,7 +38,7 @@ export async function loadForceAtlas2(): Promise<ForceAtlas2Module> {
  * afterwards so it always frames the composed result.
  */
 export function settleEmergentField(
-  prepared: PreparedField,
+  prepared: Pick<PreparedField, 'graph' | 'nodeCount' | 'edgeDensity'>,
   forceAtlas2: ForceAtlas2Module,
 ): void {
   const { graph, nodeCount, edgeDensity } = prepared;

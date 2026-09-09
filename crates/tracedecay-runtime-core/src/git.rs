@@ -467,6 +467,26 @@ pub fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Reads `remote.origin.url` from the repository at `project_root`.
+///
+/// Prefers an in-process gix config snapshot (repo-local + global) and
+/// falls back to a bounded `git config --get` when gix cannot discover
+/// the repository but git still may.
+pub fn git_remote_url(project_root: &Path) -> Option<String> {
+    if let Ok(repo) = gix::discover(project_root) {
+        let url = repo
+            .config_snapshot()
+            .string("remote.origin.url")?
+            .to_string();
+        let url = url.trim();
+        return (!url.is_empty()).then(|| url.to_string());
+    }
+    if !crate::worktree::git_may_resolve_repo(project_root) {
+        return None;
+    }
+    git_capture(project_root, &["config", "--get", "remote.origin.url"])
+}
+
 /// Outcome of the bounded `git -C` capture used by repository identity lookup.
 #[derive(Debug)]
 pub enum GitCaptureAtResult {

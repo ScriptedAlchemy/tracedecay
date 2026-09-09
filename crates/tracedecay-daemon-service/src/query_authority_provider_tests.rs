@@ -1,11 +1,11 @@
 use super::*;
-use crate::config::retrieval::{
+use std::{collections::BTreeMap, path::Path, process::Command, time::Duration};
+use tempfile::TempDir;
+use tracedecay_application::config::retrieval::{
     PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1, RetrievalProfileAuditEventV1,
     RetrievalProfileStateSnapshotV1, RetrievalRuntimeCompatibilityV1, SemanticCompatibilityPinsV1,
     SemanticResourceRequirementV1,
 };
-use std::{collections::BTreeMap, path::Path, process::Command, time::Duration};
-use tempfile::TempDir;
 use tracedecay_application::semantic_runtime::{
     CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
     SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CopyProofV1, LogicalCopyRecordV1, MessageOccurrenceRecordV1,
     RetrievalGrainV1, SessionId, TemporalModeV1,

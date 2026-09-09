@@ -406,11 +406,11 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
     // marker without creating anything in the working tree.
     let typed_project_id =
         tracedecay_store::ProjectId::new(project_id.to_owned()).expect("typed project id");
-    let roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
+    let roots = tracedecay_global_db::registered_enrollment_roots(
+        registry.as_ref(),
         &project,
         &store_layout,
         &typed_project_id,
-        registry.as_ref(),
     )
     .await
     .expect("re-adoption must resolve the enrollment root");
@@ -3859,8 +3859,10 @@ async fn production_composition_harness_reads_retained_profile_analytics_authori
         .ledger_writes_settled()
         .await;
 
-    let second_owner =
-        crate::host_admission::HostAdmissionTestRuntimeV1::profile(harness.profile_root()).await;
+    let second_owner = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
+        harness.profile_root(),
+    )
+    .await;
     let error = match second_owner {
         Ok(_) => panic!("parallel profile authority must remain rejected"),
         Err(error) => error,

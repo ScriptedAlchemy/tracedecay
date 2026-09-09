@@ -940,7 +940,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 semantic_owner,
             ) =
                 hotpath::future!(
-                    async {
+                    Box::pin(async {
                         tokio::join!(
                     graph.quick_check_report(),
                     observation_authority_audit_ok(registry.as_ref()),
@@ -989,7 +989,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                             })
                     },
                 )
-                    },
+                    }),
                     label = "daemon.doctor.collect"
                 )
                 .await;

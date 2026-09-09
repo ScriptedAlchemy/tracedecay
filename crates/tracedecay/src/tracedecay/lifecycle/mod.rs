@@ -16,7 +16,7 @@ use crate::project_store_runtime::join_standalone_session_registry;
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
@@ -32,7 +32,6 @@ mod branches;
 mod identity;
 mod registry;
 
-pub(crate) use registry::git_remote_url;
 pub use tracedecay_daemon_protocol::MovedStoreAdoption;
 
 #[cfg(not(any(test, feature = "test-transport")))]
@@ -55,7 +54,12 @@ static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
 /// fresh mounts.
 #[cfg(any(test, feature = "test-transport"))]
 static STANDALONE_TEST_RUNTIMES: LazyLock<
-    AsyncMutex<WeakRegistry<(PathBuf, PathBuf), crate::host_admission::HostAdmissionTestRuntimeV1>>,
+    AsyncMutex<
+        WeakRegistry<
+            (PathBuf, PathBuf),
+            crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
+        >,
+    >,
 > = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
 impl TraceDecay {
@@ -107,7 +111,7 @@ impl TraceDecay {
     async fn standalone_test_runtime(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
-    ) -> Result<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>> {
+    ) -> Result<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>> {
         let profile_root = open_options.resolved_profile_root()?;
         if !tracedecay_runtime_core::db::is_isolated_test_path(project_root)
             || !tracedecay_runtime_core::db::is_isolated_test_path(&profile_root)
@@ -131,7 +135,7 @@ impl TraceDecay {
             return Ok(runtime);
         }
         let runtime = Arc::new(
-            crate::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
                 project_root,
                 project_id,
@@ -150,7 +154,7 @@ impl TraceDecay {
         operation: &'static str,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
-        let project_id = Self::registered_project_id(store_layout)?;
+        let project_id = storage::registered_project_id(store_layout)?;
         let canonical_database_path = &store_layout.graph_db_path;
         if matches!(access, DatabaseAccessMode::ReadOnly) {
             return runtime
@@ -243,7 +247,7 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
+        let project_id = storage::registered_project_id(&store_layout)?;
         // Persist the minted identity in the sanctioned repo-adjacent anchor:
         // the `.git/` repository identity marker. A non-git root persists
         // nothing here — its identity is deterministic from the canonical
@@ -272,7 +276,10 @@ impl TraceDecay {
     pub(crate) async fn init_test_fixture_with_registered_runtime(
         project_root: &Path,
         project_id: &str,
-    ) -> Result<(Self, Arc<crate::host_admission::HostAdmissionTestRuntimeV1>)> {
+    ) -> Result<(
+        Self,
+        Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
+    )> {
         let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
         let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
             TraceDecayError::Config {
@@ -280,7 +287,7 @@ impl TraceDecay {
             }
         })?;
         let runtime = Arc::new(
-            crate::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
                 &profile_root,
                 project_root,
                 project_id,
@@ -515,12 +522,12 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
+        let project_id = storage::registered_project_id(&store_layout)?;
+        let enrollment_roots = registered_enrollment_roots(
+            profile_database.as_ref(),
             project_root,
             &store_layout,
             &project_id,
-            profile_database.as_ref(),
         )
         .await?;
         let configuration_database = runtime_registry
@@ -726,12 +733,12 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
+        let project_id = storage::registered_project_id(&store_layout)?;
+        let enrollment_roots = registered_enrollment_roots(
+            profile_database.as_ref(),
             project_root,
             &store_layout,
             &project_id,
-            profile_database.as_ref(),
         )
         .await?;
         let configuration_database = runtime_registry

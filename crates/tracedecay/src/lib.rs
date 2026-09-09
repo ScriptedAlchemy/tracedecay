@@ -29,21 +29,21 @@
 #![allow(clippy::used_underscore_binding)]
 #![allow(clippy::manual_async_fn)]
 #![allow(clippy::unused_async)]
-#![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::if_not_else)]
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
-// Several async fns and their test drivers hold futures that cross the 16KB
-// pedantic threshold only on Windows' struct layout; boxing every await site
-// across the tree churns far more than the lint is worth here.
-#![allow(clippy::large_futures)]
 
+// Query-bench implementation for `tracedecay bench` / MCP `admin_project`
+// action `bench`. Kept off the default library graph; the CLI production
+// feature selects `bench` so the shipped command still compiles.
+#[cfg(any(test, feature = "bench", feature = "test-helpers"))]
+#[path = "../benches/query_bench/harness.rs"]
+pub mod bench;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
-pub mod bench;
 #[cfg(any(test, feature = "test-helpers"))]
-pub mod host_admission;
+pub mod test_support;
 pub use tracedecay_code_index as code_index;
 pub use tracedecay_query as query;
 pub mod config;
@@ -64,10 +64,10 @@ mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports};
 pub mod serve;
-// Benchmark harness, not product surface: the shipped library must not carry
-// its fixture provisioning or process-environment mutation. The `session_temporal`
-// bench target and the `test-helpers` integration lanes select it explicitly.
+// Session-temporal harness lives under `benches/`; the lib only paths it in
+// when a bench target or integration lane asks for `test-helpers`.
 #[cfg(any(test, feature = "test-helpers"))]
+#[path = "../benches/session_temporal/harness.rs"]
 pub mod session_temporal_benchmark;
 pub mod tracedecay;
 #[doc(hidden)]
