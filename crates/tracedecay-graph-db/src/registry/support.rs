@@ -273,6 +273,7 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             | GraphDbError::ProjectionMismatch { .. }
             | GraphDbError::GenerationMismatch { .. }
             | GraphDbError::Unavailable { .. }
+            | GraphDbError::SourceCommitmentsUnavailable { .. }
             | GraphDbError::SealedStoreImmutable { .. }
             | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
         },

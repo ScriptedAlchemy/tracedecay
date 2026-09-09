@@ -34,6 +34,7 @@ async fn database() -> (TempDir, Database) {
     let authority =
         DatabaseAuthority::acquire_test(&path, "canonical update replay test authority")
             .expect("acquire canonical memory test authority");
+    tracedecay_global_db::register_test_schema_installer();
     let (database, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await
