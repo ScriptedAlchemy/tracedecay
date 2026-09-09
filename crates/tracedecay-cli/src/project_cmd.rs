@@ -7,7 +7,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 
 use crate::cli::ProjectsAction;
 use crate::commands::{

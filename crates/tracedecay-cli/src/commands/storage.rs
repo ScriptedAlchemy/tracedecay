@@ -180,17 +180,6 @@ impl ProfileOfflineAuthority {
     }
 }
 
-/// Takes the whole profile offline for a destructive maintenance command,
-/// within a bound, or refuses typed — never "retry after it finishes".
-///
-/// The managed daemon holds a shared lifecycle lease for its entire lifetime,
-/// and a daemon wedged in a terminal retry loop (issue #765's unseatable
-/// sealed generation) never exits, so a bare lease attempt refuses forever —
-/// exactly when the operator most needs the escape hatch. On contention this
-/// stops the installed service (the supervisor bounds the stop and SIGKILLs a
-/// hung daemon), waits a bounded interval for the lease, and restores the
-/// captured service state when the caller finishes.
-#[hotpath::measure(label = "cli.profile.offline_acquire")]
 /// Opens an existing exact-final profile registry without creating one, then
 /// admits the lease into [`ProfileRegistryMaintenanceRuntime`].
 pub(crate) async fn try_admit_profile_registry(
@@ -230,6 +219,17 @@ pub(crate) async fn try_admit_profile_registry(
     ))
 }
 
+/// Takes the whole profile offline for a destructive maintenance command,
+/// within a bound, or refuses typed — never "retry after it finishes".
+///
+/// The managed daemon holds a shared lifecycle lease for its entire lifetime,
+/// and a daemon wedged in a terminal retry loop (issue #765's unseatable
+/// sealed generation) never exits, so a bare lease attempt refuses forever —
+/// exactly when the operator most needs the escape hatch. On contention this
+/// stops the installed service (the supervisor bounds the stop and SIGKILLs a
+/// hung daemon), waits a bounded interval for the lease, and restores the
+/// captured service state when the caller finishes.
+#[hotpath::measure(label = "cli.profile.offline_acquire")]
 pub(crate) fn take_profile_offline(
     profile_root: &Path,
     operation: &'static str,
