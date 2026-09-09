@@ -32,7 +32,7 @@ export function ThreadPlayback({
   hasMoreMessages,
   hasMoreSummaryNodes,
 }: {
-  children: ReactNode;
+  children: (toolbar: ReactNode, scrubber: ReactNode) => ReactNode;
   frames: readonly LoomPlaybackFrame[];
   state: LoomPlaybackState;
   setState: Dispatch<SetStateAction<LoomPlaybackState>>;
@@ -57,12 +57,11 @@ export function ThreadPlayback({
     ? []
     : active.summaryNodeIds.map((id) => summaryNodes.find((node) => node.node_id === id) ?? null);
 
-  return (
-    <section className="flex flex-col gap-2" aria-label="Session replay">
+  const toolbar = (
       <div
         role="toolbar"
         aria-label="Replay controls"
-        className="flex flex-wrap items-center gap-1 border border-edge-subtle bg-surface-1 p-1"
+        className="flex flex-wrap items-center gap-1"
       >
         <PlaybackButton
           label={state.playing ? 'Pause replay' : 'Play replay'}
@@ -91,7 +90,7 @@ export function ThreadPlayback({
         >
           next
         </PlaybackButton>
-        <label className="flex min-h-[var(--touch-target-min)] items-center gap-1 px-1 text-3xs text-text-secondary">
+        <label className="flex min-h-8 items-center gap-1 px-1 text-3xs text-text-secondary">
           speed
           <select
             aria-label="Replay speed"
@@ -119,7 +118,8 @@ export function ThreadPlayback({
         )}
         <span className="text-3xs text-text-muted">{state.cursor + 1} / {frames.length} loaded turns</span>
       </div>
-
+  );
+  const scrubber = (
       <label className="flex items-center gap-2 text-3xs text-text-muted">
         Seek loaded event
         <input
@@ -135,8 +135,10 @@ export function ThreadPlayback({
           }}
         />
       </label>
-
-      {children}
+  );
+  return (
+    <section className="flex flex-col gap-2" aria-label="Session replay">
+      {children(toolbar, scrubber)}
 
       {active ? (
         <div className="flex flex-col gap-1 border border-edge-subtle bg-surface-0 px-2 py-1.5">
@@ -156,6 +158,7 @@ export function ThreadPlayback({
         </div>
       ) : null}
 
+      <details><summary className="text-3xs text-text-muted">Replay evidence · {linkedNodes.length} linked compaction boundaries</summary>
       <CompactionLinks nodes={linkedNodes} linkCount={active?.summaryNodeIds.length ?? 0} />
 
       <p className="text-3xs leading-relaxed text-text-muted">
@@ -171,6 +174,7 @@ export function ThreadPlayback({
           ? 'More compaction boundaries exist outside this response page.'
           : 'Compaction links are kept separate from the event cursor unless the store linked them to this raw turn.'}
       </p>
+      </details>
     </section>
   );
 }
@@ -250,7 +254,7 @@ function PlaybackButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="td-hit border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary disabled:text-text-muted"
+      className="min-h-8 min-w-8 border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary disabled:text-text-muted"
     >
       {children}
     </button>

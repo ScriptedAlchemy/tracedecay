@@ -71,20 +71,18 @@ export function ThreadChain({
   }
 
   return (
-    <Panel legend="Loaded execution" footer={replaying
-      ? <StateChip kind="unavailable" detail="Session-wide commits, edits and branch rollups are withheld during replay: this read does not bind them to individual transcript events." />
-      : <ChainTerminus thread={thread} relations={relations} />}>
+    <section aria-label="Loaded execution" className="min-w-0">
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-3">
-          {onReturn && <button type="button" className="td-hit self-start text-xs text-text-secondary" onClick={onReturn}>← All loaded sessions</button>}
+          {onReturn && <button type="button" className="min-h-8 self-start text-xs text-text-secondary" onClick={onReturn}>← All loaded sessions</button>}
           <span className="text-xs font-medium leading-snug text-text-primary">
             {thread.label}
           </span>
         </div>
 
         <details>
-          <summary className="td-hit text-xs text-text-muted">Session metadata</summary>
+          <summary className="min-h-8 flex items-center text-xs text-text-muted">Session metadata</summary>
         <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-2xs">
           <Fact label="session" value={thread.sessionId} />
           <Fact label="host" value={thread.host} />
@@ -152,7 +150,12 @@ export function ThreadChain({
           }}
         </ReadSection>
       </div>
-    </Panel>
+      <details><summary className="text-3xs text-text-muted">Session relations · {replaying ? "withheld during replay" : "loaded evidence"}</summary>
+      {replaying
+      ? <StateChip kind="unavailable" detail="Session-wide commits, edits and branch rollups are withheld during replay: this read does not bind them to individual transcript events." />
+      : <ChainTerminus thread={thread} relations={relations} />}
+      </details>
+    </section>
   );
 }
 
@@ -221,13 +224,15 @@ function IsolatedChain({
         hasMoreMessages={hasMoreMessages}
         hasMoreSummaryNodes={hasMoreSummaryNodes}
       >
-      <LoadedEventCanvas
+      {(toolbar, scrubber) => <LoadedEventCanvas
+        toolbar={toolbar}
+        scrubber={scrubber}
         frames={frames}
         visible={visible}
         activeId={active?.id ?? null}
         onSelect={(id) => setPlayback(seekPlayback(state, frames.length, frames.findIndex((frame) => frame.id === id)))}
         onInspect={() => setPlaying(false)}
-      />
+      />}
       </ThreadPlayback>
       <p className="text-3xs text-text-muted">{visible.length} revealed · {frames.length - visible.length} withheld · source: {thread.host} / {thread.sessionId}. Spawn, handoff and rejoin evidence is not served by this read.</p>
                 <div className="flex flex-col gap-1">
