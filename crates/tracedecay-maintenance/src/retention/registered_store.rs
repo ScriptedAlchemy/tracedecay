@@ -118,10 +118,14 @@ mod tests {
             })
             .await
             .expect("append old observability detail");
-        let mut session_lcm = LcmRetentionConfig::default();
-        session_lcm.enabled = false;
-        let mut observations = ObservationRetentionConfig::default();
-        observations.enabled = false;
+        let session_lcm = LcmRetentionConfig {
+            enabled: false,
+            ..LcmRetentionConfig::default()
+        };
+        let observations = ObservationRetentionConfig {
+            enabled: false,
+            ..ObservationRetentionConfig::default()
+        };
 
         let report = run_registered_store_retention(
             &harness.registered,
@@ -155,10 +159,14 @@ mod tests {
             "maintenance-registered-observability-retention-error",
         )
         .await;
-        let mut session_lcm = LcmRetentionConfig::default();
-        session_lcm.enabled = false;
-        let mut observations = ObservationRetentionConfig::default();
-        observations.enabled = false;
+        let session_lcm = LcmRetentionConfig {
+            enabled: false,
+            ..LcmRetentionConfig::default()
+        };
+        let observations = ObservationRetentionConfig {
+            enabled: false,
+            ..ObservationRetentionConfig::default()
+        };
 
         let report =
             run_registered_store_retention(&harness.registered, &session_lcm, &observations, -1)

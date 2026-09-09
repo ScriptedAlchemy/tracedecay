@@ -49,6 +49,7 @@ async fn files_for_session(
         .expect("files response")
 }
 
+#[cfg(unix)]
 async fn wait_for_exact_interactive_graph_ready(
     engine: &DaemonEngine,
     scope: &tracedecay_contracts::ResolvedScope,
