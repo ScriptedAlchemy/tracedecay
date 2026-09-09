@@ -332,28 +332,40 @@ async fn validate_legacy_alias_ownership(
     Ok(())
 }
 
+/// The two directions an owner-unbound alias row can collide with a canonical
+/// one: same owner key under a different anchor, or same anchor key under a
+/// different owner.
+///
+/// These live outside the loop below because an array literal iterated in
+/// place leaves a `std::array::IntoIter` alive across the query `await`, and
+/// that iterator's `MaybeDangling`/`ManuallyDrop`/`MaybeUninit` layers are
+/// re-entered for every auto-trait obligation raised on the enclosing future —
+/// at the deepest point of the schema-install chain that daemon project-open
+/// awaits. Borrowing a promoted slice keeps a plain `slice::Iter` there.
+const ALIAS_COPY_CONFLICT_QUERIES: &[&str] = &[
+    "SELECT 1
+     FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
+     JOIN retrieval_anchor_aliases AS current
+       ON current.owner_json = legacy.owner_json
+      AND current.alias_kind = legacy.alias_kind
+      AND current.locator_digest = legacy.locator_digest
+     WHERE current.anchor_id <> legacy.anchor_id
+     LIMIT 1",
+    "SELECT 1
+     FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
+     JOIN retrieval_anchor_aliases AS current
+       ON current.anchor_id = legacy.anchor_id
+      AND current.alias_kind = legacy.alias_kind
+      AND current.locator_digest = legacy.locator_digest
+     WHERE current.owner_json <> legacy.owner_json
+     LIMIT 1",
+];
+
 async fn validate_alias_copy_conflicts(
     conn: &(impl Executor + Sync),
     operation: &str,
 ) -> Result<()> {
-    for sql in [
-        "SELECT 1
-         FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
-         JOIN retrieval_anchor_aliases AS current
-           ON current.owner_json = legacy.owner_json
-          AND current.alias_kind = legacy.alias_kind
-          AND current.locator_digest = legacy.locator_digest
-         WHERE current.anchor_id <> legacy.anchor_id
-         LIMIT 1",
-        "SELECT 1
-         FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
-         JOIN retrieval_anchor_aliases AS current
-           ON current.anchor_id = legacy.anchor_id
-          AND current.alias_kind = legacy.alias_kind
-          AND current.locator_digest = legacy.locator_digest
-         WHERE current.owner_json <> legacy.owner_json
-         LIMIT 1",
-    ] {
+    for &sql in ALIAS_COPY_CONFLICT_QUERIES {
         let mut rows = conn
             .query(sql, ())
             .await
@@ -752,6 +764,11 @@ async fn upgrade_dispositions_if_needed(
 /// Existing one-column alias foreign keys are upgraded with a resumable,
 /// validated copy; conflicting or ownerless rows are retained and reported
 /// rather than discarded.
+///
+/// The two upgrade phases are awaited through a box. Each is a deep tree of
+/// nested `async fn` validators, and async lowering would otherwise expand
+/// those trees into the future of every migration, admission, and store-open
+/// path that installs this schema.
 #[hotpath::measure(label = "runtime_core.db.anchor_schema_install")]
 pub async fn install_retrieval_anchor_schema(
     conn: &(impl Executor + Sync),
@@ -761,8 +778,8 @@ pub async fn install_retrieval_anchor_schema(
         .await
         .map_err(|error| database_error(operation, error))?;
     validate_anchor_table_columns(conn, operation).await?;
-    upgrade_aliases_if_needed(conn, operation).await?;
-    upgrade_dispositions_if_needed(conn, operation).await?;
+    Box::pin(upgrade_aliases_if_needed(conn, operation)).await?;
+    Box::pin(upgrade_dispositions_if_needed(conn, operation)).await?;
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS retrieval_anchors_no_update;
          DROP TRIGGER IF EXISTS retrieval_anchors_no_delete;
@@ -808,6 +825,29 @@ mod tests {
         )
         .await
         .expect("insert anchor");
+    }
+
+    /// Async lowering embeds an awaited future inside its caller, so the alias
+    /// and disposition upgrade phases would expand into every migration,
+    /// admission, and store-open future that installs this schema. Both phases
+    /// stay behind pointers at this boundary; the probe fails if either is
+    /// inlined back into the install future.
+    ///
+    /// Measured under `--features hotpath`, where each measured `async fn`
+    /// embeds its body a second time: 2,144 B with both phases boxed, 7,664 B
+    /// with either one inlined.
+    #[test]
+    fn schema_install_holds_its_upgrade_phases_behind_pointers() {
+        const CEILING: usize = 4 * 1024;
+        let directory = tempfile::tempdir().expect("create anchor future probe fixture");
+        let connection = TestConnection::open(&directory.path().join("anchors.db"));
+        let install = install_retrieval_anchor_schema(&connection, "probe anchor schema future");
+        let size = std::mem::size_of_val(&install);
+        drop(install);
+        assert!(
+            size <= CEILING,
+            "install_retrieval_anchor_schema future is {size} B; ceiling {CEILING} B"
+        );
     }
 
     #[tokio::test]
