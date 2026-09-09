@@ -439,14 +439,8 @@ pub(super) async fn collect_code_generation_retention_findings(
     code_index_store_root: &Path,
     project_root: &Path,
 ) -> DoctorStorageFamilyReadV1 {
-    use tracedecay_code_index_retention::code_index_generations::{
-        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
-        plan_code_generation_retention_with_verification, plan_scope_root_retention,
-    };
     use tracedecay_contracts::storage::{
-        CodeGenerationRetentionRecordV1, SemanticVectorRetentionRecordV1, StorageByteSizeV1,
-        StoreKeyV1, code_generation_retention_finding, semantic_vector_retention_finding,
+        SemanticVectorRetentionRecordV1, StoreKeyV1, semantic_vector_retention_finding,
     };
 
     if !code_index_store_root
@@ -527,6 +521,32 @@ pub(super) async fn collect_code_generation_retention_findings(
     let vector_liveness_incomplete = semantic_record.has_backlog()
         || semantic_record.has_in_flight_generations()
         || semantic_record.observed_non_configured_published_generation_count > 0;
+    collect_generation_census(
+        code_index_store_root,
+        project_root,
+        vector_readable_sources,
+        semantic_finding,
+        vector_liveness_incomplete,
+    )
+    .await
+}
+
+async fn collect_generation_census(
+    code_index_store_root: &Path,
+    project_root: &Path,
+    vector_readable_sources: BTreeSet<tracedecay_domain::CodeGenerationId>,
+    semantic_finding: tracedecay_contracts::doctor::DoctorStorageFindingV1,
+    vector_liveness_incomplete: bool,
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_code_index_retention::code_index_generations::{
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
+        plan_scope_root_retention,
+    };
+    use tracedecay_contracts::storage::{
+        CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
+        code_generation_retention_finding,
+    };
     let semantic_only_unknown = || DoctorStorageFamilyReadV1::ObservedIncomplete {
         findings: vec![semantic_finding.clone()],
         reason: DoctorStorageIncompleteReasonV1::Unknown,
@@ -582,6 +602,15 @@ pub(super) async fn collect_code_generation_retention_findings(
     } else {
         DoctorCoverageCompletenessV1::Partial
     };
+    let (stranded_scope_count, stranded_scope_bytes) = scopes
+        .as_ref()
+        .filter(|_| !vector_liveness_incomplete)
+        .map_or((0, StorageByteSizeV1::ZERO), |scopes| {
+            (
+                scopes.stranded_scope_count(),
+                StorageByteSizeV1(scopes.stranded_scope_bytes()),
+            )
+        });
     let record = CodeGenerationRetentionRecordV1 {
         store,
         superseded_generation_count: plan.superseded_generations.len() as u64,
@@ -596,22 +625,8 @@ pub(super) async fn collect_code_generation_retention_findings(
         } else {
             StorageByteSizeV1(plan.collectable_generation_bytes())
         },
-        stranded_scope_count: if vector_liveness_incomplete {
-            0
-        } else {
-            scopes
-                .as_ref()
-                .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_count)
-        },
-        stranded_scope_bytes: if vector_liveness_incomplete {
-            StorageByteSizeV1::ZERO
-        } else {
-            StorageByteSizeV1(
-                scopes
-                    .as_ref()
-                    .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_bytes),
-            )
-        },
+        stranded_scope_count,
+        stranded_scope_bytes,
     };
     let Ok(finding) = code_generation_retention_finding(&record, completeness) else {
         return semantic_only_unknown();
@@ -793,189 +808,97 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 ) -> tracedecay_dashboard_api::DoctorReportReader {
+    let reads = Arc::new(LiveDoctorReads {
+        project_root,
+        project_id,
+        layout,
+        graph,
+        registry,
+        profile_sessions,
+        project_sessions,
+        profile_root,
+        host_home,
+        remote_operational,
+        retention,
+        schedulers,
+        diagnostic_broker,
+        feedback_runtimes,
+        semantic_owner_runtime,
+        store_telemetry_sampling,
+        configuration_runtime,
+    });
     Arc::new(move || {
-        let project_root = project_root.clone();
-        let project_id = project_id.clone();
-        let layout = layout.clone();
-        let graph = graph.clone();
-        let registry = registry.clone();
-        let profile_sessions = profile_sessions.clone();
-        let project_sessions = project_sessions.clone();
-        let profile_root = profile_root.clone();
-        let host_home = host_home.clone();
-        let remote_operational = Arc::clone(&remote_operational);
-        let retention = retention.clone();
-        let schedulers = schedulers.clone();
-        let diagnostic_broker = Arc::clone(&diagnostic_broker);
-        let feedback_runtimes = feedback_runtimes.clone();
-        let semantic_owner_runtime = semantic_owner_runtime.clone();
-        let store_telemetry_sampling = store_telemetry_sampling.clone();
-        let configuration_runtime = Arc::clone(&configuration_runtime);
-        Box::pin(async move {
-            let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
-                &project_root,
-                &project_id,
-            )
-            .map_err(|_| ApplicationContractError::Inconsistent {
-                field: "daemon Doctor project scope",
-            })?;
-            let context = doctor_report_request_context(scope)?;
-            let mut telemetry_ports = Vec::new();
-            let mut telemetry_paths = BTreeSet::new();
-            if telemetry_paths.insert(graph.database_path().to_path_buf())
-                && let Some(port) =
-                    store_telemetry_sampling.registered_port(graph.database_path(), context.scope())
-            {
-                telemetry_ports.push(port);
-            }
-            for database in [
-                registry.as_ref(),
-                profile_sessions.as_ref(),
-                project_sessions.as_ref(),
-            ] {
-                if telemetry_paths.insert(database.db_path().to_path_buf())
-                    && let Some(port) = store_telemetry_sampling
-                        .registered_port(database.db_path(), context.scope())
-                {
-                    telemetry_ports.push(port);
-                }
-            }
-            let pinned = crate::config::runtime_configuration_for_layout(&project_root, &layout);
-            let graph_authority_current = graph.write_authority().is_ok_and(|authority| {
-                authority
-                    .require_active_write_scope("read dashboard Doctor graph authority")
-                    .is_ok()
-            });
-            let registered_authority_current = registry.writer_connection().is_ok()
-                && profile_sessions.writer_connection().is_ok();
-            let retention_secs = retention
-                .orphan_store_gc_days
-                .and_then(|days| i64::try_from(days).ok())
-                .and_then(|days| days.checked_mul(24 * 60 * 60))
-                .unwrap_or(i64::MAX);
-            let now = now_secs();
-            let profile_storage_reads = async {
-                tracedecay_maintenance::retention::diagnostics::collect_profile_storage_findings(
-                    registry.as_ref(),
-                    &profile_root,
-                    retention_secs,
-                    now,
-                )
-                .await
-            };
-            let code_index_store_root =
-                tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
-                    &layout.data_root.join("code-index-v1"),
-                    &project_root,
-                );
-            let advisory_feedback_read = async {
-                let current_generation = schedulers
-                    .latest_complete_ready(&project_root)
-                    .await
-                    .map(|latest| latest.generation().manifest().generation_id.clone());
-                match feedback_runtimes.doctor_read_store(&project_root).await {
-                    Some(store) => match store.doctor_latest_publication(&context).await {
-                        Ok(publication) => advisory_feedback_read_from_publication(
-                            publication.as_ref(),
-                            current_generation.as_ref(),
-                        ),
-                        Err(_) => AdvisoryFeedbackReadV1::Unknown,
-                    },
-                    None => AdvisoryFeedbackReadV1::Absent,
-                }
-            };
-            let host_project_root = project_root.clone();
-            let host_components_root = profile_root.join("host-components");
-            // Staleness comparison against the installed plugins' provenance
-            // headers requires this binary's exact generator commit.
-            let generator_commit = crate::product_runtime::product_runtime()
-                .map_err(|_| ApplicationContractError::Inconsistent {
-                    field: "registered product runtime source provenance",
-                })?
-                .source()
-                .full_sha;
-            let host_scan = tokio::task::spawn_blocking(move || {
-                hotpath::measure_block!("daemon.doctor.host_scan", {
-                    host_home
-                        .as_ref()
-                        .map_or(HostIntegrationReadV1::Unsupported, |home| {
-                            let context = tracedecay_agent_hosts::agents::HealthcheckContext {
-                                home: home.clone(),
-                                project_path: host_project_root,
-                            };
-                            tracedecay_agent_hosts::agents::inspect_receipt_backed_host_components(
-                                &context,
-                                &host_components_root,
-                                generator_commit,
-                            )
-                            .as_ref()
-                            .map_or(
-                                HostIntegrationReadV1::Unknown,
-                                host_integration_read_from_report,
-                            )
-                        })
-                })
-            });
-            let semantic_configuration_inventory =
-                configuration_runtime.semantic_configuration_inventory_authority();
-            let (
-                quick_check,
-                authority_audit_ok,
-                temporal,
-                profile_storage,
-                store_telemetry,
-                profile_retention_backlog,
-                project_retention_backlog,
-                code_generation_retention,
-                language_server,
-                observability_read,
-                (profile_refusal_census, project_refusal_census),
-                advisory_feedback,
-                host_read,
-                code_index,
-                semantic_owner,
-            ) =
-                hotpath::future!(
-                    Box::pin(async {
-                        tokio::join!(
-                    graph.quick_check_report(),
-                    observation_authority_audit_ok(registry.as_ref()),
-                    project_sessions.session_temporal_doctor_health(),
-                    profile_storage_reads,
-                    collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
-                    tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
-                        profile_sessions.as_ref(),
-                        &retention.session_lcm,
-                        now,
-                    ),
-                    tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
-                        project_sessions.as_ref(),
-                        &retention.session_lcm,
-                        now,
-                    ),
-                    collect_code_generation_retention_findings(
-                        &schedulers,
-                        &store_telemetry_sampling,
-                        semantic_configuration_inventory.as_ref(),
-                        &code_index_store_root,
-                        &project_root,
-                    ),
-                    language_server_read_from_broker(&diagnostic_broker),
+        let reads = Arc::clone(&reads);
+        Box::pin(async move { reads.report().await })
+    })
+}
+
+struct LiveDoctorReads {
+    project_root: PathBuf,
+    project_id: tracedecay_domain::ProjectId,
+    layout: tracedecay_runtime_core::storage::StoreLayout,
+    graph: tracedecay_runtime_core::db::Database,
+    registry: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    profile_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    profile_root: PathBuf,
+    host_home: Option<PathBuf>,
+    remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
+    retention: crate::config::RetentionConfig,
+    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
+    feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
+    semantic_owner_runtime: DaemonSemanticOwnerRuntimeRegistrar,
+    store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
+    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
+}
+
+impl LiveDoctorReads {
+    async fn report(
+        &self,
+    ) -> Result<tracedecay_dashboard_api::AdmittedDoctorReportV1, ApplicationContractError> {
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+            &self.project_root,
+            &self.project_id,
+        )
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "daemon Doctor project scope",
+        })?;
+        let context = doctor_report_request_context(scope)?;
+        let pinned =
+            crate::config::runtime_configuration_for_layout(&self.project_root, &self.layout);
+        let host_scan = self.host_scan()?;
+        let (
+            runtime,
+            storage,
+            language_server,
+            observability_read,
+            (profile_refusal_census, project_refusal_census),
+            advisory_feedback,
+            host_read,
+            code_index,
+            semantic_owner,
+        ) = hotpath::future!(
+            Box::pin(async {
+                tokio::join!(
+                    self.runtime_health(),
+                    self.storage(&context),
+                    language_server_read_from_broker(&self.diagnostic_broker),
                     tracedecay_application::feedback::concrete::feedback_observation_read_model(
-                        &graph,
+                        &self.graph
                     ),
                     async {
                         tokio::join!(
-                            profile_sessions.observation_refusal_census(),
-                            project_sessions.observation_refusal_census(),
+                            self.profile_sessions.observation_refusal_census(),
+                            self.project_sessions.observation_refusal_census()
                         )
                     },
-                    advisory_feedback_read,
+                    self.advisory_feedback(&context),
                     host_scan,
-                    code_index_read_from_registry(&schedulers, &project_root),
+                    code_index_read_from_registry(&self.schedulers, &self.project_root),
                     async {
-                        semantic_owner_runtime
-                            .state(&project_root)
+                        self.semantic_owner_runtime
+                            .state(&self.project_root)
                             .await
                             .map_or(SemanticOwnerReadV1::Absent, |state| {
                                 SemanticOwnerReadV1::Observed {
@@ -985,83 +908,224 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                             })
                     },
                 )
-                    }),
-                    label = "daemon.doctor.collect"
-                )
-                .await;
-            let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
-            let temporal_ok = match temporal.status() {
-                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Complete => {
-                    Some(temporal.findings().is_empty())
-                }
-                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Partial
-                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
-                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
-            };
-            let storage = [
+            }),
+            label = "daemon.doctor.collect"
+        )
+        .await;
+        let inputs = DoctorKernelInputsV1 {
+            configuration: configuration_read_from_pin::<tracedecay_domain::errors::TraceDecayError>(
+                &pinned,
+            ),
+            runtime,
+            operational_audit: OperationalAuditReadV1 {
+                remote: (self.remote_operational)(),
+                profile_authority: ProfileAuthorityReadV1::Observed {
+                    registry_attached: self.registry.writer_connection().is_ok(),
+                    profile_sessions_attached: self.profile_sessions.writer_connection().is_ok(),
+                    coverage: DoctorCoverageCompletenessV1::Complete,
+                },
+            },
+            host: host_read.unwrap_or(HostIntegrationReadV1::Unknown),
+            advisory_feedback,
+            language_server,
+            code_index,
+            semantic_owner,
+            observability: observability_read_from_model(observability_read),
+            ingest_refusals: tracedecay_global_db::observation::ingest_refusal_read_from_censuses(
+                &[profile_refusal_census, project_refusal_census],
+            ),
+            storage: storage.findings,
+        };
+        let report = compose_doctor_report(&context, &inputs).await?;
+        Ok(
+            tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
+                .with_table_growth_evidence(storage.table_growth_evidence),
+        )
+    }
+
+    async fn runtime_health(&self) -> RuntimeHealthReadV1 {
+        let graph_authority_current = self.graph.write_authority().is_ok_and(|authority| {
+            authority
+                .require_active_write_scope("read dashboard Doctor graph authority")
+                .is_ok()
+        });
+        let registered_authority_current = self.registry.writer_connection().is_ok()
+            && self.profile_sessions.writer_connection().is_ok();
+        let (quick_check, authority_audit_ok, temporal) = tokio::join!(
+            self.graph.quick_check_report(),
+            observation_authority_audit_ok(self.registry.as_ref()),
+            self.project_sessions.session_temporal_doctor_health()
+        );
+        let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
+        let temporal_ok = match temporal.status() {
+            tracedecay_session_temporal_store::SessionTemporalHealthStatus::Complete => {
+                Some(temporal.findings().is_empty())
+            }
+            tracedecay_session_temporal_store::SessionTemporalHealthStatus::Partial
+            | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
+            | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
+        };
+        runtime_health_read(&DaemonRuntimeHealthSignalV1 {
+            serving: true,
+            startup_converged: graph_authority_current && registered_authority_current,
+            quick_check_ok,
+            // The invariant audit is distinct from write-scope currency.
+            authority_audit_ok,
+            temporal_ok,
+        })
+    }
+
+    async fn storage(&self, context: &RequestContext) -> CollectedStoreTelemetryV1 {
+        let mut telemetry_ports = Vec::new();
+        let mut telemetry_paths = BTreeSet::new();
+        if telemetry_paths.insert(self.graph.database_path().to_path_buf())
+            && let Some(port) = self
+                .store_telemetry_sampling
+                .registered_port(self.graph.database_path(), context.scope())
+        {
+            telemetry_ports.push(port);
+        }
+        for database in [
+            self.registry.as_ref(),
+            self.profile_sessions.as_ref(),
+            self.project_sessions.as_ref(),
+        ] {
+            if telemetry_paths.insert(database.db_path().to_path_buf())
+                && let Some(port) = self
+                    .store_telemetry_sampling
+                    .registered_port(database.db_path(), context.scope())
+            {
+                telemetry_ports.push(port);
+            }
+        }
+        let retention_secs = self
+            .retention
+            .orphan_store_gc_days
+            .and_then(|days| i64::try_from(days).ok())
+            .and_then(|days| days.checked_mul(24 * 60 * 60))
+            .unwrap_or(i64::MAX);
+        let now = now_secs();
+        let profile_storage_reads = async {
+            tracedecay_maintenance::retention::diagnostics::collect_profile_storage_findings(
+                self.registry.as_ref(),
+                &self.profile_root,
+                retention_secs,
+                now,
+            )
+            .await
+        };
+        let code_index_store_root =
+            tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
+                &self.layout.data_root.join("code-index-v1"),
+                &self.project_root,
+            );
+
+        let semantic_configuration_inventory = self
+            .configuration_runtime
+            .semantic_configuration_inventory_authority();
+        let (
+            profile_storage,
+            store_telemetry,
+            profile_retention,
+            project_retention,
+            code_generations,
+        ) = tokio::join!(
+            profile_storage_reads,
+            collect_over_budget_store_findings(context, &telemetry_ports, &self.retention),
+            tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
+                self.profile_sessions.as_ref(),
+                &self.retention.session_lcm,
+                now
+            ),
+            tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
+                self.project_sessions.as_ref(),
+                &self.retention.session_lcm,
+                now
+            ),
+            collect_code_generation_retention_findings(
+                &self.schedulers,
+                &self.store_telemetry_sampling,
+                semantic_configuration_inventory.as_ref(),
+                &code_index_store_root,
+                &self.project_root
+            ),
+        );
+        CollectedStoreTelemetryV1 {
+            findings: [
                 profile_storage.orphan_stores,
                 profile_storage.unregistered_stores,
                 store_telemetry.findings,
                 profile_storage.incident_debris,
-                profile_retention_backlog,
-                project_retention_backlog,
-                code_generation_retention,
+                profile_retention,
+                project_retention,
+                code_generations,
             ]
             .into_iter()
             .reduce(merge_storage_reads)
-            .unwrap_or(DoctorStorageFamilyReadV1::Absent);
-            let observability = observability_read_from_model(observability_read);
-            let ingest_refusals =
-                tracedecay_global_db::observation::ingest_refusal_read_from_censuses(&[
-                    profile_refusal_census,
-                    project_refusal_census,
-                ]);
-            let host = match host_read {
-                Ok(read) => read,
-                Err(_) => HostIntegrationReadV1::Unknown,
-            };
-            let inputs = DoctorKernelInputsV1 {
-                configuration: configuration_read_from_pin::<
-                    tracedecay_domain::errors::TraceDecayError,
-                >(&pinned),
-                runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
-                    serving: true,
-                    startup_converged: graph_authority_current && registered_authority_current,
-                    quick_check_ok,
-                    // The exhaustive invariant pass
-                    // (`validate_observation_authority_connection`) observed just
-                    // above, never a boolean re-derived from schema and write-scope
-                    // currency — that is a different question and is already
-                    // reported through `startup_converged`. `None` here means the
-                    // audit genuinely could not run and drops runtime coverage to
-                    // partial, exactly as the coverage split intends.
-                    authority_audit_ok,
-                    temporal_ok,
-                }),
-                operational_audit: OperationalAuditReadV1 {
-                    remote: remote_operational(),
-                    profile_authority: ProfileAuthorityReadV1::Observed {
-                        registry_attached: registry.writer_connection().is_ok(),
-                        profile_sessions_attached: profile_sessions.writer_connection().is_ok(),
-                        coverage: DoctorCoverageCompletenessV1::Complete,
-                    },
-                },
-                host,
-                advisory_feedback,
-                language_server,
-                code_index,
-                semantic_owner,
-                observability,
-                ingest_refusals,
-                storage,
-            };
-            let report = compose_doctor_report(&context, &inputs).await?;
-            Ok(
-                tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
-                    .with_table_growth_evidence(store_telemetry.table_growth_evidence),
-            )
-        })
-    })
+            .unwrap_or(DoctorStorageFamilyReadV1::Absent),
+            table_growth_evidence: store_telemetry.table_growth_evidence,
+        }
+    }
+
+    async fn advisory_feedback(&self, context: &RequestContext) -> AdvisoryFeedbackReadV1 {
+        let current_generation = self
+            .schedulers
+            .latest_complete_ready(&self.project_root)
+            .await
+            .map(|latest| latest.generation().manifest().generation_id.clone());
+        match self
+            .feedback_runtimes
+            .doctor_read_store(&self.project_root)
+            .await
+        {
+            Some(store) => match store.doctor_latest_publication(context).await {
+                Ok(publication) => advisory_feedback_read_from_publication(
+                    publication.as_ref(),
+                    current_generation.as_ref(),
+                ),
+                Err(_) => AdvisoryFeedbackReadV1::Unknown,
+            },
+            None => AdvisoryFeedbackReadV1::Absent,
+        }
+    }
+
+    fn host_scan(
+        &self,
+    ) -> Result<tokio::task::JoinHandle<HostIntegrationReadV1>, ApplicationContractError> {
+        let host_project_root = self.project_root.clone();
+        let host_components_root = self.profile_root.join("host-components");
+        // Staleness comparison against the installed plugins' provenance
+        // headers requires this binary's exact generator commit.
+        let generator_commit = crate::product_runtime::product_runtime()
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "registered product runtime source provenance",
+            })?
+            .source()
+            .full_sha;
+        let host_home = self.host_home.clone();
+        Ok(tokio::task::spawn_blocking(move || {
+            hotpath::measure_block!("daemon.doctor.host_scan", {
+                host_home
+                    .as_ref()
+                    .map_or(HostIntegrationReadV1::Unsupported, |home| {
+                        let context = tracedecay_agent_hosts::agents::HealthcheckContext {
+                            home: home.clone(),
+                            project_path: host_project_root,
+                        };
+                        tracedecay_agent_hosts::agents::inspect_receipt_backed_host_components(
+                            &context,
+                            &host_components_root,
+                            generator_commit,
+                        )
+                        .as_ref()
+                        .map_or(
+                            HostIntegrationReadV1::Unknown,
+                            host_integration_read_from_report,
+                        )
+                    })
+            })
+        }))
+    }
 }
 
 pub(crate) fn doctor_report_request_context(

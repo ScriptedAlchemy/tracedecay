@@ -221,6 +221,10 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 }
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one report fixture and its per-family assertions keep exact coverage relationships reviewable together"
+)]
 async fn composed_report_carries_real_states_and_enumerates_coverage() {
     use std::collections::BTreeSet;
 
