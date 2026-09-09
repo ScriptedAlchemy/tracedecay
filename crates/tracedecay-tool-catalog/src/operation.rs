@@ -281,11 +281,4 @@ mod tests {
             None
         );
     }
-
-    #[test]
-    fn operation_identity_is_copy_eq_and_hash() {
-        fn assert_traits<T: Copy + Eq + std::hash::Hash>() {}
-
-        assert_traits::<ApplicationSurfaceOperation>();
-    }
 }

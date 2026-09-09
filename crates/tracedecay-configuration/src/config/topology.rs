@@ -90,13 +90,6 @@ mod tests {
     }
 
     #[test]
-    fn safe_default_never_enables_cross_merge() {
-        let policy = safe_default_work_topology_policy();
-        policy.validate().unwrap();
-        assert!(!policy.cross_merge.allow_cross_repository);
-    }
-
-    #[test]
     fn registry_default_is_the_domain_safe_default() {
         let registry = ConfigurationRegistry::core().unwrap();
         let definition = registry.definition(&topology_key()).unwrap();

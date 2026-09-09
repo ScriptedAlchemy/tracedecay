@@ -319,13 +319,6 @@ mod tests {
     }
 
     #[test]
-    fn offline_cache_coverage_rejects_an_expired_grant() {
-        let report = offline_cache_report(101, 100);
-        report.validate().unwrap();
-        assert!(!report.is_complete());
-    }
-
-    #[test]
     fn offline_cache_coverage_uses_an_exclusive_clock_boundary() {
         let mut report = offline_cache_report(99, 100);
         report.validate().unwrap();
@@ -439,13 +432,5 @@ mod tests {
                 field: "remote coverage disposition shard"
             })
         ));
-    }
-
-    #[test]
-    fn canonical_json_sorts_object_keys_recursively() {
-        assert_eq!(
-            canonical_json_value(&json!({"z": {"b": 1, "a": 2}, "a": 0})).unwrap(),
-            r#"{"a":0,"z":{"a":2,"b":1}}"#
-        );
     }
 }

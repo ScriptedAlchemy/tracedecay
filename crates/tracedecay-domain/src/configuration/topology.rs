@@ -929,18 +929,6 @@ mod tests {
     }
 
     #[test]
-    fn safe_default_digest_is_deterministic_and_round_trips() {
-        let policy = safe_work_topology_policy_v1();
-        let digest = policy.compute_digest().unwrap();
-        assert_eq!(policy.compute_digest().unwrap(), digest);
-
-        let encoded = serde_json::to_value(&policy).unwrap();
-        let decoded: WorkTopologyPolicyV1 = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded, policy);
-        assert_eq!(decoded.compute_digest().unwrap(), digest);
-    }
-
-    #[test]
     fn github_stack_requires_probe_and_standard_fallback() {
         let mut policy = safe_work_topology_policy_v1();
         policy

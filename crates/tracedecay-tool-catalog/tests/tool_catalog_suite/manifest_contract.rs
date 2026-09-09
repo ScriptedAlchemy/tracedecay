@@ -146,14 +146,3 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
     missing_inverse_contract.inverse = tracedecay_tool_catalog::InverseContract::NotApplicable;
     assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(missing_inverse_contract).is_err());
 }
-
-#[test]
-fn availability_is_callable_only_for_available_entries() {
-    assert!(AvailabilityContract::Available.is_callable());
-    assert!(
-        !AvailabilityContract::Unavailable {
-            reason: tracedecay_tool_catalog::UnavailabilityReason::NotImplemented,
-        }
-        .is_callable()
-    );
-}

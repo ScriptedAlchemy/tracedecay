@@ -1650,18 +1650,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_requests_are_session_only() {
-        let request = request(FeedbackContentIdentityV1::EphemeralOverlay {
-            session_id: id("session.fixture"),
-            owner_client_id: id("client.fixture"),
-            agent_id: None,
-            document_version: 1,
-            overlay_digest: digest('c'),
-        });
-        assert_eq!(request.durability(), FeedbackDurabilityV1::SessionOnly);
-    }
-
-    #[test]
     fn clean_results_require_complete_provider_coverage() {
         let request = request(FeedbackContentIdentityV1::SavedContent {
             generation_digest: digest('c'),

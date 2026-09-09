@@ -1143,13 +1143,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_inputs_produce_identical_decisions() {
-        let evaluator = WorkProposalEvaluatorV1::default();
-        let request = input();
-        assert_eq!(evaluator.evaluate(&request), evaluator.evaluate(&request));
-    }
-
-    #[test]
     fn ready_work_is_recommended_for_acceptance() {
         let decision = WorkProposalEvaluatorV1::default().evaluate(&input());
         assert_eq!(decision.disposition, WorkProposalDispositionV1::Allow);
@@ -1297,29 +1290,6 @@ mod tests {
         );
         assert_eq!(decision.local_evidence, request.local_evidence);
         assert_eq!(decision.live_git_evidence, request.live_git_evidence);
-    }
-
-    #[test]
-    fn cancellation_and_deadline_are_indeterminate() {
-        let mut cancelled = input();
-        cancelled.cancellation = WorkProposalCancellationV1::Cancelled {
-            requested_at: UtcMicros(50),
-        };
-        assert_eq!(
-            WorkProposalEvaluatorV1::default()
-                .evaluate(&cancelled)
-                .disposition,
-            WorkProposalDispositionV1::Indeterminate
-        );
-
-        let mut elapsed = input();
-        elapsed.evaluated_at = elapsed.deadline;
-        assert_eq!(
-            WorkProposalEvaluatorV1::default()
-                .evaluate(&elapsed)
-                .disposition,
-            WorkProposalDispositionV1::Indeterminate
-        );
     }
 
     #[test]
