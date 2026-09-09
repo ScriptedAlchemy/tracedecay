@@ -25,7 +25,7 @@ use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticResourceCeilings,
 };
 
-use super::journey_test_support::git;
+use super::journey_test_support::{StageLedgerReportV1, git, timed_stage};
 use super::*;
 use crate::daemon::maintenance::project_store_maintenance_lease;
 use tracedecay_application::semantic_runtime::{
@@ -1318,6 +1318,9 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         );
         return;
     };
+    // Drop last so a rejected qualification still reports the completed
+    // model acquisition and evaluation dispatch stages.
+    let _stage_report = StageLedgerReportV1::arm("linked-worktree retention journey");
     let _profile = crate::config::PinnedUserDataDir::new();
 
     let isolation = TempDir::new().expect("linked-worktree journey isolation");
@@ -1341,13 +1344,20 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     git(&linked, &["add", "."]);
     git(&linked, &["commit", "-qm", "linked semantic source"]);
 
-    let harness = ProductionProjectCompositionHarnessV1::open(
-        isolation.path(),
-        [primary.clone(), linked.clone()],
+    let harness = timed_stage(
+        "harness.open(daemon composition)",
+        ProductionProjectCompositionHarnessV1::open(
+            isolation.path(),
+            [primary.clone(), linked.clone()],
+        ),
     )
     .await
     .expect("mounted linked-worktree production composition");
-    let lifecycle = install_project_distribution_fixture(&harness, &primary, &fixture_root).await;
+    let lifecycle = timed_stage(
+        "model.verify_and_install",
+        install_project_distribution_fixture(&harness, &primary, &fixture_root),
+    )
+    .await;
     let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
     let linked_project_id = tracedecay_domain::ProjectId::new(
         harness
@@ -1385,10 +1395,16 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         .await
         .expect("linked code generation");
     assert_ne!(primary_code_id, linked_code_id);
-    let (primary_code, primary_vector) =
-        wait_for_semantic_generation(&harness, &primary, &primary_code_id).await;
-    let (linked_code, linked_vector) =
-        wait_for_semantic_generation(&harness, &linked, &linked_code_id).await;
+    let (primary_code, primary_vector) = timed_stage(
+        "primary.index+embed+publish(settle)",
+        wait_for_semantic_generation(&harness, &primary, &primary_code_id),
+    )
+    .await;
+    let (linked_code, linked_vector) = timed_stage(
+        "linked.index+embed+publish(settle)",
+        wait_for_semantic_generation(&harness, &linked, &linked_code_id),
+    )
+    .await;
     assert_ne!(
         primary_vector.generation_id(),
         linked_vector.generation_id()
