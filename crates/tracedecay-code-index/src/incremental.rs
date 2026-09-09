@@ -307,31 +307,30 @@ pub fn plan_chunk_increment(
         return Err(ChunkIncrementErrorV1::SameGeneration);
     }
 
-    let prior_by_id: BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1> = prior
+    // Manifests already enforce sorted, unique chunk IDs. Merge those rows
+    // directly instead of allocating and ordering a second copy of both keys.
+    let mut previous = prior
         .into_iter()
-        .flat_map(|manifest| manifest.chunks.iter())
-        .map(|chunk| (chunk.id.clone(), chunk.as_ref()))
-        .collect();
-    let current_by_id: BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1> = current
-        .chunks
-        .iter()
-        .map(|chunk| (chunk.id.clone(), chunk.as_ref()))
-        .collect();
-
+        .flat_map(|manifest| &manifest.chunks)
+        .peekable();
     let mut added_or_changed = Vec::new();
     let mut reused = Vec::new();
-    for (chunk_id, chunk) in &current_by_id {
-        let change = match prior_by_id.get(chunk_id) {
-            None => ChangedCodeChunkV1 {
-                chunk_id: chunk_id.clone(),
-                prior_digest: None,
-                current_digest: Some(chunk.content_digest.clone()),
-            },
-            Some(prior_chunk) => ChangedCodeChunkV1 {
-                chunk_id: chunk_id.clone(),
-                prior_digest: Some(prior_chunk.content_digest.clone()),
-                current_digest: Some(chunk.content_digest.clone()),
-            },
+    let mut deleted = Vec::new();
+    for chunk in &current.chunks {
+        while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
+            deleted.push(ChangedCodeChunkV1 {
+                chunk_id: removed.id.clone(),
+                prior_digest: Some(removed.content_digest.clone()),
+                current_digest: None,
+            });
+        }
+        let prior_digest = previous
+            .next_if(|prior| prior.id == chunk.id)
+            .map(|prior| prior.content_digest.clone());
+        let change = ChangedCodeChunkV1 {
+            chunk_id: chunk.id.clone(),
+            prior_digest,
+            current_digest: Some(chunk.content_digest.clone()),
         };
         if change.prior_digest == change.current_digest {
             reused.push(change);
@@ -339,17 +338,11 @@ pub fn plan_chunk_increment(
             added_or_changed.push(change);
         }
     }
-
-    let mut deleted = Vec::new();
-    for (chunk_id, chunk) in prior_by_id {
-        if !current_by_id.contains_key(&chunk_id) {
-            deleted.push(ChangedCodeChunkV1 {
-                chunk_id,
-                prior_digest: Some(chunk.content_digest.clone()),
-                current_digest: None,
-            });
-        }
-    }
+    deleted.extend(previous.map(|removed| ChangedCodeChunkV1 {
+        chunk_id: removed.id.clone(),
+        prior_digest: Some(removed.content_digest.clone()),
+        current_digest: None,
+    }));
 
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: prior.map(|manifest| manifest.generation_id.clone()),
