@@ -2,6 +2,7 @@
 
 mod connection;
 mod dispatch;
+mod live_transcript_refresh;
 mod protocol;
 mod read_coalescing;
 mod rmcp;
@@ -15,6 +16,10 @@ pub use connection::{
 };
 pub use dispatch::{
     McpDispatchParams, McpDispatchRequest, ToolCallParams, dispatch_is_independent_read,
+    needs_lazy_sync_before_dispatch,
+};
+pub use live_transcript_refresh::{
+    LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
 };
 pub use protocol::{McpMethod, classify_mcp_method, initialize_result, resources_list_result};
 pub use read_coalescing::{

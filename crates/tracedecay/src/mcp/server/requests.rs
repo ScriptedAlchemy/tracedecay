@@ -1326,7 +1326,7 @@ impl McpServer {
                 mark_semantic_tool_error(&mut result);
                 if !tool_result_has_semantic_error(&result)
                     && let Err(error) = hotpath::future!(
-                        super::live_transcript_refresh::join_required_live_transcript_refresh(
+                        join_required_live_transcript_refresh(
                             &tool_name,
                             &analytics_arguments,
                             selected_owner.is_some(),

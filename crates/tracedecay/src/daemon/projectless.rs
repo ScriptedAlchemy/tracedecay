@@ -6,6 +6,7 @@ use serde_json::json;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_domain::errors::Result;
+use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
     tool_result_has_semantic_error,
@@ -416,21 +417,19 @@ async fn projectless_hook_runtime_response(
         Ok(result) if tool_result_has_semantic_error(&result) => {
             JsonRpcResponse::success(id, result.value)
         }
-        Ok(result) => match boxed_projectless_phase(
-            crate::mcp::server::join_required_live_transcript_refresh(
-                "tracedecay_hook_runtime",
-                &arguments,
-                false,
-                None,
-                Some(&refresh_wake),
-            ),
-        )
+        Ok(result) => match boxed_projectless_phase(join_required_live_transcript_refresh(
+            "tracedecay_hook_runtime",
+            &arguments,
+            false,
+            None,
+            Some(&refresh_wake),
+        ))
         .await
         {
-            Ok(crate::mcp::server::LiveTranscriptRefreshJoin::PublicationJoined) => {
+            Ok(LiveTranscriptRefreshJoin::PublicationJoined) => {
                 JsonRpcResponse::success(id, result.value)
             }
-            Ok(crate::mcp::server::LiveTranscriptRefreshJoin::NotRequired) => {
+            Ok(LiveTranscriptRefreshJoin::NotRequired) => {
                 refresh_wake.wake();
                 JsonRpcResponse::success(id, result.value)
             }

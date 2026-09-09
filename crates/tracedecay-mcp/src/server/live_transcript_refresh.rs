@@ -14,7 +14,7 @@ enum LiveTranscriptRefreshScope {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LiveTranscriptRefreshJoin {
+pub enum LiveTranscriptRefreshJoin {
     NotRequired,
     PublicationJoined,
 }
@@ -62,7 +62,7 @@ fn refresh_unavailable(tool_name: &str) -> TraceDecayError {
     }
 }
 
-pub(crate) async fn join_required_live_transcript_refresh(
+pub async fn join_required_live_transcript_refresh(
     tool_name: &str,
     arguments: &Value,
     selected_project_owner: bool,
@@ -114,7 +114,7 @@ mod tests {
                 "session temporal refresh did not publish before hook completion",
             ))
         );
-        let data = tracedecay_mcp::structured_hook_error_data(&error)
+        let data = crate::structured_hook_error_data(&error)
             .expect("hook error must retain structured context");
         assert_eq!(data["status"], "unavailable");
     }

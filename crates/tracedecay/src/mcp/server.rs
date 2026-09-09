@@ -51,34 +51,29 @@ mod hook_dispatch;
 mod hook_writes;
 mod ledger;
 mod lifecycle;
-mod live_transcript_refresh;
 mod project_open_access;
 mod requests;
 mod rmcp;
 mod routing;
 mod session_refresh;
-mod staleness;
 mod status_resource;
 
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::VersionCheckState;
-pub(crate) use live_transcript_refresh::{
-    LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
-};
 pub(crate) use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
     RmcpWorkDeliverySettlement,
 };
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
-pub(crate) use staleness::*;
 use tracedecay_daemon_service::{DaemonProjectRegistryReadService, DaemonWorkflowIndexReadService};
 pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
 use tracedecay_mcp::server::{
     IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest, RetainedDispatchAuthority,
-    StartupCatchUpMachineV1, ToolCallParams,
+    StartupCatchUpMachineV1, ToolCallParams, join_required_live_transcript_refresh,
+    needs_lazy_sync_before_dispatch,
 };
 pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 
