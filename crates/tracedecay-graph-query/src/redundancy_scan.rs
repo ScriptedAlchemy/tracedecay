@@ -26,17 +26,91 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::tracedecay::TraceDecay;
-use tracedecay_application::semantic_runtime::{
-    SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
-};
 use tracedecay_code_extraction::redundancy::{
     Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
     redundancy_match_score, round4,
 };
 use tracedecay_domain::SourceSpan;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::source_path_policy::is_generated_dir_segment;
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
+
+use crate::VerifiedGraphQuery;
+
+const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
+const MAX_COSINE_DISTANCE_MICROS: i64 = 2_000_000_000;
+
+/// One embedding row bound to a symbol the scan can score.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticRedundancyVectorV1 {
+    pub file_path: String,
+    pub qualified_name: String,
+    pub values: Vec<f32>,
+}
+
+/// Calibrated acceptance window for semantic analogue pairs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticRedundancyProfileV1 {
+    pub scope_digest: String,
+    pub accepted_profile_digest: String,
+    pub calibration_profile_id: String,
+    pub calibration_digest: String,
+    pub redundancy_profile_digest: String,
+    pub maximum_distance_micros: i64,
+}
+
+impl SemanticRedundancyProfileV1 {
+    fn distance_micros(&self, cosine: f64) -> Option<i64> {
+        if !cosine.is_finite() || !(-1.0..=1.0).contains(&cosine) {
+            return None;
+        }
+        let scaled = ((1.0 - cosine) * SEMANTIC_DISTANCE_SCALE).round();
+        (scaled >= 0.0 && scaled <= MAX_COSINE_DISTANCE_MICROS as f64).then_some(scaled as i64)
+    }
+
+    pub fn accepts(&self, cosine: f64) -> Option<i64> {
+        let distance = self.distance_micros(cosine)?;
+        (distance <= self.maximum_distance_micros).then_some(distance)
+    }
+
+    /// Half-width, in normalized-vector coordinate units, of the smallest
+    /// window that still contains every pair this profile could accept.
+    ///
+    /// For unit vectors `u`, `v` we have `‖u − v‖² = 2(1 − cos)`, and every
+    /// single coordinate obeys `|u_k − v_k| ≤ ‖u − v‖`. A pair is accepted only
+    /// when `round((1 − cos)·SCALE) ≤ maximum_distance_micros`, which requires
+    /// `(1 − cos) ≤ (maximum_distance_micros + 0.5)/SCALE` (the `+0.5` bounds
+    /// the rounding). Substituting yields a per-coordinate bound of
+    /// `sqrt(2·(maximum_distance_micros + 0.5)/SCALE)`.
+    ///
+    /// Sorting normalized vectors by any one coordinate and comparing only
+    /// entries within this half-width therefore excludes **no** acceptable pair
+    /// (perfect recall): the returned window is a necessary condition on every
+    /// accepted pair, never a sufficient one, so callers must still re-check
+    /// [`accepts`] on each surviving candidate. A tiny epsilon is added for
+    /// floating-point slack; the value saturates at `2.0` (a window that spans
+    /// the whole normalized range, i.e. no pruning) for permissive profiles.
+    pub fn cosine_projection_window(&self) -> f64 {
+        let allowed = (self.maximum_distance_micros as f64 + 0.5) / SEMANTIC_DISTANCE_SCALE;
+        if allowed <= 0.0 {
+            return 0.0;
+        }
+        ((2.0 * allowed).sqrt() + 1e-9).min(2.0)
+    }
+}
+
+/// Admitted semantic generation the scan can classify analogues against.
+///
+/// Application projects this from committed pins; the scan never opens
+/// semantic runtime state itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticRedundancyGenerationV1 {
+    pub vector_generation: String,
+    pub source_generation: String,
+    pub projection_key: String,
+    pub profile: SemanticRedundancyProfileV1,
+    pub vectors: Vec<SemanticRedundancyVectorV1>,
+}
 
 /// Extraction-attested symbol evidence consumed by redundancy scoring.
 ///
@@ -242,55 +316,55 @@ fn connected_node_groups<'a>(pairs: &'a [RedundantPair<'a>]) -> Vec<Vec<&'a Redu
 
 /// The knobs a redundancy scan runs with, already resolved from whatever
 /// surface requested it (MCP tool arguments or a typed port request).
-pub(crate) struct RedundancyOptions<'a> {
-    pub(crate) path_prefix: Option<&'a str>,
-    pub(crate) min_lines: u32,
-    pub(crate) max_pairs: usize,
-    pub(crate) threshold: f64,
-    pub(crate) include_naming: bool,
-    pub(crate) include_generated: bool,
+pub struct RedundancyOptions<'a> {
+    pub path_prefix: Option<&'a str>,
+    pub min_lines: u32,
+    pub max_pairs: usize,
+    pub threshold: f64,
+    pub include_naming: bool,
+    pub include_generated: bool,
 }
 
 /// One ranked structural pair, projected into owned values so the markdown
 /// renderer in the handler layer does not have to borrow the scan's interior.
 #[derive(Clone)]
-pub(crate) struct RedundancyNodeViewV1 {
-    pub(crate) name: String,
-    pub(crate) file: String,
-    pub(crate) line: u32,
-    pub(crate) id: String,
+pub struct RedundancyNodeViewV1 {
+    pub name: String,
+    pub file: String,
+    pub line: u32,
+    pub id: String,
 }
 
-pub(crate) struct RedundancyPairViewV1 {
-    pub(crate) a: RedundancyNodeViewV1,
-    pub(crate) b: RedundancyNodeViewV1,
-    pub(crate) label_a: String,
-    pub(crate) label_b: String,
-    pub(crate) id_a: String,
-    pub(crate) id_b: String,
-    pub(crate) severity: &'static str,
-    pub(crate) overlap_kind: &'static str,
-    pub(crate) ranking_score: f64,
-    pub(crate) similarity: f64,
-    pub(crate) vector_cosine: f64,
-    pub(crate) generic_helper_downranked: bool,
-    pub(crate) body_tokens: [usize; 2],
+pub struct RedundancyPairViewV1 {
+    pub a: RedundancyNodeViewV1,
+    pub b: RedundancyNodeViewV1,
+    pub label_a: String,
+    pub label_b: String,
+    pub id_a: String,
+    pub id_b: String,
+    pub severity: &'static str,
+    pub overlap_kind: &'static str,
+    pub ranking_score: f64,
+    pub similarity: f64,
+    pub vector_cosine: f64,
+    pub generic_helper_downranked: bool,
+    pub body_tokens: [usize; 2],
 }
 
 /// A completed scan: the structured payload plus the structural view the
 /// markdown renderer needs.
-pub(crate) struct RedundancyScanV1 {
+pub struct RedundancyScanV1 {
     /// The structured payload — the exact `Value` the MCP handler emits and
     /// the port decodes into `RedundancyResultV1`.
-    pub(crate) output: Value,
+    pub output: Value,
     /// True when a semantic generation was projected, in which case `output`
     /// carries semantic pairs that the structural markdown view cannot render.
-    pub(crate) semantic_active: bool,
-    pub(crate) total_candidates: usize,
-    pub(crate) scanned: usize,
-    pub(crate) pairs: Vec<RedundancyPairViewV1>,
+    pub semantic_active: bool,
+    pub total_candidates: usize,
+    pub scanned: usize,
+    pub pairs: Vec<RedundancyPairViewV1>,
     /// Connected duplicate groups, as `name (file:line)` member labels.
-    pub(crate) groups: Vec<Vec<String>>,
+    pub groups: Vec<Vec<String>>,
 }
 
 /// Scored candidate pairs per uninterrupted slice of the pairwise scan.
@@ -304,11 +378,15 @@ pub(crate) struct RedundancyScanV1 {
 const REDUNDANCY_PAIR_SLICE: usize = 2048;
 
 /// Run the full redundancy pipeline for `options`.
+///
+/// `semantic` is the already-projected generation for this project, when one
+/// exists. The scan does not open semantic runtime state; callers pass the
+/// handle they already admitted.
 #[hotpath::measure(label = "graph.redundancy_scan", future = true)]
-pub(crate) async fn redundancy_scan(
-    cg: &TraceDecay,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+pub async fn redundancy_scan(
+    graph: &VerifiedGraphQuery,
     options: &RedundancyOptions<'_>,
+    semantic: Option<&SemanticRedundancyGenerationV1>,
 ) -> Result<RedundancyScanV1> {
     // 1. Collect candidate function nodes.
     let nodes = collect_candidates(
@@ -322,7 +400,7 @@ pub(crate) async fn redundancy_scan(
 
     // 2. Compute fresh, request-owned fingerprints. The final graph authority
     // intentionally has no parallel SQLite fingerprint or pair cache.
-    let fingerprints = ensure_fingerprints(cg, &nodes).await?;
+    let fingerprints = ensure_fingerprints(graph.project_root()?, &nodes).await?;
     let scanned = fingerprints.len();
 
     // 3. Bucket by token count and score every in-window pair.
@@ -334,7 +412,6 @@ pub(crate) async fn redundancy_scan(
     // result into both so the two views can never diverge and the O(pairs²)
     // grouping runs a single time per call.
     let groups = connected_node_groups(&pairs);
-    let semantic = project_semantic_redundancy_generation(cg.project_root()).await;
     let output = augment_redundancy_output(
         options,
         total_candidates,
@@ -342,7 +419,7 @@ pub(crate) async fn redundancy_scan(
         &nodes,
         &pairs,
         &groups,
-        semantic.as_ref(),
+        semantic,
     );
     Ok(RedundancyScanV1 {
         output,
@@ -812,7 +889,7 @@ fn redundancy_output(
 
 #[hotpath::measure(label = "graph.redundancy_scan.candidates")]
 fn collect_candidates(
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    graph: &VerifiedGraphQuery,
     path_prefix: Option<&str>,
     min_lines: u32,
     include_generated: bool,
@@ -936,15 +1013,13 @@ fn admitted_redundancy_source(file_path: &str, raw: &str) -> Result<String> {
 /// twins, and `.worktrees` self-duplicates). Opt back in with
 /// `include_generated_paths: true`.
 ///
-/// Delegates to the shared [`crate::config::is_generated_path_segment`]
-/// (segment list plus minified-asset suffix), which folds in this scanner's
-/// former standalone `.min.js` check as the more general `*.min.*` suffix,
-/// and now also picks up `.cache`, `.gradle`, `.next`, `.turbo`, `.venv`,
-/// `coverage`, and `venv` — segments this scanner didn't previously
-/// exclude but the other generated/vendored lists in the codebase already
-/// did.
+/// Delegates to the shared [`is_generated_dir_segment`] list plus a
+/// minified-asset suffix, which folds in this scanner's former standalone
+/// `.min.js` check as the more general `*.min.*` suffix, and also picks up
+/// `.cache`, `.gradle`, `.next`, `.turbo`, `.venv`, `coverage`, and `venv`.
 fn is_generated_path(path: &str) -> bool {
-    crate::config::is_generated_path_segment(path)
+    path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
+        || path.split('/').any(is_generated_dir_segment)
 }
 
 // ---------------------------------------------------------------------------
@@ -959,10 +1034,10 @@ fn is_generated_path(path: &str) -> bool {
 /// that dispatched the MCP request for the whole scan.
 #[hotpath::measure(label = "graph.redundancy_scan.fingerprint_offload", future = true)]
 async fn ensure_fingerprints(
-    cg: &TraceDecay,
+    project_root: &Path,
     candidates: &[RedundancyCandidate],
 ) -> Result<HashMap<String, Fingerprint>> {
-    let project_root = cg.project_root().to_path_buf();
+    let project_root = project_root.to_path_buf();
     let candidates = candidates.to_vec();
     let load =
         tokio::task::spawn_blocking(move || compute_fingerprints(&project_root, &candidates))
@@ -1195,12 +1270,10 @@ mod tests {
 
     use super::{
         RedundancyCandidate, RedundancyOptions, RedundancyPairScan, RedundantPair, SemanticPair,
+        SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
         augment_redundancy_output, canonical_pair_ids, compute_fingerprints, connected_node_groups,
         find_redundant_pairs, is_generated_path, nodes_overlap, redundancy_output, semantic_cosine,
         semantic_pairs,
-    };
-    use tracedecay_application::semantic_runtime::{
-        SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
     };
     use tracedecay_code_extraction::redundancy::{Fingerprint, RedundancyMatchScore};
     use tracedecay_domain::SourceSpan;
@@ -1231,7 +1304,7 @@ mod tests {
         // These segments weren't in this file's old standalone list but are
         // part of the shared GENERATED_DIR_SEGMENTS union that scan.rs and
         // migrate::inventory already recognized — closing this drift is the
-        // point of routing through crate::config::is_generated_path_segment.
+        // point of routing through the shared generated-segment classifier.
         for path in [
             "packages/web/coverage/lcov.info",
             "env/.venv/pyvenv.cfg",
@@ -1335,7 +1408,7 @@ mod tests {
     #[test]
     fn active_generation_classifies_semantic_only_pair_as_analogue() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/redundancy_eval_labeled.json"
+            "../../../tests/fixtures/redundancy_eval_labeled.json"
         ))
         .unwrap();
         let labelled = fixture["cases"]

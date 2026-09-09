@@ -2,24 +2,26 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
-
-use crate::tracedecay::TraceDecay;
+use tracedecay_code_index::is_test_file;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
+
+use crate::VerifiedGraphQuery;
+use tracedecay_runtime_core::git::churn::file_churn;
 
 const ATTRIBUTION_DEPTH: usize = 3;
 const MAX_TEST_RISK_SYMBOLS: usize = 500_000;
 const MAX_TEST_RISK_RELATIONS: usize = 2_000_000;
 
 #[derive(Debug, Serialize)]
-pub(crate) struct TestRiskReport {
+pub struct TestRiskReport {
     pub risks: Vec<TestRiskEntry>,
     pub summary: TestRiskSummary,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct TestRiskEntry {
+pub struct TestRiskEntry {
     pub id: String,
     pub name: String,
     pub file: String,
@@ -37,7 +39,7 @@ pub(crate) struct TestRiskEntry {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct TestRiskSummary {
+pub struct TestRiskSummary {
     pub total_functions: usize,
     pub tested: usize,
     pub skipped: usize,
@@ -51,7 +53,7 @@ pub(crate) struct TestRiskSummary {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct TestRiskAttributionSummary {
+pub struct TestRiskAttributionSummary {
     pub depth: usize,
     pub direct_unit_attributed: usize,
     pub closure_attributed: usize,
@@ -62,7 +64,7 @@ pub(crate) struct TestRiskAttributionSummary {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct TestRiskBucketSummary {
+pub struct TestRiskBucketSummary {
     pub attributed: usize,
     pub reachable_unattributed: usize,
     pub orphan_entry: usize,
@@ -136,9 +138,8 @@ impl TestAttributionMethod {
 }
 
 #[hotpath::measure(label = "graph.health.test_risk", future = true)]
-pub(crate) async fn analyze_test_risk(
-    cg: &TraceDecay,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+pub async fn analyze_test_risk(
+    graph: &VerifiedGraphQuery,
     path_prefix: Option<&str>,
     include_tested: bool,
     limit: usize,
@@ -149,7 +150,7 @@ pub(crate) async fn analyze_test_risk(
         .iter()
         .filter(|n| {
             n.callable
-                && !crate::tracedecay::is_test_file(&n.file)
+                && !is_test_file(&n.file)
                 && !n.name.starts_with("test_")
                 && !n.name.starts_with("test")
                 && !n.file.contains("/test")
@@ -204,7 +205,7 @@ pub(crate) async fn analyze_test_risk(
         .filter(|n| {
             n.callable
                 && n.skip_test_coverage
-                && !crate::tracedecay::is_test_file(&n.file)
+                && !is_test_file(&n.file)
                 && !n.qualified_name.contains("::tests::")
         })
         .count();
@@ -236,8 +237,7 @@ pub(crate) async fn analyze_test_risk(
         .filter(|risk| include_tested || !risk.has_test())
         .collect();
 
-    let churn_map =
-        tracedecay_application::git_intelligence::churn::file_churn(cg.project_root(), 90).await?;
+    let churn_map = file_churn(graph.project_root()?, 90).await?;
     for risk in &mut risks {
         let churn = churn_map.get(&risk.file).copied().unwrap_or(0);
         risk.churn = churn;
@@ -320,17 +320,15 @@ struct VerifiedTestSymbol {
     skip_test_coverage: bool,
 }
 
-pub(crate) struct VerifiedTestEvidence {
+pub struct VerifiedTestEvidence {
     symbols: Vec<VerifiedTestSymbol>,
     calls: Vec<(String, String)>,
     files: HashMap<String, String>,
-    pub(crate) test_annotated: HashSet<String>,
+    pub test_annotated: HashSet<String>,
 }
 
 #[hotpath::measure(label = "graph.health.test_risk.evidence")]
-pub(crate) fn verified_test_evidence(
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
-) -> Result<VerifiedTestEvidence> {
+pub fn verified_test_evidence(graph: &VerifiedGraphQuery) -> Result<VerifiedTestEvidence> {
     let page = graph.symbols_page(None, MAX_TEST_RISK_SYMBOLS)?;
     if page.has_more {
         return Err(test_risk_graph_problem(
@@ -401,7 +399,7 @@ pub(crate) fn verified_test_evidence(
     })
 }
 
-pub(crate) fn verified_test_symbol_parts(
+pub fn verified_test_symbol_parts(
     symbol: &CodeGraphSymbolSummaryV1,
 ) -> Result<(&tracedecay_code_index::lineage::LineageSymbolRecordV1, &str)> {
     let metadata = symbol.metadata.as_ref().ok_or_else(|| {
@@ -438,7 +436,7 @@ fn build_test_attribution_depths(
             .push(target.clone());
         let is_test_seed = node_to_file
             .get(source)
-            .is_some_and(|file| crate::tracedecay::is_test_file(file))
+            .is_some_and(|file| is_test_file(file))
             || test_annotated_callers.contains(source);
         if is_test_seed {
             seed_nodes.insert(source.clone());

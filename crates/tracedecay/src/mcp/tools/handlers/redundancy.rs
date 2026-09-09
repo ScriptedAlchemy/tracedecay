@@ -1,17 +1,20 @@
 //! `tracedecay_redundancy` — AST-level functional-duplicate detector.
 //!
 //! Wire surface only: argument parsing, the scan call, and rendering. The
-//! pipeline itself lives in [`crate::graph::redundancy_scan`]; this handler
-//! supplies the admitted verified graph and renders the resulting payload.
+//! pipeline itself lives in [`tracedecay_graph_query::redundancy_scan`]; this
+//! handler supplies the admitted verified graph and renders the resulting payload.
 
 use serde_json::{Value, json};
 use tracedecay_contracts::retrieval::RedundancySurfaceRequestV1;
 use tracedecay_contracts::retrieval::grep_analysis::RedundancyResultV1;
 
-use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::semantic_runtime::project_semantic_redundancy_generation;
 use tracedecay_code_extraction::redundancy::round4;
 use tracedecay_domain::errors::Result;
+use tracedecay_graph_query::redundancy_scan::{
+    RedundancyOptions, RedundancyPairViewV1, RedundancyScanV1, redundancy_scan,
+};
 
 use super::support::decode_primitive_request;
 use tracedecay_mcp::ToolResult;
@@ -27,8 +30,9 @@ pub(crate) async fn handle_redundancy(
     let request: RedundancySurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_redundancy")?;
     let options = redundancy_options(&request, scope_prefix);
+    let semantic = project_semantic_redundancy_generation(cg.project_root()).await;
     let scan = hotpath::future!(
-        redundancy_scan(cg, graph, &options),
+        redundancy_scan(graph, &options, semantic.as_ref()),
         label = "mcp.health.redundancy.scan"
     )
     .await?;
@@ -118,7 +122,7 @@ fn redundancy_md(options: &RedundancyOptions<'_>, scan: &RedundancyScanV1) -> St
     md.render()
 }
 
-fn append_pair_md(md: &mut Md, pair: &crate::graph::redundancy_scan::RedundancyPairViewV1) {
+fn append_pair_md(md: &mut Md, pair: &RedundancyPairViewV1) {
     let downranked = if pair.generic_helper_downranked {
         ", generic-helper downranked"
     } else {
@@ -151,7 +155,7 @@ fn append_group_md(md: &mut Md, group: &[String]) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{RedundancyOptions, RedundancyScanV1, redundancy_md};
-    use crate::graph::redundancy_scan::{RedundancyNodeViewV1, RedundancyPairViewV1};
+    use tracedecay_graph_query::redundancy_scan::{RedundancyNodeViewV1, RedundancyPairViewV1};
 
     fn test_pair(
         id_a: &str,

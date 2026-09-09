@@ -57,7 +57,6 @@ pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
 pub use tracedecay_application::git_query;
-mod graph;
 mod hooks;
 #[cfg(test)]
 mod host_admission_test;
