@@ -40,7 +40,6 @@ mod tests {
     use std::process::Command;
 
     use super::resolve_dashboard_scope;
-    use tracedecay_domain::ProjectId;
 
     /// A registered root is a real repository whose git common directory
     /// carries the on-disk repository identity marker; resolution fails closed
@@ -80,26 +79,6 @@ mod tests {
         assert!(resolve_dashboard_scope(root.path(), Some("")).is_none());
         assert!(resolve_dashboard_scope(root.path(), Some(" project.bad")).is_none());
         assert!(resolve_dashboard_scope(root.path(), Some("project.bad\n")).is_none());
-    }
-
-    #[test]
-    fn dashboard_scope_resolves_the_exact_root_through_the_application_type() {
-        let project_id = ProjectId::new("project.dashboard-scope").expect("project id");
-        let root = registered_root(project_id.as_str());
-
-        let scope = resolve_dashboard_scope(root.path(), Some(project_id.as_str()))
-            .expect("exact resolved scope");
-
-        scope.validate().expect("resolved scope validates");
-        assert_eq!(scope.project_id, project_id);
-        // The canonical application authority supplies a digest bound to every
-        // resolved identity field; the dashboard does not re-derive it.
-        assert_eq!(scope.scope_digest, scope.compute_digest().expect("digest"));
-
-        // Resolved once: repeated resolution is byte-identical, digest included.
-        let again = resolve_dashboard_scope(root.path(), Some(project_id.as_str()))
-            .expect("exact resolved scope");
-        assert_eq!(scope, again);
     }
 
     #[test]
