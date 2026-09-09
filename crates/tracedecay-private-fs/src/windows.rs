@@ -371,6 +371,7 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
     let payload_size = filename_offset
         .checked_add(filename_bytes)
+        .and_then(|size| size.checked_add(size_of::<u16>()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
     let buffer_size: u32 = payload_size
         .max(size_of::<FILE_RENAME_INFO>())
@@ -384,7 +385,8 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     header.RootDirectory = parent.as_raw_handle();
     header.FileNameLength = filename_bytes as u32;
     // SAFETY: `storage` is pointer-aligned and sized for the fixed header plus
-    // every UTF-16 code unit. `FileNameLength` excludes a terminator.
+    // every UTF-16 code unit plus the zero-initialized terminator required by
+    // FILE_RENAME_INFO::FileName. `FileNameLength` excludes that terminator.
     unsafe {
         rename_info.write(header);
         copy_nonoverlapping(
@@ -1184,6 +1186,25 @@ mod tests {
         reader.read_to_end(&mut old_contents).unwrap();
         assert_eq!(old_contents, b"old");
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn atomic_publication_accepts_variable_length_unicode_names() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in ["a", "record", "longer-record-name", "résumé-🦀"] {
+            let source = temp.path().join("staging");
+            let destination = temp.path().join(name);
+            let mut staging = create_private_file(&source).unwrap();
+            staging.write_all(b"published").unwrap();
+            drop(staging);
+
+            let mut published = replace_file_atomically(&source, &destination).unwrap();
+            let mut contents = Vec::new();
+            published.read_to_end(&mut contents).unwrap();
+            assert_eq!(contents, b"published");
+            assert_eq!(std::fs::read(&destination).unwrap(), contents);
+            assert!(!source.exists());
+        }
     }
 
     #[cfg(windows)]
