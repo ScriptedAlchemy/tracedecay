@@ -225,6 +225,8 @@ pub(super) async fn register_project_open_production_owners(
     server: &McpServer,
     source_edit_mutation: Arc<SourceEditMutationGate>,
 ) -> Result<ProjectOpenDependentOwnerState> {
+    // Retain the admitted owner state once across its asynchronous phases.
+    Box::pin(async move {
     let owner_registration_started = Instant::now();
     let mut owner_phase_started = owner_registration_started;
     let project_id =
@@ -832,6 +834,7 @@ pub(super) async fn register_project_open_production_owners(
         diagnostic_broker,
         lsp_session_factory,
     })
+        }).await
 }
 
 #[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]
