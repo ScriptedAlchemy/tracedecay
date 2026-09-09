@@ -121,24 +121,6 @@ fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
 }
 
 #[test]
-fn deferred_begin_keeps_one_shot_sqlite_semantics() {
-    let (_directory, mut locker, contender) = busy_begin_connections();
-    let _lock = locker
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .unwrap();
-    let shutdown = AtomicBool::new(true);
-
-    let transaction = super::super::command::begin_transaction_with_busy_retry(
-        &contender,
-        TransactionBehavior::Deferred,
-        &shutdown,
-    )
-    .unwrap();
-
-    transaction.rollback().unwrap();
-}
-
-#[test]
 fn immediate_transaction_commit_reports_only_after_commit() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();

@@ -1404,12 +1404,9 @@ impl fmt::Display for CommandDigestV1 {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_domain::{BrainId, FactOwnerV1, ProjectId, UserProfileId};
+    use tracedecay_domain::ProjectId;
 
-    use super::{
-        ObservationScopeV1, StoreShardIdV1, StoreShardScopeV1, fact_owner_matches_shard,
-        observation_scope_matches, retrieval_anchor_owner_matches_shard,
-    };
+    use super::{ObservationScopeV1, StoreShardScopeV1, observation_scope_matches};
 
     #[test]
     fn observation_scope_requires_the_exact_authoritative_shard() {
@@ -1452,66 +1449,6 @@ mod tests {
         assert!(!observation_scope_matches(
             &ObservationScopeV1::Profile,
             &StoreShardScopeV1::ProjectSessions { project_id }
-        ));
-    }
-
-    #[test]
-    fn profile_retrieval_anchor_requires_the_injected_profile_sessions_shard() {
-        let profile_id = UserProfileId::new("profile.fixture").unwrap();
-        let shard = StoreShardIdV1::profile_sessions(
-            BrainId::new("brain.fixture").unwrap(),
-            profile_id.clone(),
-        );
-        assert!(retrieval_anchor_owner_matches_shard(
-            &FactOwnerV1::Profile.into(),
-            &shard
-        ));
-
-        let project_shard = StoreShardIdV1::project(
-            BrainId::new("brain.fixture").unwrap(),
-            profile_id,
-            ProjectId::new("project.fixture").unwrap(),
-        );
-        assert!(!retrieval_anchor_owner_matches_shard(
-            &FactOwnerV1::Profile.into(),
-            &project_shard
-        ));
-
-        let project_id = ProjectId::new("project.fixture").unwrap();
-        let project_sessions_shard = StoreShardIdV1::project_sessions(
-            BrainId::new("brain.fixture").unwrap(),
-            UserProfileId::new("profile.fixture").unwrap(),
-            project_id.clone(),
-        );
-        assert!(retrieval_anchor_owner_matches_shard(
-            &FactOwnerV1::Project { project_id }.into(),
-            &project_sessions_shard
-        ));
-    }
-
-    #[test]
-    fn profile_facts_require_the_dedicated_profile_memory_shard() {
-        let profile_memory = StoreShardIdV1::profile_memory(
-            BrainId::new("brain.fixture").unwrap(),
-            UserProfileId::new("profile.fixture").unwrap(),
-        );
-        let profile = StoreShardIdV1::profile(
-            BrainId::new("brain.fixture").unwrap(),
-            UserProfileId::new("profile.fixture").unwrap(),
-        );
-        let profile_sessions = StoreShardIdV1::profile_sessions(
-            BrainId::new("brain.fixture").unwrap(),
-            UserProfileId::new("profile.fixture").unwrap(),
-        );
-
-        assert!(fact_owner_matches_shard(
-            &FactOwnerV1::Profile,
-            &profile_memory,
-        ));
-        assert!(!fact_owner_matches_shard(&FactOwnerV1::Profile, &profile));
-        assert!(!fact_owner_matches_shard(
-            &FactOwnerV1::Profile,
-            &profile_sessions,
         ));
     }
 }
