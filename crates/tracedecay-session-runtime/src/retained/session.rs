@@ -40,134 +40,124 @@ use tracedecay_temporal_query::ports::{
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
-use super::receipts::{evidence_outcome, session_refresh_effect_outcome};
 use super::session_refresh::{
     MountedSessionRefreshAuthorityV1, RetainedSessionRefreshPortV1,
     admitted_session_refresh_command,
 };
-use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
-use tracedecay_session_runtime::session_retrieval::{
+use crate::session_retrieval::{
     DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
     SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
-
+use tracedecay_contracts::retained_receipts::{evidence_outcome, session_refresh_effect_outcome};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 mod refresh;
-#[cfg(test)]
-mod retained_effect_tests;
 
 const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
 /// The admitted retrieval ceiling; a larger context budget is refused rather
 /// than trimmed.
-const MESSAGE_SEARCH_CONTEXT_BYTES: u64 =
-    tracedecay_session_runtime::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES;
+const MESSAGE_SEARCH_CONTEXT_BYTES: u64 = crate::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES;
 
-pub(super) struct ProjectRetainedSessionAuthoritiesV1 {
-    pub(super) project_root: PathBuf,
-    pub(super) project_id: ProjectId,
-    pub(super) profile_id: UserProfileId,
-    pub(super) session_store_id: SessionStoreId,
-    pub(super) session_root_id: SessionRootId,
-    pub(super) configuration_digest: ManifestDigest,
-    pub(super) refresh: Arc<dyn RetainedSessionRefreshPortV1>,
-    pub(super) retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
-    pub(super) session_database: RegisteredGlobalDbLeaseV1,
-    pub(super) workflow_index: Arc<dyn WorkflowIndexReadPort>,
+pub struct ProjectRetainedSessionAuthoritiesV1 {
+    pub project_root: PathBuf,
+    pub project_id: ProjectId,
+    pub profile_id: UserProfileId,
+    pub session_store_id: SessionStoreId,
+    pub session_root_id: SessionRootId,
+    pub configuration_digest: ManifestDigest,
+    pub refresh: Arc<dyn RetainedSessionRefreshPortV1>,
+    pub retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+    pub session_database: RegisteredGlobalDbLeaseV1,
+    pub workflow_index: Arc<dyn WorkflowIndexReadPort>,
 }
 
-pub(super) struct DirectRetainedSessionPortV1 {
-    authorities: ProjectRetainedSessionAuthoritiesV1,
+enum RetainedSessionAuthority<'a> {
+    Project(ProjectRetainedSessionAuthoritiesV1),
+    Profile {
+        session_database: super::ProfileSessionDatabaseSource<'a>,
+        identity: ResolvedSessionIdentity,
+        configuration_digest: ManifestDigest,
+        refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+    },
 }
 
-/// Profile (user-scope) session authority. `refresh` is the daemon-wide
-/// profile refresh service; when it is not mounted, refresh operations answer
-/// a typed unavailable terminal instead of opening a store.
-pub(super) struct DirectProfileRetainedSessionPortV1<'a> {
-    registry: &'a DaemonSessionRuntimeRegistryV1,
-    identity: ResolvedSessionIdentity,
-    configuration_digest: ManifestDigest,
-    refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+pub struct DirectRetainedSessionPortV1<'a> {
+    authorities: RetainedSessionAuthority<'a>,
 }
 
-impl<'a> DirectProfileRetainedSessionPortV1<'a> {
+impl<'a> DirectRetainedSessionPortV1<'a> {
     #[hotpath::skip]
-    pub(super) const fn profile(
-        registry: &'a DaemonSessionRuntimeRegistryV1,
+    pub fn profile(
+        session_database: super::ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         configuration_digest: ManifestDigest,
         refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
     ) -> Self {
         Self {
-            registry,
-            identity,
-            configuration_digest,
-            refresh,
+            authorities: RetainedSessionAuthority::Profile {
+                session_database,
+                identity,
+                configuration_digest,
+                refresh,
+            },
         }
     }
 
-    #[hotpath::measure(label = "daemon.store_runtime.session.profile_refresh")]
-    async fn execute_session_refresh(
+    async fn execute_profile_session_refresh(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         request: &SessionRefreshRequestV1,
+        identity: &ResolvedSessionIdentity,
+        configuration_digest: &ManifestDigest,
+        refresh: Option<&dyn RetainedSessionRefreshPortV1>,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let selector = &request.request;
         let SessionRefreshScopeV1::Profile { profile_id } = &selector.scope else {
             return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
         };
-        if profile_id != self.identity.profile_id().as_str()
-            || selector.session.store_id != self.identity.store_id().as_str()
-            || selector.session.root_id != self.identity.root_id().as_str()
+        if profile_id != identity.profile_id().as_str()
+            || selector.session.store_id != identity.store_id().as_str()
+            || selector.session.root_id != identity.root_id().as_str()
         {
             return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
         }
-        let refresh = self.refresh.ok_or_else(|| {
+        let refresh = refresh.ok_or_else(|| {
             RetainedSurfaceExecutionErrorV1::unavailable(
                 "the profile session refresh authority is not mounted for this connection",
             )
         })?;
         let profile_id = UserProfileId::new(profile_id.as_str())
             .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
-        // The profile connection admits every request under a fresh grant, so
-        // the connection configuration digest is the stable policy identity a
-        // begin handle must keep across status and cancel.
         execute_admitted_session_refresh(
             context,
             request,
             MountedSessionRefreshAuthorityV1 {
                 profile_id: &profile_id,
-                session_store_id: self.identity.store_id(),
-                session_root_id: self.identity.root_id(),
-                configuration_digest: &self.configuration_digest,
-                policy_digest: &self.configuration_digest,
+                session_store_id: identity.store_id(),
+                session_root_id: identity.root_id(),
+                configuration_digest,
+                policy_digest: configuration_digest,
                 refresh,
             },
         )
         .await
     }
 
-    #[hotpath::measure(label = "daemon.store_runtime.session.message_search")]
-    async fn execute_message_search(
+    async fn execute_profile_message_search(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         request: &MessageSearchRequestV1,
+        session_database: &super::ProfileSessionDatabaseSource<'_>,
+        identity: &ResolvedSessionIdentity,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         ensure_profile_message_scope(request)?;
         let input = MessageSearchInput::parse(request)?;
         let query = input.query()?;
-        let database = self
-            .bounded(
-                context,
-                hotpath::future!(
-                    self.registry.profile_sessions(),
-                    label = "daemon.store_runtime.session.profile_sessions"
-                ),
-            )
-            .await?;
+        let database =
+            super::bounded_execution(context, async { session_database().await }).await?;
         let retrieval =
-            DaemonSessionRetrievalService::new_admitted_profile(database, self.identity.clone())
+            DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
                 .ok_or_else(|| {
                     RetainedSurfaceExecutionErrorV1::unavailable(
                         "the profile session retrieval service could not be admitted",
@@ -183,26 +173,10 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
     }
 
     #[hotpath::skip]
-    async fn bounded<T, F>(
-        &self,
-        context: &RetainedSurfaceExecutionContextV1<'_>,
-        future: F,
-    ) -> Result<T, RetainedSurfaceExecutionErrorV1>
-    where
-        F: std::future::Future<Output = Result<T, TraceDecayError>>,
-    {
-        tokio::select! {
-            biased;
-            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
-            result = super::bounded_execution(context, future) => result,
+    pub const fn project(authorities: ProjectRetainedSessionAuthoritiesV1) -> Self {
+        Self {
+            authorities: RetainedSessionAuthority::Project(authorities),
         }
-    }
-}
-
-impl DirectRetainedSessionPortV1 {
-    #[hotpath::skip]
-    pub(super) const fn project(authorities: ProjectRetainedSessionAuthoritiesV1) -> Self {
-        Self { authorities }
     }
 
     #[hotpath::measure(label = "daemon.store_runtime.session.message_search")]
@@ -211,10 +185,13 @@ impl DirectRetainedSessionPortV1 {
         context: &RetainedSurfaceExecutionContextV1<'_>,
         request: &MessageSearchRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        ensure_project_message_scope(context, request, &self.authorities)?;
+        let RetainedSessionAuthority::Project(authorities) = &self.authorities else {
+            return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
+        };
+        ensure_project_message_scope(context, request, authorities)?;
         let input = MessageSearchInput::parse(request)?;
         let query = input.query()?;
-        let outcome = retrieve_bounded(context, self.authorities.retrieval.as_ref(), query).await?;
+        let outcome = retrieve_bounded(context, authorities.retrieval.as_ref(), query).await?;
         let result = input.result(outcome, SessionRetrievalStoreScope::Project)?;
         evidence_outcome(
             context,
@@ -229,20 +206,40 @@ impl DirectRetainedSessionPortV1 {
         context: &RetainedSurfaceExecutionContextV1<'_>,
         request: &SessionRefreshRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        ensure_session_refresh_identity(context, request, &self.authorities)?;
-        execute_admitted_session_refresh(
-            context,
-            request,
-            MountedSessionRefreshAuthorityV1 {
-                profile_id: &self.authorities.profile_id,
-                session_store_id: &self.authorities.session_store_id,
-                session_root_id: &self.authorities.session_root_id,
-                configuration_digest: &self.authorities.configuration_digest,
-                policy_digest: &context.request_context.grant().digest,
-                refresh: self.authorities.refresh.as_ref(),
-            },
-        )
-        .await
+        match &self.authorities {
+            RetainedSessionAuthority::Profile {
+                identity,
+                configuration_digest,
+                refresh,
+                ..
+            } => {
+                return self
+                    .execute_profile_session_refresh(
+                        context,
+                        request,
+                        identity,
+                        configuration_digest,
+                        *refresh,
+                    )
+                    .await;
+            }
+            RetainedSessionAuthority::Project(authorities) => {
+                ensure_session_refresh_identity(context, request, authorities)?;
+                execute_admitted_session_refresh(
+                    context,
+                    request,
+                    MountedSessionRefreshAuthorityV1 {
+                        profile_id: &authorities.profile_id,
+                        session_store_id: &authorities.session_store_id,
+                        session_root_id: &authorities.session_root_id,
+                        configuration_digest: &authorities.configuration_digest,
+                        policy_digest: &context.request_context.grant().digest,
+                        refresh: authorities.refresh.as_ref(),
+                    },
+                )
+                .await
+            }
+        }
     }
 
     #[hotpath::measure(label = "daemon.store_runtime.session.sessions_for")]
@@ -251,12 +248,15 @@ impl DirectRetainedSessionPortV1 {
         context: &RetainedSurfaceExecutionContextV1<'_>,
         request: &SessionsForRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        ensure_mounted_project_context(context, &self.authorities)?;
+        let RetainedSessionAuthority::Project(authorities) = &self.authorities else {
+            return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
+        };
+        ensure_mounted_project_context(context, authorities)?;
         let result = self
             .bounded(context, async {
                 Ok::<_, TraceDecayError>(
-                    super::session_queries::sessions_for(
-                        Some(self.authorities.session_database.as_ref()),
+                    crate::session_queries::sessions_for(
+                        Some(authorities.session_database.as_ref()),
                         request,
                     )
                     .await,
@@ -276,12 +276,15 @@ impl DirectRetainedSessionPortV1 {
         context: &RetainedSurfaceExecutionContextV1<'_>,
         request: &WorkflowsRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        ensure_mounted_project_context(context, &self.authorities)?;
+        let RetainedSessionAuthority::Project(authorities) = &self.authorities else {
+            return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
+        };
+        ensure_mounted_project_context(context, authorities)?;
         let result = self
             .bounded(context, async {
                 Ok::<_, TraceDecayError>(
-                    super::session_queries::workflows(
-                        Some(self.authorities.workflow_index.as_ref()),
+                    crate::session_queries::workflows(
+                        Some(authorities.workflow_index.as_ref()),
                         request,
                     )
                     .await,
@@ -319,7 +322,7 @@ impl DirectRetainedSessionPortV1 {
     {
         tokio::select! {
             () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
-            result = super::bounded_execution(context, future) => result,
+            result = crate::retained::bounded_execution(context, future) => result,
         }
     }
 }
@@ -346,7 +349,7 @@ async fn execute_admitted_session_refresh(
         );
         let handled = tokio::select! {
             () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
-            result = super::bounded_execution(context, async { Ok::<_, TraceDecayError>(execute.await) }) => result,
+            result = crate::retained::bounded_execution(context, async { Ok::<_, TraceDecayError>(execute.await) }) => result,
         }?;
         return evidence_outcome(context, operation, refresh::status_result(handled, scope)?);
     }
@@ -383,49 +386,50 @@ async fn execute_admitted_session_refresh(
     )
 }
 
-impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1 {
+impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1<'_> {
     fn execute_session<'a>(
         &'a self,
         context: RetainedSurfaceExecutionContextV1<'a>,
         request: RetainedSessionRequestV1<'a>,
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
         Box::pin(async move {
-            match request {
-                RetainedSessionRequestV1::SessionRefresh(request) => {
+            match (&self.authorities, request) {
+                (
+                    RetainedSessionAuthority::Profile {
+                        session_database,
+                        identity,
+                        ..
+                    },
+                    RetainedSessionRequestV1::MessageSearch(request),
+                ) => {
+                    self.execute_profile_message_search(
+                        &context,
+                        request,
+                        session_database,
+                        identity,
+                    )
+                    .await
+                }
+                (
+                    RetainedSessionAuthority::Project(_),
+                    RetainedSessionRequestV1::MessageSearch(request),
+                ) => self.execute_message_search(&context, request).await,
+                (_, RetainedSessionRequestV1::SessionRefresh(request)) => {
                     self.execute_session_refresh(&context, request).await
                 }
-                RetainedSessionRequestV1::MessageSearch(request) => {
-                    self.execute_message_search(&context, request).await
-                }
-                RetainedSessionRequestV1::SessionsFor(request) => {
-                    self.execute_sessions_for(&context, request).await
-                }
-                RetainedSessionRequestV1::Workflows(request) => {
-                    self.execute_workflows(&context, request).await
-                }
-            }
-        })
-    }
-}
-
-impl RetainedSessionExecutionPortV1 for DirectProfileRetainedSessionPortV1<'_> {
-    fn execute_session<'a>(
-        &'a self,
-        context: RetainedSurfaceExecutionContextV1<'a>,
-        request: RetainedSessionRequestV1<'a>,
-    ) -> RetainedSurfaceExecutionFutureV1<'a> {
-        Box::pin(async move {
-            match request {
-                RetainedSessionRequestV1::MessageSearch(request) => {
-                    self.execute_message_search(&context, request).await
-                }
-                RetainedSessionRequestV1::SessionRefresh(request) => {
-                    self.execute_session_refresh(&context, request).await
-                }
-                RetainedSessionRequestV1::SessionsFor(_)
-                | RetainedSessionRequestV1::Workflows(_) => {
-                    Err(RetainedSurfaceExecutionErrorV1::Unsupported)
-                }
+                (
+                    RetainedSessionAuthority::Project(_),
+                    RetainedSessionRequestV1::SessionsFor(request),
+                ) => self.execute_sessions_for(&context, request).await,
+                (
+                    RetainedSessionAuthority::Project(_),
+                    RetainedSessionRequestV1::Workflows(request),
+                ) => self.execute_workflows(&context, request).await,
+                (
+                    RetainedSessionAuthority::Profile { .. },
+                    RetainedSessionRequestV1::SessionsFor(_)
+                    | RetainedSessionRequestV1::Workflows(_),
+                ) => Err(RetainedSurfaceExecutionErrorV1::Unsupported),
             }
         })
     }
@@ -609,11 +613,9 @@ impl MessageSearchInput {
                 // `ExecutionLimits::default()`, which the admitted binding
                 // refuses terminally — every message search would answer
                 // a structural budget refusal instead of searching.
-                .with_execution_limits(
-                    tracedecay_session_runtime::session_retrieval::admitted_execution_limits(
-                        self.limit,
-                    ),
-                )
+                .with_execution_limits(crate::session_retrieval::admitted_execution_limits(
+                    self.limit,
+                ))
         })
     }
 
@@ -681,7 +683,7 @@ impl MessageSearchInput {
             }
             SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
                 return Err(RetainedSurfaceExecutionErrorV1::unavailable(
-                    super::session_retrieval_unavailable_detail(&unavailable),
+                    crate::retained::session_retrieval_unavailable_detail(&unavailable),
                 ));
             }
             SessionRetrievalServiceOutcome::CursorStale => {
@@ -884,7 +886,7 @@ fn time_filter(
                 Ok(_) => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
                 Err(_) => parse_search_time_filter_bound(
                     value,
-                    crate::tracedecay::current_timestamp(),
+                    tracedecay_runtime_core::tracedecay::current_timestamp(),
                     bound,
                 )
                 .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)?,

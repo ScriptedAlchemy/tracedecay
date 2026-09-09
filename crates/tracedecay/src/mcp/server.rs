@@ -1396,8 +1396,8 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.mount_retained_surfaces")]
-    pub(crate) fn retained_surface_ports(
+    #[hotpath::measure(label = "mcp.server.mount_retained_surfaces", future = true)]
+    pub(crate) async fn retained_surface_ports(
         &self,
         project_root: &Path,
         project_id: tracedecay_domain::ProjectId,
@@ -1407,9 +1407,12 @@ impl McpServer {
             Arc::new(DaemonWorkflowIndexReadService::new(database.clone()))
                 as Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>
         });
+        let graph = self.cg.read().await;
         crate::daemon::retained_owner::retained_surface_ports(
             crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
                 cg: Arc::clone(&self.cg),
+                store_runtime_registry: graph.retained_store_runtime_registry(),
+                profile_database: graph.profile_database().clone(),
                 project_root: project_root.to_path_buf(),
                 project_id,
                 configuration_digest,

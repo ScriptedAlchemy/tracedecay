@@ -31,7 +31,7 @@ use tracedecay_lcm::{
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_temporal_query::context::OrderedTextContextAssembler;
 
-use tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView;
+use crate::session_retrieval::SessionTemporalMetadataView;
 
 #[hotpath::measure(label = "daemon.retained.lcm.hydrate_temporal")]
 pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporalFieldsV1 {
