@@ -1,15 +1,53 @@
-//! Blocking journal cleanup and retirement finalization for the authority facade.
+//! Blocking journal cleanup and retirement finalization.
 
 use std::path::Path;
 
-use tracedecay_automation_runtime::automation::effect_runtime::journal::DurableAutomationAdmission;
-use tracedecay_automation_runtime::automation::effect_runtime::{contract_error, retirement};
-
-use super::recovery_index;
+use super::journal::DurableAutomationAdmission;
+use super::{AutomationSettledTerminal, contract_error, recovery_index, retirement};
 use tracedecay_domain::errors::Result;
 
+pub async fn finalize_terminal_housekeeping(
+    dashboard_root: &Path,
+    journal_path: &Path,
+    admission: &DurableAutomationAdmission,
+    terminal: &AutomationSettledTerminal,
+    live_retirement: Option<retirement::RetirementPlan>,
+) -> Result<()> {
+    let retirement_binding = match (
+        admission.retirement().cloned(),
+        terminal.is_retirement_terminal(),
+    ) {
+        (Some(binding), true) => Some(binding),
+        (Some(_), false) if terminal.problem().is_some() => None,
+        (Some(_), false) => {
+            return Err(contract_error(
+                "retirement-bound automation terminal is neither its exact zero-effect retirement nor a typed problem",
+            ));
+        }
+        (None, true) => {
+            return Err(contract_error(
+                "automation retirement terminal has no admitted source binding",
+            ));
+        }
+        (None, false) if live_retirement.is_some() => {
+            return Err(contract_error(
+                "live retirement plan has no durable admission binding",
+            ));
+        }
+        (None, false) => None,
+    };
+    finalize_terminal_housekeeping_owned(
+        dashboard_root,
+        journal_path,
+        admission.clone(),
+        retirement_binding,
+        live_retirement,
+    )
+    .await
+}
+
 #[hotpath::measure(label = "daemon.automation.effect.housekeeping", future = true)]
-pub(super) async fn finalize_terminal_housekeeping(
+async fn finalize_terminal_housekeeping_owned(
     dashboard_root: &Path,
     journal_path: &Path,
     admission: DurableAutomationAdmission,

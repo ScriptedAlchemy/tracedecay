@@ -10,6 +10,35 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[tokio::test]
+async fn background_refresh_preserves_watch_policy_refusal() {
+    let (cg, dir, _authority) = init_indexed_repo().await;
+    let graph = Arc::new(cg);
+    for mode in [
+        BackgroundRefreshModeV1::ForceReconcile,
+        BackgroundRefreshModeV1::FreshnessProbe,
+    ] {
+        let outcome =
+            super::hook_writes::execute_background_refresh_direct(BackgroundRefreshRequest {
+                graph: Arc::clone(&graph),
+                project_root: dir.path().to_path_buf(),
+                mode,
+                reconcile_sink: Some(Arc::new(|_, _| {
+                    Box::pin(async { super::CodeIndexAdmission::LinkedWorktreeDisabled })
+                })),
+                freshness_probe_sink: Some(Arc::new(|_| {
+                    Box::pin(async { super::CodeIndexAdmission::LinkedWorktreeDisabled })
+                })),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled
+        ));
+    }
+}
+
+#[tokio::test]
 async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() {
     let (cg, dir, _authority) = init_indexed_repo().await;
     let forced = Arc::new(AtomicUsize::new(0));
@@ -20,7 +49,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
             let forced = Arc::clone(&forced);
             Box::pin(async move {
                 forced.fetch_add(1, Ordering::AcqRel);
-                true
+                true.into()
             })
         })
     };
@@ -30,7 +59,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
             let probed = Arc::clone(&probed);
             Box::pin(async move {
                 probed.fetch_add(1, Ordering::AcqRel);
-                true
+                true.into()
             })
         })
     };
@@ -75,7 +104,9 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
                     .lock()
                     .expect("recording lock")
                     .push(request.project_root);
-                Ok(Some(HashMap::from([("injected.rs".to_string(), 41)])))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                    Some(HashMap::from([("injected.rs".to_string(), 41)])),
+                ))
             })
         })
     };
@@ -145,12 +176,16 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
             let armed = Arc::clone(&armed);
             Box::pin(async move {
                 if !armed.load(Ordering::Acquire) {
-                    return Ok(Some(HashMap::new()));
+                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                        Some(HashMap::new()),
+                    ));
                 }
                 entered.notify_one();
                 release.notified().await;
                 completed.fetch_add(1, Ordering::AcqRel);
-                Ok(Some(HashMap::from([("detached.rs".to_string(), 7)])))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                    Some(HashMap::from([("detached.rs".to_string(), 7)])),
+                ))
             })
         })
     };
@@ -229,7 +264,9 @@ async fn concurrent_startup_catchups_use_injected_writer_authority() {
                 max_active.fetch_max(concurrent, Ordering::AcqRel);
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 active.fetch_sub(1, Ordering::AcqRel);
-                Ok(Some(HashMap::new()))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                    Some(HashMap::new()),
+                ))
             })
         })
     };

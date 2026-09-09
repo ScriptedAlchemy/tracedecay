@@ -1,8 +1,9 @@
 //! Free-page compaction for tracked branch databases (plan 38 §6).
 //!
-//! Daemon `git_watch::store_maintenance::run_project_compaction` and
-//! `run_global_compaction` already compact the live graph store and
-//! `global.db` off the hot path, through the daemon's writer-actor runtime.
+//! [`super::live_compaction::compact_project_store`] and
+//! [`super::live_compaction::compact_registered_store`] already compact the
+//! live graph store and `global.db` off the hot path, through their retained
+//! writer runtimes.
 //! Every *other* tracked branch gets its own `SQLite` family under
 //! `branches/`, cloned wholesale from an ancestor at `branch add` time and
 //! then never revisited by any compaction pass. This is the exact bloat class
@@ -20,7 +21,8 @@
 //!
 //! Branch databases inherit `PRAGMA auto_vacuum = INCREMENTAL` from the
 //! ancestor they were cloned from (every fresh store is created with it, see
-//! `src/db/migrations.rs::configure_fresh_auto_vacuum`), so `incremental_vacuum`
+//! `tracedecay-runtime-core/src/db/migrations.rs::configure_fresh_auto_vacuum`),
+//! so `incremental_vacuum`
 //! reclaims pages here exactly as it does on the live graph store. A branch
 //! database predating that migration carries `auto_vacuum = NONE`, which makes
 //! `incremental_vacuum` a *silent no-op* -- reclaiming its free pages would

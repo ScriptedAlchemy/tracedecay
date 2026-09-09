@@ -86,3 +86,26 @@ represents a distinct semantic or interaction state.
    health, controls, or success that no named production authority supplies.
 6. Every final state includes keyboard, reduced-motion, 200%-zoom/reflow,
    dense-real-data, and exact text/table/transcript fallback gates.
+
+## Validate a handoff
+
+Run the documentation-only check from the repository root:
+
+```sh
+python3 scripts/check-concept-pack.py
+python3 scripts/test-check-concept-pack.py
+# Also validate a split export and confirm the accepted PNGs are identical:
+python3 scripts/check-concept-pack.py --mirror /path/to/td-brain-demo/lookbook
+```
+
+The check enumerates missing/orphaned briefs, duplicate manifest mappings,
+broken local Markdown links, and rail names/order from `NAVIGATION.md`. It
+prints each pack's checkout commit and each PNG's Git blob identity; retain
+that output with the export review to distinguish mirrored assets from later
+revisions. The reported commit identifies the checkout; working-tree PNG blobs
+are printed independently so uncommitted image changes cannot impersonate it.
+No image-processing dependency or Rust build hook is involved.
+
+A split export may rewrite relative links for `pngs/` and `briefs/`, and link
+to its separately labelled application screenshots. PNG bytes must match;
+brief semantics and shared authorities still require review after path changes.

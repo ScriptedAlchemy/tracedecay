@@ -175,6 +175,45 @@ async fn prepare_core_query_authority_on_project_open(
             .privacy_domain
             .clone()
     };
+    let (profile, diversity) = core_query_policy()?;
+    let ranking_revision =
+        ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let keyring = cursor_keys
+        .retrieval_keyring(privacy_domain)
+        .map_err(|error| QueryRuntimeMountErrorV1::FallbackKeyUnavailable(error.to_string()))?;
+    let authority = Arc::new(QueryAuthorityV1::new(
+        profile,
+        diversity,
+        ranking_revision,
+        keyring,
+    )?);
+    Ok(authority)
+}
+
+/// Reuse the checked-in policy identity only for byte-identical ranking material.
+/// Evaluation receipts remain owned by the accepted configuration; evaluating
+/// the same fallback again must not change its ranking decisions or cursors.
+pub fn canonical_query_policy(
+    profile: &FusionProfile,
+    diversity: &DiversityPolicy,
+) -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeMountErrorV1> {
+    let (core_profile, core_diversity) = core_query_policy()?;
+    let mut candidate_profile = profile.clone();
+    let mut candidate_diversity = diversity.clone();
+    candidate_profile.evaluation_result_anchor = core_profile.evaluation_result_anchor.clone();
+    candidate_diversity.evaluation_result_anchor = core_diversity.evaluation_result_anchor.clone();
+    if diversity.evaluation_result_anchor.as_ref() == Some(&profile.evaluation_result_anchor)
+        && candidate_profile == core_profile
+        && candidate_diversity == core_diversity
+    {
+        Ok((core_profile, core_diversity))
+    } else {
+        Ok((profile.clone(), diversity.clone()))
+    }
+}
+
+fn core_query_policy() -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeMountErrorV1> {
     let workload: crate::search_eval::CandidateWorkloadV1 =
         serde_json::from_str(QUERY_FALLBACK_WORKLOAD_JSON)
             .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
@@ -200,19 +239,7 @@ async fn prepare_core_query_authority_on_project_open(
         evaluation_result_anchor: Some(policy_anchor),
         ..material.diversity
     };
-    let ranking_revision =
-        ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
-            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let keyring = cursor_keys
-        .retrieval_keyring(privacy_domain)
-        .map_err(|error| QueryRuntimeMountErrorV1::FallbackKeyUnavailable(error.to_string()))?;
-    let authority = Arc::new(QueryAuthorityV1::new(
-        profile,
-        diversity,
-        ranking_revision,
-        keyring,
-    )?);
-    Ok(authority)
+    Ok((profile, diversity))
 }
 
 /// Resolve and validate one exact accepted authority without mounting it.
@@ -264,9 +291,10 @@ pub fn prepare_query_authority(
     if keyring.privacy_domain() != privacy_domain {
         return Err(QueryRuntimeMountErrorV1::PrivacyDomainMismatch);
     }
+    let (profile, diversity) = canonical_query_policy(&material.profile, &material.diversity)?;
     Ok(Arc::new(QueryAuthorityV1::new(
-        material.profile,
-        material.diversity,
+        profile,
+        diversity,
         material.ranking_revision,
         keyring,
     )?))
@@ -936,6 +964,62 @@ mod tests {
         QueryAuthorityProviderV1, QueryRuntimeMountErrorV1, prepare_query_authority,
     };
     use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+
+    #[test]
+    fn canonical_query_policy_preserves_core_bytes_across_evaluation_receipts() {
+        let (profile, diversity) = super::core_query_policy().expect("checked-in core policy");
+        for receipt in ["search-eval:sha256:first", "search-eval:sha256:second"] {
+            let mut evaluated_profile = profile.clone();
+            let mut evaluated_diversity = diversity.clone();
+            evaluated_profile.evaluation_result_anchor = id(receipt);
+            evaluated_diversity.evaluation_result_anchor = Some(id(receipt));
+            assert_eq!(
+                super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)
+                    .expect("canonical policy"),
+                (profile.clone(), diversity.clone()),
+            );
+
+            let scope = scope("reevaluated-core");
+            let mut accepted = material(scope.clone());
+            accepted.profile = evaluated_profile.clone();
+            accepted.diversity = evaluated_diversity.clone();
+            accepted.evaluation.profile_id = evaluated_profile.profile_id.clone();
+            accepted.evaluation.evaluation_result_anchor = id(receipt);
+            let provider = OneShotProvider {
+                candidates: Mutex::new(Some(vec![accepted])),
+            };
+            assert_eq!(
+                prepare_query_authority(&scope, &privacy_domain(), &provider)
+                    .expect("accepted core evaluation")
+                    .profile(),
+                &profile,
+                "reopen validates the real evaluation before retaining the core policy",
+            );
+
+            // A real policy change must retain its own accepted provenance,
+            // even if its profile identifier has not changed.
+            evaluated_profile.retrieval_budget.max_fused_candidates += 1;
+            assert_eq!(
+                super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)
+                    .expect("changed budget"),
+                (evaluated_profile.clone(), evaluated_diversity.clone()),
+            );
+            evaluated_profile.retrieval_budget = profile.retrieval_budget.clone();
+            evaluated_diversity.per_file = Some(1);
+            assert_eq!(
+                super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)
+                    .expect("changed diversity"),
+                (evaluated_profile.clone(), evaluated_diversity.clone()),
+            );
+        }
+        let mut unbound = diversity.clone();
+        unbound.evaluation_result_anchor = None;
+        assert_eq!(
+            super::canonical_query_policy(&profile, &unbound).expect("unbound policy"),
+            (profile, unbound),
+            "normalization cannot manufacture a missing policy binding",
+        );
+    }
 
     struct OneShotProvider {
         candidates: Mutex<Option<Vec<QueryAuthorityMaterialV1>>>,

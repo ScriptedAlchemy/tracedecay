@@ -30,7 +30,6 @@ export interface ActivationOverlayOptions {
   realNodes: readonly string[];
   strands: readonly Strand[];
   field: ActivationField;
-  neighborsOf: ReadonlyMap<string, string[]>;
   theme: ThemeBox;
   focus: FocusState;
   /** Repaint the renderer. A no-op once the scene is gone. */
@@ -48,9 +47,6 @@ export interface ActivationOverlay {
   settle(): void;
   /** One static composition of the resting field. */
   repaintResting(): void;
-  /** A node was struck by the pointer: it fires now, its neighbourhood one
-   * synaptic delay later, along real caller/reference edges only. */
-  fireNeighborhood(node: string): void;
   stop(): void;
 }
 
@@ -59,7 +55,6 @@ export function createActivationOverlay({
   realNodes,
   strands,
   field,
-  neighborsOf,
   theme,
   focus,
   paint,
@@ -236,18 +231,6 @@ export function createActivationOverlay({
     repaintResting: () => {
       syncGlow();
       paint();
-    },
-    fireNeighborhood: (node: string) => {
-      // Traveling activation: the struck node fires now; its neighborhood
-      // fires one synaptic delay later (real caller/reference edges only).
-      field.strike([node], 1);
-      const neighbors = neighborsOf.get(node) ?? [];
-      // Under reduced motion the synaptic delay collapses: the neighbourhood is
-      // lit in the same paint as the struck node, so the propagation is still
-      // fully legible as a state without anything travelling across the screen.
-      if (isReduced()) field.strike(neighbors, 0.55);
-      else setTimeout(() => { field.strike(neighbors, 0.55); wake(); }, 140);
-      wake();
     },
     stop: () => {
       stopped = true;

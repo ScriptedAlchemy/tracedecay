@@ -1,5 +1,6 @@
 //! Bounded pending-index authority for automatic-effect crash recovery.
 
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,15 +19,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RunId};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
-use tracedecay_store::FactReadControl;
+use tracedecay_store::{FactReadControl, ProjectMemoryAutomationRunReceiptsV1};
 
-use tracedecay_automation_runtime::automation::effect_runtime::journal::{
-    self, DurableAutomationAdmission,
-};
-use tracedecay_automation_runtime::automation::effect_runtime::projection::project_recovered_committed_receipts;
-use tracedecay_automation_runtime::automation::effect_runtime::{
-    AutomationSettledTerminal, contract_error, digest, retirement,
-};
+use super::journal::{self, DurableAutomationAdmission};
+use super::projection::project_recovered_committed_receipts;
+use super::{AutomationSettledTerminal, contract_error, digest, retirement};
+use crate::automation::run_ledger::{self, ExactRunPublishOutcome, ExactRunUnboundDiscardOutcome};
 use tracedecay_domain::errors::Result;
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
@@ -35,26 +33,33 @@ const MAX_INDEX_BYTES: u64 = 128 * 1024;
 const INDEX_FILENAME: &str = "pending-index.json";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct AutomationEffectRecoveryReport {
-    pub(crate) inspected: usize,
-    pub(crate) partial_effects: usize,
-    pub(crate) reset_required: usize,
-    pub(crate) indeterminate: usize,
-    pub(crate) already_terminal: usize,
-    pub(crate) deferred: usize,
+pub struct AutomationEffectRecoveryReport {
+    pub inspected: usize,
+    pub partial_effects: usize,
+    pub reset_required: usize,
+    pub indeterminate: usize,
+    pub already_terminal: usize,
+    pub deferred: usize,
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.reconcile", future = true)]
-pub(crate) async fn reconcile_reserved_automation_effects_for_project(
-    memory: &crate::tracedecay::TraceDecay,
+pub enum AutomationEffectRecoveryPreparation {
+    Complete(AutomationEffectRecoveryReport),
+    Pending(PreparedAutomationEffectRecovery),
+}
+
+pub struct PreparedAutomationEffectRecovery {
+    dashboard_root: PathBuf,
+    transitions: Vec<IndexedRetirementTransition>,
+}
+
+#[hotpath::measure(label = "daemon.automation.effect.prepare_recovery", future = true)]
+pub async fn prepare_reserved_automation_effect_recovery(
     dashboard_root: &Path,
     cancellation: &CancellationSignal,
-) -> Result<AutomationEffectRecoveryReport> {
+) -> Result<AutomationEffectRecoveryPreparation> {
     let repair_root = dashboard_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        tracedecay_automation_runtime::automation::run_ledger::repair_corrupt_run_ledger_append_intent_blocking(
-            &repair_root,
-        )
+        run_ledger::repair_corrupt_run_ledger_append_intent_blocking(&repair_root)
     })
     .await
     .map_err(|error| {
@@ -62,41 +67,80 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             "automation run append-intent repair failed to join: {error}"
         ))
     })??;
-    let owner = memory.project_memory_owner()?;
-    let tracedecay_domain::FactOwnerV1::Project { project_id } = &owner else {
+    let recovery_root = dashboard_root.to_path_buf();
+    let (transitions, indexed) =
+        tokio::task::spawn_blocking(move || indexed_recovery_blocking(&recovery_root))
+            .await
+            .map_err(|error| {
+                contract_error(format!("automation recovery index reader failed: {error}"))
+            })??;
+    if transitions.is_empty() && indexed.is_empty() {
+        if !cancellation.is_cancelled() {
+            let retirement_root = dashboard_root.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                reject_unbound_retirement_witness_if_index_empty(&retirement_root)
+            })
+            .await
+            .map_err(|error| {
+                contract_error(format!(
+                    "automation retirement witness audit failed to join: {error}"
+                ))
+            })??;
+        }
+        let report = AutomationEffectRecoveryReport::default();
+        observe_recovery_report(&report);
+        return Ok(AutomationEffectRecoveryPreparation::Complete(report));
+    }
+    Ok(AutomationEffectRecoveryPreparation::Pending(
+        PreparedAutomationEffectRecovery {
+            dashboard_root: dashboard_root.to_path_buf(),
+            transitions,
+        },
+    ))
+}
+
+/// Opens receipt authority only for reserved memory effects; failures defer that
+/// journal without preventing external or terminal recovery in the same batch.
+#[hotpath::measure(label = "daemon.automation.effect.reconcile", future = true)]
+pub async fn reconcile_prepared_automation_effects_for_project<F, Fut>(
+    preparation: PreparedAutomationEffectRecovery,
+    read_receipts: F,
+    owner: &tracedecay_domain::FactOwnerV1,
+    cancellation: &CancellationSignal,
+    scope: &ResolvedScope,
+) -> Result<AutomationEffectRecoveryReport>
+where
+    F: Fn(RunId, FactReadControl) -> Fut + Sync,
+    Fut: Future<Output = Result<ProjectMemoryAutomationRunReceiptsV1>> + Send,
+{
+    let PreparedAutomationEffectRecovery {
+        dashboard_root,
+        transitions,
+    } = preparation;
+    let tracedecay_domain::FactOwnerV1::Project { project_id } = owner else {
         return Err(contract_error(
             "automation recovery requires a project owner",
         ));
     };
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
-        memory.project_root(),
-        project_id,
-    )
-    .map_err(|error| contract_error(format!("automation recovery scope is invalid: {error:?}")))?;
+    if scope.project_id != *project_id {
+        return Err(contract_error(
+            "automation recovery scope does not match its project memory owner",
+        ));
+    }
+    let scope = scope.clone();
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .map_err(contract_error)?;
     let mut report = AutomationEffectRecoveryReport::default();
-    let transition_root = dashboard_root.to_path_buf();
-    let transitions = tokio::task::spawn_blocking(move || {
-        indexed_retirement_transitions_blocking(&transition_root)
-    })
-    .await
-    .map_err(|error| {
-        contract_error(format!(
-            "automation retirement transition reader failed: {error}"
-        ))
-    })??;
     for transition in transitions {
         if cancellation.is_cancelled() {
             break;
         }
         report.inspected += 1;
         match reconcile_indexed_retirement_transition(
-            dashboard_root,
-            &owner,
+            &dashboard_root,
+            owner,
             &scope,
-            project_id,
             &operation,
             &transition,
         )
@@ -113,26 +157,26 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             }
         }
     }
-    let root = dashboard_root.to_path_buf();
+    let indexed_root = dashboard_root.clone();
     let indexed_scope = scope.clone();
-    let indexed =
-        tokio::task::spawn_blocking(move || indexed_journals_blocking(&root, &indexed_scope))
-            .await
-            .map_err(|error| {
-                contract_error(format!("automation recovery index reader failed: {error}"))
-            })??;
+    let indexed = tokio::task::spawn_blocking(move || {
+        indexed_journals_blocking(&indexed_root, &indexed_scope)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!("automation recovery index reader failed: {error}"))
+    })??;
     for indexed in indexed {
         if cancellation.is_cancelled() {
             break;
         }
         report.inspected += 1;
         match reconcile_indexed_automation_effect(
-            memory,
-            dashboard_root,
+            &read_receipts,
+            &dashboard_root,
             cancellation,
-            &owner,
+            owner,
             &scope,
-            project_id,
             &operation,
             &indexed,
         )
@@ -157,7 +201,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
         }
     }
     if !cancellation.is_cancelled() {
-        let retirement_root = dashboard_root.to_path_buf();
+        let retirement_root = dashboard_root;
         tokio::task::spawn_blocking(move || {
             reject_unbound_retirement_witness_if_index_empty(&retirement_root)
         })
@@ -168,6 +212,11 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             ))
         })??;
     }
+    observe_recovery_report(&report);
+    Ok(report)
+}
+
+fn observe_recovery_report(report: &AutomationEffectRecoveryReport) {
     hotpath::gauge!("daemon.automation.effect.reconcile.inspected_total").inc(report.inspected);
     hotpath::gauge!("daemon.automation.effect.reconcile.terminal_total")
         .inc(report.already_terminal);
@@ -176,12 +225,9 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
     hotpath::gauge!("daemon.automation.effect.reconcile.indeterminate_total")
         .inc(report.indeterminate);
     hotpath::gauge!("daemon.automation.effect.reconcile.deferred_total").inc(report.deferred);
-    Ok(report)
 }
 
-pub(super) fn reject_unbound_retirement_witness_if_index_empty(
-    dashboard_root: &Path,
-) -> Result<()> {
+pub fn reject_unbound_retirement_witness_if_index_empty(dashboard_root: &Path) -> Result<()> {
     let path = index_path(dashboard_root);
     with_index_lock(&path, || {
         let index = read_index(&path)?;
@@ -203,17 +249,15 @@ enum EntryRecoveryOutcome {
     Cancelled,
 }
 
-#[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "daemon.automation.effect.retire.reconcile", future = true)]
 async fn reconcile_indexed_retirement_transition(
     dashboard_root: &Path,
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
-    project_id: &ProjectId,
     operation: &tracedecay_contracts::ApplicationOperation,
     indexed: &IndexedRetirementTransition,
 ) -> Result<()> {
-    if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
+    if indexed.project_id != scope.project_id || indexed.scope_digest != scope.scope_digest {
         return Err(contract_error(
             "automation retirement transition escaped its exact project scope",
         ));
@@ -284,18 +328,20 @@ async fn reconcile_indexed_retirement_transition(
     })?
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn reconcile_indexed_automation_effect(
-    memory: &crate::tracedecay::TraceDecay,
+async fn reconcile_indexed_automation_effect<F, Fut>(
+    read_receipts: &F,
     dashboard_root: &Path,
     cancellation: &CancellationSignal,
     owner: &tracedecay_domain::FactOwnerV1,
     scope: &ResolvedScope,
-    project_id: &ProjectId,
     operation: &tracedecay_contracts::ApplicationOperation,
     indexed: &IndexedJournal,
-) -> Result<EntryRecoveryOutcome> {
-    if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
+) -> Result<EntryRecoveryOutcome>
+where
+    F: Fn(RunId, FactReadControl) -> Fut + Sync,
+    Fut: Future<Output = Result<ProjectMemoryAutomationRunReceiptsV1>> + Send,
+{
+    if indexed.project_id != scope.project_id || indexed.scope_digest != scope.scope_digest {
         return Ok(EntryRecoveryOutcome::Deferred);
     }
     let path = indexed.path.clone();
@@ -328,23 +374,20 @@ async fn reconcile_indexed_automation_effect(
         .map_err(|error| contract_error(format!("automation terminal reader failed: {error}")))??
         .ok_or_else(|| contract_error("terminal journal lost its durable sidecar"))?;
         if let Some(publication) = record.publication() {
-            let published =
-                tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
-                    dashboard_root,
-                    admission.request.run_id.as_str(),
-                    publication,
-                )
-                .await?;
-            if published
-                == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
-            {
+            let published = run_ledger::publish_staged_run_record_exact(
+                dashboard_root,
+                admission.request.run_id.as_str(),
+                publication,
+            )
+            .await?;
+            if published == ExactRunPublishOutcome::MissingPayload {
                 return Ok(EntryRecoveryOutcome::Deferred);
             }
             let cleanup_path = indexed.path.clone();
             let cleanup_admission = admission.clone();
             let cleanup_terminal = terminal.clone();
             let cleanup_publication = publication.clone();
-            tracedecay_automation_runtime::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+            run_ledger::discard_stale_staged_run_record_exact_after_terminal(
                 dashboard_root,
                 admission.request.run_id.as_str(),
                 publication,
@@ -389,16 +432,13 @@ async fn reconcile_indexed_automation_effect(
         if admission.retirement().is_some() || terminal.is_retirement_terminal() {
             return Ok(EntryRecoveryOutcome::Deferred);
         }
-        let published =
-            tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
-                dashboard_root,
-                admission.request.run_id.as_str(),
-                &publication,
-            )
-            .await?;
-        if published
-            == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
-        {
+        let published = run_ledger::publish_staged_run_record_exact(
+            dashboard_root,
+            admission.request.run_id.as_str(),
+            &publication,
+        )
+        .await?;
+        if published == ExactRunPublishOutcome::MissingPayload {
             return Ok(EntryRecoveryOutcome::Deferred);
         }
         let path = indexed.path.clone();
@@ -414,7 +454,7 @@ async fn reconcile_indexed_automation_effect(
         let terminal_path = indexed.path.clone();
         let terminal_admission = admission.clone();
         let terminal_publication = cleanup_publication.clone();
-        tracedecay_automation_runtime::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+        run_ledger::discard_stale_staged_run_record_exact_after_terminal(
             dashboard_root,
             admission.request.run_id.as_str(),
             &cleanup_publication,
@@ -434,21 +474,15 @@ async fn reconcile_indexed_automation_effect(
     }
     let cleanup_path = indexed.path.clone();
     let cleanup_admission = admission.clone();
-    let discarded =
-        tracedecay_automation_runtime::automation::run_ledger::discard_unbound_staged_run_records_if(
-            dashboard_root,
-            admission.request.run_id.as_str(),
-            move || {
-                journal::unbound_reserved_cleanup_is_safe_blocking(
-                    &cleanup_path,
-                    &cleanup_admission,
-                )
-            },
-        )
-        .await?;
-    if discarded
-        == tracedecay_automation_runtime::automation::run_ledger::ExactRunUnboundDiscardOutcome::Retained
-    {
+    let discarded = run_ledger::discard_unbound_staged_run_records_if(
+        dashboard_root,
+        admission.request.run_id.as_str(),
+        move || {
+            journal::unbound_reserved_cleanup_is_safe_blocking(&cleanup_path, &cleanup_admission)
+        },
+    )
+    .await?;
+    if discarded == ExactRunUnboundDiscardOutcome::Retained {
         return Ok(EntryRecoveryOutcome::Deferred);
     }
     if admission.is_external() {
@@ -465,16 +499,12 @@ async fn reconcile_indexed_automation_effect(
     }
     let read_cancellation = cancellation.clone();
     let read_control = FactReadControl::new(Arc::new(move || read_cancellation.is_cancelled()));
-    let recovered = memory
-        .project_memory_application()
-        .await?
-        .project_memory_automation_run_receipts(admission.request.run_id.clone(), &read_control)
-        .await
-        .map_err(|error| {
-            contract_error(format!(
-                "canonical memory automation receipt recovery failed: {error}"
-            ))
-        })?;
+    let recovered = read_receipts(admission.request.run_id.clone(), read_control).await?;
+    if recovered.owner() != owner {
+        return Err(contract_error(
+            "recovered memory receipts do not match the project owner",
+        ));
+    }
     if cancellation.is_cancelled() {
         return Ok(EntryRecoveryOutcome::Cancelled);
     }
@@ -552,7 +582,7 @@ async fn persist_reserved_recovery(
     })
 }
 
-pub(super) fn special_recovery_defer_reason(
+pub fn special_recovery_defer_reason(
     admission: &DurableAutomationAdmission,
     committed_receipts_empty: bool,
 ) -> Option<&'static str> {
@@ -565,7 +595,7 @@ pub(super) fn special_recovery_defer_reason(
     }
 }
 
-pub(super) fn admission_has_exact_authority(
+pub fn admission_has_exact_authority(
     admission: &DurableAutomationAdmission,
     operation: &tracedecay_contracts::ApplicationOperation,
 ) -> Result<bool> {
@@ -610,7 +640,7 @@ struct EffectAuthorityDigestInput<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn effect_authority_digest(
+pub fn effect_authority_digest(
     schema_version: u32,
     operation: &ApplicationOperation,
     request: &AutomationRunRequestV1,
@@ -648,7 +678,7 @@ pub(super) fn effect_authority_digest(
     })
 }
 
-pub(super) fn recovered_partial_terminal(
+pub fn recovered_partial_terminal(
     admission: &DurableAutomationAdmission,
     committed: Vec<tracedecay_contracts::retained_surfaces::AutomationCommittedReceiptV1>,
     operation: &tracedecay_contracts::ApplicationOperation,
@@ -730,10 +760,10 @@ struct PendingIndex {
     retirement_transitions: Vec<PendingRetirementTransition>,
 }
 
-pub(super) struct IndexedJournal {
-    pub(super) path: PathBuf,
-    pub(super) project_id: ProjectId,
-    pub(super) scope_digest: ManifestDigest,
+pub struct IndexedJournal {
+    pub path: PathBuf,
+    pub project_id: ProjectId,
+    pub scope_digest: ManifestDigest,
 }
 
 #[derive(Clone)]
@@ -745,7 +775,7 @@ struct IndexedRetirementTransition {
     capture_expected: bool,
 }
 
-pub(super) fn add_pending_blocking(
+pub fn add_pending_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
     admission: &DurableAutomationAdmission,
@@ -777,7 +807,7 @@ pub(super) fn add_pending_blocking(
     })
 }
 
-pub(super) fn remove_pending_blocking(dashboard_root: &Path, journal_path: &Path) -> Result<()> {
+pub fn remove_pending_blocking(dashboard_root: &Path, journal_path: &Path) -> Result<()> {
     let journal_file = journal_filename(journal_path)?;
     mutate_index(dashboard_root, |index| {
         index
@@ -787,7 +817,7 @@ pub(super) fn remove_pending_blocking(dashboard_root: &Path, journal_path: &Path
     })
 }
 
-pub(super) fn remove_pending_for_retirement_blocking(
+pub fn remove_pending_for_retirement_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
     admission: &DurableAutomationAdmission,
@@ -922,7 +952,7 @@ fn remove_pending_after_transition_with_writer(
 }
 
 #[hotpath::measure(label = "daemon.automation.effect.retire.finish")]
-pub(super) fn finish_retirement_transition_blocking(
+pub fn finish_retirement_transition_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
     admission: &DurableAutomationAdmission,
@@ -1022,37 +1052,34 @@ fn encode_pending_index(index: &PendingIndex) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn indexed_journals_blocking(
+pub fn indexed_journals_blocking(
     dashboard_root: &Path,
     scope: &ResolvedScope,
 ) -> Result<Vec<IndexedJournal>> {
-    let index_path = index_path(dashboard_root);
-    with_index_lock(&index_path, || {
-        let index = read_index(&index_path)?;
-        let automation_root = automation_root(dashboard_root);
-        Ok(index
-            .entries
-            .into_iter()
-            .filter(|entry| {
-                entry.project_id == scope.project_id && entry.scope_digest == scope.scope_digest
-            })
-            .map(|entry| IndexedJournal {
-                path: automation_root.join(&entry.journal_file),
-                project_id: entry.project_id,
-                scope_digest: entry.scope_digest,
-            })
-            .collect())
-    })
+    Ok(indexed_recovery_blocking(dashboard_root)?
+        .1
+        .into_iter()
+        .filter(|entry| {
+            entry.project_id == scope.project_id && entry.scope_digest == scope.scope_digest
+        })
+        .collect())
 }
 
+#[cfg(test)]
 fn indexed_retirement_transitions_blocking(
     dashboard_root: &Path,
 ) -> Result<Vec<IndexedRetirementTransition>> {
+    Ok(indexed_recovery_blocking(dashboard_root)?.0)
+}
+
+fn indexed_recovery_blocking(
+    dashboard_root: &Path,
+) -> Result<(Vec<IndexedRetirementTransition>, Vec<IndexedJournal>)> {
     let index_path = index_path(dashboard_root);
     with_index_lock(&index_path, || {
         let index = read_index(&index_path)?;
         let automation_root = automation_root(dashboard_root);
-        Ok(index
+        let transitions = index
             .retirement_transitions
             .into_iter()
             .map(|transition| IndexedRetirementTransition {
@@ -1062,7 +1089,17 @@ fn indexed_retirement_transitions_blocking(
                 source_digest: transition.source_digest,
                 capture_expected: transition.capture_expected,
             })
-            .collect())
+            .collect();
+        let indexed = index
+            .entries
+            .into_iter()
+            .map(|entry| IndexedJournal {
+                path: automation_root.join(&entry.journal_file),
+                project_id: entry.project_id,
+                scope_digest: entry.scope_digest,
+            })
+            .collect();
+        Ok((transitions, indexed))
     })
 }
 
@@ -1097,7 +1134,7 @@ fn write_pending_index(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
-pub(super) fn write_pending_index_with_publisher(
+pub fn write_pending_index_with_publisher(
     path: &Path,
     bytes: &[u8],
     publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
@@ -1329,6 +1366,66 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+    use tracedecay_domain::{FactOwnerV1, RepositoryId, WorktreeId};
+
+    fn recovery_scope(project_id: &str) -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new(project_id).expect("project id"),
+            RepositoryId::new("repository.recovery-guard").expect("repository id"),
+            WorktreeId::new("worktree.recovery-guard").expect("worktree id"),
+            None,
+        )
+        .expect("recovery scope")
+    }
+
+    fn prepared_recovery(dashboard_root: &Path) -> PreparedAutomationEffectRecovery {
+        PreparedAutomationEffectRecovery {
+            dashboard_root: dashboard_root.to_path_buf(),
+            transitions: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_recovery_rejects_non_project_memory_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = reconcile_prepared_automation_effects_for_project(
+            prepared_recovery(temp.path()),
+            |_, _| async { panic!("owner validation must precede memory access") },
+            &FactOwnerV1::Profile,
+            &CancellationSignal::active("cancellation.non-project-owner").expect("cancellation"),
+            &recovery_scope("project.recovery-guard"),
+        )
+        .await
+        .expect_err("profile memory must not authorize project recovery");
+
+        assert!(
+            error
+                .to_string()
+                .contains("automation recovery requires a project owner")
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_recovery_rejects_memory_owner_scope_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = reconcile_prepared_automation_effects_for_project(
+            prepared_recovery(temp.path()),
+            |_, _| async { panic!("scope validation must precede memory access") },
+            &FactOwnerV1::Project {
+                project_id: ProjectId::new("project.other").expect("project"),
+            },
+            &CancellationSignal::active("cancellation.owner-scope-mismatch").expect("cancellation"),
+            &recovery_scope("project.recovery-guard"),
+        )
+        .await
+        .expect_err("memory owner must match the recovered scope");
+
+        assert!(
+            error
+                .to_string()
+                .contains("automation recovery scope does not match its project memory owner")
+        );
+    }
 
     #[test]
     fn journal_filename_is_exact_digest_only() {
