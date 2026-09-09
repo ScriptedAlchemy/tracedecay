@@ -133,14 +133,14 @@ fn missing_child_pipe(child: &mut Child, pipe: &str) -> NativeGitIndexError {
 }
 
 fn terminate_and_reap(child: &mut Child) -> String {
-    let kill = child
-        .kill()
-        .map(|()| "terminated".to_owned())
-        .unwrap_or_else(|error| format!("termination failed: {error}"));
-    let reap = child
-        .wait()
-        .map(|status| format!("reaped with {status}"))
-        .unwrap_or_else(|error| format!("reap failed: {error}"));
+    let kill = child.kill().map_or_else(
+        |error| format!("termination failed: {error}"),
+        |()| "terminated".to_owned(),
+    );
+    let reap = child.wait().map_or_else(
+        |error| format!("reap failed: {error}"),
+        |status| format!("reaped with {status}"),
+    );
     format!("{kill}, {reap}")
 }
 

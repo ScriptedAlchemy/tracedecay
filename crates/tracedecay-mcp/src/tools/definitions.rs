@@ -39,7 +39,8 @@ mod workflow;
 use admin::*;
 use analysis::*;
 use application::*;
-use application_schema::canonical_application_request_schema;
+pub use application_schema::mcp_input_schema;
+use application_schema::{canonical_application_request_schema, project_input_schema};
 use ast_grep::ast_grep_available;
 pub use ast_grep::ast_grep_diagnostics;
 use edit::*;
@@ -530,6 +531,9 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     })??;
     definitions.extend(work);
     definitions.extend(workflow);
+    for definition in &mut definitions {
+        project_input_schema(&mut definition.input_schema);
+    }
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
@@ -821,12 +825,14 @@ fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCata
                     definition.name
                 ))
             })?;
+        // Repeated once per format-capable tool in every `tools/list`, so the
+        // wording stays short.
         properties.insert(
             "format".to_string(),
             json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
-                "description": "Output format. Default 'markdown' (compact, LLM-optimized sections and bullets; no tables). Pass 'json' for compact machine-readable JSON when a program will parse the result."
+                "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
         );
     }

@@ -1,9 +1,13 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::UtcMicros;
-use tracedecay_hooks::{HookHostV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1};
+use tracedecay_hooks::delivery_spool::HookDeliverySpoolError;
+use tracedecay_hooks::{
+    HookDeliveryReceiptSpoolV1, HookHostV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1,
+};
 
 use crate::cli::Commands;
 
@@ -227,12 +231,32 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
-    let Some(deadline) = Instant::now().checked_add(Duration::from_micros(
+/// One synchronous hook budget measured from now.
+///
+/// Every bounded lock wait on the capture path is anchored at its own attempt,
+/// not at hook start: the analytics row, enrolled-layout lookup, and decode
+/// that precede admission must not spend the budget an uncontended spool lock
+/// would then be refused for. The response hooks' output write anchors its
+/// receipt wait the same way.
+fn synchronous_budget_from_now() -> Option<Instant> {
+    Instant::now().checked_add(Duration::from_micros(
         tracedecay_hooks::HookSynchronousDeadlineV1::start().remaining_micros(),
-    )) else {
-        return 1;
-    };
+    ))
+}
+
+fn open_delivery_receipt_spool(
+    data_root: &Path,
+    host: HookHostV1,
+) -> Result<HookDeliveryReceiptSpoolV1, HookDeliverySpoolError> {
+    let deadline =
+        synchronous_budget_from_now().ok_or(HookDeliverySpoolError::AdmissionTimedOut)?;
+    HookDeliveryReceiptSpoolV1::open_until(
+        tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),
+        deadline,
+    )
+}
+
+pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,
         Err(()) => {
@@ -264,30 +288,30 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
                         match tracedecay_agent_hosts::hooks::native_capture_material(
                             source, &payload, now,
                         ) {
-                            Ok(material) => {
-                                let outcome = tracedecay_hooks::capture_native_event_for_replay(
-                                    &layout.data_root,
-                                    source,
-                                    &payload,
-                                    material,
-                                    now,
-                                    deadline,
-                                );
-                                if outcome == NativeHookCaptureOutcomeV1::Captured {
-                                    match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_until(
-                                        tracedecay_hooks::hook_delivery_receipt_spool_root(
+                            Ok(material) => match synchronous_budget_from_now() {
+                                Some(deadline) => {
+                                    let outcome = tracedecay_hooks::capture_native_event_for_replay(
+                                        &layout.data_root,
+                                        source,
+                                        &payload,
+                                        material,
+                                        now,
+                                        deadline,
+                                    );
+                                    if outcome == NativeHookCaptureOutcomeV1::Captured {
+                                        match open_delivery_receipt_spool(
                                             &layout.data_root,
                                             source.host(),
-                                        ),
-                                        deadline,
-                                    ) {
-                                        Ok(writer) => delivery_writer = Some(writer),
-                                        Err(error) => delivery_open_error = Some(error),
+                                        ) {
+                                            Ok(writer) => delivery_writer = Some(writer),
+                                            Err(error) => delivery_open_error = Some(error),
+                                        }
+                                        delivery_material = Some(material);
                                     }
-                                    delivery_material = Some(material);
+                                    outcome
                                 }
-                                outcome
-                            }
+                                None => NativeHookCaptureOutcomeV1::Unavailable,
+                            },
                             Err(
                                 tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeEvent
                                 | tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeFamily,

@@ -85,22 +85,30 @@ class PrDogfoodOutputTests(unittest.TestCase):
         self.payload["analysis_coverage"] = {"complete": True}
         self.validate(self.payload)
 
-    def test_strict_accepts_graph_ready_bounded_prefix_with_more_symbols(self) -> None:
-        del self.payload["status"]
-        del self.payload["verified_graph_evidence"]
+    def strict_bounded_prefix_payload(self, *, seeds: int, config_summaries: int) -> None:
+        self.payload.pop("status", None)
+        self.payload.pop("verified_graph_evidence", None)
         self.payload["graph_generation"] = "code-graph:sha256:ready-generation"
         self.payload["next_cursor"] = "pr-context.cursor.next"
+        returned = seeds + config_summaries
+        self.payload["added"] = [
+            {"name": f"symbol_{index}", "kind": "function"} for index in range(seeds)
+        ]
+        self.payload["modified"] = [
+            {"file": f"config_{index}.toml", "kind": "config_summary", "config_keys": 3}
+            for index in range(config_summaries)
+        ]
         self.payload["symbol_page"] = {
             "limit": 500,
-            "returned": 500,
+            "returned": returned,
             "has_more": True,
             "complete": False,
             "selection": "stable_prefix",
             "continuation_available": True,
         }
         self.payload["analysis_coverage"] = {
-            "seed_symbols_analyzed": 500,
-            "symbols_returned": 500,
+            "seed_symbols_analyzed": seeds,
+            "symbols_returned": returned,
             "symbols_complete": False,
             "impact_nodes_admitted": 700,
             "impact_nodes_returned": 700,
@@ -109,7 +117,29 @@ class PrDogfoodOutputTests(unittest.TestCase):
             "impact_partial": True,
             "complete": False,
         }
+
+    def test_strict_accepts_graph_ready_bounded_prefix_with_more_symbols(self) -> None:
+        self.strict_bounded_prefix_payload(seeds=500, config_summaries=0)
         self.validate_strict(self.payload)
+
+    def test_strict_accepts_config_summaries_beside_analyzed_seeds(self) -> None:
+        # Config files fold into one `config_summary` entry per file; those
+        # entries are returned but never analyzed as seeds (run 34309279328:
+        # 193 seeds + 6 summaries = 199 returned).
+        self.strict_bounded_prefix_payload(seeds=193, config_summaries=6)
+        self.validate_strict(self.payload)
+
+    def test_strict_rejects_returned_entries_that_are_neither_seed_nor_summary(
+        self,
+    ) -> None:
+        self.strict_bounded_prefix_payload(seeds=193, config_summaries=6)
+        self.payload["analysis_coverage"]["seed_symbols_analyzed"] = 190
+        with self.assertRaisesRegex(ValueError, "analysis coverage is inconsistent"):
+            self.validate_strict(self.payload)
+        self.strict_bounded_prefix_payload(seeds=193, config_summaries=6)
+        self.payload["modified"].pop()
+        with self.assertRaisesRegex(ValueError, "analysis coverage is inconsistent"):
+            self.validate_strict(self.payload)
 
     def test_strict_rejects_partial_graph_unavailability(self) -> None:
         with self.assertRaisesRegex(ValueError, "strict.*unavailable graph"):

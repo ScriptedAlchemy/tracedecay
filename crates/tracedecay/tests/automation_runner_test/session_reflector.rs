@@ -67,7 +67,7 @@ async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_public
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
     let backend = SessionJsonBackend::new(json!({"facts": []}));
     let retained = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &scheduler_config(Some(3600), None),
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -229,7 +229,7 @@ async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
     };
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -299,7 +299,7 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
     );
 
     let reflector = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -310,7 +310,7 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
     .await
     .unwrap();
     let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &skill_backend,
@@ -393,7 +393,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
 
         let reflector =
             tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-                &cg,
+                &automation_project_context(&cg),
                 &config,
                 &test_automation_run_control(Arc::new(AtomicBool::new(false))),
                 &test_configuration_revision(),
@@ -404,7 +404,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             .await
             .unwrap();
         let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &skill_backend,
@@ -460,7 +460,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
     };
     let reflector =
         tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_automation_run_control(Arc::new(AtomicBool::new(false))),
             &test_configuration_revision(),
@@ -472,7 +472,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         .unwrap();
     let skill =
         tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &skill_backend,
@@ -1364,7 +1364,7 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
     };
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -1463,7 +1463,7 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
     };
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -1581,7 +1581,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
     );
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),

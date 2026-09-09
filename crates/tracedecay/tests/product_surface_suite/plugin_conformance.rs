@@ -7,8 +7,6 @@
 //! runtime-registered port that the root crate wires at startup, so the
 //! assertions can never hold inside the leaf crate's own test binary.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use serde_json::Value;
 use std::collections::BTreeSet;
 use tracedecay_agent_hosts::agents::plugin_bundle;
