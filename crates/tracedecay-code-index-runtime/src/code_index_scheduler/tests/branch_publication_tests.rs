@@ -5,6 +5,7 @@ use tempfile::TempDir;
 use tracedecay_dashboard_api::code_index_freshness_api::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::super::branch_publication::{
     BranchPublicationContextV1, branch_generation_work_is_active,
@@ -83,6 +84,69 @@ async fn exact_branch_source_uses_the_mounted_git_identity() {
     assert_eq!(
         source.source_oid,
         super::git_stdout(fixture.path(), &["rev-parse", "HEAD"])
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_generation_wait_rolls_back_prepared_branch_metadata() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let project_id = test_project_id();
+    let registry = mounted_registry(&fixture, &store).await;
+    std::fs::write(
+        fixture.path().join("src/lib.rs"),
+        b"pub fn changed_after_mount() {}\n",
+    )
+    .expect("advance branch source");
+    super::git(fixture.path(), &["add", "src/lib.rs"]);
+    super::git(fixture.path(), &["commit", "-qm", "advance branch"]);
+
+    let context =
+        BranchPublicationContextV1::new(Some(project_id.as_str()), fixture.path(), store.path())
+            .expect("branch publication context");
+    let cancellation = CancellationToken::new();
+    let publication_cancellation = cancellation.clone();
+    let publication_registry = registry.clone();
+    let project_root = fixture.path().to_path_buf();
+    let worktree_root = project_root.clone();
+    let publication = tokio::spawn(async move {
+        context
+            .track_exact_worktree_branch(
+                &publication_registry,
+                &project_root,
+                &worktree_root,
+                "cancelled-publication",
+                &publication_cancellation,
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
+                .is_some_and(|meta| meta.is_tracked("cancelled-publication"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("branch metadata preparation becomes visible");
+    cancellation.cancel();
+
+    let error = publication
+        .await
+        .expect("publication task joins")
+        .expect_err("cancelled publication must fail");
+    assert_eq!(
+        error.project_route_context().map(|context| context.0),
+        Some("branch_tracking_failed")
+    );
+    assert!(
+        tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
+            .is_some_and(|meta| !meta.is_tracked("cancelled-publication")),
+        "cancelled generation wait must roll back prepared metadata"
     );
     registry.shutdown().await;
 }
