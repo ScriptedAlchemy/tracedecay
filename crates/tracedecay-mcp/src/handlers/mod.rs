@@ -20,6 +20,7 @@ pub mod redundancy;
 mod retained_response;
 pub mod support;
 pub mod work;
+pub mod workflow_family;
 
 pub use bounded_search::run_bounded_search;
 pub use multi_root::handle_multi_root;
@@ -33,3 +34,4 @@ pub use support::{
     unique_file_paths,
 };
 pub use work::handle_work;
+pub use workflow_family::handle_workflow;

@@ -131,7 +131,15 @@ mod verified_graph_query_authority_tests;
 )]
 mod work_dispatch_tests;
 pub mod workflow;
-mod workflow_family;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod workflow_dispatch_tests;
 
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
@@ -167,15 +175,14 @@ use retained_catalog::dispatch_profile_retained_application_tool;
 use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
-use tracedecay_api::WorkHttpRequest;
+use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
 use tracedecay_contracts::ProjectRegistryReadPort;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::{handle_multi_root, handle_work};
-use workflow_family::handle_workflow;
+use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -593,7 +600,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
             return boxed_send(handle_workflow(
                 tool_name,
                 args,
-                options.application_invocation_executor,
+                |request| {
+                    invoke_admitted_workflow_operation(
+                        options.application_invocation_executor,
+                        request,
+                    )
+                },
                 options.application_request_id,
                 options.application_deadline,
                 options.application_cancellation,
@@ -825,6 +837,33 @@ async fn invoke_admitted_work_operation(
             "work.response_invalid",
             true,
             format!("The Work application response was not valid JSON: {error}"),
+        )
+    })
+}
+
+/// Reads the canonical Workflow HTTP envelope the daemon owner already produced.
+async fn invoke_admitted_workflow_operation(
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    request: WorkflowHttpRequest,
+) -> Result<Value> {
+    let response = tracedecay_daemon_service::application_surface::invoke_workflow_operation(
+        executor, request,
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "workflow.response_unavailable",
+                true,
+                format!("The Workflow application response could not be read: {error}"),
+            )
+        })?;
+    serde_json::from_slice(&body).map_err(|error| {
+        TraceDecayError::project_route(
+            "workflow.response_invalid",
+            true,
+            format!("The Workflow application response was not valid JSON: {error}"),
         )
     })
 }
