@@ -176,11 +176,13 @@ pub(crate) async fn register_project_retained_owner_for_test(
             message: format!("retained test owner grant is invalid: {error}"),
         }
     })?;
-    let ports = server.retained_surface_ports(
-        &project_root,
-        scope.project_id.clone(),
-        access.configuration_digest.clone(),
-    );
+    let ports = server
+        .retained_surface_ports(
+            &project_root,
+            scope.project_id.clone(),
+            access.configuration_digest.clone(),
+        )
+        .await;
     DaemonRetainedRuntimeRegistrar::new(service)
         .register(project_root, scope, access.requester, grant, ports)
         .await
