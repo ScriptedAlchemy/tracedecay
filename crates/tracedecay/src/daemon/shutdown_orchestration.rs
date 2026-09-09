@@ -14,7 +14,7 @@ use super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt};
 use super::{
     DAEMON_BACKGROUND_DRAIN_DEADLINE, DAEMON_CLIENT_DRAIN_DEADLINE,
     DAEMON_PROJECT_SERVER_DRAIN_DEADLINE, DAEMON_STORE_CLOSE_RESERVE, DAEMON_TASK_ABORT_DEADLINE,
-    DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
+    DaemonLifecycle, core_lifecycle::DaemonShutdownClaim, log_daemon_event,
 };
 use tracedecay_domain::errors::Result;
 
@@ -91,6 +91,37 @@ impl DaemonShutdownBudget {
     fn store_close(self) -> tokio::time::Instant {
         self.phase(DAEMON_STORE_CLOSE_RESERVE, tokio::time::Duration::ZERO)
     }
+}
+
+/// Operator receipts for one serial shutdown phase. Hotpath already measures
+/// these windows (`daemon.shutdown.project_servers` / `store_close`; inner
+/// work includes `mcp.server.shutdown` and `graph_db.runtime.close.engine`).
+fn log_shutdown_phase(
+    phase: &str,
+    boundary: &str,
+    started: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+) {
+    let now = tokio::time::Instant::now();
+    log_daemon_event(
+        "daemon_shutdown",
+        &[
+            ("outcome", format!("{phase}_{boundary}")),
+            (
+                "elapsed_ms",
+                now.saturating_duration_since(started)
+                    .as_millis()
+                    .to_string(),
+            ),
+            (
+                "deadline_remaining_ms",
+                deadline
+                    .saturating_duration_since(now)
+                    .as_millis()
+                    .to_string(),
+            ),
+        ],
+    );
 }
 
 pub(super) struct DaemonShutdownPlan {
@@ -427,6 +458,13 @@ async fn run_daemon_shutdown(
     // closes those graph runtimes, so it must run only after every server has
     // dropped its leases.
     let project_server_deadline = budget.project_servers();
+    let project_servers_started = tokio::time::Instant::now();
+    log_shutdown_phase(
+        "project_servers",
+        "start",
+        project_servers_started,
+        project_server_deadline,
+    );
     let project_servers = hotpath::measure_block!("daemon.shutdown.project_servers", {
         let _draining = DrainingGauge::arm("daemon.shutdown.draining.project_servers");
         // The drain gets its phase deadline, so it reaches its own bounded
@@ -442,11 +480,24 @@ async fn run_daemon_shutdown(
             ) => ShutdownTaskReceipt::timed_out("project_server_shutdown"),
         }
     });
+    log_shutdown_phase(
+        "project_servers",
+        "complete",
+        project_servers_started,
+        project_server_deadline,
+    );
     // Store close: the terminal owner phase (memory_graph_reconciliation)
     // drains retained graph owners and closes their Grafeo runtimes. This is
     // the outer view of the close; daemon.branch_admin.close_graph_runtimes
     // and graph_db.registry.close_retained measure the work underneath it.
     let store_close_deadline = budget.store_close();
+    let store_close_started = tokio::time::Instant::now();
+    log_shutdown_phase(
+        "store_close",
+        "start",
+        store_close_started,
+        store_close_deadline,
+    );
     let terminal = hotpath::measure_block!("daemon.shutdown.store_close", {
         let _draining = DrainingGauge::arm("daemon.shutdown.draining.store_close");
         if project_servers.timed_out_count() == 0 {
@@ -457,6 +508,12 @@ async fn run_daemon_shutdown(
             ShutdownReceipt::timed_out(store_close_deadline, "memory_graph_reconciliation")
         }
     });
+    log_shutdown_phase(
+        "store_close",
+        "complete",
+        store_close_started,
+        store_close_deadline,
+    );
     background.extend(terminal);
     let receipt = DaemonShutdownReceipt {
         in_flight,
@@ -610,6 +667,72 @@ mod tests {
         tokio::time::advance(tokio::time::Duration::from_secs(15)).await;
         assert_eq!(budget.project_servers(), tokio::time::Instant::now());
         assert_eq!(budget.store_close(), overall);
+    }
+
+    #[tokio::test]
+    async fn post_reaper_phases_emit_start_and_complete_receipts() {
+        let _ = super::super::take_captured_daemon_event_lines();
+        let lifecycle = DaemonLifecycle::default();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let _receipt = coordinate_daemon_shutdown(&lifecycle, deadline, async move {
+            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
+                ShutdownTaskReceipt::default()
+            })
+            .with_terminal_owner_phases(vec![vec![ShutdownOwner::new(
+                "memory_graph_reconciliation",
+                || {},
+                async {},
+            )]])
+        })
+        .await;
+
+        let lines = super::super::take_captured_daemon_event_lines();
+        assert_eq!(
+            shutdown_phase_outcomes(&lines),
+            [
+                "project_servers_start",
+                "project_servers_complete",
+                "store_close_start",
+                "store_close_complete",
+            ],
+            "{lines:?}"
+        );
+        for line in &lines {
+            if !line.contains("outcome=project_servers_") && !line.contains("outcome=store_close_")
+            {
+                continue;
+            }
+            assert!(
+                line.contains("elapsed_ms="),
+                "phase receipt must carry elapsed_ms: {line}"
+            );
+            assert!(
+                line.contains("deadline_remaining_ms="),
+                "phase receipt must carry deadline_remaining_ms: {line}"
+            );
+        }
+    }
+
+    fn shutdown_phase_outcomes(lines: &[String]) -> Vec<&str> {
+        lines
+            .iter()
+            .filter_map(|line| {
+                if !line.contains("event=daemon_shutdown") {
+                    return None;
+                }
+                line.split_whitespace().find_map(|field| {
+                    field.strip_prefix("outcome=").filter(|outcome| {
+                        matches!(
+                            *outcome,
+                            "project_servers_start"
+                                | "project_servers_complete"
+                                | "store_close_start"
+                                | "store_close_complete"
+                        )
+                    })
+                })
+            })
+            .collect()
     }
 
     #[tokio::test]

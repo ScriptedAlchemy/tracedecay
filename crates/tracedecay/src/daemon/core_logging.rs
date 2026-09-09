@@ -69,7 +69,26 @@ fn quote_log_value(value: &str) -> String {
 }
 
 pub(crate) fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
-    eprintln!("{}", format_daemon_log_line(event, fields));
+    let line = format_daemon_log_line(event, fields);
+    #[cfg(test)]
+    capture_daemon_event_line(&line);
+    eprintln!("{line}");
+}
+
+#[cfg(test)]
+thread_local! {
+    static CAPTURED_DAEMON_EVENT_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn capture_daemon_event_line(line: &str) {
+    CAPTURED_DAEMON_EVENT_LINES.with(|captured| captured.borrow_mut().push(line.to_owned()));
+}
+
+#[cfg(test)]
+pub(crate) fn take_captured_daemon_event_lines() -> Vec<String> {
+    CAPTURED_DAEMON_EVENT_LINES.with(std::cell::RefCell::take)
 }
 
 /// The stderr tracing filter derived from a `RUST_LOG` value.
