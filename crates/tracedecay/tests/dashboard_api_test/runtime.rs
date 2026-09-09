@@ -129,7 +129,7 @@ pub(crate) struct DashboardTestRuntimeV1 {
     profile_database: RegisteredGlobalDbLeaseV1,
     profile_sessions_database: RegisteredGlobalDbLeaseV1,
     project_database: RegisteredGlobalDbLeaseV1,
-    graph: dashboard::DashboardGraphTestRuntimeV1,
+    graph: dashboard::dashboard_graph_test_runtime::DashboardGraphTestRuntimeV1,
     project_id: ProjectId,
 }
 
@@ -154,7 +154,10 @@ impl DashboardTestRuntimeV1 {
         let graph_profile_root = profile_root
             .join("dashboard-test-graphs")
             .join(project_id.as_str());
-        let graph = dashboard::DashboardGraphTestRuntimeV1::open(&graph_profile_root).await?;
+        let graph = dashboard::dashboard_graph_test_runtime::DashboardGraphTestRuntimeV1::open(
+            &graph_profile_root,
+        )
+        .await?;
         let profile_database = graph.profile_database();
         let profile_sessions_database = graph.profile_sessions_database();
         let project_database = graph

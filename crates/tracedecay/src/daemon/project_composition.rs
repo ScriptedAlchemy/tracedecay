@@ -516,7 +516,7 @@ impl ComposedCoreServer {
             ))
             .with_code_graph_read_admission_port(Arc::clone(&code_index.graph_read_admission_port))
             .with_verified_graph_query_port(
-                crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
+                tracedecay_graph_query::admitted_verified_graph_query_port_with_source(
                     Arc::clone(&code_index.graph_read_admission_port),
                     Arc::clone(&code_index.graph_projection_read_port),
                     cg.source_read_context(),
