@@ -1,46 +1,34 @@
-//! Daemon-side Hook V2 replay consumer.
+//! Host-spool Hook V2 replay drain.
 //!
 //! A hook that cannot reach the daemon inside its synchronous budget appends
-//! the exact validated envelope to the host transport spool. Nothing else in
-//! the product drained that spool, so this module closes the loop: on project
-//! open, and periodically thereafter, it leases spooled batches,
-//! **reauthorizes every envelope against the currently published binding**,
-//! feeds the survivors through the same durable admission path the live hook
-//! uses (so idempotency makes replay safe), and acknowledges each record as
-//! either committed or a typed terminal tombstone.
+//! the exact validated envelope to the host transport spool. The caller admits
+//! one host spool and the project identity; this module leases fair batches,
+//! reauthorizes every envelope against the published binding for that project,
+//! feeds survivors through the caller's admission callback, and acknowledges
+//! each record as committed or a typed terminal tombstone.
 //!
-//! Bounds: one pass per host per interval, at most the spool's own fair
-//! per-session batch limits, and the spool's writer lease is held only for the
+//! Bounds: one pass per admitted spool, at most the spool's own fair
+//! per-session batch limits, and the writer lease is held only for the
 //! duration of a pass so a live hook can still append.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_domain::{SessionId, UtcMicros};
-use tracedecay_hooks::{
+use tracedecay_domain::UtcMicros;
+
+use crate::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
     HookEventEnvelopeV2, HookHostV1, HookScopeBindingV1, HookSpoolAckDispositionV1, HookSpoolAckV1,
-    HookSpoolConfigV1, HookSpoolRecordV1, HookSpoolV1, hook_configuration_path,
-    validate_replay_batch,
+    HookSpoolRecordV1, HookSpoolV1, hook_configuration_path, validate_replay_batch,
 };
 
-use crate::mcp::tools::handlers::{
-    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_pending_work_envelopes,
-};
-
-/// How often a project's spools are drained after the project-open pass.
-const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 /// Fair sessions leased per host per pass. The spool caps this at four.
 const REPLAY_SESSIONS_PER_PASS: usize = 4;
 
 /// Why a spooled record was terminally dropped instead of admitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HookReplayTombstoneReasonV1 {
+pub enum HookReplayTombstoneReasonV1 {
     /// The published binding no longer authorizes this envelope.
     BindingStale,
     /// The same event identity was already admitted with different bytes.
@@ -51,7 +39,7 @@ pub(crate) enum HookReplayTombstoneReasonV1 {
 
 impl HookReplayTombstoneReasonV1 {
     #[hotpath::skip]
-    pub(crate) const fn as_key(self) -> &'static str {
+    pub const fn as_key(self) -> &'static str {
         match self {
             Self::BindingStale => "binding_stale",
             Self::IdentityConflict => "admission_identity_conflict",
@@ -62,19 +50,31 @@ impl HookReplayTombstoneReasonV1 {
 
 /// What one pass did. Every counter is per host per pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct HookReplayPassReportV1 {
-    pub(crate) committed: u32,
-    pub(crate) duplicates: u32,
-    pub(crate) tombstoned: u32,
-    pub(crate) retained: u32,
-    pub(crate) binding_unavailable: bool,
+pub struct HookReplayPassReportV1 {
+    pub committed: u32,
+    pub duplicates: u32,
+    pub tombstoned: u32,
+    pub retained: u32,
+    pub binding_unavailable: bool,
 }
 
-pub(crate) fn hook_v2_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
+/// Typed admission result the drain understands. Callers map their own
+/// admission outcomes onto this closed set; nothing here talks to TraceDecay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookReplayAdmissionOutcomeV1 {
+    Admitted,
+    ExactDuplicate,
+    Conflict,
+    CatchupRequired,
+    Backpressured,
+    Unavailable,
+}
+
+pub fn hook_v2_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
     data_root.join("hook-v2-spool").join(host.hook_key())
 }
 
-fn current_binding(
+pub fn published_hook_scope_binding(
     data_root: &Path,
     host: HookHostV1,
     now: UtcMicros,
@@ -133,65 +133,65 @@ enum ReplayCompletion {
     Retained(u32),
 }
 
-/// Drain one host spool once. `admit` reauthorizes and admits a single
-/// envelope; production passes the daemon admission path, tests pass a fake.
-#[hotpath::measure(label = "daemon.hook_replay.host_drain", future = true)]
-pub(crate) async fn drain_host_spool_once<A, F>(
-    data_root: &Path,
-    host: HookHostV1,
+/// Drain one admitted host spool once. `admit` reauthorizes and admits a
+/// single envelope; production passes the daemon admission path, tests pass a
+/// fake. The spool handle is dropped across admission so a live hook can append.
+#[hotpath::measure(label = "hooks.replay.host_drain", future = true)]
+pub async fn drain_host_spool_once<A, F>(
+    mut spool: HookSpoolV1,
+    project_id: [u8; 16],
+    binding: Option<&HookScopeBindingV1>,
     now: UtcMicros,
     admit: A,
-) -> Option<HookReplayPassReportV1>
+) -> HookReplayPassReportV1
 where
     A: Fn(HookEventEnvelopeV2) -> F,
-    F: Future<Output = HookV2AdmissionOutcomeV1>,
+    F: Future<Output = HookReplayAdmissionOutcomeV1>,
 {
-    let root = hook_v2_spool_root(data_root, host);
-    if !root.is_dir() {
-        return None;
-    }
-    let (mut spool, _report) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now).ok()?;
+    let host = spool.config().host;
     let mut pass = HookReplayPassReportV1::default();
 
     // Age-expired records are terminal regardless of binding state: the spool
-    // keeps them durable precisely until the daemon says otherwise.
-    for record in spool.expired_records(now).ok()? {
-        if acknowledge(
-            &mut spool,
-            &record,
-            HookSpoolAckDispositionV1::TerminalTombstone,
-            now,
-        ) {
-            hotpath::gauge!("daemon.hook_replay.expired").inc(1.0);
-            log_tombstone(host, &record, HookReplayTombstoneReasonV1::Expired);
-            pass.tombstoned = pass.tombstoned.saturating_add(1);
+    // keeps them durable precisely until the drain says otherwise.
+    if let Ok(expired) = spool.expired_records(now) {
+        for record in expired {
+            if acknowledge(
+                &mut spool,
+                &record,
+                HookSpoolAckDispositionV1::TerminalTombstone,
+                now,
+            ) {
+                hotpath::gauge!("hooks.replay.expired").inc(1.0);
+                log_tombstone(host, &record, HookReplayTombstoneReasonV1::Expired);
+                pass.tombstoned = pass.tombstoned.saturating_add(1);
+            }
         }
     }
 
-    let Some(binding) = current_binding(data_root, host, now) else {
-        // Without a current binding nothing can be reauthorized. Records stay
-        // durable and pending; a later pass retries.
-        hotpath::gauge!("daemon.hook_replay.binding_unavailable").inc(1.0);
+    let Some(binding) = binding.filter(|binding| binding.project_id == project_id) else {
+        // Without a current binding for this project nothing can be
+        // reauthorized. Records stay durable and pending; a later pass retries.
+        hotpath::gauge!("hooks.replay.binding_unavailable").inc(1.0);
         pass.binding_unavailable = true;
-        return Some(pass);
+        return pass;
     };
 
-    let batches = spool
-        .claim_replay_batches(now, REPLAY_SESSIONS_PER_PASS)
-        .ok()?;
+    let Ok(batches) = spool.claim_replay_batches(now, REPLAY_SESSIONS_PER_PASS) else {
+        return pass;
+    };
     let mut replay_batches = Vec::with_capacity(batches.len());
     for batch in batches {
         let Ok(record_count) = u16::try_from(batch.records.len()) else {
             let _ = spool.release_replay_claim(batch.claim_id);
-            return Some(pass);
+            return pass;
         };
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
             let _ = spool.release_replay_claim(batch.claim_id);
-            hotpath::gauge!("daemon.hook_replay.retained").inc(f64::from(record_count));
+            hotpath::gauge!("hooks.replay.retained").inc(f64::from(record_count));
             pass.retained = pass.retained.saturating_add(record_count.into());
             continue;
         }
-        hotpath::gauge!("daemon.hook_replay.batch_events").set(f64::from(record_count));
+        hotpath::gauge!("hooks.replay.batch_events").set(f64::from(record_count));
         replay_batches.push((batch.records, record_count));
     }
 
@@ -199,11 +199,15 @@ where
     // live hook events. Admission may await arbitrary daemon work, so retain
     // only bounded record copies across that await and reacquire the writer
     // solely for the final acknowledgement phase.
+    let root = spool.root().to_path_buf();
+    let config = spool.config();
     drop(spool);
     let mut completions = Vec::new();
     for (records, record_count) in replay_batches {
         for (index, record) in records.into_iter().enumerate() {
-            if record.envelope.validate(&binding).is_err() {
+            if record.envelope.project_id != project_id
+                || record.envelope.validate(binding).is_err()
+            {
                 completions.push(ReplayCompletion::Tombstone(
                     record,
                     HookReplayTombstoneReasonV1::BindingStale,
@@ -212,29 +216,30 @@ where
             }
             let outcome = hotpath::future!(
                 admit(record.envelope.clone()),
-                label = "daemon.hook_replay.delivery"
+                label = "hooks.replay.delivery"
             )
             .await;
             match outcome {
-                HookV2AdmissionOutcomeV1::Admitted { .. } => {
+                HookReplayAdmissionOutcomeV1::Admitted => {
                     completions.push(ReplayCompletion::Committed(record));
                 }
-                HookV2AdmissionOutcomeV1::ExactDuplicate => {
+                HookReplayAdmissionOutcomeV1::ExactDuplicate => {
                     completions.push(ReplayCompletion::ExactDuplicate(record));
                 }
-                HookV2AdmissionOutcomeV1::Conflict => {
+                HookReplayAdmissionOutcomeV1::Conflict => {
                     completions.push(ReplayCompletion::Tombstone(
                         record,
                         HookReplayTombstoneReasonV1::IdentityConflict,
                     ));
                 }
-                HookV2AdmissionOutcomeV1::CatchupRequired => {
+                HookReplayAdmissionOutcomeV1::CatchupRequired => {
                     completions.push(ReplayCompletion::Tombstone(
                         record,
                         HookReplayTombstoneReasonV1::BindingStale,
                     ));
                 }
-                HookV2AdmissionOutcomeV1::Backpressured | HookV2AdmissionOutcomeV1::Unavailable => {
+                HookReplayAdmissionOutcomeV1::Backpressured
+                | HookReplayAdmissionOutcomeV1::Unavailable => {
                     completions.push(ReplayCompletion::Retained(u32::from(
                         record_count.saturating_sub(index as u16),
                     )));
@@ -252,14 +257,10 @@ where
             | ReplayCompletion::Tombstone(_, _) => 1,
         })
     });
-    let Ok((mut spool, _)) = HookSpoolV1::open(
-        hook_v2_spool_root(data_root, host),
-        HookSpoolConfigV1::stock(host),
-        now,
-    ) else {
-        hotpath::gauge!("daemon.hook_replay.retained").inc(f64::from(retained_without_ack));
+    let Ok((mut spool, _)) = HookSpoolV1::open(root, config, now) else {
+        hotpath::gauge!("hooks.replay.retained").inc(f64::from(retained_without_ack));
         pass.retained = pass.retained.saturating_add(retained_without_ack);
-        return Some(pass);
+        return pass;
     };
     for completion in completions {
         match completion {
@@ -270,7 +271,7 @@ where
                     HookSpoolAckDispositionV1::Committed,
                     now,
                 ) {
-                    hotpath::gauge!("daemon.hook_replay.delivered").inc(1.0);
+                    hotpath::gauge!("hooks.replay.delivered").inc(1.0);
                     pass.committed = pass.committed.saturating_add(1);
                 }
             }
@@ -281,7 +282,7 @@ where
                     HookSpoolAckDispositionV1::Committed,
                     now,
                 ) {
-                    hotpath::gauge!("daemon.hook_replay.duplicate").inc(1.0);
+                    hotpath::gauge!("hooks.replay.duplicate").inc(1.0);
                     pass.duplicates = pass.duplicates.saturating_add(1);
                 }
             }
@@ -294,11 +295,11 @@ where
                 ) {
                     match reason {
                         HookReplayTombstoneReasonV1::Expired => {
-                            hotpath::gauge!("daemon.hook_replay.expired").inc(1.0);
+                            hotpath::gauge!("hooks.replay.expired").inc(1.0);
                         }
                         HookReplayTombstoneReasonV1::BindingStale
                         | HookReplayTombstoneReasonV1::IdentityConflict => {
-                            hotpath::gauge!("daemon.hook_replay.refused").inc(1.0);
+                            hotpath::gauge!("hooks.replay.refused").inc(1.0);
                         }
                     }
                     log_tombstone(host, &record, reason);
@@ -306,12 +307,12 @@ where
                 }
             }
             ReplayCompletion::Retained(count) => {
-                hotpath::gauge!("daemon.hook_replay.retained").inc(f64::from(count));
+                hotpath::gauge!("hooks.replay.retained").inc(f64::from(count));
                 pass.retained = pass.retained.saturating_add(count);
             }
         }
     }
-    Some(pass)
+    pass
 }
 
 fn log_tombstone(
@@ -328,16 +329,16 @@ fn log_tombstone(
     );
 }
 
-async fn admit_replayed_envelope_with_authoritative_session<R, RF, A, AF>(
+pub async fn admit_replayed_envelope_with_authoritative_session<R, RF, A, AF, O>(
     envelope: HookEventEnvelopeV2,
     resolve_session: R,
     admit: A,
-) -> HookV2AdmissionOutcomeV1
+) -> O
 where
     R: FnOnce([u8; 16], [u8; 16], [u8; 32]) -> RF,
-    RF: Future<Output = Option<SessionId>>,
-    A: FnOnce(HookEventEnvelopeV2, Option<SessionId>) -> AF,
-    AF: Future<Output = HookV2AdmissionOutcomeV1>,
+    RF: Future<Output = Option<tracedecay_domain::SessionId>>,
+    A: FnOnce(HookEventEnvelopeV2, Option<tracedecay_domain::SessionId>) -> AF,
+    AF: Future<Output = O>,
 {
     let native_session_id = resolve_session(
         envelope.project_id,
@@ -348,265 +349,25 @@ where
     admit(envelope, native_session_id).await
 }
 
-#[hotpath::measure(label = "daemon.hook_replay.receipt_drain", future = true)]
-async fn drain_hook_delivery_receipts(
-    data_root: &Path,
-    host: HookHostV1,
-    authority: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
-) {
-    let root = tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host);
-    if !root.is_dir() {
-        return;
-    }
-    let Ok(spool) = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(&root) else {
-        return;
-    };
-    let Ok(receipts) = spool.pending(usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS))
-    else {
-        return;
-    };
-    drop(spool);
-
-    let mut settled = Vec::new();
-    for receipt in receipts {
-        let receipt_hex = encode_lowercase_hex(&receipt.receipt_id);
-        let source_receipt_ref = format!("hook:delivery:{receipt_hex}");
-        if authority
-            .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)
-            .await
-            .is_err()
-        {
-            continue;
-        }
-        let Ok(_emission) = authority.settle(&receipt.settlement).await else {
-            continue;
-        };
-        // A successful durable settlement is enough to release the source
-        // receipt.  Early recipients legitimately return `observability: None`
-        // while their fan-out census is partial; only the final recipient
-        // emits the complete owner fact.  Retaining those partial files would
-        // replay immutable attempts forever after the database already owns
-        // them.
-        settled.push(receipt.receipt_id);
-    }
-    if settled.is_empty() {
-        return;
-    }
-    let Ok(spool) = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(root) else {
-        return;
-    };
-    for receipt_id in settled {
-        let _ = spool.acknowledge(receipt_id);
-    }
-}
-
-/// The sweep gauge is RAII so the consumer task's `abort()` at project close
-/// cannot leave a phantom in-flight sweep behind.
-struct HookReplaySweepObservation;
-
-impl HookReplaySweepObservation {
-    fn begin() -> Self {
-        hotpath::gauge!("daemon.hook_replay.sweeps_active").inc(1.0);
-        Self
-    }
-}
-
-impl Drop for HookReplaySweepObservation {
-    fn drop(&mut self) {
-        hotpath::gauge!("daemon.hook_replay.sweeps_active").inc(-1.0);
-    }
-}
-
-#[hotpath::measure(label = "daemon.hook_replay.sweep", future = true)]
-async fn drain_all_hosts(
-    graph: &crate::tracedecay::TraceDecay,
-    data_root: &Path,
-    delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
-) {
-    let _sweep = HookReplaySweepObservation::begin();
-    for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
-        let now = hook_replay_now();
-        drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;
-        for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
-            let _ = admit_replayed_envelope_with_authoritative_session(
-                envelope,
-                |project_id, worktree_id, protected_session_id| async move {
-                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
-                        project_id,
-                        worktree_id,
-                        protected_session_id,
-                    )
-                    .await
-                },
-                |envelope, native_session_id| async move {
-                    admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
-                        .await
-                },
-            )
-            .await;
-        }
-        let report = drain_host_spool_once(data_root, *host, now, |envelope| async move {
-            admit_replayed_envelope_with_authoritative_session(
-                envelope,
-                |project_id, worktree_id, protected_session_id| async move {
-                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
-                        project_id,
-                        worktree_id,
-                        protected_session_id,
-                    )
-                    .await
-                },
-                |envelope, native_session_id| async move {
-                    admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
-                        .await
-                },
-            )
-            .await
-        })
-        .await;
-        if let Some(report) = report
-            && (report.committed > 0 || report.duplicates > 0 || report.tombstoned > 0)
-        {
-            tracing::debug!(
-                event = "hook_v2_replay_pass",
-                host = host.hook_key(),
-                committed = report.committed,
-                duplicates = report.duplicates,
-                tombstoned = report.tombstoned,
-                retained = report.retained,
-                "hook V2 replay pass completed"
-            );
-        }
-    }
-}
-
-fn hook_replay_now() -> UtcMicros {
-    UtcMicros(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |duration| {
-                duration.as_micros().min(i64::MAX as u128) as i64
-            })
-            .max(1),
-    )
-}
-
-struct RegisteredReplayConsumer {
-    graph: Weak<crate::tracedecay::TraceDecay>,
-    delivery_settlements:
-        Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-fn registered_replay_roots() -> &'static StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>> {
-    static ROOTS: OnceLock<StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>>> = OnceLock::new();
-    ROOTS.get_or_init(|| StdMutex::new(BTreeMap::new()))
-}
-
-#[cfg(test)]
-pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
-    registered_replay_roots().lock().is_ok_and(|roots| {
-        roots.get(data_root).is_some_and(|consumer| {
-            consumer.graph.upgrade().is_some() && consumer.delivery_settlements.upgrade().is_some()
-        })
-    })
-}
-
-/// Start the per-project replay consumer exactly once per hook data root.
-/// Returns `false` when one is already running for this root.
-pub(crate) fn register_hook_v2_replay_consumer(
-    graph: Arc<crate::tracedecay::TraceDecay>,
-    delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
-) -> bool {
-    let data_root = graph.hook_store_layout().data_root.clone();
-    let graph = Arc::downgrade(&graph);
-    let delivery_settlements = Arc::downgrade(&delivery_settlements);
-    match registered_replay_roots().lock() {
-        Ok(mut roots) => {
-            if roots.get(&data_root).is_some_and(|consumer| {
-                consumer.graph.upgrade().is_some()
-                    && consumer.delivery_settlements.upgrade().is_some()
-            }) {
-                return false;
-            }
-            roots.insert(
-                data_root.clone(),
-                RegisteredReplayConsumer {
-                    graph: graph.clone(),
-                    delivery_settlements: delivery_settlements.clone(),
-                    task: None,
-                },
-            );
-        }
-        Err(_) => return false,
-    }
-    let task_data_root = data_root.clone();
-    let task_graph = graph.clone();
-    let task_delivery_settlements = delivery_settlements.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            let (Some(graph_owner), Some(delivery_settlements)) =
-                (task_graph.upgrade(), task_delivery_settlements.upgrade())
-            else {
-                break;
-            };
-            drain_all_hosts(&graph_owner, &task_data_root, delivery_settlements.as_ref()).await;
-            drop(graph_owner);
-            drop(delivery_settlements);
-            // Retained records wait exactly this interval for their next
-            // delivery attempt; keep the pacing WAIT separate from sweep WORK.
-            hotpath::future!(
-                tokio::time::sleep(REPLAY_INTERVAL),
-                label = "daemon.hook_replay.interval_wait"
-            )
-            .await;
-        }
-        if let Ok(mut roots) = registered_replay_roots().lock()
-            && roots
-                .get(&task_data_root)
-                .is_some_and(|registered| Weak::ptr_eq(&registered.graph, &task_graph))
-        {
-            roots.remove(&task_data_root);
-        }
-    });
-    match registered_replay_roots().lock() {
-        Ok(mut roots) => match roots.get_mut(&data_root) {
-            Some(registered) if Weak::ptr_eq(&registered.graph, &graph) => {
-                registered.task = Some(task);
-            }
-            _ => task.abort(),
-        },
-        Err(_) => task.abort(),
-    }
-    true
-}
-
-/// Stop and join the exact project replay consumer before releasing its graph.
-pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
-    let task = registered_replay_roots()
-        .lock()
-        .ok()
-        .and_then(|mut roots| roots.remove(data_root))
-        .and_then(|consumer| consumer.task);
-    if let Some(task) = task {
-        task.abort();
-        let _ = task.await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::oneshot;
-    use tracedecay_hooks::{
+    use tracedecay_domain::SessionId;
+
+    use crate::{
         HOOK_CONFIGURATION_SCHEMA_VERSION, HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1,
         HookCapabilityV1, HookConfigurationFileWriterV1, HookConfigurationPublisherV1,
         HookConfigurationSnapshotV1, HookEventFamily, HookEventV2, HookOrderingV1,
-        stock_event_support,
+        HookSpoolConfigV1, stock_event_support,
     };
 
     const HOST: HookHostV1 = HookHostV1::ClaudeCode;
+    const PROJECT_ID: [u8; 16] = [1; 16];
 
     #[test]
     fn cursor_native_identities_use_distinct_canonical_spool_roots() {
@@ -625,7 +386,7 @@ mod tests {
     fn binding(epoch: u64) -> HookScopeBindingV1 {
         HookScopeBindingV1 {
             host: HOST,
-            project_id: [1; 16],
+            project_id: PROJECT_ID,
             repository_id: [2; 16],
             worktree_id: [3; 16],
             worktree_epoch: epoch,
@@ -706,6 +467,31 @@ mod tests {
         report.pending_records
     }
 
+    fn open_admitted_spool(data_root: &Path, now: UtcMicros) -> HookSpoolV1 {
+        HookSpoolV1::open(
+            hook_v2_spool_root(data_root, HOST),
+            HookSpoolConfigV1::stock(HOST),
+            now,
+        )
+        .unwrap()
+        .0
+    }
+
+    async fn drain<A, F>(data_root: &Path, now: UtcMicros, admit: A) -> HookReplayPassReportV1
+    where
+        A: Fn(HookEventEnvelopeV2) -> F,
+        F: Future<Output = HookReplayAdmissionOutcomeV1>,
+    {
+        drain_host_spool_once(
+            open_admitted_spool(data_root, now),
+            PROJECT_ID,
+            published_hook_scope_binding(data_root, HOST, now).as_ref(),
+            now,
+            admit,
+        )
+        .await
+    }
+
     struct TestRoot(PathBuf);
 
     impl TestRoot {
@@ -731,13 +517,12 @@ mod tests {
         }
     }
 
-    fn admitted() -> HookV2AdmissionOutcomeV1 {
-        HookV2AdmissionOutcomeV1::Admitted {
-            orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1::Unavailable,
-            ready_guidance: serde_json::Value::Null,
-            feedback_notice: serde_json::Value::Null,
-            github_stack_signal_available: false,
-        }
+    fn admitted() -> HookReplayAdmissionOutcomeV1 {
+        HookReplayAdmissionOutcomeV1::Admitted
+    }
+
+    fn protected_session_id(session: &str) -> [u8; 32] {
+        Sha256::digest(session.as_bytes()).into()
     }
 
     #[tokio::test]
@@ -755,15 +540,14 @@ mod tests {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
 
-        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope| {
             let recorder = Arc::clone(&recorder);
             async move {
                 recorder.lock().unwrap().push(envelope.event_id);
                 admitted()
             }
         })
-        .await
-        .unwrap();
+        .await;
 
         assert_eq!(report.committed, 2);
         assert_eq!(report.tombstoned, 0);
@@ -778,8 +562,7 @@ mod tests {
         let binding = binding(7);
         publish_binding(root.path(), &binding, now);
         let mut edit = envelope(9, &binding);
-        edit.protected_session_id =
-            tracedecay_agent_hosts::hooks::protected_native_session_id("session.native.replay");
+        edit.protected_session_id = protected_session_id("session.native.replay");
         edit.event = HookEventV2::SavedEdit {
             file_id: [8; 16],
             changed_range_count: 1,
@@ -790,19 +573,17 @@ mod tests {
         let suggestions = Arc::new(StdMutex::new(Vec::new()));
         let captured = Arc::clone(&suggestions);
 
-        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope| {
             let captured = Arc::clone(&captured);
             async move {
                 admit_replayed_envelope_with_authoritative_session(
                     envelope,
                     |project_id, worktree_id, protected_session_id| async move {
-                        assert_eq!(project_id, [1; 16]);
+                        assert_eq!(project_id, PROJECT_ID);
                         assert_eq!(worktree_id, [3; 16]);
                         assert_eq!(
                             protected_session_id,
-                            tracedecay_agent_hosts::hooks::protected_native_session_id(
-                                "session.native.replay",
-                            )
+                            self::protected_session_id("session.native.replay")
                         );
                         Some(SessionId::new("session.native.replay".to_owned()).unwrap())
                     },
@@ -815,22 +596,13 @@ mod tests {
                                 .unwrap()
                                 .push("replayed lifecycle suggestion");
                         }
-                        HookV2AdmissionOutcomeV1::Admitted {
-                            orchestration:
-                                tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
-                            ready_guidance: serde_json::json!({
-                                "suggestion": "replayed lifecycle suggestion"
-                            }),
-                            feedback_notice: serde_json::Value::Null,
-                            github_stack_signal_available: false,
-                        }
+                        admitted()
                     },
                 )
                 .await
             }
         })
-        .await
-        .unwrap();
+        .await;
 
         assert_eq!(report.committed, 1);
         assert_eq!(
@@ -842,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_admission_does_not_hold_the_spool_writer_lease() {
-        let data_root = tempfile::tempdir().unwrap();
+        let data_root = TestRoot::new("lease");
         let current = UtcMicros(10);
         let binding = binding(7);
         publish_binding(data_root.path(), &binding, current);
@@ -862,7 +634,7 @@ mod tests {
         let (release_tx, release_rx) = oneshot::channel();
         let entered_tx = Arc::new(StdMutex::new(Some(entered_tx)));
         let release_rx = Arc::new(StdMutex::new(Some(release_rx)));
-        let drain = drain_host_spool_once(data_root.path(), HOST, current, move |_| {
+        let drain = drain(data_root.path(), current, move |_| {
             let entered_tx = Arc::clone(&entered_tx);
             let release_rx = Arc::clone(&release_rx);
             async move {
@@ -891,7 +663,7 @@ mod tests {
         drop(concurrent);
 
         let _ = release_tx.send(());
-        let report = drain.await.unwrap();
+        let report = drain.await;
         assert_eq!(report.committed, 1);
     }
 
@@ -911,15 +683,14 @@ mod tests {
         let admissions = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&admissions);
 
-        let report = drain_host_spool_once(root.path(), HOST, now, move |_| {
+        let report = drain(root.path(), now, move |_| {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::Relaxed);
                 admitted()
             }
         })
-        .await
-        .unwrap();
+        .await;
 
         assert_eq!(report.tombstoned, 1);
         assert_eq!(report.committed, 0);
@@ -940,15 +711,14 @@ mod tests {
             now,
         );
 
-        let report = drain_host_spool_once(root.path(), HOST, now, |envelope| async move {
+        let report = drain(root.path(), now, |envelope| async move {
             if envelope.event_id == [9; 16] {
-                HookV2AdmissionOutcomeV1::ExactDuplicate
+                HookReplayAdmissionOutcomeV1::ExactDuplicate
             } else {
-                HookV2AdmissionOutcomeV1::Conflict
+                HookReplayAdmissionOutcomeV1::Conflict
             }
         })
-        .await
-        .unwrap();
+        .await;
 
         assert_eq!(report.duplicates, 1);
         assert_eq!(report.tombstoned, 1);
@@ -968,20 +738,17 @@ mod tests {
             now,
         );
 
-        let report = drain_host_spool_once(root.path(), HOST, now, |_| async move {
-            HookV2AdmissionOutcomeV1::Unavailable
+        let report = drain(root.path(), now, |_| async move {
+            HookReplayAdmissionOutcomeV1::Unavailable
         })
-        .await
-        .unwrap();
+        .await;
 
         assert_eq!(report.retained, 2);
         assert_eq!(report.committed, 0);
         assert_eq!(pending_records(root.path(), now), 2);
 
         // A later pass with a healthy daemon drains it.
-        let report = drain_host_spool_once(root.path(), HOST, now, |_| async move { admitted() })
-            .await
-            .unwrap();
+        let report = drain(root.path(), now, |_| async move { admitted() }).await;
         assert_eq!(report.committed, 2);
         assert_eq!(pending_records(root.path(), now), 0);
     }
@@ -993,11 +760,31 @@ mod tests {
         let binding = binding(7);
         spool_envelopes(root.path(), &binding, &[envelope(9, &binding)], now);
 
-        let report = drain_host_spool_once(root.path(), HOST, now, |_| async move { admitted() })
-            .await
-            .unwrap();
+        let report = drain(root.path(), now, |_| async move { admitted() }).await;
 
         assert!(report.binding_unavailable);
+        assert_eq!(pending_records(root.path(), now), 1);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_project_id_leaves_every_record_pending() {
+        let root = TestRoot::new("foreign-project");
+        let now = UtcMicros(1_000);
+        let binding = binding(7);
+        publish_binding(root.path(), &binding, now);
+        spool_envelopes(root.path(), &binding, &[envelope(9, &binding)], now);
+
+        let report = drain_host_spool_once(
+            open_admitted_spool(root.path(), now),
+            [9; 16],
+            published_hook_scope_binding(root.path(), HOST, now).as_ref(),
+            now,
+            |_| async move { admitted() },
+        )
+        .await;
+
+        assert!(report.binding_unavailable);
+        assert_eq!(report.committed, 0);
         assert_eq!(pending_records(root.path(), now), 1);
     }
 
@@ -1025,8 +812,7 @@ mod tests {
             .collect();
             let mut replayed = envelope(sequence as u8, &host_binding);
             replayed.producer = host;
-            replayed.protected_session_id =
-                tracedecay_agent_hosts::hooks::protected_native_session_id(session);
+            replayed.protected_session_id = protected_session_id(session);
             replayed.ordering = HookOrderingV1::ProviderSequence(sequence);
             replayed.event = HookEventV2::SavedEdit {
                 file_id: [sequence as u8; 16],
@@ -1037,12 +823,9 @@ mod tests {
             let outcome = admit_replayed_envelope_with_authoritative_session(
                 replayed,
                 move |project_id, worktree_id, protected_session_id| async move {
-                    assert_eq!(project_id, [1; 16]);
+                    assert_eq!(project_id, PROJECT_ID);
                     assert_eq!(worktree_id, [3; 16]);
-                    assert_eq!(
-                        protected_session_id,
-                        tracedecay_agent_hosts::hooks::protected_native_session_id(session)
-                    );
+                    assert_eq!(protected_session_id, self::protected_session_id(session));
                     Some(SessionId::new(session.to_owned()).unwrap())
                 },
                 move |envelope, native_session_id| async move {
@@ -1055,7 +838,7 @@ mod tests {
                 },
             )
             .await;
-            assert!(matches!(outcome, HookV2AdmissionOutcomeV1::Admitted { .. }));
+            assert_eq!(outcome, HookReplayAdmissionOutcomeV1::Admitted);
         }
 
         let seen = seen.lock().unwrap();
@@ -1074,12 +857,10 @@ mod tests {
         let binding = binding(7);
         publish_binding(root.path(), &binding, queued_at);
         spool_envelopes(root.path(), &binding, &[envelope(9, &binding)], queued_at);
-        let later = UtcMicros(queued_at.0 + tracedecay_hooks::MAX_SPOOL_AGE_MICROS + 1);
+        let later = UtcMicros(queued_at.0 + crate::MAX_SPOOL_AGE_MICROS + 1);
         publish_binding(root.path(), &binding, later);
 
-        let report = drain_host_spool_once(root.path(), HOST, later, |_| async move { admitted() })
-            .await
-            .unwrap();
+        let report = drain(root.path(), later, |_| async move { admitted() }).await;
 
         assert_eq!(report.tombstoned, 1);
         assert_eq!(report.committed, 0);
@@ -1131,15 +912,14 @@ mod tests {
         // Pass 1: the daemon is unavailable, so nothing is acknowledged.
         let first_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = Arc::clone(&first_seen);
-        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope| {
             let recorder = Arc::clone(&recorder);
             async move {
                 recorder.lock().unwrap().push(envelope.event_id);
-                HookV2AdmissionOutcomeV1::Unavailable
+                HookReplayAdmissionOutcomeV1::Unavailable
             }
         })
-        .await
-        .unwrap();
+        .await;
         assert_eq!(
             report.retained, 2,
             "an unavailable daemon acknowledges nothing"
@@ -1150,15 +930,14 @@ mod tests {
         // Pass 2: the replay re-offers the same identities and commits them.
         let second_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = Arc::clone(&second_seen);
-        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope| {
             let recorder = Arc::clone(&recorder);
             async move {
                 recorder.lock().unwrap().push(envelope.event_id);
                 admitted()
             }
         })
-        .await
-        .unwrap();
+        .await;
         assert_eq!(report.committed, 2);
         assert_eq!(pending_records(root.path(), now), 0);
 
@@ -1172,15 +951,14 @@ mod tests {
         // Pass 3: an acknowledged record is never redelivered.
         let third_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = Arc::clone(&third_seen);
-        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope| {
             let recorder = Arc::clone(&recorder);
             async move {
                 recorder.lock().unwrap().push(envelope.event_id);
                 admitted()
             }
         })
-        .await
-        .unwrap();
+        .await;
         assert_eq!(
             report.committed, 0,
             "an acknowledged record must never replay a second time"

@@ -134,7 +134,7 @@ async fn release_one_idle_project_server_before_open(
                 .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
             for data_root in hook_data_roots {
-                super::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
+                super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
             }
             for prior in prior_owner_retirements {
                 prior.wait().await?;

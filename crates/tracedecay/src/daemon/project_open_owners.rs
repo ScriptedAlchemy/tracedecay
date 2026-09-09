@@ -1154,7 +1154,7 @@ pub(super) async fn register_project_open_production_owners(
         .ok_or_else(|| TraceDecayError::Config {
             message: "hook delivery settlement authority is unavailable".to_owned(),
         })?;
-    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(
+    crate::daemon::hook_v2_replay_consumer::register_hook_v2_replay_consumer(
         Arc::clone(&graph),
         delivery_settlements,
     );
