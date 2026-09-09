@@ -1,108 +1,266 @@
-//! Daemon-owned at-rest privacy remediation.
+//! At-rest privacy remediation after fail-closed project admission.
 //!
 //! Project-open spawns one bounded background rescan per adopted project
-//! store after fail-closed admission has finished; it never blocks admission
-//! or retrieval. The rescan re-runs the current in-process detector over the
-//! persisted stores it owns. Project-memory detector hits are terminally
+//! store after admission has finished; it never blocks admission or retrieval.
+//! The caller passes the admitted project and its grant — not a composition-root
+//! handle. Grant expiry, cancellation, and commit denial fail closed. The
+//! rescan re-runs the current in-process detector over the persisted stores
+//! the caller already opened. Project-memory detector hits are terminally
 //! quarantined so historical payloads are erased; LCM raw messages settle
 //! through their canonical remediation authority. Durable receipts record
 //! every mutation, and no scanner binary runs.
 
+use std::fmt::Display;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_session_memory::memory::{
-    PrivacyRemediationTriggerV1, ProjectMemoryPrivacyRemediationReceiptV1,
-};
+use thiserror::Error;
+use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_store::{FactReadControl, FactWriteControl};
 
-use crate::tracedecay::TraceDecay;
-use tracedecay_domain::errors::Result;
-use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
+/// Project identity admitted by project-open before background remediation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmittedPrivacyProjectV1 {
+    project_id: ProjectId,
+    project_label: String,
+}
 
-/// Spawns the bounded background rescan for one adopted project store.
-pub(crate) fn spawn_at_rest_privacy_remediation(
-    owner: &crate::mcp::McpServer,
-    graph: Arc<TraceDecay>,
-    session_db: RegisteredGlobalDbLeaseV1,
-) -> bool {
-    owner.spawn_background_task(async move {
-        let project = graph.project_root().display().to_string();
-        match run_project_memory_privacy_remediation(&graph).await {
-            Ok(receipt) => {
-                hotpath::gauge!("daemon.privacy.remediation.memory_completed_total").inc(1_u64);
-                tracing::info!(
-                    event = "project_memory_privacy_remediation",
-                    project = %project,
-                    detector_revision = %receipt.detector_revision,
-                    superseded_payloads_scanned = receipt.superseded_payloads_scanned,
-                    superseded_payloads_purged = receipt.superseded_payloads_purged,
-                    scanned_facts = receipt.scanned_facts,
-                    clean_facts = receipt.clean_facts,
-                    quarantined_facts = receipt.quarantined_facts,
-                    curation_batches = receipt.curation_receipts.len(),
-                );
-            }
-            Err(error) => {
-                hotpath::gauge!("daemon.privacy.remediation.memory_failed_total").inc(1_u64);
-                tracing::warn!(
-                    event = "project_memory_privacy_remediation_failed",
-                    project = %project,
-                    %error,
-                );
-            }
+impl AdmittedPrivacyProjectV1 {
+    pub fn new(project_id: ProjectId, project_root: impl Display) -> Self {
+        Self {
+            project_id,
+            project_label: project_root.to_string(),
         }
-        match session_db.lcm_privacy_rescan_raw_messages().await {
-            Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent) => {
-                hotpath::gauge!("daemon.privacy.remediation.lcm_current_total").inc(1_u64);
-            }
-            Ok(LcmPrivacyRescanOutcomeV1::Completed(receipt)) => {
-                hotpath::gauge!("daemon.privacy.remediation.lcm_completed_total").inc(1_u64);
-                tracing::info!(
-                    event = "lcm_privacy_remediation",
-                    project = %project,
-                    detector_revision = %receipt.detector_revision,
-                    scanned_rows = receipt.scanned_rows,
-                    clean_rows = receipt.clean_rows,
-                    remediated_rows = receipt.remediated_rows,
-                    protected_rows = receipt.protected_rows,
-                    unavailable_payload_rows = receipt.unavailable_payload_rows,
-                );
-            }
-            Err(error) => {
-                hotpath::gauge!("daemon.privacy.remediation.lcm_failed_total").inc(1_u64);
-                tracing::warn!(
-                    event = "lcm_privacy_remediation_failed",
-                    project = %project,
-                    %error,
-                );
-            }
+    }
+
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub fn project_label(&self) -> &str {
+        &self.project_label
+    }
+}
+
+/// Why at-rest remediation must not run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum PrivacyRemediationDeniedV1 {
+    #[error("privacy remediation grant is expired")]
+    Expired,
+    #[error("privacy remediation grant is cancelled")]
+    Cancelled,
+}
+
+/// Grant authorizing one at-rest remediation of an admitted project.
+///
+/// Expiry and cancellation fail closed: spawn does not admit the task, and an
+/// already-running pass stops before the next store authority is invoked.
+#[derive(Clone, Debug)]
+pub struct PrivacyRemediationGrantV1 {
+    expires_at: UtcMicros,
+    observed_at: UtcMicros,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl PrivacyRemediationGrantV1 {
+    pub fn new(expires_at: UtcMicros, observed_at: UtcMicros) -> Self {
+        Self {
+            expires_at,
+            observed_at,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
-    })
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn authorize(&self, observed_at: UtcMicros) -> Result<(), PrivacyRemediationDeniedV1> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(PrivacyRemediationDeniedV1::Cancelled);
+        }
+        if observed_at >= self.expires_at || self.observed_at >= self.expires_at {
+            return Err(PrivacyRemediationDeniedV1::Expired);
+        }
+        Ok(())
+    }
+}
+
+/// Truthful memory-rescan counts logged after an admitted pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivacyMemoryRemediationOutcomeV1 {
+    pub detector_revision: String,
+    pub superseded_payloads_scanned: u64,
+    pub superseded_payloads_purged: u64,
+    pub scanned_facts: u64,
+    pub clean_facts: u64,
+    pub quarantined_facts: u64,
+    pub curation_batches: usize,
+}
+
+/// Truthful LCM-rescan outcome logged after an admitted pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrivacyLcmRemediationOutcomeV1 {
+    AlreadyCurrent,
+    Completed {
+        detector_revision: String,
+        scanned_rows: u64,
+        clean_rows: u64,
+        remediated_rows: u64,
+        protected_rows: u64,
+        unavailable_payload_rows: u64,
+    },
+}
+
+/// Spawns the bounded background rescan for one admitted project store.
+///
+/// Returns `false` when the grant is already expired or cancelled, or when
+/// the caller's spawn admission refuses the task. Project-open must not fail
+/// on a refused spawn: remediation never blocks admission.
+pub fn spawn_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>(
+    spawn: impl FnOnce(Pin<Box<dyn Future<Output = ()> + Send>>) -> bool,
+    project: AdmittedPrivacyProjectV1,
+    grant: PrivacyRemediationGrantV1,
+    memory: Memory,
+    lcm: Lcm,
+    now: impl Fn() -> UtcMicros + Send + 'static,
+) -> bool
+where
+    Memory:
+        Future<Output = Result<PrivacyMemoryRemediationOutcomeV1, MemoryError>> + Send + 'static,
+    Lcm: Future<Output = Result<PrivacyLcmRemediationOutcomeV1, LcmError>> + Send + 'static,
+    MemoryError: Display + Send + 'static,
+    LcmError: Display + Send + 'static,
+{
+    if grant.authorize(now()).is_err() {
+        return false;
+    }
+    spawn(Box::pin(run_at_rest_privacy_remediation(
+        project, grant, memory, lcm, now,
+    )))
 }
 
 #[hotpath::measure(label = "daemon.privacy.remediate", future = true)]
-async fn run_project_memory_privacy_remediation(
-    graph: &TraceDecay,
-) -> Result<ProjectMemoryPrivacyRemediationReceiptV1> {
-    let memory = graph.project_memory_application().await?;
-    memory
-        .privacy_remediation_rescan(
-            PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
-            &remediation_read_control(),
-            &remediation_write_control(),
-        )
-        .await
-        .map_err(tracedecay_session_memory::memory::memory_application_error)
+pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>(
+    project: AdmittedPrivacyProjectV1,
+    grant: PrivacyRemediationGrantV1,
+    memory: Memory,
+    lcm: Lcm,
+    now: impl Fn() -> UtcMicros + Send + 'static,
+) where
+    Memory: Future<Output = Result<PrivacyMemoryRemediationOutcomeV1, MemoryError>>,
+    Lcm: Future<Output = Result<PrivacyLcmRemediationOutcomeV1, LcmError>>,
+    MemoryError: Display,
+    LcmError: Display,
+{
+    let project = project.project_label();
+    if let Err(error) = grant.authorize(now()) {
+        tracing::warn!(
+            event = "project_memory_privacy_remediation_failed",
+            project = %project,
+            %error,
+        );
+        return;
+    }
+    match memory.await {
+        Ok(receipt) => {
+            hotpath::gauge!("daemon.privacy.remediation.memory_completed_total").inc(1_u64);
+            tracing::info!(
+                event = "project_memory_privacy_remediation",
+                project = %project,
+                detector_revision = %receipt.detector_revision,
+                superseded_payloads_scanned = receipt.superseded_payloads_scanned,
+                superseded_payloads_purged = receipt.superseded_payloads_purged,
+                scanned_facts = receipt.scanned_facts,
+                clean_facts = receipt.clean_facts,
+                quarantined_facts = receipt.quarantined_facts,
+                curation_batches = receipt.curation_batches,
+            );
+        }
+        Err(error) => {
+            hotpath::gauge!("daemon.privacy.remediation.memory_failed_total").inc(1_u64);
+            tracing::warn!(
+                event = "project_memory_privacy_remediation_failed",
+                project = %project,
+                %error,
+            );
+        }
+    }
+    if let Err(error) = grant.authorize(now()) {
+        tracing::warn!(
+            event = "lcm_privacy_remediation_failed",
+            project = %project,
+            %error,
+        );
+        return;
+    }
+    match lcm.await {
+        Ok(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent) => {
+            hotpath::gauge!("daemon.privacy.remediation.lcm_current_total").inc(1_u64);
+        }
+        Ok(PrivacyLcmRemediationOutcomeV1::Completed {
+            detector_revision,
+            scanned_rows,
+            clean_rows,
+            remediated_rows,
+            protected_rows,
+            unavailable_payload_rows,
+        }) => {
+            hotpath::gauge!("daemon.privacy.remediation.lcm_completed_total").inc(1_u64);
+            tracing::info!(
+                event = "lcm_privacy_remediation",
+                project = %project,
+                detector_revision = %detector_revision,
+                scanned_rows,
+                clean_rows,
+                remediated_rows,
+                protected_rows,
+                unavailable_payload_rows,
+            );
+        }
+        Err(error) => {
+            hotpath::gauge!("daemon.privacy.remediation.lcm_failed_total").inc(1_u64);
+            tracing::warn!(
+                event = "lcm_privacy_remediation_failed",
+                project = %project,
+                %error,
+            );
+        }
+    }
 }
 
-fn remediation_read_control() -> FactReadControl {
+pub fn remediation_read_control() -> FactReadControl {
     FactReadControl::new(Arc::new(|| false))
+}
+
+/// Read control that fails closed when the grant expires or is cancelled.
+pub fn granted_remediation_read_control(
+    grant: &PrivacyRemediationGrantV1,
+    now: impl Fn() -> UtcMicros + Send + Sync + 'static,
+) -> FactReadControl {
+    let grant = grant.clone();
+    FactReadControl::new(Arc::new(move || grant.authorize(now()).is_err()))
 }
 
 /// The owner bounds every commit to one read page; the control admits each
 /// canonical page receipt until that finite scan completes.
-fn remediation_write_control() -> FactWriteControl {
+pub fn remediation_write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
+}
+
+/// Recheck expiry and cancellation at the canonical commit boundary.
+pub fn granted_remediation_write_control(
+    grant: &PrivacyRemediationGrantV1,
+    now: impl Fn() -> UtcMicros + Send + Sync + Clone + 'static,
+) -> FactWriteControl {
+    let commit_grant = grant.clone();
+    let read_control = granted_remediation_read_control(grant, now.clone());
+    FactWriteControl::new(
+        Arc::new(move || read_control.interrupted()),
+        Arc::new(move || commit_grant.authorize(now()).is_ok()),
+    )
 }
 
 #[cfg(test)]
@@ -115,7 +273,7 @@ mod tests {
     use tracedecay_domain::{
         ComponentVersion, Confidence, FactCategoryV1, FactOwnerV1, FactPayloadV1, ProjectId,
         ProvenanceId, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-        SanitizerDispositionV1, SensitivityV1,
+        SanitizerDispositionV1, SensitivityV1, UtcMicros,
     };
     use tracedecay_session_memory::memory::{MemoryApplication, PrivacyRemediationTriggerV1};
     use tracedecay_store::{
@@ -124,13 +282,138 @@ mod tests {
         ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
     };
 
-    use super::{remediation_read_control, remediation_write_control};
+    use super::{
+        AdmittedPrivacyProjectV1, PrivacyLcmRemediationOutcomeV1,
+        PrivacyMemoryRemediationOutcomeV1, PrivacyRemediationDeniedV1, PrivacyRemediationGrantV1,
+        remediation_read_control, remediation_write_control, spawn_at_rest_privacy_remediation,
+    };
     use tracedecay_daemon_identity::profile_identity;
     use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
     fn secret() -> String {
         ["sk", "-test-", "1234567890abcdef"].concat()
+    }
+
+    #[test]
+    fn expired_grant_fails_closed_without_spawning() {
+        let project = AdmittedPrivacyProjectV1::new(
+            ProjectId::new("project.privacy-grant-expired").expect("project id"),
+            "/tmp/privacy-grant-expired",
+        );
+        let grant = PrivacyRemediationGrantV1::new(UtcMicros(10), UtcMicros(10));
+        let spawned = spawn_at_rest_privacy_remediation(
+            |_| panic!("expired grant must not spawn"),
+            project,
+            grant,
+            async { Ok::<_, PrivacyRemediationDeniedV1>(memory_outcome()) },
+            async {
+                Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
+            },
+            || UtcMicros(1),
+        );
+        assert!(!spawned);
+    }
+
+    #[test]
+    fn cancelled_grant_fails_closed_without_spawning() {
+        let project = AdmittedPrivacyProjectV1::new(
+            ProjectId::new("project.privacy-grant-cancelled").expect("project id"),
+            "/tmp/privacy-grant-cancelled",
+        );
+        let grant = PrivacyRemediationGrantV1::new(UtcMicros(20), UtcMicros(1));
+        grant.cancel();
+        let spawned = spawn_at_rest_privacy_remediation(
+            |_| panic!("cancelled grant must not spawn"),
+            project,
+            grant,
+            async { Ok::<_, PrivacyRemediationDeniedV1>(memory_outcome()) },
+            async {
+                Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
+            },
+            || UtcMicros(1),
+        );
+        assert!(!spawned);
+    }
+
+    #[test]
+    fn admitted_grant_hands_the_task_to_spawn() {
+        let project = AdmittedPrivacyProjectV1::new(
+            ProjectId::new("project.privacy-grant-admitted").expect("project id"),
+            "/tmp/privacy-grant-admitted",
+        );
+        let grant = PrivacyRemediationGrantV1::new(UtcMicros(20), UtcMicros(1));
+        let spawned = spawn_at_rest_privacy_remediation(
+            |_| true,
+            project,
+            grant,
+            async { Ok::<_, PrivacyRemediationDeniedV1>(memory_outcome()) },
+            async {
+                Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
+            },
+            || UtcMicros(1),
+        );
+        assert!(spawned);
+    }
+
+    #[tokio::test]
+    async fn grant_expiring_during_memory_scan_withholds_lcm() {
+        let now = Arc::new(std::sync::atomic::AtomicI64::new(1));
+        let scan_now = Arc::clone(&now);
+        let lcm_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lcm_marker = Arc::clone(&lcm_polled);
+        super::run_at_rest_privacy_remediation(
+            AdmittedPrivacyProjectV1::new(
+                ProjectId::new("project.privacy-expiry-transition").expect("project id"),
+                "/tmp/privacy-expiry-transition",
+            ),
+            PrivacyRemediationGrantV1::new(UtcMicros(20), UtcMicros(1)),
+            async move {
+                scan_now.store(20, std::sync::atomic::Ordering::Release);
+                Ok::<_, PrivacyRemediationDeniedV1>(memory_outcome())
+            },
+            async move {
+                lcm_marker.store(true, std::sync::atomic::Ordering::Release);
+                Ok::<_, PrivacyRemediationDeniedV1>(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent)
+            },
+            move || UtcMicros(now.load(std::sync::atomic::Ordering::Acquire)),
+        )
+        .await;
+        assert!(!lcm_polled.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn grant_controls_recheck_expiry_and_cancellation_at_commit() {
+        let now = Arc::new(std::sync::atomic::AtomicI64::new(1));
+        let clock = {
+            let now = Arc::clone(&now);
+            move || UtcMicros(now.load(std::sync::atomic::Ordering::Acquire))
+        };
+        let grant = PrivacyRemediationGrantV1::new(UtcMicros(20), UtcMicros(1));
+        let read = super::granted_remediation_read_control(&grant, clock.clone());
+        let write = super::granted_remediation_write_control(&grant, clock);
+        assert!(!read.interrupted());
+        assert!(write.try_begin_commit());
+        now.store(20, std::sync::atomic::Ordering::Release);
+        assert!(read.interrupted());
+        assert!(write.interrupted());
+        assert!(!write.try_begin_commit());
+        now.store(1, std::sync::atomic::Ordering::Release);
+        grant.cancel();
+        assert!(read.interrupted());
+        assert!(!write.try_begin_commit());
+    }
+
+    fn memory_outcome() -> PrivacyMemoryRemediationOutcomeV1 {
+        PrivacyMemoryRemediationOutcomeV1 {
+            detector_revision: "privacy.memory-fact.v1".to_owned(),
+            superseded_payloads_scanned: 0,
+            superseded_payloads_purged: 0,
+            scanned_facts: 0,
+            clean_facts: 0,
+            quarantined_facts: 0,
+            curation_batches: 0,
+        }
     }
 
     fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
@@ -198,9 +481,8 @@ mod tests {
             source_label,
         )
         .expect("legacy payload reference");
-        let sanitizer_version =
-            ComponentVersion::new(tracedecay_privacy::MEMORY_FACT_SANITIZER_VERSION_V1)
-                .expect("pinned detector revision");
+        let sanitizer_version = ComponentVersion::new(crate::MEMORY_FACT_SANITIZER_VERSION_V1)
+            .expect("pinned detector revision");
         let receipt = SanitizationReceiptV1::new(
             SanitizationReceiptRefV1::new(
                 legacy_receipt_id(

@@ -6775,6 +6775,7 @@ name = "tracedecay-privacy"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "hex",
  "hotpath",
  "percent-encoding",
  "regex",
@@ -6782,10 +6783,18 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.19",
+ "tokio",
  "toml",
  "tracedecay-capture",
+ "tracedecay-daemon-identity",
  "tracedecay-domain",
+ "tracedecay-runtime-core",
+ "tracedecay-session-memory",
+ "tracedecay-store",
+ "tracedecay-store-runtime",
+ "tracing",
  "url",
 ]
 
