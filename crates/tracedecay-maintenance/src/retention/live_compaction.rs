@@ -1,6 +1,6 @@
 //! Bounded compaction for stores retained by a live runtime.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_contracts::storage::compaction::CompactionTriggerPolicyV1;
 use tracedecay_contracts::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
@@ -129,12 +129,12 @@ fn compaction_is_scheduled(
     if page_size == 0 || page_count == 0 {
         return Ok(false);
     }
-    let observed_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ())?
-        .as_micros();
-    let observed_at = i64::try_from(observed_at).map_err(|_| ())?;
-    let sample = store_size_sample_at(page_size, page_count, freelist, UtcMicros(observed_at))?;
+    let observed_at = duration_to_utc_micros(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ())?,
+    )?;
+    let sample = store_size_sample_at(page_size, page_count, freelist, observed_at)?;
     let policy = CompactionTriggerPolicyV1 {
         free_page_ratio_threshold: FreePageRatioV1::new(config.free_page_ratio_threshold)
             .map_err(|_| ())?,
@@ -143,6 +143,12 @@ fn compaction_is_scheduled(
     policy
         .decide(&sample)
         .map(|decision| decision.is_scheduled())
+        .map_err(|_| ())
+}
+
+fn duration_to_utc_micros(duration: Duration) -> Result<UtcMicros, ()> {
+    i64::try_from(duration.as_micros())
+        .map(UtcMicros)
         .map_err(|_| ())
 }
 
@@ -190,11 +196,12 @@ mod tests {
     }
 
     #[test]
-    fn compaction_sample_preserves_true_unix_microseconds() {
-        let observed_at = UtcMicros(1_700_000_000_123_456);
-        let sample =
-            store_size_sample_at(4_096, 100, 50, observed_at).expect("valid compaction sample");
+    fn compaction_clock_conversion_preserves_sub_millisecond_microseconds_and_refuses_overflow() {
+        let observed_at =
+            duration_to_utc_micros(std::time::Duration::new(1_700_000_000, 123_456_000))
+                .expect("unix duration fits");
 
-        assert_eq!(sample.observed_at, observed_at);
+        assert_eq!(observed_at, UtcMicros(1_700_000_000_123_456));
+        assert_eq!(duration_to_utc_micros(std::time::Duration::MAX), Err(()));
     }
 }
