@@ -1,6 +1,7 @@
 use tracedecay_application::pr_tracking::{
     ManagedPr, PrAutotrackState, load_state, managed_summary, save_state,
 };
+use tracedecay_domain::errors::TraceDecayError;
 
 #[test]
 fn managed_pr_state_round_trips_through_application_owner() {
@@ -19,6 +20,38 @@ fn managed_pr_state_round_trips_through_application_owner() {
 
     save_state(store.path(), &state).expect("persist managed PR state");
 
-    assert_eq!(load_state(store.path()).managed, state.managed);
-    assert_eq!(managed_summary(store.path())[0].pr, 7);
+    assert_eq!(
+        load_state(store.path())
+            .expect("load managed PR state")
+            .managed,
+        state.managed
+    );
+    assert_eq!(
+        managed_summary(store.path()).expect("summarize managed PR state")[0].pr,
+        7
+    );
+}
+
+#[test]
+fn malformed_managed_pr_state_is_a_typed_json_error() {
+    let store = tempfile::tempdir().expect("store root");
+    std::fs::write(store.path().join("pr-autotrack.json"), "{not json")
+        .expect("write malformed state");
+
+    assert!(matches!(
+        load_state(store.path()),
+        Err(TraceDecayError::Json(_))
+    ));
+}
+
+#[test]
+fn unreadable_managed_pr_state_is_a_typed_io_error() {
+    let store = tempfile::tempdir().expect("store root");
+    std::fs::create_dir(store.path().join("pr-autotrack.json"))
+        .expect("create unreadable state path");
+
+    assert!(matches!(
+        load_state(store.path()),
+        Err(TraceDecayError::Io(_))
+    ));
 }

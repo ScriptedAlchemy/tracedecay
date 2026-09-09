@@ -311,7 +311,10 @@ pub struct DashboardPrAutoTrackEntryV1 {
 }
 
 pub trait DashboardPrAutoTrackReadPort: Send + Sync {
-    fn managed_summary(&self, store_root: &Path) -> Vec<DashboardPrAutoTrackEntryV1>;
+    fn managed_summary(
+        &self,
+        store_root: &Path,
+    ) -> tracedecay_domain::errors::Result<Vec<DashboardPrAutoTrackEntryV1>>;
 }
 
 static PR_AUTOTRACK_READ_PORT: OnceLock<Arc<dyn DashboardPrAutoTrackReadPort>> = OnceLock::new();
@@ -610,7 +613,7 @@ async fn settings_envelope(
             configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
             tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
-            pr_autotrack: pr_autotrack_payload(state),
+            pr_autotrack: pr_autotrack_payload(state)?,
         },
         user: user_settings_payload(&user, &worker_configuration),
         automation,
@@ -732,21 +735,23 @@ fn automation_settings_payload(
 /// Lists the PR branches the daemon currently auto-tracks for this project, read
 /// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
 /// feature has tracked nothing yet.
-fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
-    let tracked = PR_AUTOTRACK_READ_PORT
-        .get()
-        .map(|port| {
-            port.managed_summary(&state.store_root)
-                .into_iter()
-                .map(|entry| PrAutoTrackEntryV1 {
-                    branch: entry.branch,
-                    pr: entry.pr,
-                    head_branch: entry.head_branch,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    PrAutoTrackPayloadV1 { tracked }
+fn pr_autotrack_payload(
+    state: &DashboardState,
+) -> std::result::Result<PrAutoTrackPayloadV1, DashboardConfigurationRouteErrorV1> {
+    let tracked = match PR_AUTOTRACK_READ_PORT.get() {
+        Some(port) => port
+            .managed_summary(&state.store_root)
+            .map_err(|_| configuration_authority_unavailable_error())?
+            .into_iter()
+            .map(|entry| PrAutoTrackEntryV1 {
+                branch: entry.branch,
+                pr: entry.pr,
+                head_branch: entry.head_branch,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(PrAutoTrackPayloadV1 { tracked })
 }
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {

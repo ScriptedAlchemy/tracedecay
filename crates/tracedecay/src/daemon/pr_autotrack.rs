@@ -47,6 +47,7 @@ use tracedecay_application::pr_tracking::{
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::errors::TraceDecayError;
 
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
@@ -1373,8 +1374,8 @@ async fn reconcile_project_with_administration(
     discovery: &PrDiscovery,
     cap: usize,
     administration: PrStoreAdministration<'_>,
-) -> ReconcileReport {
-    let mut state = load_state(data_root);
+) -> std::result::Result<ReconcileReport, TraceDecayError> {
+    let mut state = load_state(data_root)?;
     let mut report = ReconcileReport {
         skipped_forks: discovery.skipped_forks.clone(),
         ..Default::default()
@@ -1556,7 +1557,7 @@ async fn reconcile_project_with_administration(
             .push(("<state>".to_string(), reason.clone()));
         log_pr_skip(repo_root, None, None, &reason);
     }
-    report
+    Ok(report)
 }
 
 /// Fetches a PR head, checks it out into a linked worktree, and mounts that

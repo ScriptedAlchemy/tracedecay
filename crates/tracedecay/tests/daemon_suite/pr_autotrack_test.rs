@@ -146,7 +146,11 @@ async fn reconciliation_without_scheduler_fails_before_git_or_state_mutation() {
             .1
             .starts_with("code_index_scheduler_unavailable:")
     );
-    assert!(pr_tracking::managed_summary(fixture.data_root()).is_empty());
+    assert!(
+        pr_tracking::managed_summary(fixture.data_root())
+            .expect("read managed PR state")
+            .is_empty()
+    );
     assert!(!fixture.data_root().join("pr-worktrees").exists());
     assert!(
         !fixture

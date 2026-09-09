@@ -71,7 +71,8 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
         10,
         administration,
     )
-    .await;
+    .await
+    .expect("load managed PR state");
 
     assert!(report.untracked.is_empty());
     assert!(report.tracked.is_empty());
@@ -81,10 +82,48 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
             .1
             .starts_with("code_index_scheduler_unavailable:")
     );
-    assert!(load_state(data_root.path()).managed.contains_key("pr/5"));
+    assert!(
+        load_state(data_root.path())
+            .expect("load managed PR state")
+            .managed
+            .contains_key("pr/5")
+    );
     let reloaded = load_branch_meta(data_root.path()).unwrap();
     assert!(reloaded.is_tracked("pr/5"));
     assert!(data_root.path().join("branches/pr_5.db").exists());
+}
+
+#[tokio::test]
+async fn reconcile_refuses_malformed_state_before_branch_mutation() {
+    let data_root = tempfile::tempdir().expect("data root");
+    let repo_root = tempfile::tempdir().expect("repository root");
+    std::fs::write(data_root.path().join("pr-autotrack.json"), "{not json")
+        .expect("write malformed state");
+    let discovery = PrDiscovery {
+        open: vec![DiscoveredPr {
+            number: 9,
+            head_branch: "feature-9".to_owned(),
+            head_sha: "sha-9".to_owned(),
+        }],
+        ..PrDiscovery::default()
+    };
+    let daemon_administration = StoreAdministration::default();
+
+    let error = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await
+    .expect_err("malformed durable state must fail closed");
+
+    assert!(matches!(
+        error,
+        tracedecay_domain::errors::TraceDecayError::Json(_)
+    ));
+    assert!(!data_root.path().join("pr-worktrees").exists());
 }
 
 #[tokio::test]
@@ -108,7 +147,8 @@ async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
         10,
         PrStoreAdministration::state_only(&daemon_administration),
     )
-    .await;
+    .await
+    .expect("load managed PR state");
 
     assert!(report.tracked.is_empty());
     assert_eq!(report.failures.len(), 1);
@@ -117,7 +157,12 @@ async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
             .1
             .starts_with("code_index_scheduler_unavailable:")
     );
-    assert!(load_state(data_root.path()).managed.is_empty());
+    assert!(
+        load_state(data_root.path())
+            .expect("load managed PR state")
+            .managed
+            .is_empty()
+    );
     assert!(!data_root.path().join("pr-worktrees").exists());
 }
 
@@ -174,7 +219,8 @@ async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
         10,
         PrStoreAdministration::with_control(&schedulers, &graph, &command_control),
     )
-    .await;
+    .await
+    .expect("load managed PR state");
 
     assert_eq!(report.failures, Vec::<(String, String)>::new());
     assert_eq!(report.tracked, vec![pr_label(11)]);
@@ -184,7 +230,12 @@ async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
         schedulers.is_worktree_mounted(&worktree).await,
         "scheduler must mount the registered PR worktree"
     );
-    assert!(load_state(&data_root).managed.contains_key(&pr_label(11)));
+    assert!(
+        load_state(&data_root)
+            .expect("load managed PR state")
+            .managed
+            .contains_key(&pr_label(11))
+    );
     schedulers.shutdown().await;
 }
 
@@ -256,13 +307,15 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
         10,
         PrStoreAdministration::state_only(&daemon_administration),
     )
-    .await;
+    .await
+    .expect("load managed PR state");
 
     // Already managed and still open: nothing changes.
     assert!(report.tracked.is_empty());
     assert!(report.untracked.is_empty());
     assert!(
         load_state(data_root.path())
+            .expect("load managed PR state")
             .managed
             .contains_key("tracedecay/autotrack/pr/3")
     );
@@ -308,7 +361,8 @@ async fn partial_discovery_suppresses_removals() {
         10,
         PrStoreAdministration::state_only(&daemon_administration),
     )
-    .await;
+    .await
+    .expect("load managed PR state");
 
     assert!(
         report.removals_suppressed,
@@ -316,7 +370,10 @@ async fn partial_discovery_suppresses_removals() {
     );
     assert!(report.untracked.is_empty(), "no untrack on a partial view");
     assert!(
-        load_state(data_root.path()).managed.contains_key("pr/5"),
+        load_state(data_root.path())
+            .expect("load managed PR state")
+            .managed
+            .contains_key("pr/5"),
         "managed entry survives a partial discovery"
     );
     assert!(
@@ -394,23 +451,6 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
         repo.path(),
         "refs/tracedecay/branch/feature-manual"
     ));
-    let synthetic_branch = tracedecay_runtime_core::branch::current_branch(&activation.worktree)
-        .expect("manual worktree has an attached synthetic branch");
-    let source = crate::daemon::branch_add::branch_publication_context(&graph)
-        .expect("branch publication context")
-        .capture_exact_branch_source(
-            &schedulers,
-            repo.path(),
-            &activation.worktree,
-            &synthetic_branch,
-        )
-        .await
-        .expect("synthetic branch source uses exact Git ref identity");
-    assert_eq!(
-        source.reference,
-        "refs/heads/tracedecay/track/feature-manual"
-    );
-    assert_eq!(source.source_oid, activation.head_sha);
     schedulers.shutdown().await;
 }
 

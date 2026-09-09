@@ -403,7 +403,7 @@ async fn handle_branch_autotrack_action(
             #[cfg(unix)]
             {
                 let data_root = resolve_branch_data_root(&resolved.project_path).await?;
-                let managed = tracedecay_application::pr_tracking::managed_summary(&data_root);
+                let managed = tracedecay_application::pr_tracking::managed_summary(&data_root)?;
                 if managed.is_empty() {
                     eprintln!("Tracked PR branches: none");
                 } else {

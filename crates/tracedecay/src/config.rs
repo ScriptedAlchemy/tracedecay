@@ -935,17 +935,20 @@ impl tracedecay_dashboard_api::DashboardPrAutoTrackReadPort for DaemonPrAutoTrac
     fn managed_summary(
         &self,
         store_root: &Path,
-    ) -> Vec<tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1> {
-        tracedecay_application::pr_tracking::managed_summary(store_root)
-            .into_iter()
-            .map(
-                |entry| tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1 {
-                    branch: entry.branch,
-                    pr: entry.pr,
-                    head_branch: entry.head_branch,
-                },
-            )
-            .collect()
+    ) -> tracedecay_domain::errors::Result<Vec<tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1>>
+    {
+        Ok(
+            tracedecay_application::pr_tracking::managed_summary(store_root)?
+                .into_iter()
+                .map(
+                    |entry| tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1 {
+                        branch: entry.branch,
+                        pr: entry.pr,
+                        head_branch: entry.head_branch,
+                    },
+                )
+                .collect(),
+        )
     }
 }
 

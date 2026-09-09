@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError};
 
@@ -116,11 +117,15 @@ pub fn pr_tracking_ref(number: u64) -> String {
     format!("refs/tracedecay/pr/{number}")
 }
 
-pub fn load_state(data_root: &Path) -> PrAutotrackState {
-    let Ok(content) = std::fs::read_to_string(state_path(data_root)) else {
-        return PrAutotrackState::default();
+pub fn load_state(data_root: &Path) -> std::result::Result<PrAutotrackState, TraceDecayError> {
+    let content = match std::fs::read_to_string(state_path(data_root)) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PrAutotrackState::default());
+        }
+        Err(error) => return Err(error.into()),
     };
-    serde_json::from_str(&content).unwrap_or_default()
+    Ok(serde_json::from_str(&content)?)
 }
 
 pub fn save_state(data_root: &Path, state: &PrAutotrackState) -> std::io::Result<()> {
@@ -134,8 +139,10 @@ pub fn save_state(data_root: &Path, state: &PrAutotrackState) -> std::io::Result
     )
 }
 
-pub fn managed_summary(data_root: &Path) -> Vec<ManagedPrSummary> {
-    let mut summaries = load_state(data_root)
+pub fn managed_summary(
+    data_root: &Path,
+) -> std::result::Result<Vec<ManagedPrSummary>, TraceDecayError> {
+    let mut summaries = load_state(data_root)?
         .managed
         .into_iter()
         .map(|(branch, managed)| ManagedPrSummary {
@@ -145,7 +152,7 @@ pub fn managed_summary(data_root: &Path) -> Vec<ManagedPrSummary> {
         })
         .collect::<Vec<_>>();
     summaries.sort_by_key(|summary| summary.pr);
-    summaries
+    Ok(summaries)
 }
 
 fn state_path(data_root: &Path) -> PathBuf {
@@ -492,6 +499,9 @@ mod tests {
         )
         .expect("legacy state");
 
-        assert_eq!(load_state(store.path()).managed["pr/8"].head_sha, "");
+        assert_eq!(
+            load_state(store.path()).expect("load legacy state").managed["pr/8"].head_sha,
+            ""
+        );
     }
 }

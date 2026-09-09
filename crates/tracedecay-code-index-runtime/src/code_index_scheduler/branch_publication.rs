@@ -87,7 +87,7 @@ impl BranchPublicationContextV1 {
                 ),
             )
         })?;
-        if !self.owns_project(&canonical_project_root) {
+        if !self.owns_project(&canonical_project_root)? {
             return Err(TraceDecayError::project_route(
                 CODE_INDEX_IDENTITY_MISMATCH,
                 false,
@@ -289,14 +289,14 @@ impl BranchPublicationContextV1 {
         label = "daemon.code_index.branch_publication.capture_source",
         future = true
     )]
-    pub async fn capture_exact_branch_source(
+    pub(super) async fn capture_exact_branch_source(
         &self,
         schedulers: &CodeIndexSchedulerRegistryV1,
         canonical_project_root: &Path,
         canonical_worktree_root: &Path,
         branch: &str,
     ) -> Result<BranchGraphSourceDraftV1, TraceDecayError> {
-        if !self.owns_project(canonical_project_root) {
+        if !self.owns_project(canonical_project_root)? {
             return Err(TraceDecayError::project_route(
                 CODE_INDEX_IDENTITY_MISMATCH,
                 false,
@@ -553,13 +553,17 @@ impl BranchPublicationContextV1 {
         Ok(())
     }
 
-    fn owns_project(&self, canonical_root: &Path) -> bool {
-        self.project_root == canonical_root
-            || self
-                .project_root
+    fn owns_project(&self, canonical_root: &Path) -> Result<bool, TraceDecayError> {
+        let retained_root =
+            self.project_root
                 .canonicalize()
-                .ok()
-                .is_some_and(|root| root == canonical_root)
+                .map_err(|error| TraceDecayError::File {
+                    message: format!(
+                        "failed to canonicalize retained branch project root: {error}"
+                    ),
+                    path: self.project_root.display().to_string(),
+                })?;
+        Ok(retained_root == canonical_root)
     }
 }
 
