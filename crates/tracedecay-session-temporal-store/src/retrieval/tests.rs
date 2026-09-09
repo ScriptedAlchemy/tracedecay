@@ -15,12 +15,15 @@ use tracedecay_runtime_core::db::{
     engine::{Connection, Executor, TestConnection, Value as SqlValue},
 };
 use tracedecay_temporal_query::candidates::CandidateChannel;
+use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, PageRequest, TemporalAuthorizedRoot,
+    BindingDigest, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, ExecutionControl,
+    ExecutionLimits, KernelVersions, PageLimits, PageRequest, PageStatus, TemporalAuthorizedRoot,
     TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
     TemporalParticipantManifest, TemporalPortError, TemporalPreparedCandidateCohort,
     TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
-    TemporalWatermarks,
+    TemporalWatermarks, await_controlled, begin_prepared_candidate_pull,
+    commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
@@ -231,6 +234,123 @@ fn prepared_root_candidates_bind_each_frozen_participant_generation() {
             )
             .expect_err("candidate cannot inherit another provider generation"),
         TemporalPortError::UnauthorizedSnapshot
+    );
+}
+
+fn root_preparation_request(mode: TemporalModeV1) -> TemporalSnapshotRequest {
+    root_snapshot_with_mode(1, None, mode).request().clone()
+}
+
+#[tokio::test]
+async fn root_candidate_preparation_matches_direct_request_producer() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let adapter = read.adapter();
+    let request = root_preparation_request(TemporalModeV1::Current);
+    let plan = plan_temporal_candidates("needle candidate", None, false);
+    let direct = adapter
+        .prepare_root_candidate_cohort(&request, &plan)
+        .await
+        .expect("direct root candidate cohort");
+    let candidate_limits = PageLimits::new(
+        request.limits().candidate_limit,
+        request.limits().candidate_total_bytes,
+        request.limits().candidate_item_bytes,
+        request.limits().candidate_limit.min(64),
+    )
+    .expect("valid limits");
+    let mut state = CandidateReadState::new(candidate_limits);
+    let mut via_pages = Vec::new();
+    let scope = TemporalRetrievalScope::AllSessionsInAuthorizedRoot;
+    loop {
+        let limits = begin_prepared_candidate_pull(&request, &mut state).expect("pull limits");
+        let control = request.execution_control();
+        let field_caps = CandidateFieldCaps::new(
+            limits.candidate_stable_id_bytes,
+            limits.candidate_anchor_id_bytes,
+            limits.candidate_metadata_field_bytes,
+        );
+        let page_request = state.request(limits.candidate_key_bytes, Some(field_caps));
+        let mut sink = state.begin_page(
+            control,
+            limits.candidate_key_bytes,
+            Some(field_caps),
+            CANDIDATE_READ_BUDGET,
+        );
+        let status = await_controlled(
+            control,
+            Box::pin(adapter.produce_candidates_from_request(
+                &scope,
+                &request,
+                1,
+                &plan,
+                &page_request,
+                &mut sink,
+            )),
+        )
+        .await
+        .expect("page-driven root candidate cohort");
+        let page = sink.finish(status).expect("bounded page");
+        let page = commit_prepared_candidate_pull(&mut state, page).expect("committed page");
+        let status = page.status();
+        via_pages.extend(page.into_items());
+        if status == PageStatus::Complete {
+            break;
+        }
+    }
+    assert_eq!(
+        direct.candidates(),
+        via_pages.as_slice(),
+        "direct preparation must match the request producer path"
+    );
+    assert!(
+        !direct.candidates().is_empty(),
+        "root candidate preparation must return live fixture candidates"
+    );
+}
+
+#[tokio::test]
+async fn root_candidate_preparation_preserves_item_byte_budget_failure() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let adapter = read.adapter();
+    let request = root_preparation_request(TemporalModeV1::Current).with_limits(ExecutionLimits {
+        candidate_limit: 8,
+        candidate_total_bytes: 64 * 1024,
+        candidate_item_bytes: 8,
+        ..ExecutionLimits::default()
+    });
+    let plan = plan_temporal_candidates("needle candidate", None, false);
+    assert!(matches!(
+        adapter.prepare_root_candidate_cohort(&request, &plan).await,
+        Err(TemporalPortError::BudgetExceeded { .. })
+    ));
+}
+
+#[tokio::test]
+async fn root_candidate_preparation_preserves_live_cancellation() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let adapter = read.adapter();
+    let control = ExecutionControl::default();
+    control.cancel();
+    let request = root_preparation_request(TemporalModeV1::Current).with_execution_control(control);
+    let plan = plan_temporal_candidates("needle candidate", None, false);
+    assert_eq!(
+        adapter.prepare_root_candidate_cohort(&request, &plan).await,
+        Err(TemporalPortError::Cancelled)
     );
 }
 
