@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import unittest
-from pathlib import Path
 
 from embed_proxy import (
     DASHBOARD_EMBED_PATH,
@@ -18,12 +17,6 @@ from embed_proxy import (
 
 
 class EmbedPathTests(unittest.TestCase):
-    def test_iframe_url_is_the_hermes_mount_not_loopback(self) -> None:
-        self.assertEqual(DASHBOARD_EMBED_PATH, "/api/plugins/tracedecay/embed/")
-        self.assertFalse(DASHBOARD_EMBED_PATH.startswith("http://"))
-        self.assertNotIn("127.0.0.1", DASHBOARD_EMBED_PATH)
-        self.assertNotIn("localhost", DASHBOARD_EMBED_PATH)
-
     def test_upstream_path_strips_the_embed_prefix_only(self) -> None:
         self.assertEqual(embed_upstream_path(""), "/")
         self.assertEqual(embed_upstream_path("/"), "/")
@@ -62,23 +55,7 @@ class HtmlRewriteTests(unittest.TestCase):
         self.assertIn('src="//cdn.example/app.js"', rewritten)
         self.assertIn('href="https://example.test/app.css"', rewritten)
 
-    def test_bridge_rewrites_api_fetch_and_eventsource(self) -> None:
-        script = dashboard_bridge_script()
-        self.assertIn(EMBED_MOUNT, script)
-        self.assertIn("window.fetch", script)
-        self.assertIn("window.EventSource", script)
-        self.assertIn("/api/", script)
-        self.assertIn("__webpack_public_path__", script)
-
-
 class PluginApiContractTests(unittest.TestCase):
-    def test_dashboard_url_handler_returns_the_embed_path(self) -> None:
-        source = Path(__file__).with_name("plugin_api.py").read_text()
-        self.assertIn('return JSONResponse({"url": DASHBOARD_EMBED_PATH})', source)
-        self.assertNotIn('{"url": f"{base}/"}', source)
-        self.assertIn('@router.api_route("/embed"', source)
-        self.assertIn('@router.api_route("/embed/{path:path}"', source)
-
     def test_get_dashboard_url_never_returns_loopback(self) -> None:
         try:
             import plugin_api

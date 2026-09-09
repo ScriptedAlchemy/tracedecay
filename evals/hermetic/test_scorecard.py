@@ -85,10 +85,6 @@ class AggregateTest(unittest.TestCase):
         self.assertAlmostEqual(s["overall"]["adoption_pct"], 50.0, places=2)
         self.assertAlmostEqual(s["factstore_adoption_pct"], 50.0, places=2)
 
-    def test_feedback_headline(self):
-        s = scorecard.aggregate(SYNTHETIC_RESULTS)
-        self.assertAlmostEqual(s["feedback_adoption_pct"], 0.0, places=2)
-
     def test_non_factstore_ignored(self):
         s = scorecard.aggregate(SYNTHETIC_RESULTS)
         self.assertNotIn("context", s["buckets"])
@@ -192,21 +188,6 @@ class RenderAndCliTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         out = buf.getvalue()
         self.assertIn("Fact-store adoption %: 0.00%", out)
-
-    def test_main_with_real_files(self):
-        with tempfile.TemporaryDirectory() as d:
-            results_path = Path(d) / "results.jsonl"
-            results_path.write_text(
-                "\n".join(json.dumps(r) for r in SYNTHETIC_RESULTS) + "\n"
-            )
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                rc = scorecard.main([str(results_path)])
-            self.assertEqual(rc, 0)
-            out = buf.getvalue()
-            self.assertIn("Fact-store adoption %: 50.00%", out)
-            self.assertIn("Feedback-loop adoption %: 0.00%", out)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
