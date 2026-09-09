@@ -10,8 +10,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_domain::{
     ComponentRevision, DiversityPolicy, FusionProfile, OptionalStagePublicStatus,
-    QueryFallbackSubpayload, RankedCandidate, RerankPolicy, RetrievalRequest, RetrieverKind,
-    SanitizedStageFailure, SemanticRetrievalContinuationV1,
+    QueryFallbackSubpayload, RankedCandidate, RerankPolicy, RetrieverKind, SanitizedStageFailure,
+    SemanticRetrievalContinuationV1,
 };
 
 use super::{
@@ -27,25 +27,6 @@ use crate::retrieval::rerank::BoundedRerankOutcomeV1;
 pub enum SemanticCompositionAuthorityErrorV1 {
     #[error("invalid semantic composition authority: {0}")]
     InvalidAuthority(String),
-}
-
-/// Query-layer port for one already-mounted deterministic local reranker.
-///
-/// Daemon adapters may capture generation-bound view authority and execution
-/// control, but the query authority depends only on the bounded rerank
-/// contract and transport-independent retrieval values.
-pub trait SemanticRerankExecutionPortV1 {
-    fn execute_rerank(
-        &mut self,
-        request: &RetrievalRequest,
-        policy: &RerankPolicy,
-        pre_rerank: &[RankedCandidate],
-    ) -> BoundedRerankOutcomeV1;
-}
-
-pub enum SemanticRerankReadinessV1<'a> {
-    Ready(&'a mut dyn SemanticRerankExecutionPortV1),
-    Unavailable(SanitizedStageFailure),
 }
 
 /// Successful semantic composition before paging and hydration.
@@ -122,15 +103,14 @@ impl SemanticCompositionExecutionAuthorityV1 {
     /// Typed semantic abstentions pass through unchanged. Composition failure
     /// becomes a typed lane abstention, while strict mode remains unavailable.
     /// An authenticated continuation restores its frozen order and never
-    /// invokes the current reranker.
+    /// invokes the current reranker. Live optional rerank is the caller's
+    /// responsibility after this returns.
     #[hotpath::measure(label = "query.fusion.semantic")]
     pub fn execute(
         &self,
-        request: &RetrievalRequest,
         authorized_query: &AuthorizedQueryFallbackV1,
         semantic: SemanticQueryServiceOutcomeV1,
         on_abstention: SemanticAbstentionDispositionV1,
-        rerank: Option<SemanticRerankReadinessV1<'_>>,
     ) -> Result<SemanticCompositionExecutionOutcomeV1, SemanticQueryServiceError> {
         if authorized_query.fallback.validate().is_err()
             || !Arc::ptr_eq(semantic.fallback(), &authorized_query.fallback)
@@ -182,7 +162,7 @@ impl SemanticCompositionExecutionAuthorityV1 {
                 restore_frozen_semantic_order(continuation, &mut composition)?;
                 continuation.rerank.clone()
             }
-            None => self.execute_optional_rerank(request, rerank, &mut composition),
+            None => OptionalStagePublicStatus::NotRequested,
         };
 
         Ok(SemanticCompositionExecutionOutcomeV1::Augmented(Box::new(
@@ -194,33 +174,18 @@ impl SemanticCompositionExecutionAuthorityV1 {
             },
         )))
     }
+}
 
-    #[hotpath::measure(label = "query.rerank.semantic")]
-    fn execute_optional_rerank(
-        &self,
-        request: &RetrievalRequest,
-        readiness: Option<SemanticRerankReadinessV1<'_>>,
-        composition: &mut CompositionOutputV1,
-    ) -> OptionalStagePublicStatus {
-        let Some(policy) = self.rerank_policy.as_ref() else {
-            return OptionalStagePublicStatus::NotRequested;
-        };
-        let Some(readiness) = readiness else {
-            return OptionalStagePublicStatus::Unavailable(
-                SanitizedStageFailure::AuthorityUnavailable,
-            );
-        };
-        let executor = match readiness {
-            SemanticRerankReadinessV1::Ready(executor) => executor,
-            SemanticRerankReadinessV1::Unavailable(reason) => {
-                return OptionalStagePublicStatus::Unavailable(reason);
-            }
-        };
-
-        let original = composition.ranked_candidates.clone();
-        let outcome = executor.execute_rerank(request, policy, &original);
-        apply_rerank_outcome(original, outcome, composition)
-    }
+/// Apply one bounded rerank outcome to the exact post-composition candidates.
+///
+/// Complete permutations replace the ranked list. Every other public status
+/// restores the pre-rerank value.
+pub fn apply_bounded_rerank_outcome(
+    composition: &mut CompositionOutputV1,
+    outcome: BoundedRerankOutcomeV1,
+) -> OptionalStagePublicStatus {
+    let original = composition.ranked_candidates.clone();
+    apply_rerank_outcome(original, outcome, composition)
 }
 
 /// Restore the authenticated rerank order without rerunning an optional stage.
@@ -389,13 +354,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tracedecay_domain::{
-        AuthorizationRevision, CalibrationProfileId, CandidateSetDigest, ExactClass,
-        FreshnessVectorDigest, FusedCandidate, LogicalEvidenceId, ManifestDigest, PrincipalId,
-        ProjectionKeyV1, ProjectionKindV1, PublicRetrieverStatus, QueryDigest, QueryMac,
-        RankingRevision, RetrievalAnchorId, RetrievalBudget, RetrievalScope, RetrievalSnapshot,
-        RetrieverBatch, RetrieverCoverage, RetrieverOutcome, SanitizedBudgetUsage,
-        SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness, TemporalModeV1,
-        UtcMicros, VectorGenerationIdV1, VectorWatermark,
+        CalibrationProfileId, CandidateSetDigest, ExactClass, FusedCandidate, LogicalEvidenceId,
+        ManifestDigest, ProjectionKeyV1, ProjectionKindV1, PublicRetrieverStatus, QueryDigest,
+        QueryMac, RankingRevision, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
+        RetrieverCoverage, RetrieverOutcome, SanitizedBudgetUsage, SemanticSearchIndexProfileV1,
+        SourceFreshness, VectorGenerationIdV1,
     };
 
     use super::*;
@@ -470,31 +433,6 @@ mod tests {
             per_session_or_thread: None,
             per_copy_cluster: None,
             per_evidence_role: None,
-        }
-    }
-
-    fn request() -> RetrievalRequest {
-        RetrievalRequest {
-            principal: id::<PrincipalId>("principal.semantic-execution"),
-            scope: RetrievalScope {
-                privacy_domain: id("privacy.semantic-execution"),
-                root: SingleRootScopeV1 {
-                    repository: id("repository.semantic-execution"),
-                    worktree: None,
-                    reference: None,
-                },
-            },
-            temporal_mode: TemporalModeV1::Current,
-            snapshot: RetrievalSnapshot {
-                watermarks: VectorWatermark::default(),
-                freshness_digest: digest::<FreshnessVectorDigest>('a'),
-                authorization_revision: id::<AuthorizationRevision>(
-                    "authorization.semantic-execution.v1",
-                ),
-                captured_at: UtcMicros(1),
-            },
-            profile_id: id("profile.semantic-execution.v1"),
-            budget: budget(),
         }
     }
 
@@ -584,14 +522,12 @@ mod tests {
         ] {
             let outcome = authority()
                 .execute(
-                    &request(),
                     &authorized,
                     SemanticQueryServiceOutcomeV1::Fallback {
                         abstention: abstention.clone(),
                         fallback: Arc::clone(&fallback),
                     },
                     SemanticAbstentionDispositionV1::UseFallback,
-                    None,
                 )
                 .expect("typed fallback");
             assert!(matches!(
@@ -612,7 +548,6 @@ mod tests {
         let authorized = authorized(Arc::clone(&fallback));
         let outcome = authority()
             .execute(
-                &request(),
                 &authorized,
                 SemanticQueryServiceOutcomeV1::Augmented {
                     semantic_lane: empty_lane(RetrieverKind::Semantic),
@@ -625,7 +560,6 @@ mod tests {
                     fallback: Arc::clone(&fallback),
                 },
                 SemanticAbstentionDispositionV1::UseFallback,
-                None,
             )
             .expect("semantic composition");
         let SemanticCompositionExecutionOutcomeV1::Augmented(executed) = outcome else {
@@ -658,14 +592,12 @@ mod tests {
 
         assert!(matches!(
             authority().execute(
-                &request(),
                 &authorized,
                 SemanticQueryServiceOutcomeV1::Fallback {
                     abstention: SemanticAbstentionV1::Denied,
                     fallback: duplicate,
                 },
                 SemanticAbstentionDispositionV1::UseFallback,
-                None,
             ),
             Err(SemanticQueryServiceError::InvalidFallback)
         ));
@@ -764,6 +696,86 @@ mod tests {
         );
     }
 
+    fn rerank_policy() -> tracedecay_domain::RerankPolicy {
+        tracedecay_domain::RerankPolicy {
+            policy_id: id("rerank.semantic-execution.v1"),
+            evaluation_result_anchor: id("evaluation.semantic-execution.v1"),
+            max_candidates: 8,
+            max_input_bytes: u64::MAX,
+            max_input_tokens: u64::MAX,
+            max_work_units: 8,
+            max_model_invocations: 1,
+            deadline_micros: None,
+        }
+    }
+
+    #[test]
+    fn first_page_with_rerank_policy_leaves_not_requested_for_the_caller() {
+        let fallback = fallback();
+        let policy = rerank_policy();
+        let authority = SemanticCompositionExecutionAuthorityV1::new(
+            profile(Some(policy.policy_id.clone())),
+            diversity(),
+            Some(policy),
+            id("ranking.semantic-execution.v1"),
+        )
+        .expect("valid semantic composition authority with rerank");
+        let outcome = authority
+            .execute(
+                &authorized(Arc::clone(&fallback)),
+                SemanticQueryServiceOutcomeV1::Augmented {
+                    semantic_lane: empty_lane(RetrieverKind::Semantic),
+                    calibration: SemanticCalibrationEvidenceV1 {
+                        calibration_profile_id: id("calibration.semantic-execution.v1"),
+                        cohort_digest: digest('8'),
+                        best_distance: super::super::CanonicalSemanticDistanceV1(0),
+                        next_best_margin_micros: u64::MAX,
+                    },
+                    fallback,
+                },
+                SemanticAbstentionDispositionV1::UseFallback,
+            )
+            .expect("semantic composition");
+        let SemanticCompositionExecutionOutcomeV1::Augmented(executed) = outcome else {
+            panic!("complete semantic lane must augment");
+        };
+        assert_eq!(executed.rerank, OptionalStagePublicStatus::NotRequested);
+    }
+
+    #[test]
+    fn apply_bounded_rerank_keeps_a_complete_permutation() {
+        let reranked = vec![ranked("anchor.two", 0), ranked("anchor.one", 1)];
+        let mut composition = empty_composition(id("profile.semantic-execution.v1"));
+        composition.ranked_candidates = vec![ranked("anchor.one", 0), ranked("anchor.two", 1)];
+        let status = apply_bounded_rerank_outcome(
+            &mut composition,
+            BoundedRerankOutcomeV1 {
+                ordered_candidates: reranked.clone(),
+                public_status: OptionalStagePublicStatus::Complete,
+                usage: RerankUsageV1::default(),
+            },
+        );
+        assert_eq!(status, OptionalStagePublicStatus::Complete);
+        assert_eq!(composition.ranked_candidates, reranked);
+    }
+
+    #[test]
+    fn apply_bounded_rerank_cancelled_restores_the_exact_post_composition_value() {
+        let original = vec![ranked("anchor.one", 0), ranked("anchor.two", 1)];
+        let mut composition = empty_composition(id("profile.semantic-execution.v1"));
+        composition.ranked_candidates = original.clone();
+        let status = apply_bounded_rerank_outcome(
+            &mut composition,
+            BoundedRerankOutcomeV1 {
+                ordered_candidates: vec![ranked("anchor.two", 0), ranked("anchor.one", 1)],
+                public_status: OptionalStagePublicStatus::Cancelled,
+                usage: RerankUsageV1::default(),
+            },
+        );
+        assert_eq!(status, OptionalStagePublicStatus::Cancelled);
+        assert_eq!(composition.ranked_candidates, original);
+    }
+
     #[test]
     fn malformed_complete_rerank_is_rejected_and_restored() {
         let original = vec![ranked("anchor.one", 0), ranked("anchor.two", 1)];
@@ -792,7 +804,6 @@ mod tests {
         let mut authorized = authorized(Arc::clone(&fallback));
         authorized.fallback_lanes.clear();
         let result = authority().execute(
-            &request(),
             &authorized,
             SemanticQueryServiceOutcomeV1::Augmented {
                 semantic_lane: empty_lane(RetrieverKind::Semantic),
@@ -805,7 +816,6 @@ mod tests {
                 fallback,
             },
             SemanticAbstentionDispositionV1::RejectUnavailable,
-            None,
         );
 
         assert!(matches!(
