@@ -52,7 +52,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let snapshots = admitted_runtime_snapshots(&options, include_doctor).await;
-            let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
+            let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots, None)?;
             portable_health::handle_runtime(
                 &ctx,
                 args,

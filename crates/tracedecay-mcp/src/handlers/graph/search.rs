@@ -302,7 +302,8 @@ where
     }
     // Read after the search settles: the verdict must describe the scheduler
     // state at serve time, not a snapshot taken before the lanes ran.
-    let worktree_freshness = worktree_freshness_from_payload(ctx.freshness());
+    let freshness_payload = ctx.freshness().await;
+    let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
     match outcome {
         tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
             let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
@@ -830,7 +831,10 @@ where
     let memory = context_memory_outcome(ctx, task, &memory_options, memory_read_control.as_ref());
     let search_and_graph = race_primary_search_with_graph(search, graph, false, None, false);
     let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
-    let worktree_freshness = worktree_freshness_from_payload(ctx.freshness());
+    // Read after the search settles: the verdict must describe the scheduler
+    // state at serve time, not a snapshot taken before the lanes ran.
+    let freshness_payload = ctx.freshness().await;
+    let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
     let strict_semantic_unavailable = semantic_mode
         == tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic
         && matches!(
@@ -1587,6 +1591,87 @@ mod tests {
             tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable {
                 reason: tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn search_reads_freshness_after_the_search_future_resolves() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let search_order = std::sync::Arc::clone(&order);
+        let freshness_order = std::sync::Arc::clone(&order);
+        let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
+            move |_| {
+                let search_order = std::sync::Arc::clone(&search_order);
+                Box::pin(async move {
+                    search_order.lock().expect("order").push("search_start");
+                    tokio::task::yield_now().await;
+                    search_order.lock().expect("order").push("search_done");
+                    tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+                        tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "calibration_unavailable",
+                            },
+                            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
+                                "calibration_unavailable",
+                            ),
+                        },
+                    )
+                })
+            },
+        );
+        let freshness: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+            std::sync::Arc::new(move |_| {
+                let freshness_order = std::sync::Arc::clone(&freshness_order);
+                Box::pin(async move {
+                    freshness_order.lock().expect("order").push("freshness");
+                    None
+                })
+            });
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = crate::tool_context::tests::scope("freshness-order");
+        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
+        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+            principal: tracedecay_domain::PrincipalId::new("principal.freshness-order")
+                .expect("principal"),
+            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                "revision.freshness-order",
+            )
+            .expect("revision"),
+        };
+        let code_index = crate::AdmittedCodeIndex::new(&authority, Some(&executor), None)
+            .expect("search executor admits");
+        let ctx = crate::McpToolContext::bind(crate::McpToolBinding::Admitted {
+            project: &project,
+            request: crate::McpRequestAuthoritiesV1 {
+                code_index: Some(code_index),
+                freshness: Some(&freshness),
+                ..crate::McpRequestAuthoritiesV1::default()
+            },
+        })
+        .expect("admitted search binding");
+
+        handle_search(
+            &ctx,
+            async {
+                Err(TraceDecayError::project_route(
+                    "verified-code-graph-read-unavailable",
+                    true,
+                    "ordering test does not admit a graph",
+                ))
+            },
+            json!({"query": "fixture"}),
+            None,
+            None,
+        )
+        .await
+        .expect("search renders without a graph");
+
+        assert_eq!(
+            *order.lock().expect("order"),
+            ["search_start", "search_done", "freshness"],
+            "freshness must be read after the search future resolves"
         );
     }
 

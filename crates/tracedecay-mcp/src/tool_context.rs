@@ -33,7 +33,9 @@ use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_contracts::doctor::SemanticOwnerStateV1;
 use tracedecay_contracts::{CancellationSignal, Deadline, ResolvedScope};
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
+use tracedecay_dashboard_api::code_index_freshness_api::{
+    CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReader,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -338,7 +340,9 @@ pub enum McpDoctorReportV1<'a> {
 pub struct McpRequestAuthoritiesV1<'a> {
     pub controls: RequestControls<'a>,
     pub code_index: Option<AdmittedCodeIndex<'a>>,
-    pub freshness: Option<&'a CodeIndexFreshnessPayloadV1>,
+    /// Scheduler-freshness reader invoked at serve time, not at bind.
+    /// Search and context call it after the lanes settle.
+    pub freshness: Option<&'a CodeIndexFreshnessReader>,
     pub generation_census: Option<&'a GenerationCensusSnapshot>,
     pub semantic_owner: McpSemanticOwnerV1<'a>,
     pub doctor_report: McpDoctorReportV1<'a>,
@@ -369,11 +373,6 @@ pub enum McpToolBinding<'a> {
         project_session_store: Option<AdmittedProjectStore<'a>>,
     },
 }
-
-/// Compile-level proof that an admitted binding cannot also carry a loose
-/// root, scope, or session store: those fields exist only on [`McpToolBinding::Unprojected`].
-const _: for<'a> fn(&'a McpAdmittedProjectV1, McpRequestAuthoritiesV1<'a>) -> McpToolBinding<'a> =
-    |project, request| McpToolBinding::Admitted { project, request };
 
 /// Admitted daemon authorities for one MCP tool call.
 ///
@@ -522,9 +521,12 @@ impl<'a> McpToolContext<'a> {
             .and_then(|project| project.identity.serving_branch.as_deref())
     }
 
-    #[must_use]
-    pub fn freshness(&self) -> Option<&'a CodeIndexFreshnessPayloadV1> {
-        self.request.freshness
+    /// Reads scheduler freshness now. Search and context must call this after
+    /// the lanes settle so the verdict describes serve time, not bind time.
+    pub async fn freshness(&self) -> Option<CodeIndexFreshnessPayloadV1> {
+        let reader = self.request.freshness?;
+        let worktree = reader(self.project_root().to_path_buf()).await;
+        Some(CodeIndexFreshnessPayloadV1::from_scheduler_read(worktree))
     }
 
     #[must_use]
@@ -625,7 +627,7 @@ impl std::fmt::Debug for McpToolContext<'_> {
         formatter
             .debug_struct("McpToolContext")
             .field("has_project_snapshot", &self.project.is_some())
-            .field("has_freshness", &self.request.freshness.is_some())
+            .field("has_freshness_reader", &self.request.freshness.is_some())
             .field(
                 "has_generation_census",
                 &self.request.generation_census.is_some(),
@@ -760,7 +762,7 @@ fn checkout_label(scope: &ResolvedScope) -> String {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
@@ -804,7 +806,7 @@ mod tests {
             .expect("registered store fixture")
     }
 
-    fn scope(project: &str) -> ResolvedScope {
+    pub(crate) fn scope(project: &str) -> ResolvedScope {
         ResolvedScope::new(
             ProjectId::new(format!("project.{project}")).expect("project id"),
             RepositoryId::new(format!("repository.{project}")).expect("repository id"),
@@ -868,7 +870,7 @@ mod tests {
         }
     }
 
-    fn project_bundle(
+    pub(crate) fn project_bundle(
         root: &Path,
         admitted: &ResolvedScope,
         lease: Option<RegisteredGlobalDbLeaseV1>,
@@ -1293,8 +1295,8 @@ mod tests {
             "semantic-owner absence must stay NotAttached"
         );
         assert!(
-            bound.freshness().is_none(),
-            "freshness absence must stay None"
+            bound.request().freshness.is_none(),
+            "freshness-reader absence must stay None"
         );
         assert!(
             matches!(bound.doctor_report(), McpDoctorReportV1::NotAttached),

@@ -220,7 +220,12 @@ pub async fn handle_status(
             "reason": "authority_unattached",
         }),
     };
-    let (code_index_freshness, retrieval_serving) = match ctx.freshness() {
+    let freshness_payload = hotpath::future!(
+        ctx.freshness(),
+        label = "mcp.info.status.code_index_freshness"
+    )
+    .await;
+    let (code_index_freshness, retrieval_serving) = match freshness_payload.as_ref() {
         Some(payload) => match payload.worktrees.first() {
             Some(freshness) => {
                 let (status, warning) = code_index_freshness_projection(freshness);
@@ -281,7 +286,7 @@ pub async fn handle_status(
     if include_storage_health {
         let mut storage_health = serde_json::to_value(
             hotpath::future!(
-                crate::handlers::health::collect_database_snapshot(ctx, false),
+                crate::handlers::health::collect_database_snapshot(ctx, false, None),
                 label = "mcp.info.status.storage_health"
             )
             .await?,

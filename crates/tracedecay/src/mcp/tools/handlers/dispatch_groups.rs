@@ -16,7 +16,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use tracedecay_contracts::doctor::SemanticOwnerStateV1;
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
+use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::ast_grep as portable_ast_grep;
 use tracedecay_mcp::handlers::git;
@@ -24,13 +24,11 @@ use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::{
-    AdmittedCodeIndex, AdmittedProjectStore, McpAdmittedProjectV1, McpDoctorReportV1,
-    McpProjectIdentityV1, McpRequestAuthoritiesV1, McpSemanticOwnerV1, McpToolBinding,
-    McpToolContext, RequestControls, ToolResult,
+    AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
+    McpRequestAuthoritiesV1, McpSemanticOwnerV1, McpToolBinding, McpToolContext, RequestControls,
+    ToolResult,
 };
-use tracedecay_runtime_core::storage::registered_project_id;
 use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
-use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 use super::ToolCallRegistryOptions;
 use super::support::{effective_path, generic_tool_result, unique_file_paths};
@@ -505,11 +503,9 @@ fn dispatch_graph_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let project = admitted_project_authorities(cg, &options)?;
-        let snapshots = AdmittedRequestSnapshotsV1 {
-            freshness: admitted_freshness_payload(cg, &options).await,
-            ..AdmittedRequestSnapshotsV1::default()
-        };
-        let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
+        let snapshots = AdmittedRequestSnapshotsV1::default();
+        let freshness = graph_freshness_reader(tool_name, &options);
+        let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots, freshness)?;
         match tool_name {
             "tracedecay_search" => {
                 portable_graph::handle_search(
@@ -671,13 +667,19 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_status" => {
                 let project = admitted_project_authorities(cg, &options)?;
                 let snapshots = admitted_status_snapshots(cg, &options).await;
-                let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
+                let ctx = admitted_tool_context(
+                    cg,
+                    &options,
+                    project.as_ref(),
+                    &snapshots,
+                    options.code_index_freshness_reader.as_ref(),
+                )?;
                 portable_info::handle_status(&ctx, args, server_stats, scope_prefix).await
             }
             "tracedecay_active_project" => {
                 let project = admitted_project_authorities(cg, &options)?;
                 let snapshots = AdmittedRequestSnapshotsV1::default();
-                let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
+                let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots, None)?;
                 portable_info::handle_active_project(&ctx, &args, server_stats, scope_prefix)
             }
             "tracedecay_project_list" => {
@@ -1020,7 +1022,7 @@ fn dispatch_git_tools_inner<'a>(
         let remaining = carried_deadline.and_then(tracedecay_daemon_protocol::deadline_remaining);
         let project = admitted_project_authorities(cg, &options)?;
         let snapshots = AdmittedRequestSnapshotsV1::default();
-        let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots)?;
+        let ctx = admitted_tool_context(cg, &options, project.as_ref(), &snapshots, None)?;
 
         let handler = async {
             match tool_name {
@@ -1077,29 +1079,18 @@ fn dispatch_git_tools_inner<'a>(
 
 /// Builds the request-scoped admitted project snapshot from the live
 /// `TraceDecay` this call already holds. It must not be cached: a later
-/// branch reopen swaps the served instance. A request-carried scope is
-/// preferred and still has to match the layout project id; fixture
-/// `handle_tool_call` derives the checkout from the opened project instead.
+/// branch reopen swaps the served instance.
+///
+/// Absent a request-carried scope this is `None`: the call is unprojected
+/// (standalone or core-server before project-open). The session store is
+/// the canonical `registered_project_session_db` lease only — never a
+/// silent fallback to `session_authorities.project`.
 fn admitted_project_authorities(
     cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<Option<McpAdmittedProjectV1>> {
-    let scope = match options.admitted_project_scope.clone() {
-        Some(scope) => scope,
-        None => {
-            let project_id = registered_project_id(cg.store_layout())?;
-            tracedecay_code_index_runtime::resolved_scope_for_project(
-                cg.project_root(),
-                &project_id,
-            )
-            .map_err(|error| {
-                TraceDecayError::project_route(
-                    "admitted_project_scope_unresolved",
-                    false,
-                    error.to_string(),
-                )
-            })?
-        }
+    let Some(scope) = options.admitted_project_scope.clone() else {
+        return Ok(None);
     };
     Ok(Some(McpAdmittedProjectV1::new(
         McpProjectIdentityV1 {
@@ -1114,10 +1105,7 @@ fn admitted_project_authorities(
         cg.db_path(),
         Some(cg.store_runtime_registry.clone()),
         Some(cg.configuration_runtime().clone()),
-        options
-            .registered_project_session_db
-            .clone()
-            .or_else(|| options.session_authorities.project.cloned()),
+        options.registered_project_session_db.clone(),
     )?))
 }
 
@@ -1149,7 +1137,6 @@ enum DoctorReportSnapshotV1 {
 
 #[derive(Default)]
 struct AdmittedRequestSnapshotsV1 {
-    freshness: Option<CodeIndexFreshnessPayloadV1>,
     generation_census: Option<GenerationCensusSnapshot>,
     semantic_owner: SemanticOwnerSnapshotV1,
     doctor_report: DoctorReportSnapshotV1,
@@ -1157,9 +1144,10 @@ struct AdmittedRequestSnapshotsV1 {
 
 async fn admitted_generation_census(
     options: &ToolCallRegistryOptions<'_>,
+    label: &'static str,
 ) -> Option<GenerationCensusSnapshot> {
     match options.generation_census_reader.as_ref() {
-        Some(reader) => Some(reader().await),
+        Some(reader) => Some(hotpath::future!(reader(), label = label).await),
         None => None,
     }
 }
@@ -1184,24 +1172,26 @@ async fn admitted_semantic_owner(
 
 async fn admitted_doctor_report(options: &ToolCallRegistryOptions<'_>) -> DoctorReportSnapshotV1 {
     match options.doctor_report_reader.as_ref() {
-        Some(reader) => match reader().await {
-            Ok(report) => DoctorReportSnapshotV1::Read(report),
-            Err(_) => DoctorReportSnapshotV1::ReadFailed,
-        },
+        Some(reader) => {
+            match hotpath::future!(reader(), label = "mcp.health.runtime.doctor_report").await {
+                Ok(report) => DoctorReportSnapshotV1::Read(report),
+                Err(_) => DoctorReportSnapshotV1::ReadFailed,
+            }
+        }
         None => DoctorReportSnapshotV1::NotAttached,
     }
 }
 
-/// Status needs freshness, census, and the semantic-owner snapshot. It does
-/// not run the doctor reader — that report is runtime-only and is expensive
-/// enough to stall a warming code-index if it ran on every status call.
+/// Status needs census and the semantic-owner snapshot. Freshness is a
+/// lazy reader on the binding so the handler reads it when it renders.
+/// It does not run the doctor reader — that report is runtime-only.
 async fn admitted_status_snapshots(
     cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
 ) -> AdmittedRequestSnapshotsV1 {
     AdmittedRequestSnapshotsV1 {
-        freshness: admitted_freshness_payload(cg, options).await,
-        generation_census: admitted_generation_census(options).await,
+        generation_census: admitted_generation_census(options, "mcp.info.status.generation_census")
+            .await,
         semantic_owner: admitted_semantic_owner(cg, options).await,
         ..AdmittedRequestSnapshotsV1::default()
     }
@@ -1214,7 +1204,8 @@ async fn admitted_runtime_snapshots(
     include_doctor: bool,
 ) -> AdmittedRequestSnapshotsV1 {
     AdmittedRequestSnapshotsV1 {
-        generation_census: admitted_generation_census(options).await,
+        generation_census: admitted_generation_census(options, "runtime_ports.generation_census")
+            .await,
         doctor_report: if include_doctor {
             admitted_doctor_report(options).await
         } else {
@@ -1224,15 +1215,13 @@ async fn admitted_runtime_snapshots(
     }
 }
 
-async fn admitted_freshness_payload(
-    cg: &TraceDecay,
-    options: &ToolCallRegistryOptions<'_>,
-) -> Option<CodeIndexFreshnessPayloadV1> {
-    let reader = options.code_index_freshness_reader.as_ref()?;
-    let worktree = reader(cg.project_root().to_path_buf()).await;
-    Some(CodeIndexFreshnessPayloadV1::from_scheduler_observation(
-        worktree,
-    ))
+fn graph_freshness_reader<'a>(
+    tool_name: &str,
+    options: &'a ToolCallRegistryOptions<'a>,
+) -> Option<&'a CodeIndexFreshnessReader> {
+    matches!(tool_name, "tracedecay_search" | "tracedecay_context")
+        .then_some(options.code_index_freshness_reader.as_ref())
+        .flatten()
 }
 
 fn admitted_tool_context<'a>(
@@ -1240,6 +1229,7 @@ fn admitted_tool_context<'a>(
     options: &'a ToolCallRegistryOptions<'a>,
     project: Option<&'a McpAdmittedProjectV1>,
     snapshots: &'a AdmittedRequestSnapshotsV1,
+    freshness: Option<&'a CodeIndexFreshnessReader>,
 ) -> Result<McpToolContext<'a>> {
     // Project open resolves one checkout per served route and publishes it
     // alongside the authorities that mount behind it, so this is the checkout
@@ -1267,24 +1257,13 @@ fn admitted_tool_context<'a>(
             ));
         }
     };
-    // The daemon opened this store for the route it admitted, which is the
-    // authorization this request carries. `bind` proves independently that the
-    // lease's own logical shard names that project before any handler reads it.
-    let project_session_store = scope
-        .and(
-            options
-                .registered_project_session_db
-                .as_ref()
-                .or(options.session_authorities.project),
-        )
-        .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
     let request = McpRequestAuthoritiesV1 {
         controls: RequestControls {
             deadline: options.application_deadline.as_ref(),
             cancellation: options.application_cancellation.as_ref(),
         },
         code_index,
-        freshness: snapshots.freshness.as_ref(),
+        freshness,
         generation_census: snapshots.generation_census.as_ref(),
         semantic_owner: match &snapshots.semantic_owner {
             SemanticOwnerSnapshotV1::Attached(state) => McpSemanticOwnerV1::Attached(state),
@@ -1304,7 +1283,7 @@ fn admitted_tool_context<'a>(
             active_branch: cg.active_branch(),
             request,
             scope,
-            project_session_store,
+            project_session_store: None,
         },
     };
     Ok(McpToolContext::bind(binding)?)
