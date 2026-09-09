@@ -1,13 +1,15 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use tracedecay_automation_runtime::automation::combined_effect::{
+    AdmissionState, DeferredLegTerminal, PairMode, PairResultMode, PairResultOrder,
+    combined_dispatch_terminals, pair_mode,
+};
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::runner::CombinedReviewAutomationOptions;
 use tracedecay_automation_runtime::automation::runner::{
-    CombinedFailureTerminals, CombinedMemoryCompletedSkillFailure, CombinedRecordedFailure,
-    CombinedReflectorPartial, CombinedReviewDispatch, CombinedSkillPartial, RetainedAutomationRun,
-    RetainedAutomationSettlementDisposition, SessionReflectorAutomationRun,
+    RetainedAutomationRun, RetainedAutomationSettlementDisposition, SessionReflectorAutomationRun,
     SkillWriterAutomationRun,
     run_combined_review_with_backend_and_retrieval_for_retained_settlement,
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
@@ -53,88 +55,12 @@ pub(super) enum CombinedEffectAdmission {
     PreAdmissionProblem(Vec<tracedecay_contracts::ApplicationProblemEnvelope>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AdmissionState {
-    Execute,
-    Replay,
-    Conflict,
-    Problem,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PairMode {
-    Combined,
-    SkillOnly,
-    ReflectorOnly,
-    Replayed,
-    ProblemAbandonSkill,
-    ProblemAbandonReflector,
-    ProblemNoAbandon,
-    ConflictAbandonSkill,
-    ConflictAbandonReflector,
-    ConflictNoAbandon,
-}
-
-fn pair_mode(reflector: AdmissionState, skill: AdmissionState) -> PairMode {
-    match (reflector, skill) {
-        (AdmissionState::Execute, AdmissionState::Execute) => PairMode::Combined,
-        (AdmissionState::Replay, AdmissionState::Execute) => PairMode::SkillOnly,
-        (AdmissionState::Execute, AdmissionState::Replay) => PairMode::ReflectorOnly,
-        (AdmissionState::Replay, AdmissionState::Replay) => PairMode::Replayed,
-        (AdmissionState::Problem, AdmissionState::Execute) => PairMode::ProblemAbandonSkill,
-        (AdmissionState::Execute, AdmissionState::Problem) => PairMode::ProblemAbandonReflector,
-        (AdmissionState::Conflict, AdmissionState::Execute) => PairMode::ConflictAbandonSkill,
-        (AdmissionState::Execute, AdmissionState::Conflict) => PairMode::ConflictAbandonReflector,
-        (AdmissionState::Conflict, _) | (_, AdmissionState::Conflict) => {
-            PairMode::ConflictNoAbandon
-        }
-        _ => PairMode::ProblemNoAbandon,
-    }
-}
-
 fn admission_state(admission: &AutomationEffectAdmission) -> AdmissionState {
     match admission {
         AutomationEffectAdmission::Execute(_) => AdmissionState::Execute,
         AutomationEffectAdmission::Replay(_) => AdmissionState::Replay,
         AutomationEffectAdmission::Conflict => AdmissionState::Conflict,
         AutomationEffectAdmission::PreAdmissionProblem(_) => AdmissionState::Problem,
-    }
-}
-
-struct DeferredRunTerminal {
-    record: tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
-    committed: Option<tracedecay_automation_runtime::automation::AutomationCommittedReceipt>,
-}
-
-struct DeferredProblemTerminal {
-    error: tracedecay_automation_runtime::automation::AutomationRunError,
-}
-
-enum DeferredLegTerminal {
-    Run(Box<DeferredRunTerminal>),
-    Problem(Box<DeferredProblemTerminal>),
-    Abandon,
-}
-
-fn failed_leg_terminal(
-    record: Option<
-        tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
-    >,
-    error: Option<tracedecay_domain::errors::TraceDecayError>,
-    fallback_message: String,
-) -> DeferredLegTerminal {
-    match record {
-        Some(record) => DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-            record,
-            committed: None,
-        })),
-        None => DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-            error: error
-                .unwrap_or(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: fallback_message,
-                })
-                .into(),
-        })),
     }
 }
 
@@ -194,19 +120,6 @@ fn collect_settlement_result(
             None
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PairResultOrder {
-    ReflectorFirst,
-    SkillFirst,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PairResultMode {
-    CompletedIfBoth,
-    Handled,
-    DeferredIfBothAbandoned,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -594,238 +507,10 @@ fn run_execute_pair<'a>(
                 return CombinedEffectOutcome::Handled;
             }
         };
-        let (reflector_terminal, skill_terminal, result_order, result_mode) = match result {
-            Ok(CombinedReviewDispatch::Ran(run)) => (
-                DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                    record: run.session_reflector.ledger_record,
-                    committed: run.session_reflector.committed_receipt,
-                })),
-                DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                    record: run.skill_writer.ledger_record,
-                    committed: run.skill_writer.committed_receipt,
-                })),
-                PairResultOrder::ReflectorFirst,
-                PairResultMode::CompletedIfBoth,
-            ),
-            Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(failure)) => {
-                let CombinedMemoryCompletedSkillFailure {
-                    session_reflector,
-                    skill_writer_record,
-                    skill_writer_record_error,
-                    error,
-                } = *failure;
-                super::log_scheduler_task_error(
-                    project_path,
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                    &error,
-                );
-                if let Some(error) = skill_writer_record_error.as_ref() {
-                    super::log_scheduler_task_error(
-                        project_path,
-                        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                        error,
-                    );
-                }
-                let skill_terminal = match skill_writer_record {
-                    Some(record) => DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                        record,
-                        committed: None,
-                    })),
-                    None => DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                        error: error.into(),
-                    })),
-                };
-                (
-                    DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                        record: session_reflector.ledger_record,
-                        committed: session_reflector.committed_receipt,
-                    })),
-                    skill_terminal,
-                    PairResultOrder::ReflectorFirst,
-                    PairResultMode::Handled,
-                )
-            }
-            Ok(CombinedReviewDispatch::RecordedFailure(failure)) => {
-                let CombinedRecordedFailure { run, error } = *failure;
-                super::log_scheduler_task_error(
-                    project_path,
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
-                    &error,
-                );
-                (
-                    DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                        record: run.session_reflector.ledger_record,
-                        committed: None,
-                    })),
-                    DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                        record: run.skill_writer.ledger_record,
-                        committed: None,
-                    })),
-                    PairResultOrder::ReflectorFirst,
-                    PairResultMode::Handled,
-                )
-            }
-            Ok(CombinedReviewDispatch::FailureTerminals(failure)) => {
-                let CombinedFailureTerminals {
-                    reflector_record,
-                    reflector_error,
-                    skill_writer_record,
-                    skill_writer_error,
-                    error,
-                } = *failure;
-                let fallback_message = error.to_string();
-                super::log_scheduler_task_error(
-                    project_path,
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
-                    &error,
-                );
-                if reflector_record.is_none()
-                    && let Some(error) = reflector_error.as_ref()
-                {
-                    super::log_scheduler_task_error(
-                        project_path,
-                        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
-                        error,
-                    );
-                }
-                if skill_writer_record.is_none()
-                    && let Some(error) = skill_writer_error.as_ref()
-                {
-                    super::log_scheduler_task_error(
-                        project_path,
-                        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                        error,
-                    );
-                }
-                let reflector_terminal = failed_leg_terminal(
-                    reflector_record,
-                    reflector_error,
-                    fallback_message.clone(),
-                );
-                let skill_terminal =
-                    failed_leg_terminal(skill_writer_record, skill_writer_error, fallback_message);
-                (
-                    reflector_terminal,
-                    skill_terminal,
-                    PairResultOrder::ReflectorFirst,
-                    PairResultMode::Handled,
-                )
-            }
-            Ok(CombinedReviewDispatch::ReflectorPartial(partial)) => {
-                let CombinedReflectorPartial {
-                    run_id,
-                    committed_receipt,
-                    ledger_record,
-                    reflector_record_error,
-                    skill_writer_record,
-                    skill_writer_error,
-                    detail,
-                } = *partial;
-                if let Some(error) = reflector_record_error.as_ref() {
-                    super::log_scheduler_task_error(
-                        project_path,
-                        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
-                        error,
-                    );
-                }
-                let reflector_terminal =
-                    DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                        error: tracedecay_automation_runtime::automation::AutomationRunError::PartialEffect {
-                            run_id,
-                            committed_receipt: Box::new(committed_receipt),
-                            ledger_record: ledger_record.map(Box::new),
-                            detail,
-                        },
-                    }));
-                let skill_terminal = match (skill_writer_record, skill_writer_error) {
-                    (Some(record), error) => {
-                        if let Some(error) = error.as_ref() {
-                            super::log_scheduler_task_error(
-                                project_path,
-                                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                                error,
-                            );
-                        }
-                        DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                            record,
-                            committed: None,
-                        }))
-                    }
-                    (None, Some(error)) => {
-                        super::log_scheduler_task_error(
-                            project_path,
-                            tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                            &error,
-                        );
-                        DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                            error: error.into(),
-                        }))
-                    }
-                    (None, None) => DeferredLegTerminal::Abandon,
-                };
-                (
-                    reflector_terminal,
-                    skill_terminal,
-                    PairResultOrder::ReflectorFirst,
-                    PairResultMode::Handled,
-                )
-            }
-            Ok(CombinedReviewDispatch::SkillPartial(partial)) => {
-                let CombinedSkillPartial {
-                    completed_session_reflector,
-                    run_id,
-                    committed_receipt,
-                    ledger_record,
-                    skill_writer_record_error,
-                    detail,
-                } = *partial;
-                if let Some(error) = skill_writer_record_error.as_ref() {
-                    super::log_scheduler_task_error(
-                        project_path,
-                        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                        error,
-                    );
-                }
-                let skill_terminal = DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                    error:
-                        tracedecay_automation_runtime::automation::AutomationRunError::PartialEffect {
-                            run_id,
-                            committed_receipt: Box::new(committed_receipt),
-                            ledger_record: ledger_record.map(Box::new),
-                            detail,
-                        },
-                }));
-                (
-                    DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
-                        record: completed_session_reflector.ledger_record,
-                        committed: completed_session_reflector.committed_receipt,
-                    })),
-                    skill_terminal,
-                    PairResultOrder::SkillFirst,
-                    PairResultMode::Handled,
-                )
-            }
-            Ok(CombinedReviewDispatch::NotCombined { .. }) => (
-                DeferredLegTerminal::Abandon,
-                DeferredLegTerminal::Abandon,
-                PairResultOrder::ReflectorFirst,
-                PairResultMode::DeferredIfBothAbandoned,
-            ),
-            Err(error) => {
-                let message = error.to_string();
-                (
-                    DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                        error: error.into(),
-                    })),
-                    DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                        error: tracedecay_domain::errors::TraceDecayError::Config { message }
-                            .into(),
-                    })),
-                    PairResultOrder::ReflectorFirst,
-                    PairResultMode::Handled,
-                )
-            }
-        };
+        let (reflector_terminal, skill_terminal, result_order, result_mode) =
+            combined_dispatch_terminals(result, |task, error| {
+                super::log_scheduler_task_error(project_path, task, error);
+            });
 
         let reflector_request =
             deferred_settlement_request(reflector_terminal, engine, project_id, project_path);
@@ -905,6 +590,10 @@ fn run_execute_pair<'a>(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "composition keeps daemon admission, project memory, cancellation and pinned configuration authorities explicit"
+)]
 #[hotpath::measure(label = "daemon.scheduler.combined_effect_prepare", future = true)]
 pub(super) async fn prepare_combined_effects(
     engine: &DaemonEngine,
@@ -1124,9 +813,8 @@ mod tests {
     };
 
     use super::{
-        AdmissionState, AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome,
-        DaemonEngine, PairMode, TraceDecay, pair_mode, prepare_combined_effects,
-        run_combined_scheduler_effect,
+        AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome, DaemonEngine,
+        TraceDecay, prepare_combined_effects, run_combined_scheduler_effect,
         run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
         scheduler_automation_effect,
     };
@@ -1793,50 +1481,6 @@ mod tests {
                     if observation.run_ref == current_skill_run_id
             )
         }));
-    }
-
-    #[test]
-    fn admission_matrix_never_reruns_a_replayed_leg() {
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Execute),
-            PairMode::Combined
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Replay, AdmissionState::Execute),
-            PairMode::SkillOnly
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Replay),
-            PairMode::ReflectorOnly
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Replay, AdmissionState::Replay),
-            PairMode::Replayed
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Problem, AdmissionState::Execute),
-            PairMode::ProblemAbandonSkill
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Problem),
-            PairMode::ProblemAbandonReflector
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Problem, AdmissionState::Replay),
-            PairMode::ProblemNoAbandon
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Conflict, AdmissionState::Execute),
-            PairMode::ConflictAbandonSkill
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Conflict),
-            PairMode::ConflictAbandonReflector
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Conflict, AdmissionState::Replay),
-            PairMode::ConflictNoAbandon
-        );
     }
 
     #[tokio::test]
