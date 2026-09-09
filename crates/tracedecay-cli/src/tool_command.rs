@@ -53,6 +53,7 @@ use tracedecay::application_surface::{
     parse_application_surface_request,
 };
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
+use tracedecay::mcp::server::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
@@ -668,6 +669,11 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
 
 fn print_tool_output(result_value: &Value, raw_json: bool) {
     println!("{}", rendered_tool_output(result_value, raw_json));
+    if !raw_json {
+        for footer in token_accounting_footers(result_value) {
+            eprintln!("{footer}");
+        }
+    }
 }
 
 /// The bytes `tracedecay tool` writes to stdout for a completed compatibility
@@ -682,23 +688,41 @@ fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
     }
 }
 
-/// Joins every `content[*].text` block in an MCP tool result, separated by a
-/// blank line. Handlers sometimes prepend a warning/notice block ahead of the
-/// real payload+metrics block; printing only `content[0].text` would silently
-/// drop the payload. Falls back to the empty string when no text blocks exist.
+/// Joins every payload `content[*].text` block in an MCP tool result,
+/// separated by a blank line. Handlers sometimes prepend a warning/notice block
+/// ahead of the real payload; printing only `content[0].text` would silently
+/// drop the payload. The daemon's separate token-accounting footer block is
+/// excluded (see [`token_accounting_footers`]): with `--format json` the
+/// payload block is the whole stdout document and a trailing footer would make
+/// it unparseable. Falls back to the empty string when no text blocks exist.
 fn join_content_text(result_value: &Value) -> String {
+    content_text_blocks(result_value)
+        .filter(|text| !is_token_accounting_footer(text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The daemon's token-accounting footer blocks, printed to stderr.
+fn token_accounting_footers(result_value: &Value) -> Vec<String> {
+    content_text_blocks(result_value)
+        .filter(|text| is_token_accounting_footer(text))
+        .map(|text| text.trim().to_owned())
+        .collect()
+}
+
+fn content_text_blocks(result_value: &Value) -> impl Iterator<Item = &str> {
     result_value
         .get("content")
         .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+}
+
+fn is_token_accounting_footer(text: &str) -> bool {
+    text.trim_start()
+        .starts_with(TOKEN_ACCOUNTING_FOOTER_PREFIX)
 }
 
 /// Print a grouped list of every available tool. Tools annotated as
