@@ -1,6 +1,6 @@
 # Brain renderer qualification
 
-Observed 2026-09-09, 16:00–18:15 UTC. This is a bounded product-renderer
+Observed 2026-09-09. This is a bounded product-renderer
 qualification, not a claim of final plate parity or real workload admission.
 
 ## Sources and environment
@@ -110,8 +110,84 @@ not a substitute for real workload provenance.
 
 The demonstrated defects were corrected with existing Sigma/Canvas and DOM
 capabilities. They do not justify a production engine cutover. The external
-R3F/Three and Pixi comparison remains separate from production code and must be
-read alongside this report before a broader renderer decision. Rich body,
+R3F/Three and Pixi comparison below remains separate from production code. Rich body,
 curve/depth fidelity and large-density legibility remain material evaluation
 criteria; successful compilation or raw draw counts do not establish plate
 parity. No final engine winner or full issue closure is claimed here.
+
+
+## Isolated candidate comparison
+
+The comparison at `candidates/comparison.md` and its adjacent exact
+`package-lock.json` uses React 19.2.8, R3F 9.7.0, Three 0.186.0, PixiJS 8.20.1,
+Sigma 3.0.3 and Graphology 0.26.0. The exact R3F peer range accepts React/React DOM
+`>=19 <19.3` and Three `>=0.156`; the isolated Rsbuild 1.7.6 build passed.
+No candidate dependencies were added to the product.
+
+All three draw the same authored eight-node scene and a 5,000-point authored
+load field with 499 explicit relations. They use the same stable IDs and DOM
+fallback. This is not the product's ForceAtlas2 layout and cannot demonstrate
+that an engine improves that layout's density. The prototype Sigma view uses
+vanilla circles/straight edges; the product already has its own smooth glow and
+curved dendrites. Richer custom Pixi/R3F prototype code therefore cannot establish
+an engine fidelity advantage.
+
+| Runtime | 5,000-point mount | Pick-to-DOM commit | Completed cleanup |
+| --- | ---: | ---: | ---: |
+| Sigma 3.0.3 | 128.0 ms | 2.7 ms | 12.9 ms |
+| R3F 9.7.0 / Three 0.186.0 | 158.9 ms | 4.3 ms | Not measured at this density |
+| PixiJS 8.20.1 | 371.9 ms | 5.2 ms | 25.5 ms |
+
+These are single-run observations in Chrome 152. Mount includes an animation
+frame boundary. Shared-page heap and the 1 Hz browser pacing cannot rank engine
+memory or playback. Every small-scene pointer pick resolved `project-0000`; the
+shared keyboard fallback resolved `project-0001`. Completed cleanups left zero
+canvases. The Pixi prototype uses CPU nearest-point picking, so it does not
+qualify a GPU-picking implementation. Capture pairs are
+`candidates/captures/{sigma,r3f,pixi}-{8,5000}.jpg`.
+
+Decision: retain Sigma as the single current production runtime. The candidate
+spike proves viable browser material-authoring alternatives, not a warranted
+cutover. Blender can produce reference art or textures; interaction remains a
+DOM/WebGL responsibility. The product's measured main-thread stall is in its
+layout algorithm, not evidence that its renderer needs replacement.
+
+## Hermetic production baseline and root cause
+
+A separate repository test-browser run used the exact `7b5dd30f3` production
+bundle, Chromium 149.0.7827.55 at 1440×1000, AMD EPYC 7742 with 96 visible CPUs.
+Host load was approximately 64 during the run. Its empty-page frame baseline
+was median 16.7/p95 16.8 ms, separating it from the connected-browser pacing
+above. Raw measurements/captures are copied to `hermetic-before/` in the artifact
+directory (original run: `/fast/tmp/td-graph-headless/`).
+
+| Scene during 20,000-envelope stream | Frame median / p95 / max | Observed long tasks | JS heap before / after |
+| --- | --- | --- | --- |
+| 5,000 symbols, 4,999 relations | 16.7 / 16.8 / 16.8 ms | None during the burst | 105.6 / 109.3 MB |
+| 29-project overview | 16.7 / 33.4 / 150 ms | Eight, 51–148 ms | 42.9 / 53.3 MB |
+
+Both measured connections received all 20,000 envelopes. The overview's exact
+terminal envelope was selected in the UI and resolved `tracedecay`; retention
+remained 64. Aggregate project events are not symbol-level activity, so the
+scoped graph is a static scene during this load.
+
+The initial 5,000-symbol navigation took 12.69 seconds. A CPU sample attributes
+6,738.6 ms self time to ForceAtlas2 `iterate`, versus approximately 446 ms in a
+React frame and 238 ms in canvas measurement. Barnes–Hut was already enabled.
+`5000-load-before.cpuprofile` and `load-cpu-summary.json` contain the observations.
+The fix in `cfc6477ee` moves the same bounded calculation into a module worker;
+it does not raise a limit, reduce iterations, or alter measured coordinates.
+Cancellation terminates the worker, malformed/stale coordinates cannot replace
+the active scene, and a pending state preserves the exact DOM data view.
+Final geometry parity and worker cancellation/error behavior pass focused tests;
+the browser comparison must distinguish time to usable DOM from time to final
+geometry rather than disguise unchanged computation time.
+
+The initial 1.61-second zoom measurement included expensive automation locator
+resolution. A corrected baseline resolves coordinates before timing a trusted
+pointer event: locator resolution alone took 787 ms; pointerdown to second
+animation frame was 14, 401, and 16.5 ms over three samples. Median 16.5 ms does
+not erase the 401 ms outlier. These measure first response, not completion of
+the camera animation. A browser CPU sample also attributes roughly 796 ms to
+injected accessibility/role lookup, so no renderer change is justified solely
+by the original automation end-to-end number.
