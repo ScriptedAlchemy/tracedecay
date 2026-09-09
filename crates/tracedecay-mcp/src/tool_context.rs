@@ -302,25 +302,46 @@ impl std::fmt::Debug for McpAdmittedProjectV1 {
     }
 }
 
+/// Semantic-owner snapshot the root computed for this request.
+///
+/// One state, not an `Option` plus a flag: a caller cannot claim the daemon
+/// service was both attached and unattached.
+#[derive(Clone, Copy, Default)]
+pub enum McpSemanticOwnerV1<'a> {
+    /// No daemon invocation service was attached to this call.
+    #[default]
+    NotAttached,
+    /// The service was attached and the owner task has no registered state.
+    AttachedAbsent,
+    Attached(&'a SemanticOwnerStateV1),
+}
+
+/// Doctor-report snapshot the root computed for this request.
+///
+/// One state, not an `Option` plus a flag: a caller cannot claim the reader
+/// both failed and was never attached.
+#[derive(Clone, Copy, Default)]
+pub enum McpDoctorReportV1<'a> {
+    /// No doctor reader was attached to this call.
+    #[default]
+    NotAttached,
+    /// The reader ran and failed. Status/runtime report this as `unknown`.
+    ReadFailed,
+    Read(&'a AdmittedDoctorReportV1),
+}
+
 /// Per-request snapshots and admitted executors a moved handler family may read.
 ///
 /// Snapshots, not readers: the root computes freshness, census, semantic-owner,
-/// and doctor report once per call and passes the values. Absence is `None`.
+/// and doctor report once per call and passes the values. Absence is typed.
 #[derive(Clone, Copy, Default)]
 pub struct McpRequestAuthoritiesV1<'a> {
     pub controls: RequestControls<'a>,
     pub code_index: Option<AdmittedCodeIndex<'a>>,
     pub freshness: Option<&'a CodeIndexFreshnessPayloadV1>,
     pub generation_census: Option<&'a GenerationCensusSnapshot>,
-    pub semantic_owner: Option<&'a SemanticOwnerStateV1>,
-    /// Distinguishes “no daemon service attached” from “service attached but
-    /// the owner task is unregistered”. Only consulted when `semantic_owner`
-    /// is `None`.
-    pub semantic_owner_authority_attached: bool,
-    pub doctor_report: Option<&'a AdmittedDoctorReportV1>,
-    /// Distinguishes “no doctor reader attached” from “reader ran and failed”.
-    /// Only consulted when `doctor_report` is `None`.
-    pub doctor_report_read_failed: bool,
+    pub semantic_owner: McpSemanticOwnerV1<'a>,
+    pub doctor_report: McpDoctorReportV1<'a>,
 }
 
 /// Everything the composition root admits for one MCP tool call.
@@ -512,23 +533,13 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn semantic_owner(&self) -> Option<&'a SemanticOwnerStateV1> {
+    pub fn semantic_owner(&self) -> McpSemanticOwnerV1<'a> {
         self.request.semantic_owner
     }
 
     #[must_use]
-    pub fn semantic_owner_authority_attached(&self) -> bool {
-        self.request.semantic_owner_authority_attached
-    }
-
-    #[must_use]
-    pub fn doctor_report(&self) -> Option<&'a AdmittedDoctorReportV1> {
+    pub fn doctor_report(&self) -> McpDoctorReportV1<'a> {
         self.request.doctor_report
-    }
-
-    #[must_use]
-    pub fn doctor_report_read_failed(&self) -> bool {
-        self.request.doctor_report_read_failed
     }
 
     #[must_use]
@@ -613,14 +624,20 @@ impl std::fmt::Debug for McpToolContext<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("McpToolContext")
-            .field("has_project_bundle", &self.project.is_some())
+            .field("has_project_snapshot", &self.project.is_some())
             .field("has_freshness", &self.request.freshness.is_some())
             .field(
                 "has_generation_census",
                 &self.request.generation_census.is_some(),
             )
-            .field("has_semantic_owner", &self.request.semantic_owner.is_some())
-            .field("has_doctor_report", &self.request.doctor_report.is_some())
+            .field(
+                "semantic_owner",
+                &matches!(self.request.semantic_owner, McpSemanticOwnerV1::Attached(_)),
+            )
+            .field(
+                "doctor_report",
+                &matches!(self.request.doctor_report, McpDoctorReportV1::Read(_)),
+            )
             .field("project_root", &self.project_root)
             .field("active_branch", &self.active_branch)
             .field("admitted_scope", &self.admitted_scope)
@@ -1272,16 +1289,16 @@ mod tests {
             "census absence must stay None"
         );
         assert!(
-            bound.semantic_owner().is_none(),
-            "semantic-owner absence must stay None"
+            matches!(bound.semantic_owner(), McpSemanticOwnerV1::NotAttached),
+            "semantic-owner absence must stay NotAttached"
         );
         assert!(
             bound.freshness().is_none(),
             "freshness absence must stay None"
         );
         assert!(
-            bound.doctor_report().is_none(),
-            "doctor-report absence must stay None"
+            matches!(bound.doctor_report(), McpDoctorReportV1::NotAttached),
+            "doctor-report absence must stay NotAttached"
         );
         assert!(
             bound.store_runtime().is_none(),

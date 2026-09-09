@@ -7,7 +7,7 @@ use tracedecay_application::semantic_runtime::project_lifecycle_status;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 
-use crate::{McpToolContext, ToolResult, generic_tool_result};
+use crate::{McpDoctorReportV1, McpToolContext, ToolResult, generic_tool_result};
 
 /// Bound for the session-temporal doctor probe so a wedged sessions DB cannot
 /// monopolize a `tracedecay_runtime` request indefinitely.
@@ -123,22 +123,18 @@ async fn literal_workspace_placeholder_transcript_paths(
     paths
 }
 
-fn attach_doctor_report(
-    value: &mut Value,
-    report: Option<&tracedecay_dashboard_api::AdmittedDoctorReportV1>,
-    read_failed: bool,
-) {
+fn attach_doctor_report(value: &mut Value, report: McpDoctorReportV1<'_>) {
     value["doctor_report"] = match report {
-        Some(admitted) => json!({
+        McpDoctorReportV1::Read(admitted) => json!({
             "kind": "observed",
             "report": admitted.report,
             "table_growth_evidence": admitted.table_growth_evidence,
         }),
-        None if read_failed => json!({
+        McpDoctorReportV1::ReadFailed => json!({
             "kind": "unknown",
             "table_growth_evidence": [],
         }),
-        None => json!({
+        McpDoctorReportV1::NotAttached => json!({
             "kind": "unsupported",
             "table_growth_evidence": [],
         }),
@@ -357,11 +353,7 @@ pub async fn handle_runtime(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        attach_doctor_report(
-            &mut value,
-            ctx.doctor_report(),
-            ctx.doctor_report_read_failed(),
-        );
+        attach_doctor_report(&mut value, ctx.doctor_report());
     }
     let semantic_configuration = match ctx.configuration_runtime() {
         Some(runtime) => hotpath::future!(
@@ -402,7 +394,7 @@ mod tests {
     async fn requested_doctor_report_is_typed_unavailable_without_reader() {
         let mut value = json!({});
 
-        attach_doctor_report(&mut value, None, false);
+        attach_doctor_report(&mut value, McpDoctorReportV1::NotAttached);
 
         assert_eq!(
             value["doctor_report"],

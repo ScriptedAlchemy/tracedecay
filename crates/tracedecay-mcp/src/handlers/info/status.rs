@@ -10,7 +10,9 @@ use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
 use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 
 use crate::tools::render::Md;
-use crate::{McpToolContext, ToolResult, generic_tool_result, rendered_tool_result};
+use crate::{
+    McpSemanticOwnerV1, McpToolContext, ToolResult, generic_tool_result, rendered_tool_result,
+};
 
 fn display_path(path: &Path) -> String {
     path.display().to_string()
@@ -208,12 +210,12 @@ pub async fn handle_status(
         "graph_statistics": graph_statistics,
     });
     output["semantic_owner"] = match ctx.semantic_owner() {
-        Some(state) => serde_json::to_value(state)?,
-        None if ctx.semantic_owner_authority_attached() => json!({
+        McpSemanticOwnerV1::Attached(state) => serde_json::to_value(state)?,
+        McpSemanticOwnerV1::AttachedAbsent => json!({
             "status": "unavailable",
             "reason": "owner_task_unregistered",
         }),
-        None => json!({
+        McpSemanticOwnerV1::NotAttached => json!({
             "status": "unavailable",
             "reason": "authority_unattached",
         }),
