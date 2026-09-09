@@ -933,6 +933,28 @@ fn join_content_text_joins_warning_and_payload() {
 }
 
 #[test]
+fn join_content_text_routes_the_daemon_metrics_footer_to_stderr() {
+    // `--format json` payloads are parsed from stdout as one document; the
+    // daemon appends its token accounting as a separate block, which must not
+    // trail the payload (run 34296614024: "Extra data: line 4 column 1").
+    let value = json!({
+        "content": [
+            { "type": "text", "text": r#"{"code":[],"coverage":{"exact":"complete"}}"# },
+            { "type": "text", "text": "\ntracedecay_metrics: before=151600 after=3721" }
+        ]
+    });
+    assert_eq!(
+        join_content_text(&value),
+        r#"{"code":[],"coverage":{"exact":"complete"}}"#
+    );
+    assert_eq!(
+        token_accounting_footers(&value),
+        vec!["tracedecay_metrics: before=151600 after=3721".to_owned()]
+    );
+    assert!(token_accounting_footers(&json!({ "content": [] })).is_empty());
+}
+
+#[test]
 fn join_content_text_skips_empty_blocks() {
     let value = json!({
         "content": [
