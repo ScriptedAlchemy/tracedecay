@@ -186,6 +186,8 @@ macro_rules! root_occurrence_cursor_bound {
 
 // A direct-user search can otherwise walk every common-term FTS hit and only
 // reject tool/assistant observations after one SQL round-trip per candidate.
+// The canonical projected message columns cheaply narrow role and event time
+// before the observation JSON is inspected for mixed tool-result envelopes.
 // This is a necessary prefilter; the typed Rust filter remains the authority.
 macro_rules! root_direct_user_prefilter {
     ($enabled:literal, $start:literal, $end:literal) => {
@@ -194,35 +196,31 @@ macro_rules! root_direct_user_prefilter {
             $enabled,
             " = 0 OR EXISTS (
           SELECT 1
-          FROM observations AS filter_observation
-          JOIN json_each(
-              filter_observation.observation_json,
-              '$.payload.facts'
-          ) AS filter_fact
-          WHERE filter_observation.observation_id = o.source_observation_id
-          GROUP BY filter_observation.observation_id
-          HAVING MIN(CASE
-                     WHEN json_extract(filter_fact.value, '$.kind') = 'message'
-                     THEN CAST(filter_fact.key AS INTEGER)
-                 END) = MIN(CASE
-                     WHEN json_extract(filter_fact.value, '$.kind') = 'message'
-                      AND json_extract(filter_fact.value, '$.role') = 'user'
-                      AND (",
+          FROM session_messages AS filter_message
+          WHERE filter_message.provider = o.source_provider
+            AND filter_message.message_id = o.message_id
+            AND filter_message.session_id = o.session_id
+            AND filter_message.role = 'user'
+            AND (",
             $start,
-            " IS NULL OR json_extract(filter_fact.value, '$.timestamp') >= ",
+            " IS NULL OR filter_message.timestamp >= ",
             $start,
             ")
-                      AND (",
+            AND (",
             $end,
-            " IS NULL OR json_extract(filter_fact.value, '$.timestamp') <= ",
+            " IS NULL OR filter_message.timestamp <= ",
             $end,
             ")
-                     THEN CAST(filter_fact.key AS INTEGER)
-                 END)
-             AND SUM(CASE
-                         WHEN json_extract(filter_fact.value, '$.kind') = 'tool_result'
-                         THEN 1 ELSE 0
-                     END) = 0
+            AND NOT EXISTS (
+                SELECT 1
+                FROM observations AS filter_observation
+                JOIN json_each(
+                    filter_observation.observation_json,
+                    '$.payload.facts'
+                ) AS filter_fact
+                WHERE filter_observation.observation_id = o.source_observation_id
+                  AND json_extract(filter_fact.value, '$.kind') = 'tool_result'
+            )
       ))"
         )
     };
