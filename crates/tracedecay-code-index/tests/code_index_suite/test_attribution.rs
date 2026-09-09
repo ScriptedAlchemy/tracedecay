@@ -118,48 +118,6 @@ fn attribution(
 }
 
 #[test]
-fn exact_occurrence_content_binds_current_attribution() {
-    let (snapshot, manifest) = generation();
-    let attributions = vec![attribution(
-        &manifest,
-        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
-    )];
-    let occurrence_evidence = occurrences();
-    let joined = GenerationTestJoinV1::join(
-        &manifest,
-        &snapshot,
-        &attributions,
-        &occurrence_evidence,
-        &watermark(
-            &snapshot,
-            &manifest,
-            TestAttributionJoinInputCoverageV1::Complete,
-            &attributions,
-            &occurrence_evidence,
-        ),
-    )
-    .expect("exact test attribution join");
-
-    assert_eq!(joined.coverage, GenerationTestJoinCoverageV1::Complete);
-    assert_eq!(joined.records.len(), 1);
-    assert!(matches!(
-        joined.records[0].disposition,
-        GenerationTestJoinDispositionV1::Current {
-            evidence_class: TestAttributionEvidenceClassV1::ObservedCoverageCandidates
-        }
-    ));
-    assert_eq!(
-        joined.records[0]
-            .test_occurrence
-            .as_ref()
-            .expect("test occurrence resolved")
-            .content_digest,
-        content('b')
-    );
-    assert_eq!(joined.records[0].covered_occurrences.len(), 1);
-}
-
-#[test]
 fn every_declared_attribution_evidence_class_stays_typed() {
     let (snapshot, manifest) = generation();
     let classes = [

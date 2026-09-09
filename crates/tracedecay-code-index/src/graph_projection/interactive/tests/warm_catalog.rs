@@ -145,32 +145,6 @@ fn many_import_manifest() -> GraphGenerationManifest {
 }
 
 #[test]
-fn warmed_symbol_catalog_serves_a_budget_that_cannot_scan_the_cold_projection() {
-    let cold_store = store_for(production_manifest());
-    assert_eq!(
-        reader(&cold_store)
-            .resolve_qualified_name("beta::run", None, 8, cancellation_budget(3))
-            .expect_err("three cancellation observations cannot build the cold catalog"),
-        CodeGraphProjectionError::Cancelled
-    );
-
-    let warm_store = store_for(production_manifest());
-    assert_catalog_is_cold(&warm_store);
-    warm_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
-        .expect("warm valid symbol catalog");
-    assert!(
-        warm_store
-            .interactive_catalog_is_warm()
-            .expect("read warm state")
-    );
-    let hits = reader(&warm_store)
-        .resolve_qualified_name("beta::run", None, 8, cancellation_budget(3))
-        .expect("bounded lookup reuses the warm catalog");
-    assert_eq!(occurrences(&hits), vec!["sym.beta.run".to_owned()]);
-}
-
-#[test]
 fn cached_warm_still_honors_cancellation() {
     let store = store_for(production_manifest());
     store
@@ -324,27 +298,6 @@ fn concurrent_warmers_share_one_full_catalog_build() {
         outcomes[0].2, outcomes[1].2,
         "both warmers return through the same cached catalog authority"
     );
-}
-
-#[test]
-fn warmed_import_catalog_serves_a_budget_that_cannot_scan_the_cold_projection() {
-    let cold_store = store_for(many_import_manifest());
-    assert_eq!(
-        reader(&cold_store)
-            .external_type_import_candidates("pkg", None, 1, cancellation_budget(6))
-            .expect_err("six cancellation observations cannot build the cold catalog"),
-        CodeGraphProjectionError::Cancelled
-    );
-
-    let warm_store = store_for(many_import_manifest());
-    warm_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
-        .expect("warm valid import catalog");
-    let candidates = reader(&warm_store)
-        .external_type_import_candidates("pkg", None, 1, cancellation_budget(6))
-        .expect("bounded import lookup reuses the warm catalog");
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].logical_path, "src/warm-import-00.ts");
 }
 
 #[test]

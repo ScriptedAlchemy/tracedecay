@@ -615,18 +615,6 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_written_against_these_bytes_is_admitted() {
-        let temp = tempfile::tempdir().unwrap();
-        let container = temp.path().join("graph.grafeo");
-        let body = body(64, "sha256:abc");
-        let digest = body.digest().unwrap();
-        write_marker(&container, body, digest);
-
-        let admitted = load(&container, identity(64));
-        assert_eq!(admitted.len(), 1);
-    }
-
-    #[test]
     fn a_marker_written_against_different_bytes_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");

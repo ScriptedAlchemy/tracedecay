@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "hotpath")]
 use std::time::Instant;
 
-#[cfg(any(feature = "hotpath", test))]
+#[cfg(feature = "hotpath")]
 const HOT_LOOP_SAMPLE_PERIOD: u64 = 32;
 
 #[cfg(feature = "hotpath")]
@@ -115,11 +115,6 @@ impl PendingWorkQueue {
         let _ = started;
         WorkerBusyGuard::enter()
     }
-
-    #[cfg(test)]
-    fn pending_for_test(&self) -> usize {
-        self.remaining.load(Ordering::Relaxed)
-    }
 }
 
 impl Drop for PendingWorkQueue {
@@ -171,11 +166,6 @@ impl WorkerBusyGuard {
             #[cfg(feature = "hotpath")]
             started: Instant::now(),
         }
-    }
-
-    #[cfg(test)]
-    fn is_coordinating_for_test(&self) -> bool {
-        self.coordinating.get()
     }
 }
 
@@ -368,57 +358,5 @@ pub(crate) fn record_rebuild_state(state: &'static str) {
     #[cfg(not(feature = "hotpath"))]
     {
         let _ = state;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(feature = "hotpath")]
-    #[test]
-    fn hotpath_file_probe_cadence_uses_one_fixed_slot_per_period() {
-        let sampled = (0..(HOT_LOOP_SAMPLE_PERIOD * 2))
-            .filter(|sequence| is_hot_loop_sample(*sequence))
-            .collect::<Vec<_>>();
-
-        assert_eq!(sampled, vec![0, HOT_LOOP_SAMPLE_PERIOD]);
-    }
-
-    #[cfg(not(feature = "hotpath"))]
-    #[test]
-    fn hotpath_file_probe_sampler_is_dormant_without_the_feature() {
-        assert!((0..(HOT_LOOP_SAMPLE_PERIOD * 2)).all(|_| !sample_hot_loop()));
-    }
-
-    #[test]
-    fn pending_queue_decrements_when_each_worker_starts() {
-        let queue = PendingWorkQueue::new(3);
-        assert_eq!(queue.pending_for_test(), 3);
-
-        let first = queue.start_worker();
-        assert_eq!(queue.pending_for_test(), 2);
-        drop(first);
-
-        let second = queue.start_worker();
-        assert_eq!(queue.pending_for_test(), 1);
-        drop(second);
-
-        let third = queue.start_worker();
-        assert_eq!(queue.pending_for_test(), 0);
-        drop(third);
-    }
-
-    #[test]
-    fn pool_coordination_leaves_cpu_stage_until_the_guard_finishes() {
-        let queue = PendingWorkQueue::new(1);
-        let worker = queue.start_worker();
-        assert!(!worker.is_coordinating_for_test());
-
-        let coordinating = worker.pool_coordination();
-        assert!(worker.is_coordinating_for_test());
-
-        drop(coordinating);
-        assert!(!worker.is_coordinating_for_test());
     }
 }

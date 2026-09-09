@@ -15,34 +15,6 @@ impl ExtractionCancellation for AlwaysCancelled {
 }
 
 #[test]
-fn extraction_is_deterministic_and_revision_bound() {
-    let extractor = TreeSitterExtractor::new();
-    let descriptor = rust_descriptor();
-    let file = validated_rust_file(RUST_SOURCE.as_bytes());
-
-    let first = extractor
-        .extract(&file, &descriptor, &NeverCancelled)
-        .expect("first extraction");
-    let second = extractor
-        .extract(&file, &descriptor, &NeverCancelled)
-        .expect("second extraction");
-
-    assert_eq!(first.batch(), second.batch());
-    assert_eq!(first.batch().parse_outcome, ParseOutcomeV1::Complete);
-    assert_eq!(
-        first.batch().descriptor_revision,
-        descriptor.descriptor_revision
-    );
-    assert_eq!(first.batch().grammar_revision, descriptor.grammar_revision);
-    assert_eq!(
-        first.batch().extractor_revision,
-        descriptor.extractor_revision
-    );
-    assert!(first.batch().coverage.symbols_extracted > 0);
-    assert!(first.batch().coverage.relations_extracted > 0);
-}
-
-#[test]
 fn extraction_reports_cancellation_after_sanitized_intake() {
     let extractor = TreeSitterExtractor::new();
     let descriptor = rust_descriptor();

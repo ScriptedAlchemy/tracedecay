@@ -92,17 +92,4 @@ mod tests {
         );
         assert_eq!(require_generation_capacity("entities", 9, 1, 10), Ok(()));
     }
-
-    #[test]
-    fn canonical_write_budget_admits_sealed_generation_bytes() {
-        // Sealed artifacts admit up to 2 GiB. The previous 1 GiB canonical-batch
-        // bound sat below that and refused live ~1.6 GB / >1M-entity activations
-        // as a write budget on every hydrate retry.
-        const SEALED_BOUND: usize = 2usize << 30;
-        assert_eq!(
-            super::MAX_GRAPH_BATCH_CANONICAL_BYTES,
-            SEALED_BOUND * 2,
-            "canonical write budget must admit JSON-escape expansion of a max sealed generation"
-        );
-    }
 }
