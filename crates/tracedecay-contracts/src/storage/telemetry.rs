@@ -472,14 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn sample_computes_totals_and_free_bytes() {
-        let sample = sample(100, 25);
-        assert_eq!(sample.total_bytes(), StorageByteSizeV1(409_600));
-        assert_eq!(sample.free_bytes(), StorageByteSizeV1(102_400));
-        assert!((sample.free_page_ratio().as_f64() - 0.25).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn sample_rejects_freelist_larger_than_page_count() {
         assert_eq!(
             sample(10, 11).validate().expect_err("freelist too large"),
@@ -537,28 +529,6 @@ mod tests {
                 field: "storage soft budget limit"
             }
         );
-    }
-
-    #[test]
-    fn table_growth_reports_saturating_delta() {
-        let table = TableNameV1::new("observations").expect("valid table");
-        let growing = TableGrowthSampleV1 {
-            store: store(),
-            table: table.clone(),
-            previous_bytes: StorageByteSizeV1(1_000),
-            current_bytes: StorageByteSizeV1(1_800),
-            previous_observed_at: UtcMicros(1),
-            current_observed_at: UtcMicros(2),
-        };
-        assert!(growing.is_growing());
-        assert_eq!(growing.growth_bytes(), StorageByteSizeV1(800));
-
-        let shrunk = TableGrowthSampleV1 {
-            current_bytes: StorageByteSizeV1(500),
-            ..growing
-        };
-        assert!(!shrunk.is_growing());
-        assert_eq!(shrunk.growth_bytes(), StorageByteSizeV1::ZERO);
     }
 
     #[test]

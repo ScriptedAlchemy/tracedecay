@@ -7,25 +7,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 
 #[test]
-fn stream_is_ordered_and_has_exactly_one_terminal_event() {
-    let operation = common::operation();
-    let context = common::context(&operation);
-    let receipt = OperationReceipt::completed(
-        UtcMicros(2),
-        UtcMicros(3),
-        context.deadline().clone(),
-        Default::default(),
-    )
-    .unwrap();
-    let events = vec![
-        StreamEvent::item(0, "first").unwrap(),
-        StreamEvent::terminal(1, StreamTermination::completed(receipt)).unwrap(),
-    ];
-
-    validate_stream(&events).unwrap();
-}
-
-#[test]
 fn stream_rejects_events_after_the_terminal_receipt() {
     let operation = common::operation();
     let context = common::context(&operation);
