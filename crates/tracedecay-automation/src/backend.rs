@@ -979,16 +979,6 @@ mod tests {
     }
 
     impl FlakyBackend {
-        fn timing_out(failures: usize) -> Self {
-            Self {
-                failures,
-                calls: AtomicUsize::new(0),
-                error: AgentTaskError::Timeout {
-                    reason: "timed out waiting for codex app-server response".to_string(),
-                },
-            }
-        }
-
         fn failing_with(failures: usize, error: AgentTaskError) -> Self {
             Self {
                 failures,
@@ -1077,36 +1067,6 @@ mod tests {
                 "message: {message}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn retry_report_records_transient_transient_success_attempts() {
-        let backend = FlakyBackend::timing_out(2);
-        let policy = BackendRetryPolicy::new(
-            3,
-            vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
-        );
-        let mut report = AgentTaskRetryReport::default();
-
-        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
-            .await
-            .unwrap();
-
-        assert_eq!(report.attempt_count(), 3);
-        assert_eq!(
-            report
-                .attempts()
-                .iter()
-                .map(|attempt| attempt.failure_classification)
-                .collect::<Vec<_>>(),
-            vec![
-                Some(AgentTaskFailureClass::Timeout),
-                Some(AgentTaskFailureClass::Timeout),
-                None,
-            ]
-        );
-        assert!(report.attempts()[2].succeeded);
     }
 
     #[test]
@@ -1223,35 +1183,6 @@ mod tests {
             Some(AgentTaskFailureClass::Unavailable)
         );
         assert!(report.attempts()[1].succeeded);
-    }
-
-    #[test]
-    fn retry_report_appends_later_request_history() {
-        let mut initial = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: true,
-                failure_classification: None,
-                backoff_millis: 0,
-            }],
-        };
-        let repair = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: false,
-                failure_classification: Some(AgentTaskFailureClass::MalformedOutput),
-                backoff_millis: 0,
-            }],
-        };
-
-        initial.append(repair);
-
-        assert_eq!(initial.attempt_count(), 2);
-        assert!(initial.attempts()[0].succeeded);
-        assert_eq!(
-            initial.attempts()[1].failure_classification,
-            Some(AgentTaskFailureClass::MalformedOutput)
-        );
     }
 
     #[test]

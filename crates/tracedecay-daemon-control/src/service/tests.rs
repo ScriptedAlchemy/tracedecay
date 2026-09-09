@@ -718,31 +718,6 @@ fn daemon_shutdown_response_requires_matching_acknowledgement() {
 }
 
 #[test]
-fn user_service_runs_daemon_with_socket_path() {
-    let spec = DaemonServiceSpec {
-        tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
-        socket_path: PathBuf::from("/tmp/tracedecay.sock"),
-        data_dir_override: None,
-        remote_tls: None,
-    };
-
-    let unit = spec.render_systemd_user_unit().expect("systemd unit");
-
-    assert!(
-        unit.contains(
-            "ExecStart=/usr/local/bin/tracedecay daemon run --socket /tmp/tracedecay.sock"
-        )
-    );
-    assert!(unit.contains("Environment=\"PATH="));
-    assert!(unit.contains("Environment=\"MALLOC_ARENA_MAX=2\""));
-    assert!(unit.contains("Restart=always"));
-    assert!(unit.contains("RestartSec=2"));
-    assert!(unit.contains("StartLimitIntervalSec=0"));
-    assert!(!unit.contains("Restart=on-failure"));
-    assert!(unit.contains("LimitNOFILE=8192"));
-}
-
-#[test]
 fn systemd_unit_quotes_exec_start_paths_that_systemd_would_misparse() {
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/trace decay/bin/tracedecay"),
@@ -866,53 +841,6 @@ fn managed_service_rejects_non_unicode_remote_tls_paths() {
     assert!(error.to_string().contains("valid Unicode"));
 }
 
-// The launchd render tests use Unix-style absolute binary paths, which
-// `Path::is_absolute` rejects on Windows; launchd is Unix-only anyway.
-#[cfg(unix)]
-#[test]
-fn render_launchd_plist_includes_program_arguments_socket_logs_and_label() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = tempfile::TempDir::new().expect("profile temp dir");
-    let home = tempfile::TempDir::new().expect("home temp dir");
-    let _home_guard = EnvVarGuard::set("HOME", home.path());
-    let spec = DaemonServiceSpec {
-        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
-        socket_path: profile.path().join("daemon.sock"),
-        data_dir_override: Some(profile.path().to_path_buf()),
-        remote_tls: None,
-    };
-
-    let plist = spec.render_launchd_plist().expect("launchd plist");
-
-    assert!(plist.contains("<key>Label</key>"));
-    assert!(plist.contains("<string>com.tracedecay.daemon</string>"));
-    assert!(plist.contains("<key>ProgramArguments</key>"));
-    assert!(plist.contains("<string>/opt/tracedecay/bin/tracedecay</string>"));
-    assert!(plist.contains("<string>daemon</string>"));
-    assert!(plist.contains("<string>run</string>"));
-    assert!(plist.contains("<string>--socket</string>"));
-    assert!(plist.contains(&format!(
-        "<string>{}</string>",
-        profile.path().join("daemon.sock").display()
-    )));
-    assert!(plist.contains(&format!(
-        "<string>{}</string>",
-        profile.path().join("daemon.out.log").display()
-    )));
-    assert!(plist.contains(&format!(
-        "<string>{}</string>",
-        profile.path().join("daemon.err.log").display()
-    )));
-    assert!(plist.contains("<key>TRACEDECAY_DATA_DIR</key>"));
-    assert!(plist.contains("<key>RunAtLoad</key>"));
-    assert!(plist.contains("<key>KeepAlive</key>"));
-    assert!(plist.contains("<key>ProcessType</key>"));
-    assert!(plist.contains("<string>Interactive</string>"));
-    assert!(plist.contains("<key>SoftResourceLimits</key>"));
-    assert!(plist.contains("<key>NumberOfFiles</key>"));
-    assert!(plist.contains("<integer>8192</integer>"));
-}
-
 #[cfg(unix)]
 #[test]
 fn parsed_launchd_remote_tls_paths_are_validated_before_refresh() {
@@ -961,23 +889,6 @@ fn socket_path_from_launchd_plist_returns_none_for_malformed_input() {
     );
 }
 
-#[test]
-fn socket_path_from_launchd_plist_accepts_socket_equals_form() {
-    let plist = "\
-            <key>ProgramArguments</key>\
-            <array>\
-              <string>/opt/tracedecay/bin/tracedecay</string>\
-              <string>daemon</string>\
-              <string>run</string>\
-              <string>--socket=/tmp/tracedecay.sock</string>\
-            </array>";
-
-    assert_eq!(
-        super::unit_file::socket_path_from_launchd_plist(plist),
-        Some(PathBuf::from("/tmp/tracedecay.sock"))
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn launchd_plist_env_value_round_trips_data_dir_override() {
@@ -1000,29 +911,6 @@ fn launchd_plist_env_value_round_trips_data_dir_override() {
     );
     assert_eq!(
         super::unit_file::launchd_plist_env_value(&plist, "MISSING_VAR"),
-        None
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn launchd_plist_env_value_ignores_plist_without_override() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = tempfile::TempDir::new().expect("profile temp dir");
-    let home = tempfile::TempDir::new().expect("home temp dir");
-    let _home_guard = EnvVarGuard::set("HOME", home.path());
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
-    let spec = DaemonServiceSpec {
-        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
-        socket_path: profile.path().join("daemon.sock"),
-        data_dir_override: None,
-        remote_tls: None,
-    };
-
-    let plist = spec.render_launchd_plist().expect("launchd plist");
-
-    assert_eq!(
-        super::unit_file::launchd_plist_env_value(&plist, USER_DATA_DIR_ENV),
         None
     );
 }

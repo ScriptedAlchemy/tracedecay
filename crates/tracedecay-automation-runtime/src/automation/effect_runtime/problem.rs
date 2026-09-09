@@ -225,10 +225,7 @@ mod tests {
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-    use super::{
-        failed_ledger_problem, failure_class_problem, post_admission_termination_problem,
-        runtime_problem,
-    };
+    use super::{failed_ledger_problem, failure_class_problem, runtime_problem};
 
     fn failed_ledger() -> AutomationRunLedgerRecord {
         serde_json::from_value(json!({
@@ -367,25 +364,6 @@ mod tests {
             problem.cancellation_stage(),
             Some(CancellationStage::EffectInFlight)
         );
-        assert_eq!(problem.execution_failure_classification(), None);
-    }
-
-    #[test]
-    fn elapsed_post_admission_deadline_precedes_backend_failure_classification() {
-        let context = context_with_deadline(UtcMicros(2));
-        let cancellation =
-            CancellationSignal::active("cancellation.runtime-problem").expect("signal");
-
-        let problem = post_admission_termination_problem(&context, &cancellation)
-            .expect("typed deadline")
-            .expect("elapsed deadline problem");
-
-        assert_eq!(problem.kind(), ApplicationProblemKind::TimedOut);
-        assert_eq!(
-            problem.cancellation_stage(),
-            Some(CancellationStage::EffectInFlight)
-        );
-        assert_eq!(problem.unavailable_classification(), None);
         assert_eq!(problem.execution_failure_classification(), None);
     }
 

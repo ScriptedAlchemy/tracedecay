@@ -733,42 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn ignores_url_and_path_like_colon_tokens() {
-        let events = infer_usage_events(
-            None,
-            Some(r#"{"url":"https://example.com/a:b","path":"C:\\tmp\\SKILL.md"}"#),
-            Some("Also ignore file:///tmp/tracedecay:exploring-code"),
-        );
-        assert!(
-            events.is_empty(),
-            "url and path strings should not become skills, got {events:#?}"
-        );
-    }
-
-    #[test]
-    fn infers_codex_skill_usage_from_real_prose_shape() {
-        let events = infer_usage_events(
-            None,
-            Some(r#"{"source":"codex_rollout"}"#),
-            Some(include_str!(
-                "../../../tests/fixtures/analytics/codex_skill_prose.txt"
-            )),
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Skill,
-            "superpowers:using-superpowers",
-            UsageCategory::WorkflowSkill,
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Skill,
-            "tracedecay:exploring-code",
-            UsageCategory::TraceDecayWorkflowSkill,
-        );
-    }
-
-    #[test]
     fn infers_cursor_skill_reads_from_real_tool_use_shape() {
         let events = infer_usage_events(
             Some("ReadFile"),

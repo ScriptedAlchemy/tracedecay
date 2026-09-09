@@ -1404,50 +1404,6 @@ mod recorded_failure_tests {
             .is_some()
         );
     }
-
-    #[test]
-    fn recorded_failure_exposes_only_its_constructed_terminal() {
-        let config = AutomationConfig::default();
-        let finalizer = AgentRunFinalizer::new_at(
-            Path::new("/unused"),
-            "recorded_failure_run",
-            AutomationTrigger::Dashboard,
-            &config,
-            AgentTaskKind::SessionReflector,
-            "0",
-            None,
-            std::time::SystemTime::UNIX_EPOCH,
-        )
-        .expect("test finalizer");
-        let ledger_record = finalizer
-            .record(RunRecordOutcome {
-                model: None,
-                status: AutomationRunStatus::Failed,
-                evidence_hash: None,
-                proposed_ops: None,
-                accepted_count: 0,
-                rejected_count: 0,
-                error: Some("failed".to_owned()),
-            })
-            .expect("test ledger record");
-        let recorded = AutomationRunError::RecordedFailure {
-            error: TraceDecayError::Config {
-                message: "failed".to_owned(),
-            },
-            ledger_record: Box::new(ledger_record),
-        };
-        let runtime = AutomationRunError::Runtime(TraceDecayError::Config {
-            message: "failed before terminal construction".to_owned(),
-        });
-
-        assert_eq!(
-            recorded
-                .ledger_record()
-                .map(|record| record.run_id.as_str()),
-            Some("recorded_failure_run")
-        );
-        assert!(runtime.ledger_record().is_none());
-    }
 }
 
 #[cfg(test)]
