@@ -437,7 +437,8 @@ pub struct McpServer {
     admitted_project_scope: Option<tracedecay_contracts::ResolvedScope>,
     retained_project_server_resolver: Option<RetainedProjectServerResolver>,
     #[cfg(any(test, feature = "test-transport"))]
-    _host_admission_test_runtime: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
+    _host_admission_test_runtime:
+        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     hook_project_routes: SharedHookProjectRouteCache,
     version_cache: std::sync::Mutex<VersionCheckState>,
     pending_notifications: std::sync::Mutex<Vec<Value>>,
@@ -650,7 +651,7 @@ impl McpServer {
     #[doc(hidden)]
     pub fn host_admission_test_runtime_for_test(
         &self,
-    ) -> Option<&crate::host_admission::HostAdmissionTestRuntimeV1> {
+    ) -> Option<&crate::test_support::host_admission::HostAdmissionTestRuntimeV1> {
         self._host_admission_test_runtime.as_deref()
     }
 
@@ -660,7 +661,7 @@ impl McpServer {
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
+        runtime: crate::test_support::host_admission::ProjectScopedTestRuntimeV1,
     ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         Self::new_with_retained_test_servers_for_test(cg, scope_prefix, runtime, Vec::new()).await
     }
@@ -678,7 +679,7 @@ impl McpServer {
     pub async fn new_with_retained_test_servers_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
+        runtime: crate::test_support::host_admission::ProjectScopedTestRuntimeV1,
         retained_servers: Vec<Arc<McpServer>>,
     ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
