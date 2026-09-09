@@ -113,10 +113,41 @@ impl ServerStats {
 
 use tracedecay_mcp::transport::write_wire_oversized_rejection;
 
-/// Future returned by a [`CodeIndexHookSink`] invocation. Resolves to `true`
-/// when a mounted worktree scheduler accepted the touched paths.
+/// Admission preserves policy refusal separately from scheduler availability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeIndexAdmission {
+    Accepted,
+    LinkedWorktreeDisabled,
+    Unavailable,
+}
+
+impl CodeIndexAdmission {
+    pub(crate) fn host_outcome(self) -> HostAdmissionOutcome {
+        match self {
+            Self::Accepted => HostAdmissionOutcome::replay_completed(true, false),
+            Self::LinkedWorktreeDisabled => {
+                HostAdmissionOutcome::degraded("linked_worktree_disabled")
+            }
+            Self::Unavailable => {
+                HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")
+            }
+        }
+    }
+}
+
+impl From<bool> for CodeIndexAdmission {
+    fn from(accepted: bool) -> Self {
+        if accepted {
+            Self::Accepted
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
+/// Future returned by a [`CodeIndexHookSink`] invocation.
 pub(crate) type CodeIndexHookNotifyFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = CodeIndexAdmission> + Send + 'static>>;
 
 /// Type-erased bridge from the MCP hook boundary to the daemon-owned code-index
 /// scheduler registry. The daemon constructs this closing over its cloneable
