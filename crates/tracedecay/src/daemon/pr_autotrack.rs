@@ -36,7 +36,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use tracedecay_application::pr_tracking::managed_summary;
 use tracedecay_application::pr_tracking::{
-    DiscoveredPr, ManagedPr, ManualBranchArtifactOwnershipV1, PrAutotrackState, PrCleanupError,
+    DiscoveredPr, ManagedPr, ManualBranchArtifactOwnershipV1, PrAutotrackState,
     PrCommandControlV1 as PrCommandControl, PrDiscovery, cleanup_owned_worktree_off_runtime,
     cleanup_pr_worktree_off_runtime, default_pr_command_control, discover_open_prs_with_control,
     load_state, manual_branch_artifact_ownership_off_runtime,

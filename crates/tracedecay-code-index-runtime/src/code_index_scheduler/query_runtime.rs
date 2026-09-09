@@ -311,7 +311,9 @@ pub fn canonical_query_policy(
     let mut candidate_profile = profile.clone();
     let mut candidate_diversity = diversity.clone();
     candidate_profile.evaluation_result_anchor = core_profile.evaluation_result_anchor.clone();
-    candidate_diversity.evaluation_result_anchor = core_diversity.evaluation_result_anchor.clone();
+    candidate_diversity
+        .evaluation_result_anchor
+        .clone_from(&core_diversity.evaluation_result_anchor);
     if diversity.evaluation_result_anchor.as_ref() == Some(&profile.evaluation_result_anchor)
         && candidate_profile == core_profile
         && candidate_diversity == core_diversity
@@ -1113,7 +1115,7 @@ mod tests {
                     .expect("changed budget"),
                 (evaluated_profile.clone(), evaluated_diversity.clone()),
             );
-            evaluated_profile.retrieval_budget = profile.retrieval_budget.clone();
+            evaluated_profile.retrieval_budget = profile.retrieval_budget;
             evaluated_diversity.per_file = Some(1);
             assert_eq!(
                 super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)

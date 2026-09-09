@@ -18,18 +18,19 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
-use super::profile_host_admission_replay::{
-    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
-    ProfileHostAdmissionReplayRegistry,
-};
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
+use crate::mcp::tools::replay_projectless_hermes_host_admission;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_identity::{authority, profile_identity};
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
+use tracedecay_daemon_service::{
+    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
+    ProfileHostAdmissionReplayRegistry,
+};
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
@@ -555,7 +556,15 @@ impl Default for StoreAdministration {
                 tokio::sync::Mutex::new(()),
                 label = "daemon.branch_admin.host_admission_broker.gate"
             )),
-            profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
+            profile_host_admission_replay: Arc::new(
+                ProfileHostAdmissionReplayRegistry::with_replay_pass(Arc::new(
+                    |broker, profile_root| {
+                        Box::pin(async move {
+                            replay_projectless_hermes_host_admission(&broker, &profile_root).await
+                        })
+                    },
+                )),
+            ),
             profile_session_refresh_services: Arc::new(hotpath::mutex!(
                 tokio::sync::Mutex::new(HashMap::new()),
                 label = "daemon.branch_admin.profile_session_refresh_services"
@@ -1973,10 +1982,10 @@ pub(super) async fn write_branch_admin_response(
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::super::profile_host_admission_replay::BootstrapCompletion;
     use super::super::{AuthenticatedFirstRequest, ProjectRouteKey, StoreOwnerKey};
     use super::*;
     use std::time::Duration;
+    use tracedecay_daemon_service::BootstrapCompletion;
 
     fn parsed_branch_admin_request(line: String) -> Option<BranchAdminRequest> {
         let request = AuthenticatedFirstRequest::new(line);

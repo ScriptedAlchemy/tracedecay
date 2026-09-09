@@ -60,6 +60,7 @@ pub mod application_surface;
 pub mod invocation;
 mod mcp_project_registry;
 mod mcp_workflow_index;
+pub mod profile_host_admission_replay;
 pub mod project_owner_registration;
 pub mod project_runtime;
 pub mod request_cancellation;
@@ -101,6 +102,12 @@ pub use invocation::{
 };
 pub use mcp_project_registry::DaemonProjectRegistryReadService;
 pub use mcp_workflow_index::DaemonWorkflowIndexReadService;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use profile_host_admission_replay::BootstrapCompletion;
+pub use profile_host_admission_replay::{
+    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
+    ProfileHostAdmissionReplayPass, ProfileHostAdmissionReplayRegistry,
+};
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
     ProjectRuntimePublicationAttemptV1, ProjectRuntimePublicationStateV1,
