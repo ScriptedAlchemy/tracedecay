@@ -75,7 +75,7 @@ pub use context_headings::{
 };
 pub use handlers::{
     CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
-    handle_multi_root, rendered_tool_result, require_node_id, require_object_args,
+    handle_multi_root, handle_work, rendered_tool_result, require_node_id, require_object_args,
     require_positive_limit, retained_problem_envelope, retained_safe_diagnostic,
     take_internal_context_memory_analytics, text_tool_result, tool_json, tool_json_with_md,
     unique_file_paths, validated_retained_response,
