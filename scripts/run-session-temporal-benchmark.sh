@@ -91,7 +91,7 @@ require(stats.get("p99_label") == p99_label, "p99 label mismatch")
 require(workload.get("production_path", {}).get("available_to_benchmark_target") is True,
         "production path must be available")
 implementation = workload.get("implementation") or {}
-require(implementation.get("path") == "crates/tracedecay/src/session_temporal_benchmark.rs",
+require(implementation.get("path") == "crates/tracedecay/benches/session_temporal/harness.rs",
         "implementation path mismatch")
 require((root / implementation["path"]).is_file(), "implementation source missing")
 runner = workload.get("runner") or {}
@@ -133,7 +133,7 @@ elif provisional == "result-current.json":
             "current result workload manifest mismatch")
     identity = result.get("source_identity", {})
     require(identity.get("harness")
-            == "crates/tracedecay/src/session_temporal_benchmark.rs",
+            == "crates/tracedecay/benches/session_temporal/harness.rs",
             "current result harness identity mismatch")
     require(identity.get("runner") == "scripts/run-session-temporal-benchmark.sh",
             "current result runner identity mismatch")

@@ -31,7 +31,7 @@ async fn registered_project_session_hydrates_provider_qualified_task_evidence() 
     let project_id = id::<ProjectId>("project.work-task-session");
     let repository_id = id::<RepositoryId>("repository.work-task-session");
     let worktree_id = id::<WorktreeId>("worktree.work-task-session");
-    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
         profile.path(),
         &project,
         project_id.clone(),

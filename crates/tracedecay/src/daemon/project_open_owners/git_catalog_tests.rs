@@ -41,7 +41,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-m", "fixture"]);
     let project_id = ProjectId::new("project.git-catalog").unwrap();
-    let fixture = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let fixture = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
         &profile_root,
         &project_root,
         project_id.clone(),
