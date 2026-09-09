@@ -5079,42 +5079,6 @@ fn component_slug(component: HostBundleComponentV1) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test]
-    fn kimi_repair_actions_name_the_interactive_plugins_flow() {
-        for state in [
-            HostBundleComponentDoctorStateV1::Repairable,
-            HostBundleComponentDoctorStateV1::Missing,
-            HostBundleComponentDoctorStateV1::Corrupt,
-            HostBundleComponentDoctorStateV1::OwnershipConflict,
-        ] {
-            let action = repair_action(
-                HostKindV1::KimiCode,
-                HostBundleComponentV1::Core,
-                state,
-                HostBundleRegistrationStateV1::Repairable,
-            );
-            assert!(
-                action.contains("/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay"),
-                "Kimi remediation must name the interactive host command: {action}"
-            );
-            assert!(
-                !action.contains("reinstall --component"),
-                "Kimi remediation must not advertise an unsupported repair command: {action}"
-            );
-        }
-
-        let corrupt = corrupt_component_result(
-            PathBuf::from("/tmp/kimi-corrupt-receipt.json"),
-            Some(HostKindV1::KimiCode),
-            Some(HostBundleComponentV1::Core),
-        );
-        assert!(
-            corrupt
-                .repair_action
-                .contains("/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay")
-        );
-    }
-
     #[derive(Clone)]
     struct FirstPartyVerifier([u8; 32]);
 

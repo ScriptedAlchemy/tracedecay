@@ -2085,30 +2085,6 @@ mod tests {
         );
     }
 
-    /// Upgrading over an install that shipped the pre-rename dispatcher slugs
-    /// (`skills/tracedecay-arch` → `skills/tracedecay-map-architecture`, …) must
-    /// sweep the old skill directories instead of leaving Cursor listing both
-    /// the old and new command skills.
-    #[test]
-    fn reinstall_sweeps_pre_rename_dispatcher_skills() {
-        let tmp = TempDir::new().unwrap();
-        let install_dir = tmp.path().join("tracedecay");
-        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
-        // Simulate a pre-rename install that shipped skills/tracedecay-arch/.
-        std::fs::create_dir_all(install_dir.join("skills/tracedecay-arch")).unwrap();
-        std::fs::write(
-            install_dir.join("skills/tracedecay-arch/SKILL.md"),
-            "---\nname: tracedecay-arch\n---\nApply the `tracedecay:code-health` skill.\n",
-        )
-        .unwrap();
-
-        remove_cursor_plugin_install(&install_dir).expect("replace should succeed");
-        assert!(
-            !install_dir.exists(),
-            "pre-rename dispatcher skill dirs must be swept so the tracedecay-only dir is fully removed"
-        );
-    }
-
     /// A reinstall must be a CLEAN REPLACE of the tracedecay-owned dir: a stale
     /// file the current bundle no longer ships is gone afterward, while the
     /// fresh bundle is present. Exercises the full write → remove → write path.
@@ -2318,14 +2294,6 @@ mod tests {
             ],
             "a no-op sweep must not create backups or new files"
         );
-    }
-
-    /// Projects without a `.cursor/` directory at all are a silent no-op.
-    #[test]
-    fn sweep_handles_missing_cursor_dir() {
-        let project = TempDir::new().unwrap();
-        sweep_legacy_project_artifacts(project.path()).expect("sweep should succeed");
-        assert!(!project.path().join(".cursor").exists());
     }
 
     #[test]

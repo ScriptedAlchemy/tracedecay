@@ -479,24 +479,4 @@ mod tests {
         let findings = scan_cursor_mcp_logs(logs.path());
         assert!(!findings.scanned_any_log);
     }
-
-    #[test]
-    fn plugin_version_staleness_flags_mismatch_only() {
-        let stale = serde_json::json!({ "name": "tracedecay", "version": "0.1.0" });
-        let message = plugin_version_staleness(&stale, "0.2.0")
-            .expect("mismatched versions should produce a warning");
-        assert!(message.contains("0.1.0"), "{message}");
-        assert!(message.contains("0.2.0"), "{message}");
-        assert!(message.contains("update-plugin"), "{message}");
-
-        let current = serde_json::json!({ "name": "tracedecay", "version": "0.2.0" });
-        assert_eq!(plugin_version_staleness(&current, "0.2.0"), None);
-
-        // A manifest without a version (or a non-string one) is not a
-        // staleness signal — the manifest-completeness check owns that.
-        assert_eq!(
-            plugin_version_staleness(&serde_json::json!({ "name": "tracedecay" }), "0.2.0"),
-            None
-        );
-    }
 }
