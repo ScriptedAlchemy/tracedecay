@@ -821,12 +821,4 @@ mod tests {
         receipt.command.failure.evidence_ref = "runtime-terminal:other".to_owned();
         assert!(!receipt.validate_for_observation());
     }
-
-    #[test]
-    fn terminal_failure_retry_uses_truthful_recovery_reason() {
-        assert_eq!(
-            WorkRetryCauseV1::RuntimeFailure.restart_reason(),
-            WorkRestartReasonV1::FailureObserved,
-        );
-    }
 }

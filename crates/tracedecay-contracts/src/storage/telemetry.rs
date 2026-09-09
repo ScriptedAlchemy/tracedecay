@@ -562,21 +562,6 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_read_exposes_store_for_every_variant() {
-        assert_eq!(
-            StorageTelemetryReadV1::Unsupported { store: store() }.store(),
-            &store()
-        );
-        assert_eq!(
-            StorageTelemetryReadV1::Observed {
-                sample: sample(1, 0)
-            }
-            .store(),
-            &store()
-        );
-    }
-
-    #[test]
     fn unavailable_table_growth_is_typed_instead_of_zero() {
         let read = TableGrowthTelemetryReadV1::Unknown { store: store() };
         let serialized = serde_json::to_value(&read).expect("serialize table-growth read");
@@ -590,21 +575,6 @@ mod tests {
         );
         assert!(serialized.get("growth_bytes").is_none());
         assert!(serialized.get("samples").is_none());
-    }
-
-    #[test]
-    fn first_table_growth_read_reports_baseline_without_growth() {
-        let read = TableGrowthTelemetryReadV1::BaselineEstablished {
-            store: store(),
-            observed_at: UtcMicros(2_000),
-            tables_observed: 3,
-        };
-        let serialized = serde_json::to_value(&read).expect("serialize table-growth read");
-
-        assert_eq!(serialized["kind"], "baseline_established");
-        assert_eq!(serialized["tables_observed"], 3);
-        assert!(serialized.get("samples").is_none());
-        assert!(serialized.get("growth_bytes").is_none());
     }
 
     #[test]

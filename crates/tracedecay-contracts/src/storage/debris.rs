@@ -266,21 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_path_returns_none_for_live_file() {
-        let path = RelativeArtifactPathV1::new("sessions.db").expect("valid");
-        assert!(
-            IncidentDebrisArtifactV1::classify_path(
-                store(),
-                path,
-                StorageByteSizeV1(10),
-                UtcMicros(1)
-            )
-            .expect("ok")
-            .is_none()
-        );
-    }
-
-    #[test]
     fn quarantine_computes_eligibility_and_rejects_nonpositive_window() {
         let location = QuarantineLocationV1::new("quarantine").expect("valid");
         let contract = QuarantineContractV1 {

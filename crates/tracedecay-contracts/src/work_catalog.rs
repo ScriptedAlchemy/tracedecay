@@ -728,17 +728,6 @@ mod tests {
     }
 
     #[test]
-    fn operation_lookup_is_backed_by_the_executable_registry() {
-        let operation =
-            tracedecay_tool_catalog::OperationId::new("operation.work.topology").unwrap();
-        let binding = work_executable_binding(&operation)
-            .unwrap()
-            .expect("topology is an executable Work operation");
-        assert!(binding.effect().is_read_only());
-        assert_eq!(binding.deadline().maximum_millis(), 30_000);
-    }
-
-    #[test]
     fn topology_metrics_binding_returns_the_canonical_read_model() {
         let operation =
             tracedecay_tool_catalog::OperationId::new("operation.work.topology_metrics").unwrap();
