@@ -304,7 +304,6 @@ impl std::fmt::Debug for McpProjectAuthoritiesV1 {
 #[derive(Clone, Copy, Default)]
 pub struct McpRequestAuthoritiesV1<'a> {
     pub controls: RequestControls<'a>,
-    pub graph: Option<&'a VerifiedGraphQuery>,
     pub code_index: Option<AdmittedCodeIndex<'a>>,
     pub freshness: Option<&'a CodeIndexFreshnessPayloadV1>,
     pub generation_census: Option<&'a GenerationCensusSnapshot>,
@@ -436,13 +435,6 @@ impl<'a> McpToolContext<'a> {
         if request.code_index.is_some() {
             require_scope(admitted_scope, "code index")?;
         }
-        if let Some(graph) = request.graph {
-            verify_scope_isolation(admitted_scope, graph.request_context().scope()).map_err(
-                |error| McpToolBindingError::ScopeInvalid {
-                    detail: error.to_string(),
-                },
-            )?;
-        }
 
         Ok(Self {
             project,
@@ -537,11 +529,6 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn admitted_graph(&self) -> Option<&'a VerifiedGraphQuery> {
-        self.request.graph
-    }
-
-    #[must_use]
     pub fn branch_diagnostics(
         &self,
     ) -> Option<tracedecay_application::tracedecay::BranchDiagnostics> {
@@ -625,7 +612,6 @@ impl std::fmt::Debug for McpToolContext<'_> {
         formatter
             .debug_struct("McpToolContext")
             .field("has_project_bundle", &self.project.is_some())
-            .field("has_request_graph", &self.request.graph.is_some())
             .field("has_freshness", &self.request.freshness.is_some())
             .field(
                 "has_generation_census",
