@@ -1,4 +1,4 @@
-//! Host-side ast-grep binary resolution for catalog gating.
+//! Shared ast-grep executable authority for capability probes and source edits.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,5 +70,31 @@ fn is_executable_file(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ast_grep_command;
+
+    #[test]
+    fn explicit_binary_override_is_shared_by_probes_and_edits() {
+        const CHILD: &str = "TRACEDECAY_TEST_AST_GREP_RESOLVER";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(ast_grep_command().get_program(), "explicit-ast-grep");
+            return;
+        }
+        // A child isolates environment authority from concurrent tests.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ast_grep::tests::explicit_binary_override_is_shared_by_probes_and_edits",
+            ])
+            .env(CHILD, "1")
+            .env("TRACEDECAY_AST_GREP_BIN", "explicit-ast-grep")
+            .env_remove("PATH")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

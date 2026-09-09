@@ -7105,6 +7105,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "gix",
  "hotpath",
  "same-file",
  "serde",
@@ -7112,6 +7113,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-contracts",
  "tracedecay-domain",
@@ -7121,6 +7123,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-tool-catalog",
  "tracing",
+ "tree-sitter",
 ]
 
 [[package]]

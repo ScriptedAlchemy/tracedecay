@@ -44,7 +44,6 @@ pub mod context_headings;
 pub mod handlers;
 pub mod hook_events;
 pub mod hook_runtime;
-pub mod host_cli;
 pub mod jsonrpc;
 pub mod lifecycle;
 pub mod path_tree;

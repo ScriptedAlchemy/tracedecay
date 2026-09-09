@@ -2,8 +2,7 @@
 //!
 //! This module root holds the [`TraceDecay`] struct and its shared result
 //! types; the behavior is implemented in focused submodules:
-//! [`lifecycle`] (init/open/branch provenance), [`edits`] (anchored source
-//! edits), [`queries`]
+//! [`lifecycle`] (init/open/branch provenance), [`queries`]
 //! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
 //! (session memory), and source-edit orchestration.
 use std::path::PathBuf;
@@ -20,10 +19,8 @@ mod automation_context;
 #[cfg(test)]
 mod concrete_runtime_tests;
 mod diagnostics;
-mod edits;
 pub(crate) mod facts;
 mod lifecycle;
-mod move_symbol;
 pub(crate) mod queries;
 mod source_edit_runtime;
 

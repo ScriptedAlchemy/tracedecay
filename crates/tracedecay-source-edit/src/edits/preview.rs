@@ -9,7 +9,7 @@
 /// leading lines belong to the header vs. the first item) and its `//!` skip
 /// loop (never let a moved span start on an inner module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::tracedecay) enum LeadingKind {
+pub(crate) enum LeadingKind {
     /// Empty (after trimming leading whitespace).
     Blank,
     /// Inner doc comment (`//!`) — documents the *enclosing* item/module.
@@ -30,7 +30,7 @@ pub(in crate::tracedecay) enum LeadingKind {
 
 /// Classifies `line` (leading-whitespace-insensitive) into the kind of
 /// leading-region content it looks like.
-pub(in crate::tracedecay) fn classify_leading_line(line: &str) -> LeadingKind {
+pub(crate) fn classify_leading_line(line: &str) -> LeadingKind {
     let trimmed = line.trim_start();
     if trimmed.is_empty() {
         LeadingKind::Blank
@@ -56,17 +56,17 @@ pub(in crate::tracedecay) fn classify_leading_line(line: &str) -> LeadingKind {
 
 /// Unchanged context lines shown on each side of the changed region in a
 /// dry-run preview diff.
-pub(in crate::tracedecay) const PREVIEW_DIFF_CONTEXT: usize = 3;
+pub(crate) const PREVIEW_DIFF_CONTEXT: usize = 3;
 
 /// Hard cap on the number of lines emitted in a dry-run preview diff. Keeps the
 /// preview bounded even when an edit rewrites a large span; the remainder is
 /// noted as truncated.
-pub(in crate::tracedecay) const MAX_PREVIEW_DIFF_LINES: usize = 200;
+pub(crate) const MAX_PREVIEW_DIFF_LINES: usize = 200;
 
 /// Success-path message wrapper: on a real edit returns `base` verbatim; on a
 /// dry run wraps it to make clear that nothing was written and only a preview
 /// was produced.
-pub(in crate::tracedecay) fn edit_success_message(dry_run: bool, base: &str) -> String {
+pub(crate) fn edit_success_message(dry_run: bool, base: &str) -> String {
     if dry_run {
         format!("dry run — nothing written; preview only ({base})")
     } else {
@@ -81,7 +81,7 @@ pub(in crate::tracedecay) fn edit_success_message(dry_run: bool, base: &str) -> 
 /// `max_lines` (excess is noted as truncated). This is a cheap single-hunk
 /// preview for a localized edit, not a minimal multi-hunk LCS diff; a widely
 /// scattered set of changes collapses into one hunk spanning them.
-pub(in crate::tracedecay) fn bounded_region_diff(
+pub(crate) fn bounded_region_diff(
     original: &str,
     modified: &str,
     context: usize,
