@@ -326,8 +326,9 @@ pub use source_edit::{
     RenameResult, RenameSiteDispositionV1, RenameSiteKindV1, RenameSiteV1, RenameSymbolBindingV1,
     RenameSymbolSurfaceRequestV1, SourceEditAuthorizationAdmissionV1,
     SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditDiagnosticV1,
-    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
-    SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
+    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditInvocationV1, SourceEditKind,
+    SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
+    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditRollbackInvocationV1,
     SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
