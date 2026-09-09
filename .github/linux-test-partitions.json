@@ -37,12 +37,7 @@
         "test:search_quality_suite",
         "test:cursor_observation_identity_fallback",
         "bins",
-        "test:build_version_test",
-        "test:cli_boundary",
         "test:core_cli_suite",
-        "test:dashboard_bundle_test",
-        "test:host_cli_fixture",
-        "test:source_provenance_test",
         "test:work_route_exposure_conformance"
       ],
       "executables": ["example:tracedecay-host-cli-fixture"],
@@ -160,8 +155,7 @@
   "not_run": {
     "tracedecay::mcp_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
     "tracedecay::transport_acceptance_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
-    "tracedecay-cli::host_lifecycle_cli_acceptance": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
-    "tracedecay-cli::opencode_one_analyzer_journey": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay-cli::host_journeys_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
     "tracedecay-cli::work_loop_journey": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
     "tracedecay-global-db::schema_convergence_hotpath": "requires hotpath-alloc, which no test lane enables; the hotpath workflows own it"
   }
