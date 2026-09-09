@@ -24,6 +24,8 @@ use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 #[cfg(any(test, feature = "test-transport"))]
 use super::*;
+#[cfg(any(test, feature = "test-transport"))]
+use tracedecay_application::pr_tracking::try_acquire_manual_branch_lifecycle;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
 #[cfg(any(test, feature = "test-transport"))]
@@ -923,17 +925,15 @@ impl ProductionProjectCompositionHarnessV1 {
         let branch = branch.to_owned();
         administration
             .run_manual_branch_publication(|cancellation| async move {
-                let _lifecycle = super::pr_autotrack::try_acquire_manual_branch_lifecycle(
-                    &graph.store_layout().data_root,
-                    &branch,
-                )
-                .map_err(|error| {
-                    TraceDecayError::project_route(
-                        error.reason_code(),
-                        error.retryable(),
-                        error.detail(),
-                    )
-                })?;
+                let _lifecycle =
+                    try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, &branch)
+                        .map_err(|error| {
+                        TraceDecayError::project_route(
+                            error.reason_code(),
+                            error.retryable(),
+                            error.detail(),
+                        )
+                    })?;
                 super::branch_add::branch_publication_context(&graph)?
                     .track_exact_worktree_branch(
                         &schedulers,
@@ -1524,10 +1524,8 @@ mod code_index_activation_test {
         let owner_cancellation = cancellation.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let owner = tokio::spawn(async move {
-            let _lease = crate::daemon::pr_autotrack::try_acquire_manual_branch_lifecycle(
-                &data_root, "main",
-            )
-            .expect("lifecycle owner");
+            let _lease =
+                try_acquire_manual_branch_lifecycle(&data_root, "main").expect("lifecycle owner");
             ready_tx.send(()).expect("publish owner readiness");
             owner_cancellation.cancelled().await;
         });
