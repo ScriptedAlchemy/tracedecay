@@ -511,7 +511,8 @@ pub struct FusionComparatorRecordV1 {
     pub anchor_id: RetrievalAnchorId,
     /// Identity for matching survivors after deduplication, not a sorting key.
     pub logical_evidence_id: LogicalEvidenceId,
-    /// Retriever/domain ascending, raw score descending; zero-weight lanes excluded.
+    /// Lexicographic retriever/domain ascending, then raw score descending.
+    /// Different lane/domain mixes use tag order; zero-weight lanes are excluded.
     pub domain_scores: Vec<(RetrieverKind, ScoreDomainId, FixedPointScore)>,
     pub retriever_evidence_anchors: Vec<RetrievalAnchorId>,
     pub source_occurrence_ids: Vec<SourceOccurrenceId>,
