@@ -99,6 +99,8 @@ pub struct SemanticEvaluationProjectionBatchCacheMemoryV1 {
     pub in_flight_key_bytes: u64,
     /// Exact composed-input keys currently probing this store.
     pub active_lookup_key_bytes: u64,
+    /// Vector copies reserved before allocation and held through install or refusal.
+    pub pending_install_vector_bytes: u64,
     /// Warm-hit output copies and the shared batch, conservatively charged until
     /// their request ends (including a shared batch outliving retirement).
     pub active_hit_vector_bytes: u64,
@@ -133,6 +135,7 @@ struct SemanticEvaluationProjectionBatchCacheStateV1 {
     retained_bytes: u64,
     in_flight_key_bytes: u64,
     active_lookup_key_bytes: u64,
+    pending_install_vector_bytes: u64,
     active_hit_vector_bytes: u64,
     peak_accounted_bytes: u64,
     next_request_id: u64,
@@ -146,6 +149,7 @@ impl SemanticEvaluationProjectionBatchCacheStateV1 {
         self.retained_bytes
             .saturating_add(self.in_flight_key_bytes)
             .saturating_add(self.active_lookup_key_bytes)
+            .saturating_add(self.pending_install_vector_bytes)
             .saturating_add(self.active_hit_vector_bytes)
     }
 
@@ -162,6 +166,7 @@ impl SemanticEvaluationProjectionBatchCacheStateV1 {
             retained_batch_bytes: self.retained_bytes,
             in_flight_key_bytes: self.in_flight_key_bytes,
             active_lookup_key_bytes: self.active_lookup_key_bytes,
+            pending_install_vector_bytes: self.pending_install_vector_bytes,
             active_hit_vector_bytes: self.active_hit_vector_bytes,
             total_accounted_bytes: self.total_accounted_bytes(),
             peak_accounted_bytes: self.peak_accounted_bytes,
@@ -208,15 +213,17 @@ impl Drop for SemanticEvaluationProjectionBatchBuildGuardV1<'_> {
     }
 }
 
-struct SemanticEvaluationProjectionBatchLookupGuardV1<'cache> {
+struct SemanticEvaluationProjectionBatchStagingGuardV1<'cache> {
     store: &'cache SemanticEvaluationProjectionBatchStoreV1,
     request_id: u64,
     accounted_bytes: u64,
+    install_bytes: u64,
 }
 
-impl Drop for SemanticEvaluationProjectionBatchLookupGuardV1<'_> {
+impl Drop for SemanticEvaluationProjectionBatchStagingGuardV1<'_> {
     fn drop(&mut self) {
-        self.store.end_lookup(self.request_id, self.accounted_bytes);
+        self.store
+            .end_staging(self.request_id, self.accounted_bytes, self.install_bytes);
     }
 }
 
@@ -341,11 +348,12 @@ impl SemanticEvaluationProjectionBatchStoreV1 {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn begin_lookup(
+    fn begin_staging(
         &self,
         request_id: u64,
         accounted_bytes: u64,
-    ) -> Result<SemanticEvaluationProjectionBatchLookupGuardV1<'_>, String> {
+        install_bytes: u64,
+    ) -> Result<SemanticEvaluationProjectionBatchStagingGuardV1<'_>, String> {
         let mut state = self.lock_state();
         if state.retired || !state.active_requests.contains_key(&request_id) {
             return Err("semantic evaluation projection batch cache is retired".to_owned());
@@ -357,16 +365,23 @@ impl SemanticEvaluationProjectionBatchStoreV1 {
         state.active_lookup_key_bytes = state
             .active_lookup_key_bytes
             .saturating_add(accounted_bytes);
+        state.pending_install_vector_bytes = state
+            .pending_install_vector_bytes
+            .saturating_add(install_bytes);
         state.observe_peak(0);
-        Ok(SemanticEvaluationProjectionBatchLookupGuardV1 {
+        Ok(SemanticEvaluationProjectionBatchStagingGuardV1 {
             store: self,
             request_id,
             accounted_bytes,
+            install_bytes,
         })
     }
 
-    fn end_lookup(&self, request_id: u64, accounted_bytes: u64) {
+    fn end_staging(&self, request_id: u64, accounted_bytes: u64, install_bytes: u64) {
         let mut state = self.lock_state();
+        state.pending_install_vector_bytes = state
+            .pending_install_vector_bytes
+            .saturating_sub(install_bytes);
         if let Some(request) = state.active_requests.get_mut(&request_id) {
             request.lookup_key_bytes = request.lookup_key_bytes.saturating_sub(accounted_bytes);
         }
@@ -483,6 +498,14 @@ impl SemanticEvaluationProjectionBatchStoreV1 {
         // The encoder owns its output; retain one immutable copy without holding
         // the cache lock. Retirement is rechecked before this copy can install.
         let vector_bytes = cache_vector_bytes(vectors);
+        let Ok(_install_memory) = self.begin_staging(
+            request_id,
+            0,
+            vector_bytes.saturating_add(EVALUATION_BATCH_CACHE_KEY_OWNER_OVERHEAD_BYTES),
+        ) else {
+            return;
+        };
+        // Declared after the reservation so every refused copy drops before its charge.
         let vectors = Arc::new(vectors.to_vec());
         let mut state = self.lock_state();
         if state.retired || !state.active_requests.contains_key(&request_id) {
@@ -793,7 +816,7 @@ where
         let lookup_key_bytes = distinct.keys().fold(0_u64, |total, key| {
             total.saturating_add(cache_key_bytes(key))
         });
-        let _lookup_memory = store.begin_lookup(request_id, lookup_key_bytes)?;
+        let _lookup_memory = store.begin_staging(request_id, lookup_key_bytes, 0)?;
         let mut unique_misses = Vec::<(
             SemanticEvaluationProjectionBatchBuildGuardV1<'_>,
             usize,
@@ -2676,6 +2699,61 @@ mod tests {
             "retirement cannot invalidate held values"
         );
         assert!(store.claim(&key, request.request_id, 1, &|| None).is_err());
+    }
+
+    #[test]
+    fn refused_install_records_copy_peak_and_concurrent_staging_survives_retirement() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let store = SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(1, 1_000_000);
+        let request = store.request_cache();
+        let mut encoder = request_encoder(&request);
+        let retained = chunk('a', "pinned existing entry");
+        encoder.encode_batch(&embedding_key, &[&retained]).unwrap();
+        let incoming = chunk('b', "refused while existing entry is pinned");
+        let key = encoder.exact_key(&embedding_key, &[&incoming]).unwrap();
+        let SemanticEvaluationProjectionBatchClaimV1::Build(guard) =
+            store.claim(&key, request.request_id, 1, &|| None).unwrap()
+        else {
+            panic!("distinct input must claim a build");
+        };
+        let before = store.memory_usage();
+        let vectors = vec![vec![1.0; 32_768]];
+        let vector_bytes = super::cache_vector_bytes(&vectors);
+        store.install(guard, &vectors, request.request_id);
+        let refused = store.memory_usage();
+        assert_eq!(store.entry_count(), 1);
+        assert_eq!(refused.pending_install_vector_bytes, 0);
+        assert!(refused.peak_accounted_bytes >= before.total_accounted_bytes + vector_bytes);
+
+        let barrier = std::sync::Barrier::new(3);
+        let (staged, retired) = std::thread::scope(|threads| {
+            for _ in 0..2 {
+                let store = &store;
+                let barrier = &barrier;
+                let vectors = &vectors;
+                let request_id = request.request_id;
+                threads.spawn(move || {
+                    let reservation = store.begin_staging(request_id, 0, vector_bytes).unwrap();
+                    let copy = Arc::new(vectors.clone());
+                    barrier.wait();
+                    barrier.wait();
+                    drop(copy);
+                    drop(reservation);
+                });
+            }
+            barrier.wait();
+            let staged = store.memory_usage();
+            store.release();
+            let retired = store.memory_usage();
+            barrier.wait();
+            (staged, retired)
+        });
+        assert_eq!(staged.pending_install_vector_bytes, 2 * vector_bytes);
+        assert!(staged.total_accounted_bytes >= 2 * vector_bytes);
+        assert_eq!(retired.pending_install_vector_bytes, 2 * vector_bytes);
+        assert_eq!(store.memory_usage().pending_install_vector_bytes, 0);
+        assert_eq!(store.entry_count(), 0);
     }
 
     #[test]
