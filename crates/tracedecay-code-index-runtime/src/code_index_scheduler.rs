@@ -3416,6 +3416,35 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     worktree_id: WorktreeId,
 }
 
+fn text_artifact_resident_memory_charges(
+    requested: NonZeroU64,
+    unmodeled_live_bytes: u64,
+    watermark_headroom: u64,
+) -> Result<(NonZeroU64, NonZeroU64), RetrievalPortError> {
+    let retained = requested
+        .get()
+        .checked_add(unmodeled_live_bytes)
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact resident-memory accounting overflowed".to_owned(),
+            )
+        })?;
+    // Headroom makes the reserve call enforce the lower admission watermark,
+    // but it is not memory owned by this artifact. Retaining it in every
+    // overlapping build charges the same process-wide margin repeatedly.
+    let accounted = retained
+        .get()
+        .checked_add(watermark_headroom)
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact resident-memory accounting overflowed".to_owned(),
+            )
+        })?;
+    Ok((accounted, retained))
+}
+
 impl DaemonCodeTextArtifactStoreV1 {
     fn bind(
         store_root: &Path,
@@ -3439,9 +3468,9 @@ impl DaemonCodeTextArtifactStoreV1 {
 
     /// Reserve one artifact memory ceiling plus the freshly observed process
     /// live set not already represented by reservations for this admission.
-    /// This closes the gap between the modeled ledger and decoded generations
-    /// before the artifact allocates; the retained guard is shrunk back to the
-    /// component's own ceiling once admission-time growth has completed.
+    /// The atomic reserve also includes the process-wide high-watermark
+    /// headroom, then releases that check-only margin before returning while
+    /// the component ceiling and unmodeled live baseline remain charged.
     fn reserve_resident_memory(
         &self,
         generation_id: &CodeGenerationId,
@@ -3473,16 +3502,11 @@ impl DaemonCodeTextArtifactStoreV1 {
             .high_watermark_bytes()
             .min(snapshot.limit_bytes);
         let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
-        let accounted = requested
-            .get()
-            .checked_add(unmodeled_live_bytes)
-            .and_then(|bytes| bytes.checked_add(watermark_headroom))
-            .and_then(NonZeroU64::new)
-            .ok_or_else(|| {
-                RetrievalPortError::Contract(
-                    "text-artifact resident-memory accounting overflowed".to_owned(),
-                )
-            })?;
+        let (accounted, retained) = text_artifact_resident_memory_charges(
+            requested,
+            unmodeled_live_bytes,
+            watermark_headroom,
+        )?;
         hotpath::gauge!("query.artifact.admission.observed_resident_bytes")
             .set(observed_bytes as f64);
         hotpath::gauge!("query.artifact.admission.unmodeled_live_bytes")
@@ -3490,7 +3514,9 @@ impl DaemonCodeTextArtifactStoreV1 {
         hotpath::gauge!("query.artifact.admission.requested_growth_bytes")
             .set(requested.get() as f64);
         hotpath::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
-        self.resident_memory
+        hotpath::gauge!("query.artifact.admission.retained_bytes").set(retained.get() as f64);
+        let mut reservation = self
+            .resident_memory
             .reserve(
                 ResidentMemoryKeyV1 {
                     project_id: self.project_id.clone(),
@@ -3500,7 +3526,13 @@ impl DaemonCodeTextArtifactStoreV1 {
                 },
                 accounted,
             )
-            .map_err(|_| RetrievalPortError::BudgetExceeded)
+            .map_err(|_| RetrievalPortError::BudgetExceeded)?;
+        reservation.shrink_to(retained.get()).map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact resident-memory headroom release failed: {error}"
+            ))
+        })?;
+        Ok(reservation)
     }
 
     /// The durably attached artifact descriptor for one retained generation,
