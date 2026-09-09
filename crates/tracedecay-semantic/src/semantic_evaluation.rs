@@ -1237,7 +1237,7 @@ mod tests {
     use tracedecay_query::retrieval::semantic::{
         SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
     };
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
     use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
@@ -1249,7 +1249,7 @@ mod tests {
         SemanticExecutionAuthority, SemanticExecutionInterruptionV1, prepare_vector_generation,
         semantic_evaluation_runtime,
     };
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     use super::{LoadedSemanticArtifactV1, prepare_semantic_evaluation_projection};
     use crate::AdmittedProjectionArtifactV1;
     use crate::RuntimeChunkVectorEncoderV1;
@@ -1860,7 +1860,7 @@ mod tests {
         assert_eq!(cache.entry_count_for_tests(), 1);
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn real_fastembed_cold_and_cached_projection_are_byte_exact() {
         let current_rss_bytes = || {

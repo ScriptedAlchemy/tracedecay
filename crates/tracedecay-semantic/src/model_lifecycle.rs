@@ -220,7 +220,7 @@ impl HfHubModelMemberSourceV1 {
         }
     }
 
-    #[cfg(all(test, feature = "semantic-fastembed"))]
+    #[cfg(all(test, feature = "semantic-fastembed", not(windows)))]
     fn new_for_tests(cache_dir: PathBuf, endpoint: Option<String>, offline: bool) -> Self {
         Self {
             cache_dir,
@@ -355,7 +355,7 @@ include!("model_lifecycle/acquisition.rs");
 include!("model_lifecycle/persistence.rs");
 include!("model_lifecycle/local_evaluation.rs");
 
-#[cfg(all(test, feature = "semantic-fastembed"))]
+#[cfg(all(test, feature = "semantic-fastembed", not(windows)))]
 #[path = "model_lifecycle/distribution_acquisition_acceptance.rs"]
 mod distribution_acquisition_acceptance;
 

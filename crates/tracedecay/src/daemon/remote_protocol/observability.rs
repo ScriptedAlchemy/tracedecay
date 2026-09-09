@@ -21,10 +21,11 @@ use tracedecay_domain::{
     RemoteAuthorityUnavailableReasonV1, RemoteCoverageObservedV1, RemoteOperationV1, UtcMicros,
 };
 
-use crate::daemon::remote_query::DaemonRemoteExactObservationQueryPortV1;
 use tracedecay_daemon_service::DaemonInvocationService;
-use tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1;
-use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
+use tracedecay_store_runtime::{
+    DaemonRemoteCredentialAuthorityV1, DaemonRemoteExactObservationQueryPortV1,
+    DaemonRemoteReplayTransactionAuthorityV1,
+};
 
 pub(super) struct DaemonRemoteQueryProtocolPortV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,

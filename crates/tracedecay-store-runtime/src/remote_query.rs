@@ -1,4 +1,4 @@
-//! Exact remote reads over the daemon's already-published project runtime.
+//! Exact remote reads over an already-published project runtime.
 //!
 //! The adapter receives neither a locator nor a database handle. It resolves
 //! the same registered runtime used by replay and recovery, verifies the
@@ -39,17 +39,17 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::SortContractId;
 
-use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
+use crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 
 /// Query adapter over one authenticated `RemoteNode` store and the canonical
 /// project runtime registry shared with replay/recovery.
-pub(crate) struct DaemonRemoteExactObservationQueryPortV1 {
+pub struct DaemonRemoteExactObservationQueryPortV1 {
     authority: Arc<RemoteSqliteStorageV1>,
     targets: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
 }
 
 impl DaemonRemoteExactObservationQueryPortV1 {
-    pub(crate) fn new(
+    pub fn new(
         authority: Arc<RemoteSqliteStorageV1>,
         targets: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
     ) -> Self {
@@ -412,5 +412,46 @@ impl RuntimeRequestProbeV1 for QueryProbe {
                 .commit_started
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_coverage_remains_a_typed_deadline_error() {
+        assert_eq!(
+            current_frontier(&RuntimeReadCoverageV1::Unavailable {
+                coverage: None,
+                reason: UnavailableReasonV1::DeadlineExceeded,
+            }),
+            Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed)
+        );
+    }
+
+    #[test]
+    fn elapsed_query_probe_refuses_commit() {
+        let probe = QueryProbe {
+            cancellation: RuntimeCancellationIdentityV1 {
+                cancellation_id: RuntimeCancellationIdV1::new("cancellation.remote-query.test")
+                    .expect("cancellation identity"),
+                generation: 1,
+            },
+            deadline: RuntimeDeadlineV1 {
+                deadline_id: RuntimeDeadlineIdV1::new("deadline.remote-query.test")
+                    .expect("deadline identity"),
+            },
+            started: Instant::now(),
+            maximum_elapsed: Duration::ZERO,
+            decision: Mutex::new(None),
+            commit_started: AtomicBool::new(false),
+        };
+
+        assert_eq!(
+            probe.interruption(),
+            Some(RuntimeInterruptionV1::DeadlineExceeded)
+        );
+        assert!(!probe.try_begin_commit());
     }
 }

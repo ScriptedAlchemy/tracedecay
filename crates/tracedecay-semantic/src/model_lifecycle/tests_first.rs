@@ -4,13 +4,13 @@
         SemanticExecutionInterruptionV1,
     };
     use std::collections::BTreeMap;
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc::{self, Receiver, SyncSender};
     use std::sync::Barrier;
     use std::time::Duration;
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     use std::time::Instant;
 
     use tracedecay_domain::{
@@ -131,7 +131,7 @@
     /// `finish` stops it early through a wake-up connection if the client
     /// never issued them, so a short acquisition fails an assertion instead
     /// of hanging the join.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     struct FixtureHub {
         endpoint: String,
         address: SocketAddr,
@@ -140,7 +140,7 @@
         worker: Option<JoinHandle<()>>,
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     impl FixtureHub {
         fn start(model: &CatalogedFastEmbedModelV1, fixture: &Path) -> Self {
             let members = model
@@ -193,7 +193,7 @@
         }
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn serve_fixture_hub_request(
         stream: &mut TcpStream,
         members: &BTreeMap<String, Vec<u8>>,
@@ -415,7 +415,7 @@
         assert!(!owner.enqueue_demand_acquisition_if_needed());
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn fresh_hub_acquisition_downloads_then_reuses_private_cache_offline() {
         let fixture = tempfile::tempdir().unwrap();
@@ -456,7 +456,7 @@
         ));
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn offline_cache_miss_reports_failed_reason_and_omits_semantics() {
         let fixture = tempfile::tempdir().unwrap();

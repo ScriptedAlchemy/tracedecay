@@ -45,7 +45,9 @@ pub(crate) use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::transport::ReplayTransport;
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{
+    BrokerStreamTransport, ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport,
+};
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
@@ -194,8 +196,6 @@ use bootstrap_route::{
 };
 mod branch_add;
 mod branch_admin;
-mod broker_stream_transport;
-use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
 use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
 use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
@@ -282,7 +282,6 @@ mod http_application;
 pub use http_application::live_remote_operational_status;
 mod http_application_router;
 pub(crate) mod remote_protocol;
-mod remote_query;
 pub(crate) mod retained_owner;
 use http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,
@@ -437,6 +436,10 @@ mod code_index_runtime_graph_activation_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod http_application_tests;
+
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used)]
+mod broker_stream_transport_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

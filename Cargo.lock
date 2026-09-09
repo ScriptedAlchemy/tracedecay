@@ -7181,6 +7181,7 @@ dependencies = [
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-tool-catalog",
  "tracing",
  "windows-sys 0.61.2",
 ]

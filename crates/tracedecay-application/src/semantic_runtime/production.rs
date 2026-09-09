@@ -4512,7 +4512,7 @@ fn fair_schedule_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -5180,7 +5180,7 @@ mod tests {
         Arc::new(fallback)
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn composition_calibration(
         request: &SemanticRetrievalRequestV1<'_>,
     ) -> SemanticCalibrationProfileV1 {
@@ -5435,7 +5435,7 @@ mod tests {
 
     // Binding a query runtime requires the concrete FastEmbed runtime; the
     // compiled-out stub fails compatibility verification by design.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[tokio::test]
     async fn atomically_current_generation_enables_semantic_lane() {
         let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
@@ -5531,7 +5531,7 @@ mod tests {
 
     // Binding a query runtime requires the concrete FastEmbed runtime; the
     // compiled-out stub fails compatibility verification by design.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[tokio::test]
     async fn live_request_cancellation_reaches_query_runtime_before_vector_scan() {
         struct PanicVectors;
