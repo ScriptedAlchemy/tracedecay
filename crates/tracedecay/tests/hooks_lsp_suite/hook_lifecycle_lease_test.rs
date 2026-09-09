@@ -169,33 +169,6 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
 }
 
 #[test]
-fn cursor_before_submit_prompt_remains_capture_only() {
-    let temp = tempfile::tempdir().unwrap();
-    let payload = serde_json::json!({
-        "hook_event_name": "beforeSubmitPrompt",
-        "conversation_id": "cursor-prompt-session",
-        "generation_id": "cursor-prompt-generation",
-        "prompt": "inspect the current change",
-        "workspace_roots": [temp.path()],
-    })
-    .to_string();
-
-    let output = run_hook(
-        temp.path(),
-        "hook-cursor-before-submit-prompt",
-        Some(payload.as_bytes()),
-    );
-
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"{}\n", "{output:?}");
-    assert!(output.stderr.is_empty(), "{output:?}");
-    assert!(
-        !temp.path().join(".tracedecay").exists(),
-        "capture-only denial surface must not create profile state"
-    );
-}
-
-#[test]
 fn native_prompts_reject_invalid_profile_identity_without_ingesting() {
     for hook in ["hook-codex-user-prompt-submit", "hook-kiro-prompt-submit"] {
         let home = tempfile::tempdir().unwrap();

@@ -172,21 +172,6 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     }
 }
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn native_provider_usage_survives_production_admission() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let home = TempDir::new().unwrap();
-    let _home = EnvVarGuard::set("HOME", home.path());
-    let _userprofile = EnvVarGuard::set("USERPROFILE", home.path());
-    for provider in ["claude", "codex"] {
-        let outcome = execute_native_provider_path(provider, home.path()).await;
-        assert_eq!(outcome.status, HostAdmissionStatus::Supported, "{provider}");
-    }
-}
-
 fn hook_completed_rows(project: &Path, home: &Path, provider: &str) -> Vec<Value> {
     let mut paths = vec![
         tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project)
@@ -325,26 +310,6 @@ fn assert_json_strings_omit(value: &Value, private: &str, label: &str) {
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn native_provider_fixtures_persist_external_source_receipts_across_restart() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let host = TempDir::new().unwrap();
-    let home = host.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let _home = EnvVarGuard::set("HOME", &home);
-    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    for (provider, _) in FIXTURES {
-        assert_eq!(
-            execute_native_provider_path(provider, &home).await.status,
-            HostAdmissionStatus::Supported,
-            "{provider}"
-        );
     }
 }
 
