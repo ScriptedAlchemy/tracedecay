@@ -1,20 +1,109 @@
-//! Project-open Work grant identity and catalog coverage.
+//! Project-open source-access and Work-grant authorization.
 
-use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
+use crate::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_configuration::config::registry::ConfigurationRegistry;
+use tracedecay_configuration::config::resolver::{ConfigurationLayerV1, resolve_configuration};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::{
-    AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+    AuthorityRef, ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::{
     ActorId, LocatorDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::CapabilityId;
 
-use super::{production_owner_capabilities, project_open_work_grant};
+use super::{
+    project_open_source_access_at, project_open_work_capabilities, project_open_work_grant,
+};
+
+#[test]
+fn project_source_access_uses_the_configured_binding_and_refuses_foreign_configuration() {
+    let root = tempfile::tempdir().expect("project root");
+    let project_id = ProjectId::new("project.source-access").expect("project id");
+    let scope = ResolvedScope::new(
+        project_id.clone(),
+        RepositoryId::new("repository.source-access").expect("repository id"),
+        WorktreeId::new("worktree.source-access").expect("worktree id"),
+        None,
+    )
+    .expect("scope");
+    let revision =
+        ConfigurationRevisionId::new("revision.source-access.1").expect("configuration revision");
+    let binding =
+        tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
+            &project_id,
+            root.path(),
+        )
+        .expect("daemon source binding");
+    let source_bindings_key =
+        SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).expect("source bindings key");
+    let snapshot = resolve_configuration(
+        &ConfigurationRegistry::core().expect("configuration registry"),
+        &[ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: std::collections::BTreeMap::from([(
+                source_bindings_key,
+                ConfigurationValueV1::SourceBindings(vec![binding.clone()]),
+            )]),
+        }],
+    )
+    .expect("configuration resolution")
+    .snapshot;
+    let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            project_id: project_id.clone(),
+            project_root: root.path().to_path_buf(),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("pinned configuration");
+    let requester = ActorId::new("actor.source-access").expect("requester");
+    let capabilities = project_open_work_capabilities().expect("capabilities");
+    let access = project_open_source_access_at(
+        &scope,
+        root.path(),
+        &configuration,
+        requester.clone(),
+        capabilities.clone(),
+        UtcMicros(10),
+        UtcMicros(100),
+    )
+    .expect("source access");
+
+    assert_eq!(access.binding, binding);
+    assert_eq!(access.requester, requester);
+    assert_eq!(access.effective_capabilities, capabilities);
+
+    let foreign_scope = ResolvedScope::new(
+        ProjectId::new("project.foreign").expect("foreign project"),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        scope.reference.clone(),
+    )
+    .expect("foreign scope");
+    assert!(
+        project_open_source_access_at(
+            &foreign_scope,
+            root.path(),
+            &configuration,
+            access.requester,
+            access.effective_capabilities,
+            UtcMicros(10),
+            UtcMicros(100),
+        )
+        .is_err(),
+        "foreign configuration identity must fail closed"
+    );
+}
 
 #[test]
 fn production_project_owner_grants_every_work_operation() {
-    let capabilities = production_owner_capabilities().expect("production capabilities");
+    let capabilities = project_open_work_capabilities().expect("production capabilities");
 
     for (_, capability, _) in tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .into_iter()
@@ -87,7 +176,7 @@ fn access_snapshot() -> ProjectSourceAccessSnapshot {
             .expect("configuration digest"),
         configuration_provenance_digest: canonical_sha256(&"work-grant-provenance-1")
             .expect("configuration provenance"),
-        effective_capabilities: production_owner_capabilities().expect("production capabilities"),
+        effective_capabilities: project_open_work_capabilities().expect("production capabilities"),
         grant_expires_at: UtcMicros(100),
     }
 }

@@ -22,7 +22,7 @@ use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::project_code_graph_projection_read_port;
-use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use crate::code_index_scheduler::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
 
 const PROJECT_ID: &str = "project.project-open-code-graph-scope";
 
@@ -338,7 +338,7 @@ async fn wait_for_initial_generation(registry: &CodeIndexSchedulerRegistryV1, pr
 async fn wait_for_ready_root_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
-) -> tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1 {
+) -> LatestCompleteCodeIndexV1 {
     let latest = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(latest) = registry.latest_complete_fresh(project_root).await {
