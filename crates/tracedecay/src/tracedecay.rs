@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use crate::config::TraceDecayConfig;
+use tracedecay_configuration::TraceDecayConfig;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::SourceReadContext;

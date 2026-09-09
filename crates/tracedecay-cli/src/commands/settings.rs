@@ -328,9 +328,10 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
 
 #[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
 pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay_domain::errors::Result<()> {
-    let resolved =
-        super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(None))
-            .await?;
+    let resolved = super::scope::resolve_project_scope(
+        tracedecay_configuration::resolve_path_with_discovery(None),
+    )
+    .await?;
     let expected_revision = current_configuration_revision(&resolved.project_path).await?;
     let current = canonical_upload_enabled(&resolved.project_path).await?;
     let mutations = if current != enable {
@@ -380,7 +381,7 @@ fn handle_gitignore_inner(
     // Erase the deeply nested gitignore-settings future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let project_path = tracedecay::config::resolve_path(path);
+        let project_path = tracedecay_configuration::resolve_path(path);
         match action.as_deref() {
             Some("on") => {
                 let resolved = super::scope::resolve_project_scope(project_path).await?;

@@ -1,5 +1,10 @@
-use std::path::PathBuf;
 use std::sync::Arc;
+
+mod target;
+pub use target::{
+    MemoryTargetAccessV1, RetainedMemoryTargetAuthorityV1, RetainedMemoryTargetV1,
+    open_project_retained_memory_target,
+};
 
 use serde::Serialize;
 use tracedecay_contracts::retained_surfaces::{
@@ -25,19 +30,19 @@ use tracedecay_store::{
     ProjectMemoryFactSearchKindV1,
 };
 
-use super::map_execution_error;
-use super::memory_mapping;
-use super::memory_mutation::{
-    bounded_memory_operation, fact_write_control, validate_memory_mutation,
-};
-use super::memory_tracking::{TrackedExplicitSearch, track_explicit_search};
-use super::receipts::{
+use tracedecay_contracts::retained_receipts::{
     effective_memory_deadline, evidence_outcome, memory_expiry_partial, prepare_retained_effect,
 };
-use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
+use tracedecay_session_memory::memory_mapping;
+use tracedecay_session_memory::memory_mutation::{
+    bounded_memory_operation, fact_write_control, validate_memory_mutation,
+};
+use tracedecay_session_memory::memory_tracking::{TrackedExplicitSearch, track_explicit_search};
+use tracedecay_session_runtime::retained::map_execution_error;
+
+use crate::session_registry::{DaemonSessionRuntimeRegistryV1, open_user_memory_db};
 
 macro_rules! execute_scoped_memory {
     (
@@ -49,15 +54,11 @@ macro_rules! execute_scoped_memory {
         $executor:ident($request:expr)
     ) => {{
         match &$port.authority {
-            DirectRetainedMemoryAuthorityV1::Project { cg, project_root } => {
-                let (cg, _) = bounded_memory_operation($context, async {
-                    Ok::<_, RetainedSurfaceExecutionErrorV1>(Arc::clone(&*cg.read().await))
-                })
-                .await?;
+            DirectRetainedMemoryAuthorityV1::Project { authority } => {
                 let (target, _) = bounded_memory_operation($context, async {
-                    super::memory_target::open_project_retained_memory_target(
-                        &cg,
-                        project_root,
+                    open_project_retained_memory_target(
+                        authority,
+                        &authority.project_root,
                         &$context.request_context.scope().project_id,
                         $memory_scope,
                         $selector,
@@ -79,7 +80,7 @@ macro_rules! execute_scoped_memory {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
                 let (database, _) = bounded_memory_operation($context, async {
                     hotpath::future!(
-                        tracedecay_store_runtime::open_user_memory_db(registry),
+                        open_user_memory_db(registry),
                         label = "daemon.retained.memory.open_profile"
                     )
                     .await
@@ -101,8 +102,7 @@ macro_rules! execute_scoped_memory {
 
 enum DirectRetainedMemoryAuthorityV1<'a> {
     Project {
-        cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
-        project_root: PathBuf,
+        authority: RetainedMemoryTargetAuthorityV1,
     },
     Profile {
         registry: &'a DaemonSessionRuntimeRegistryV1,
@@ -137,25 +137,24 @@ impl Read<'_> {
         }
     }
 }
-pub(super) struct DirectRetainedMemoryPortV1<'a> {
+pub struct DirectRetainedMemoryPortV1<'a> {
     authority: DirectRetainedMemoryAuthorityV1<'a>,
     configuration_digest: ManifestDigest,
 }
 impl DirectRetainedMemoryPortV1<'static> {
-    pub(super) fn project(
-        cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
-        project_root: PathBuf,
+    pub fn project(
+        authority: RetainedMemoryTargetAuthorityV1,
         configuration_digest: ManifestDigest,
     ) -> Self {
         Self {
-            authority: DirectRetainedMemoryAuthorityV1::Project { cg, project_root },
+            authority: DirectRetainedMemoryAuthorityV1::Project { authority },
             configuration_digest,
         }
     }
 }
 
 impl<'a> DirectRetainedMemoryPortV1<'a> {
-    pub(super) fn profile(
+    pub fn profile(
         registry: &'a DaemonSessionRuntimeRegistryV1,
         configuration_digest: ManifestDigest,
     ) -> Self {
@@ -176,7 +175,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
             context,
             request.memory_scope,
             request.project_selector.as_ref(),
-            super::memory_target::MemoryTargetAccessV1::Write,
+            MemoryTargetAccessV1::Write,
             execute_add_on_db(request)
         )
     }
@@ -193,7 +192,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
             context,
             memory_scope,
             selector,
-            super::memory_target::MemoryTargetAccessV1::Read,
+            MemoryTargetAccessV1::Read,
             execute_read_on_db(request)
         )
     }
@@ -209,7 +208,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
             context,
             request.memory_scope,
             request.project_selector.as_ref(),
-            super::memory_target::MemoryTargetAccessV1::Read,
+            MemoryTargetAccessV1::Read,
             execute_status_on_db(request)
         )
     }
@@ -225,7 +224,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
             context,
             request.memory_scope,
             request.project_selector.as_ref(),
-            super::memory_target::MemoryTargetAccessV1::Write,
+            MemoryTargetAccessV1::Write,
             execute_update_on_db(request)
         )
     }
@@ -241,7 +240,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
             context,
             request.memory_scope,
             request.project_selector.as_ref(),
-            super::memory_target::MemoryTargetAccessV1::Write,
+            MemoryTargetAccessV1::Write,
             execute_remove_on_db(request)
         )
     }
@@ -257,7 +256,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
             context,
             request.memory_scope,
             request.project_selector.as_ref(),
-            super::memory_target::MemoryTargetAccessV1::Write,
+            MemoryTargetAccessV1::Write,
             execute_supersede_on_db(request)
         )
     }
@@ -273,7 +272,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
             context,
             request.memory_scope,
             request.project_selector.as_ref(),
-            super::memory_target::MemoryTargetAccessV1::Write,
+            MemoryTargetAccessV1::Write,
             execute_feedback_on_db(request)
         )
     }

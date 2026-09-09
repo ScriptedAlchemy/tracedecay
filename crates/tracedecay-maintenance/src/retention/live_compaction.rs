@@ -9,7 +9,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::Database;
 
-use super::branch_compaction::CompactionThresholdConfig;
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveStoreCompactionFailureV1 {

@@ -312,7 +312,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn external_source_receipt_for_test(
+    pub fn external_source_receipt_for_test(
         &self,
         scope: HostAdmissionScope,
         observation: &tracedecay_store::ObservationCommitReceipt,

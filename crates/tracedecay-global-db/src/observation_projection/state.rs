@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
@@ -10,7 +9,7 @@ use tracedecay_store::{
 
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
-use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, plain_host_path};
+use tracedecay_sessions::runtime::shared::durable_project_path_key;
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
@@ -716,7 +715,9 @@ pub(in super::super) async fn verify_projection_rows_from_records(
     // expansions (/var -> /private/var) and user symlink families compare equal
     // to the persisted canonical row without putting FS probing into reconcile.
     let expected = canonicalize_session_project_paths(session);
-    if !actual_session.is_some_and(|actual| session_rows_compatible(actual, &expected)) {
+    if !actual_session.is_some_and(|actual| {
+        session_rows_compatible(&canonicalize_session_project_paths(actual), &expected)
+    }) {
         return Err(ProjectionStoreError::OutputCollision {
             provider: session.provider.clone(),
             message_id: format!("session:{}", session.session_id),
@@ -1101,74 +1102,17 @@ pub(super) fn session_rows_compatible(actual: &SessionRecord, expected: &Session
     reconcile_session_rows(actual, expected).is_some()
 }
 
-/// Session project-path normalization boundary. Resolves a session row's
-/// project path to its canonical on-disk form so that symlinked family roots
-/// (e.g. `/home/zack/projects` vs `/fast/projects`) converge to a single
-/// spelling before they are persisted or compared.
-///
-/// Called from [`apply_session`](super::apply) at ingest, and from verify/rebuild
-/// on the re-derived expected row so host spellings match the persisted form.
-/// [`reconcile_session_rows`] itself stays pure string/shape logic with no
-/// filesystem access. macOS `/var` firmlink expansions are collapsed back to the
-/// public `/var/...` spelling inside [`canonical_project_path`].
+/// Normalize projection rows through the same authority as runtime session writes
+/// and project-scoped reads. Host/display spellings are not durable identity.
+/// Reconciliation remains pure over the normalized stored strings.
 pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> SessionRecord {
-    let Some(canonical) = canonical_project_path(&session.project_path) else {
-        return session.clone();
-    };
+    let canonical = durable_project_path_key(&session.project_path);
     let mut normalized = session.clone();
-    // A path-shaped key must track the canonical path so downstream pure
-    // reconciliation keeps recognizing the two spellings as one family root.
     if session.project_key == session.project_path {
         normalized.project_key.clone_from(&canonical);
     }
     normalized.project_path = canonical;
     normalized
-}
-
-thread_local! {
-    static CANONICAL_PROJECT_PATH_CACHE: RefCell<HashMap<String, Option<String>>> =
-        RefCell::new(HashMap::new());
-}
-
-/// Resolve a project-path string to its canonical on-disk form, returning
-/// `Some` only when the path exists and its canonical spelling differs. Non
-/// paths and vanished paths yield `None`, so identity is only widened by
-/// verifiable filesystem evidence.
-///
-/// Canonicalization is memoized per distinct `project_path` for the
-/// current thread so a drain or rebuild transaction does not re-walk the
-/// filesystem for the same family root on every session write.
-///
-/// On macOS, canonicalization expands firmlinks such as `/var` ->
-/// `/private/var`. Prefer the stable public `/var/...` spelling (same policy as
-/// [`tracedecay_sessions::runtime::git_correlation::normalize_worktree`]) so host-reported
-/// temp/project roots are not rewritten into a form that breaks search keys and
-/// authority verify against the original observation path. On Windows,
-/// canonicalization returns the `\\?\D:\...` verbatim form; no host reports a
-/// project root that way, so the same policy spells it plainly
-/// ([`plain_host_path`]).
-fn canonical_project_path(path: &str) -> Option<String> {
-    CANONICAL_PROJECT_PATH_CACHE.with(|cache| {
-        if let Some(cached) = cache.borrow().get(path) {
-            return cached.clone();
-        }
-        let computed = compute_canonical_project_path(path);
-        cache.borrow_mut().insert(path.to_owned(), computed.clone());
-        computed
-    })
-}
-
-fn compute_canonical_project_path(path: &str) -> Option<String> {
-    let path_ref = std::path::Path::new(path);
-    if !path_ref.exists() {
-        return None;
-    }
-    let canonical = plain_host_path(&canonicalize_existing_prefix(path_ref)?);
-    let mut canonical = canonical.to_string_lossy().into_owned();
-    if let Some(stripped) = canonical.strip_prefix("/private/var/") {
-        canonical = format!("/var/{stripped}");
-    }
-    (canonical != path).then_some(canonical)
 }
 
 /// Reconcile two stored session rows into one merged row using pure
@@ -1417,6 +1361,10 @@ pub(super) async fn protected_message_rows_compatible(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod reconcile_tests {
+    #[cfg(unix)]
+    use crate::tests::harness::RegisteredGlobalDbHarness;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::db::engine::params;
     use tracedecay_store::SessionRecord;
 
     use super::canonicalize_session_project_paths;
@@ -1484,9 +1432,66 @@ mod reconcile_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_registered_session_alias_is_reconciled_and_persisted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("project");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = tmp.path().join("project-alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let harness = RegisteredGlobalDbHarness::open("existing-session-alias").await;
+        let project_id = tracedecay_domain::ProjectId::new("project.fixture").unwrap();
+        let mut original = record(&alias.to_string_lossy());
+        original.project_key = project_id.as_str().to_owned();
+        assert!(harness.registered.upsert_session(&original).await);
+        // Model a persisted host spelling from the earlier projection writer.
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "UPDATE sessions SET project_path = ?1 WHERE provider = ?2 AND session_id = ?3",
+                params![
+                    original.project_path.as_str(),
+                    original.provider.as_str(),
+                    original.session_id.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let mut expected = original.clone();
+        expected.project_path = real.to_string_lossy().into_owned();
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        super::super::apply::apply_session(&transaction, &expected)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let persisted = harness
+            .registered
+            .get_session(&original.provider, &original.session_id)
+            .await
+            .unwrap();
+        assert_eq!(persisted.project_key, project_id.as_str());
+        assert_eq!(
+            persisted.project_path,
+            super::durable_project_path_key(&expected.project_path)
+        );
+
+        let other = tmp.path().join("other-project");
+        std::fs::create_dir_all(&other).unwrap();
+        expected.project_path = other.to_string_lossy().into_owned();
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        assert!(matches!(
+            super::super::apply::apply_session(&transaction, &expected).await,
+            Err(tracedecay_store::ProjectionStoreError::OutputCollision { .. })
+        ));
+        transaction.rollback().await.unwrap();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_temp_firmlink_spelling_is_preserved_at_ingest() {
+    fn macos_temp_firmlink_projection_matches_runtime_session_identity() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project = tmp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -1497,10 +1502,11 @@ mod reconcile_tests {
         );
         let normalized = canonicalize_session_project_paths(&record(&host));
         assert_eq!(
-            normalized.project_path, host,
-            "macOS /var firmlink expansion must not rewrite host-facing project paths"
+            normalized.project_path,
+            tracedecay_sessions::runtime::shared::durable_project_path_key(&host),
+            "projection and runtime session writes must use the same durable identity"
         );
-        assert_eq!(normalized.project_key, host);
+        assert_eq!(normalized.project_key, normalized.project_path);
     }
 
     /// The Windows analogue of the firmlink case: `canonicalize` yields

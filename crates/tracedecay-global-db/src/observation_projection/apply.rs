@@ -475,7 +475,8 @@ pub(super) async fn apply_session(
     let session = &canonicalize_session_project_paths(session);
     match read_session(conn, &session.provider, &session.session_id).await? {
         Some(actual) => {
-            let Some(merged) = reconcile_session_rows(&actual, session) else {
+            let normalized_actual = canonicalize_session_project_paths(&actual);
+            let Some(merged) = reconcile_session_rows(&normalized_actual, session) else {
                 return Err(ProjectionStoreError::OutputCollision {
                     provider: session.provider.clone(),
                     message_id: format!("session:{}", session.session_id),

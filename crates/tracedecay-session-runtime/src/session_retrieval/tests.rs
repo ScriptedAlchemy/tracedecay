@@ -1169,3 +1169,106 @@ async fn oversized_session_lookup_page_remains_a_typed_budget_refusal() {
         ))
     );
 }
+
+#[tokio::test]
+async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profile");
+    let project = temp.path().join("project");
+    let project_id = typed::<tracedecay_domain::ProjectId>("project.shared-graph");
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        &profile,
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &project,
+        &profile,
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let mut branches = tracedecay_runtime_core::branch_meta::BranchMeta::new("master");
+    branches.add_branch(
+        "refs/heads/feature",
+        tracedecay_runtime_core::config::DB_FILENAME,
+        "master",
+    );
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branches).unwrap();
+    let registry = runtime.profile_database();
+    tracedecay_global_db::register_project_store(registry, &project, &layout)
+        .await
+        .unwrap();
+    let database = runtime.project_database_arc().unwrap();
+    let shard = &database.binding().shard_id;
+    let mut roots = Vec::new();
+    for branch in ["master", "refs/heads/feature"] {
+        let serving = SessionRetrievalServingIdentityV1::resolve_project(
+            project_id.as_str(),
+            &layout.graph_db_path,
+            Some(branch),
+            &project,
+            &shard.profile_id,
+            shard,
+            registry,
+        )
+        .await
+        .expect("tracked branch must retain a mounted retrieval authority");
+        let root = DaemonSessionRetrievalRoot::project(serving, registry)
+            .await
+            .unwrap();
+        assert_eq!(
+            root.identity().git_route().unwrap().branch_id().as_str(),
+            branch
+        );
+        roots.push(root.identity().root_id().clone());
+        assert!(
+            crate::lcm_authority::mount_registered_lcm_authority(
+                database.clone(),
+                root.identity().clone(),
+                shard,
+            )
+            .is_some()
+        );
+        assert!(DaemonSessionRetrievalService::new(database.clone(), root, None).is_some());
+    }
+    assert_ne!(
+        roots[0], roots[1],
+        "shared storage must not alias branch authority"
+    );
+    for branch in [None, Some("untracked")] {
+        assert!(
+            SessionRetrievalServingIdentityV1::resolve_project(
+                project_id.as_str(),
+                &layout.graph_db_path,
+                branch,
+                &project,
+                &shard.profile_id,
+                shard,
+                registry,
+            )
+            .await
+            .is_none(),
+            "missing or unknown branch must not pick another branch"
+        );
+    }
+    let foreign = &registry.binding().shard_id;
+    assert!(
+        SessionRetrievalServingIdentityV1::resolve_project(
+            project_id.as_str(),
+            &layout.graph_db_path,
+            Some("master"),
+            &project,
+            &shard.profile_id,
+            foreign,
+            registry,
+        )
+        .await
+        .is_none(),
+        "a profile shard cannot serve project retrieval"
+    );
+}

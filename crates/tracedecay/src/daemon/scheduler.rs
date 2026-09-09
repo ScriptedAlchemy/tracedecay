@@ -5,11 +5,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
+use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
 
-use crate::daemon::automation_effect::{
-    AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
-};
 use crate::tracedecay::TraceDecay;
+use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
+    AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
+    RetainedAutomationSettlementProjection, pinned_automation_configuration_digest,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::branch_admin::MaintenanceReaperKind;
@@ -20,16 +23,12 @@ use super::{
 mod combined_effect;
 pub(crate) mod effect_admission;
 mod host_receipt_review;
-mod run_control;
-mod termination;
 pub(super) use effect_admission::run_automation_scheduler_tick;
 use effect_admission::{
     log_scheduler_admission_conflict, log_scheduler_pre_admission_problem,
     scheduler_automation_effect, synchronize_scheduler_effect_control,
 };
 use host_receipt_review::run_host_receipt_review;
-use run_control::AutomationSchedulerStop;
-pub(super) use termination::MaintenanceTaskTermination;
 
 pub(super) fn scheduler_task_log_fields(
     project_path: &Path,
@@ -748,7 +747,9 @@ impl DaemonEngine {
         let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let loop_generation = Arc::clone(&generation);
         let stop_requested = AutomationSchedulerStop::default();
-        let run_control = stop_requested.run_control(self.lifecycle.clone());
+        let lifecycle = self.lifecycle.clone();
+        let run_control =
+            stop_requested.run_control(std::sync::Arc::new(move || lifecycle.accepting()));
         let termination = Arc::new(MaintenanceTaskTermination::pending());
         let administration = self.store_administration.clone();
         let scheduler_engine = self.clone();
@@ -1476,7 +1477,7 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
 }
 
 fn global_table_retention_config(
-    config: &crate::config::RetentionConfig,
+    config: &tracedecay_configuration::RetentionConfig,
 ) -> tracedecay_maintenance::retention::RetentionConfig {
     let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
         (
@@ -1502,7 +1503,7 @@ fn global_table_retention_config(
 async fn maybe_run_global_retention(
     administration: &super::branch_admin::StoreAdministration,
     database: &tracedecay_global_db::RegisteredGlobalDb,
-    config: &crate::config::RetentionConfig,
+    config: &tracedecay_configuration::RetentionConfig,
 ) {
     let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
         return;
@@ -1703,8 +1704,8 @@ mod global_retention_tests {
             .expect("decode retention deletion receipt count")
     }
 
-    fn global_retention_config() -> crate::config::RetentionConfig {
-        let mut config = crate::config::RetentionConfig::default();
+    fn global_retention_config() -> tracedecay_configuration::RetentionConfig {
+        let mut config = tracedecay_configuration::RetentionConfig::default();
         config.session_lcm.enabled = true;
         config.session_lcm.dedupe_projected_after_days = Some(1);
         config.session_lcm.drop_after_days = None;
@@ -1928,12 +1929,11 @@ async fn effective_automation_config_for_project(
     let settings = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
         configuration.snapshot(),
     )?;
-    let configuration_digest =
-        crate::daemon::automation_effect::pinned_automation_configuration_digest(
-            configuration.revision_id(),
-            &configuration.snapshot().effective_behavior_digest,
-            &configuration.snapshot().resolution_provenance_digest,
-        )?;
+    let configuration_digest = pinned_automation_configuration_digest(
+        configuration.revision_id(),
+        &configuration.snapshot().effective_behavior_digest,
+        &configuration.snapshot().resolution_provenance_digest,
+    )?;
     Ok(PinnedAutomationConfiguration {
         configuration_revision_id: configuration.revision_id().clone(),
         configuration_digest,
@@ -2139,11 +2139,11 @@ async fn run_user_jobs_scheduler_pass(
                     == tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Skipped
                     && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
                 {
-                    crate::daemon::automation_effect::RetainedAutomationSettlementProjection::AbandonObserved {
+                    RetainedAutomationSettlementProjection::AbandonObserved {
                         record: run.ledger_record,
                     }
                 } else {
-                    crate::daemon::automation_effect::RetainedAutomationSettlementProjection::Run {
+                    RetainedAutomationSettlementProjection::Run {
                         record: run.ledger_record,
                         committed: run.committed_receipt.map(Box::new),
                     }

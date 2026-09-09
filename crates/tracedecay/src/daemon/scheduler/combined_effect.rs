@@ -21,11 +21,11 @@ use super::scheduler_automation_effect;
 use crate::daemon::DaemonEngine;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 
-use crate::daemon::automation_effect::{
+use crate::tracedecay::TraceDecay;
+use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, DeferredProblemSettlementRequest,
     DeferredRunSettlementRequest, DeferredSettlementOutcome, DeferredSettlementRequest,
 };
-use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::Result;
 
 pub(super) enum CombinedEffectAdmission {
@@ -891,6 +891,8 @@ mod tests {
             let retained_ports = crate::daemon::retained_owner::retained_surface_ports(
                 crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
                     cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&memory))),
+                    store_runtime_registry: memory.retained_store_runtime_registry(),
+                    profile_database: memory.profile_database().clone(),
                     project_root: project_root.clone(),
                     project_id: project_id.clone(),
                     mounted_profile_id: None,

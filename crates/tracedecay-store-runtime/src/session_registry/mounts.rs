@@ -1387,6 +1387,55 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
+    /// Issues a write lease for a project-memory store that is already mounted.
+    ///
+    /// Retained project memory never discovers or initializes a store; the root
+    /// assembler selected this runtime because the project is already Ready.
+    pub fn mounted_project_memory(&self, project_id: &ProjectId) -> Result<Database> {
+        let mounted = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match mounted.get(project_id) {
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => owners
+                .memory
+                .as_ref()
+                .ok_or_else(|| {
+                    session_registry_error(
+                        "issue mounted project memory database client",
+                        "project memory owner is not mounted".to_string(),
+                    )
+                })?
+                .issue_database_lease()
+                .map_err(|error| {
+                    session_registry_error(
+                        "issue mounted project memory database client",
+                        error.to_string(),
+                    )
+                }),
+            Some(ProjectRuntimeOwnerStateV1::Opening(_)) => Err(TraceDecayError::project_route(
+                "project_runtime_opening",
+                true,
+                "Project runtime is already opening",
+            )),
+            Some(
+                ProjectRuntimeOwnerStateV1::Retiring(_)
+                | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                | ProjectRuntimeOwnerStateV1::Recovering(_)
+                | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                | ProjectRuntimeOwnerStateV1::Faulted(_),
+            ) => Err(TraceDecayError::project_route(
+                "project_runtime_retiring",
+                true,
+                "Project runtime is unavailable while retirement is terminal or in progress",
+            )),
+            None => Err(session_registry_error(
+                "issue mounted project memory database client",
+                "project memory owner is not mounted".to_string(),
+            )),
+        }
+    }
+
     /// Mounts one project graph/memory database through the retained registry.
     ///
     /// The typed project id and enrollment roots authorize the resolver; the

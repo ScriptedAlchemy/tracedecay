@@ -385,7 +385,7 @@ async fn execute_dashboard_automation_run(
         })?;
     let config = from_configuration_snapshot(pinned.snapshot()).map_err(automation_failed)?;
     let configuration_digest =
-        crate::daemon::automation_effect::pinned_automation_configuration_digest(
+        tracedecay_automation_runtime::automation::effect_runtime::pinned_automation_configuration_digest(
             pinned.revision_id(),
             &pinned.snapshot().effective_behavior_digest,
             &pinned.snapshot().resolution_provenance_digest,
@@ -404,7 +404,7 @@ async fn execute_dashboard_automation_run(
             .ok_or_else(|| DashboardAutomationAuthorityErrorV1::NotFound {
                 detail: format!("automation job '{job_id}' was not found"),
             })?;
-            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+            let admission = crate::daemon::automation_effect::prepare(
                 invocation_service,
                 cg,
                 cg.project_root(),
@@ -422,14 +422,14 @@ async fn execute_dashboard_automation_run(
             .await
             .map_err(automation_failed)?;
             let effect = match admission {
-                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => effect,
-                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Execute(effect) => effect,
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Replay(terminal) => {
                     return automation_terminal_run(&terminal);
                 }
-                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(envelope) => {
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::PreAdmissionProblem(envelope) => {
                     return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
                 }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Conflict => {
                     return Err(automation_admission_conflict());
                 }
             };
@@ -460,18 +460,18 @@ async fn execute_dashboard_automation_run(
                     (run.ledger_record, run.committed_receipt)
                 });
             match waiter.wait().await.map_err(automation_failed)? {
-                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Run {
+                tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Run {
                     terminal,
                     record: _record,
                 } => automation_terminal_run(&terminal)?,
-                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Problem {
+                tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Problem {
                     problem,
                     record: _record,
                 } => return Err(automation_problem(problem)),
-                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Reused {
+                tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Reused {
                     record: _record,
                 }
-                | crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::AbandonedObserved {
+                | tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::AbandonedObserved {
                     record: _record,
                 } => {
                     return Err(automation_failed(

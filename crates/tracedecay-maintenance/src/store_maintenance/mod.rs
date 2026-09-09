@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use crate::clock::now_secs_i64;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::log_maintenance_event;
-use crate::retention::branch_compaction::CompactionThresholdConfig;
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::MaintenanceTickOutcome;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_semantic_contracts::SemanticConfig;
 
 mod graph_replay;
@@ -1718,8 +1718,8 @@ fn log_code_index_scope_reconciliation_degraded(failure: &str) {
 /// and independent per file: a busy or failing branch database never blocks
 /// the rest, but keeps the maintenance cadence retry-eligible — see
 /// `src/retention/branch_compaction.rs` for the compaction policy itself.
-#[hotpath::measure(label = "daemon.git.maintenance.branch_compaction", future = true)]
-pub async fn run_branch_compaction(
+#[hotpath::measure(label = "daemon.git.maintenance.branch_compaction")]
+pub fn run_branch_compaction(
     lease: &ProjectStoreMaintenanceLeaseV1,
     config: &CompactionThresholdConfig,
 ) -> bool {
