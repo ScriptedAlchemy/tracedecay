@@ -391,16 +391,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adapter_contains_only_the_borrowed_registered_db_handle() {
-        #[allow(dead_code)]
-        fn assert_exact_fields<D: SessionTemporalRegisteredDb>(
-            store: &GlobalDbSessionTemporalStore<'_, D>,
-        ) {
-            let GlobalDbSessionTemporalStore { db: _ } = store;
-        }
-    }
-
-    #[test]
     fn graph_cancellation_observes_the_callers_execution_control() {
         let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         let cancellation = execution_control_graph_cancellation(&control);

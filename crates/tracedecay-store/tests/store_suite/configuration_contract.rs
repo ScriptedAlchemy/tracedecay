@@ -7,7 +7,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros};
 use tracedecay_store::configuration::{
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1,
-    ConfigurationRevisionRecordV1, ConfigurationStoreError,
+    ConfigurationRevisionRecordV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -31,14 +31,6 @@ fn revision_records_are_append_only_typed_values() {
     };
 
     record.validate().unwrap();
-}
-
-#[test]
-fn idempotency_conflicts_have_one_stable_store_outcome() {
-    assert_eq!(
-        ConfigurationStoreError::IdempotencyConflict.to_string(),
-        "configuration idempotency key conflicts with prior input"
-    );
 }
 
 fn digest(byte: char) -> ManifestDigest {

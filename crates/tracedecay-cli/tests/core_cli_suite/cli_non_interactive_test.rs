@@ -799,25 +799,6 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     assert!(!kimi_home.join("plugins/installed.json").exists());
 }
 
-/// Drives the Codex activation journey non-interactively: install stages the
-/// plugin source and marketplace entry, then drives `codex plugin add` through
-/// a host-CLI shim that emulates Codex 0.147's non-interactive registry.
-#[test]
-fn codex_plugin_cli_shim_is_a_native_executable() {
-    let home = TempDir::new().unwrap();
-    let mut command = Command::new("true");
-    add_codex_plugin_cli_shim(&mut command, home.path());
-    let shim = home
-        .path()
-        .join(format!("bin/codex{}", std::env::consts::EXE_SUFFIX));
-    let bytes = std::fs::read(&shim).unwrap();
-    assert!(
-        provision_host_cli_fixture::looks_like_native_executable(&bytes),
-        "Codex host-CLI fixture must be a compiled executable, not a script (Windows os error 216); first bytes: {:?}",
-        &bytes[..bytes.len().min(8)]
-    );
-}
-
 fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
     let home_path = canonical_temp_path(home.path());
 

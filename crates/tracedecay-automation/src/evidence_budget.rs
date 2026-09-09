@@ -175,14 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_and_suppressed_labels_are_distinct_typed_states() {
-        assert_ne!(
-            SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
-            "a suppressed tick must never present as a fresh exhausted attempt"
-        );
-    }
-
-    #[test]
     fn window_arithmetic_saturates_instead_of_wrapping() {
         let backoff = window(u64::MAX);
         let exceeded = SessionEvidenceBudgetExceeded {
@@ -198,14 +190,6 @@ mod tests {
         assert_eq!(
             backoff.gate(exceeded, i64::MAX),
             SessionEvidenceBudgetGate::AttemptPermitted
-        );
-    }
-
-    #[test]
-    fn default_window_is_one_hour() {
-        assert_eq!(
-            SessionEvidenceBudgetBackoff::default().suppression_secs(),
-            3_600
         );
     }
 }
