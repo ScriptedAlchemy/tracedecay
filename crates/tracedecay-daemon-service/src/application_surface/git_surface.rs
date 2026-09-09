@@ -1,6 +1,9 @@
 //! Typed Git application-surface requests and bounded Git-read decoding.
 
 use serde_json::Value;
+use tracedecay_application::git_query::{
+    GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES,
+};
 use tracedecay_contracts::git::GitReadRequestV1;
 use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
@@ -38,13 +41,13 @@ pub(super) fn parse_git_read_surface_request(
     };
     let max_entries = bounded_u64(
         "max_entries",
-        u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
-        u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
+        u64::from(GIT_QUERY_DEFAULT_MAX_ENTRIES),
+        u64::from(GIT_QUERY_DEFAULT_MAX_ENTRIES),
     )? as u32;
     let max_bytes = bounded_u64(
         "max_bytes",
-        crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
-        crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
+        GIT_QUERY_DEFAULT_MAX_BYTES,
+        GIT_QUERY_DEFAULT_MAX_BYTES,
     )?;
     let string = |name: &str| {
         object

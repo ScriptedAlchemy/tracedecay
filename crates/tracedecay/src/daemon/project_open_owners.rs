@@ -156,12 +156,10 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project-open source edit preview scope denied: {error}"),
             })?;
-    let catalog =
-        crate::catalog_composition::build_application_catalog_snapshot().map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("project-open source edit catalog is unavailable: {error}"),
-            }
-        })?;
+    let catalog = tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
+        .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open source edit catalog is unavailable: {error}"),
+    })?;
     let authorization = ProjectSourceEditAuthorizationV1::new(
         project_root.to_path_buf(),
         scope,

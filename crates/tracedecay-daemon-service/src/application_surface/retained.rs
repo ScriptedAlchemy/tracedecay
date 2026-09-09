@@ -332,7 +332,7 @@ fn named_argument_error(error: serde_path_to_error::Error<serde_json::Error>) ->
     }
 }
 
-pub(crate) fn result_value(
+pub fn result_value(
     result: tracedecay_contracts::ApplicationResult<RetainedSurfaceResultV1>,
 ) -> Result<
     tracedecay_contracts::ApplicationResult<serde_json::Value>,

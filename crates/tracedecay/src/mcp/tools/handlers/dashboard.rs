@@ -220,23 +220,24 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         &self,
         active_project_id: ProjectId,
     ) -> std::result::Result<DashboardApplicationRouters, String> {
-        let http = crate::application_surface::assemble_http_application_router(
-            Arc::clone(&self.executor),
-            tracedecay_application::operation_stream::OperationEventAuthority::default(),
-            active_project_id,
-        )
-        .map_err(|error| error.to_string())?;
+        let http =
+            tracedecay_daemon_service::application_surface::assemble_http_application_router(
+                Arc::clone(&self.executor),
+                tracedecay_application::operation_stream::OperationEventAuthority::default(),
+                active_project_id,
+            )
+            .map_err(|error| error.to_string())?;
         let configuration =
-            crate::application_surface::dashboard_configuration_application_router_with_executor(
+            tracedecay_daemon_service::application_surface::dashboard_configuration_application_router_with_executor(
                 Arc::clone(&self.executor),
             )
             .map_err(|error| error.to_string())?;
         let feedback =
-            crate::application_surface::dashboard_feedback_application_router_with_executor(
+            tracedecay_daemon_service::application_surface::dashboard_feedback_application_router_with_executor(
                 Arc::clone(&self.executor),
             )
             .map_err(|error| error.to_string())?;
-        let work = crate::application_surface::dashboard_work_application_router_with_executor(
+        let work = tracedecay_daemon_service::application_surface::dashboard_work_application_router_with_executor(
             Arc::clone(&self.executor),
         )
         .map_err(|error| error.to_string())?;
@@ -263,10 +264,10 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         }
         Box::pin(async move {
             let error_request_id = request_id.clone();
-            match crate::application_surface::resolve_dashboard_application_surface(
+            match tracedecay_daemon_service::application_surface::resolve_dashboard_application_surface(
                 ApplicationSurfaceOperation::ConfigurationBatch,
                 request_id,
-                crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
                     tracedecay_contracts::ConfigurationWireRequestV1::Batch(
                         tracedecay_contracts::ConfigurationBatchRequestV1 {
                             mutations: direct_mutations,
@@ -388,7 +389,7 @@ pub(crate) async fn dashboard_native_integration_status(
     let request = tracedecay_daemon_protocol::DaemonInvocationRequest::native_integration(
         control.request_id().as_str(),
         ApplicationSurfaceOperation::NativeIntegrationStatus,
-        crate::application_surface::NativeIntegrationSurfaceRequest::Status(
+        tracedecay_daemon_service::application_surface::NativeIntegrationSurfaceRequest::Status(
             tracedecay_contracts::NativeIntegrationStatusSurfaceRequest { transaction_id },
         ),
         control.observed_at(),

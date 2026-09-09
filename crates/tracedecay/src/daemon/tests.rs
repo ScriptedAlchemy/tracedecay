@@ -657,8 +657,8 @@ async fn apply_project_setting_via_surface(
         tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
@@ -677,30 +677,32 @@ async fn apply_project_setting_via_surface(
         format!("daemon-test-setting-{}", request_id.as_str()),
     )
     .expect("configuration idempotency key");
-    let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
-        tracedecay_contracts::ConfigurationWireRequestV1::Batch(
-            tracedecay_contracts::ConfigurationBatchRequestV1 {
-                mutations: vec![
-                    tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
-                        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
-                            project_id: target.project_id,
+    let request =
+        tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_contracts::ConfigurationWireRequestV1::Batch(
+                tracedecay_contracts::ConfigurationBatchRequestV1 {
+                    mutations: vec![
+                        tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
+                            layer:
+                                tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                                    project_id: target.project_id,
+                                },
+                            key,
+                            value: Box::new(value),
                         },
-                        key,
-                        value: Box::new(value),
-                    },
-                ],
-                expected_revision: current.revision_id().clone(),
-                idempotency_key,
-            },
-        ),
-    );
+                    ],
+                    expected_revision: current.revision_id().clone(),
+                    idempotency_key,
+                },
+            ),
+        );
     let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
         "cancellation.surface.{}",
         request_id.as_str()
     ))
     .expect("surface cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
@@ -711,11 +713,13 @@ async fn apply_project_setting_via_surface(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    Box::pin(crate::application_surface::execute_application_surface(
-        operation,
-        dispatched,
-        Some(&executor),
-    ))
+    Box::pin(
+        tracedecay_daemon_service::application_surface::execute_application_surface(
+            operation,
+            dispatched,
+            Some(&executor),
+        ),
+    )
     .await
     .expect("configuration batch application invocation")
     .result

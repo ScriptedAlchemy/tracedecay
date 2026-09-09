@@ -655,6 +655,7 @@ code_extraction_package=${package_dirs[tracedecay-code-extraction]}
 query_package=${package_dirs[tracedecay-query]}
 semantic_package=${package_dirs[tracedecay-semantic]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
+contracts_package=${package_dirs[tracedecay-contracts]}
 
 assert_required_assets "$root_package" "$cli_package"
 [[ ! -e "$package_root/.git" && ! -L "$package_root/.git" ]] ||
@@ -860,6 +861,7 @@ TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo install \
 consumer="$work/library-consumer"
 mkdir -p -- "$consumer/src"
 python3 - "$root_package/Cargo.toml" "$root_package" "$catalog_package" "$agent_hosts_package" \
+  "$contracts_package" \
   >"$consumer/Cargo.toml" <<'PY'
 import json
 import sys
@@ -891,11 +893,16 @@ print(
     + json.dumps(sys.argv[4])
     + " }"
 )
+print(
+    "tracedecay-contracts = { path = "
+    + json.dumps(sys.argv[5])
+    + " }"
+)
 PY
 cat >"$consumer/src/main.rs" <<'RS'
 use std::collections::BTreeSet;
 
-use tracedecay::catalog_composition::build_application_catalog_snapshot;
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_agent_hosts::agents::host_bundle_registry::{
     RECEIPT_BACKED_HOST_KINDS, default_components, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle,

@@ -6,9 +6,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
-use crate::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
-};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
@@ -16,6 +13,9 @@ use crate::mcp::tools::dispatch::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
+use tracedecay_daemon_service::application_surface::{
+    ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 
@@ -117,7 +117,7 @@ pub(super) async fn handle_application_surface(
     let request = match parse_application_surface_request(operation, request_args) {
         Ok(request) => request,
         Err(error) => {
-            crate::application_surface::observe_surface_argument_rejection(
+            tracedecay_daemon_service::application_surface::observe_surface_argument_rejection(
                 executor,
                 tracedecay_tool_catalog::BindingSurface::Mcp,
                 operation,
@@ -178,9 +178,9 @@ pub(super) async fn handle_application_surface(
 /// Map surface-resolution failures to typed reason codes so MCP clients see
 /// truthful unavailable/denied states instead of an untyped internal error.
 fn application_surface_dispatch_error(
-    error: crate::application_surface::ApplicationSurfaceAdapterError,
+    error: tracedecay_daemon_service::application_surface::ApplicationSurfaceAdapterError,
 ) -> TraceDecayError {
-    use crate::application_surface::ApplicationSurfaceAdapterError as AdapterError;
+    use tracedecay_daemon_service::application_surface::ApplicationSurfaceAdapterError as AdapterError;
     let (reason_code, retryable) = match &error {
         AdapterError::DaemonUnavailable => ("application_surface_unavailable", true),
         // Keep the transport's own reason code (`daemon_connect_down` /
@@ -287,11 +287,10 @@ pub(super) fn render_retained_result(
     result: ApplicationResult<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>,
     requested_format: RequestedOutputFormat,
 ) -> Result<tracedecay_mcp::ToolResult> {
-    let result = crate::application_surface::retained::result_value(result).map_err(|error| {
-        TraceDecayError::Config {
+    let result = tracedecay_daemon_service::application_surface::retained::result_value(result)
+        .map_err(|error| TraceDecayError::Config {
             message: format!("invalid retained application result: {error}"),
-        }
-    })?;
+        })?;
     render_result_parts(
         project_root,
         operation.as_str(),

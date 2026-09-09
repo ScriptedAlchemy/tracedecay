@@ -54,10 +54,6 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName, UseCaseId,
 };
 
-use crate::catalog_composition::{
-    ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
-    compose_application_catalog_with,
-};
 use tracedecay_application::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
     OperationRequestControls,
@@ -66,6 +62,10 @@ use tracedecay_application::primitives::{
     CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
     FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, QualifiedNamePrimitiveRequest,
     SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest, StorageStatusPrimitiveRequest,
+};
+use tracedecay_contracts::catalog_composition::{
+    ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
+    compose_application_catalog_with,
 };
 use tracedecay_contracts::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
@@ -111,7 +111,7 @@ use request_control::{
     ActiveHttpRequest, HttpCancellationRegistry, RequestControlError, accepts_supplied_request_id,
     supplied_request_id,
 };
-pub(crate) use workflow::invoke_workflow_operation;
+pub use workflow::invoke_workflow_operation;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
@@ -325,7 +325,7 @@ fn application_invoker_for_surface(
 }
 
 #[hotpath::measure(label = "application_surface.multi_root.invoke", future = true)]
-pub(crate) async fn invoke_multi_root_surface_request(
+pub async fn invoke_multi_root_surface_request(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -367,7 +367,7 @@ fn work_application_router_with_executor(
 /// The caller supplies transport-normalized controls; typed Work decoding,
 /// registry binding resolution, cancellation policy, and canonical result
 /// encoding remain here so transports cannot grow their own Work dispatcher.
-pub(crate) async fn invoke_work_operation(
+pub async fn invoke_work_operation(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     request: tracedecay_api::WorkHttpRequest,
 ) -> Response {
@@ -781,7 +781,7 @@ pub fn http_application_router_with_executor(
 ///
 /// Dashboard nests this under `/api/application` and applies one Axum layer
 /// after the full dashboard router is assembled.
-pub(crate) fn assemble_http_application_router(
+pub fn assemble_http_application_router(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation_events: OperationEventAuthority,
     active_project_id: ProjectId,
@@ -872,7 +872,7 @@ pub fn dashboard_feedback_application_router_with_executor(
 /// and middleware assembly. Leaf routers remain unlayered so merged routes
 /// emit exactly one server event and enter exactly one route scope.
 #[cfg(feature = "hotpath")]
-pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S>
+pub fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
@@ -880,7 +880,7 @@ where
 }
 
 #[cfg(not(feature = "hotpath"))]
-pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S> {
+pub fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S> {
     router
 }
 
@@ -1909,7 +1909,7 @@ static APPLICATION_SURFACE_CATALOG: LazyLock<Result<CatalogSnapshotV1, CatalogCo
     LazyLock::new(build_application_catalog_snapshot);
 
 /// Borrow the process-wide catalog snapshot without recomposing it.
-pub(crate) fn application_surface_catalog_ref()
+pub fn application_surface_catalog_ref()
 -> Result<&'static CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
     match &*APPLICATION_SURFACE_CATALOG {
         Ok(catalog) => Ok(catalog),
@@ -3765,7 +3765,7 @@ fn http_adapter_problem(
 /// cannot route the call to its handler; the truthful answer for the named
 /// operation is the reset-required terminal under its own mounted MCP result
 /// contract. Returns `None` for tools without a mounted application binding.
-pub(crate) fn mcp_project_open_reset_refusal(
+pub fn mcp_project_open_reset_refusal(
     tool_name: &str,
     request_id: RequestId,
     authority: &str,

@@ -19,10 +19,6 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use tracedecay::application_surface::{
-    ApplicationSurfaceRequest, parse_application_surface_request,
-    resolve_application_surface_dispatch, resolve_catalog_tool_binding,
-};
 use tracedecay_api::is_http_application_operation_exposed;
 use tracedecay_contracts::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
@@ -32,6 +28,10 @@ use tracedecay_contracts::{
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_daemon_service::application_surface::{
+    ApplicationSurfaceRequest, parse_application_surface_request,
+    resolve_application_surface_dispatch, resolve_catalog_tool_binding,
+};
 use tracedecay_mcp::get_tool_definitions;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface, CatalogContributionV1};
 
