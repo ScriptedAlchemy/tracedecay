@@ -181,6 +181,31 @@ pub async fn prepare_temporal_candidate_cohort(
     TemporalPreparedCandidateCohort::new(candidates)
 }
 
+pub fn begin_prepared_candidate_pull(
+    request: &TemporalSnapshotRequest,
+    state: &mut CandidateReadState,
+) -> Result<ExecutionLimits, TemporalPortError> {
+    begin_pull_request(
+        request,
+        state,
+        |limits| {
+            (
+                limits.candidate_limit,
+                limits.candidate_total_bytes,
+                limits.candidate_item_bytes,
+            )
+        },
+        CANDIDATE_READ_BUDGET,
+    )
+}
+
+pub fn commit_prepared_candidate_pull(
+    state: &mut CandidateReadState,
+    page: BoundedPage<RankingCandidate>,
+) -> Result<BoundedPage<RankingCandidate>, TemporalPortError> {
+    commit_pulled_page(state, page, CANDIDATE_READ_BUDGET)
+}
+
 pub async fn pull_candidate_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,
