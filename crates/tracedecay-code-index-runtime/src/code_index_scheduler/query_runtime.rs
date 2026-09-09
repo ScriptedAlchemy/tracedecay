@@ -202,7 +202,9 @@ pub fn canonical_query_policy(
     let mut candidate_profile = profile.clone();
     let mut candidate_diversity = diversity.clone();
     candidate_profile.evaluation_result_anchor = core_profile.evaluation_result_anchor.clone();
-    candidate_diversity.evaluation_result_anchor = core_diversity.evaluation_result_anchor.clone();
+    candidate_diversity
+        .evaluation_result_anchor
+        .clone_from(&core_diversity.evaluation_result_anchor);
     if diversity.evaluation_result_anchor.as_ref() == Some(&profile.evaluation_result_anchor)
         && candidate_profile == core_profile
         && candidate_diversity == core_diversity
