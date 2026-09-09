@@ -5,7 +5,11 @@ import { useNavigate } from 'react-router';
 import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
-import { activationFor, useScope } from '../../data/scope/store.ts';
+import {
+  activationFor,
+  scopedWorkspacePath,
+  useScope,
+} from '../../data/scope/store.ts';
 
 interface CommandPaletteRow {
   id: string;
@@ -42,6 +46,7 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
+  const scope = useScope((state) => state.scope);
   const selectProject = useScope((s) => s.selectProject);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
@@ -59,7 +64,7 @@ export function CommandPalette({
       label: w.label,
       hint: 'workspace',
       action: () => {
-        navigate(`/${w.path}`);
+        navigate(scopedWorkspacePath(scope, w.path));
         onOpenChange(false);
       },
     }));
@@ -87,14 +92,14 @@ export function CommandPalette({
                     isActive: project.is_active ?? null,
                   }),
                 );
-                navigate('/brain');
+                navigate(scopedWorkspacePath(useScope.getState().scope, 'brain'));
                 onOpenChange(false);
               },
             })),
           )
         : [];
     return [...workspaceEntries, ...projectEntries];
-  }, [navigate, onOpenChange, projects.data, selectProject]);
+  }, [navigate, onOpenChange, projects.data, scope, selectProject]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
