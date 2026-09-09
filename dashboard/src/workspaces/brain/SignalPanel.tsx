@@ -56,10 +56,12 @@ export function SignalPanel({
   pulses,
   sseState,
   lastEventAt,
+  onInspectProject,
 }: {
   pulses: readonly LiveActivityPulse[];
   sseState: SseConnectionState;
   lastEventAt: number | null;
+  onInspectProject?: (projectId: string | null) => void;
 }) {
   const now = useClockWhileAging(lastEventAt);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
@@ -135,7 +137,10 @@ export function SignalPanel({
             {pulses.length === 0 ? <p>No admitted event is retained. Transcript target unavailable.</p> : (
               <ol aria-label="Retained admitted events" className="space-y-1">
                 {[...pulses].reverse().map((pulse) => <li key={pulse.eventId}>
-                  <button type="button" className="td-hit w-full break-all border border-edge-subtle p-1 text-left" aria-pressed={selectedEventId === pulse.eventId} onClick={() => setSelectedEventId(pulse.eventId)}>
+                  <button type="button" className="td-hit w-full break-all border border-edge-subtle p-1 text-left" aria-pressed={selectedEventId === pulse.eventId} onClick={() => {
+                    setSelectedEventId(pulse.eventId);
+                    onInspectProject?.(pulse.projectId);
+                  }}>
                     {pulse.family} · {pulse.eventId}
                   </button>
                 </li>)}
