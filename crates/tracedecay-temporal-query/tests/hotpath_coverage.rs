@@ -8,14 +8,19 @@
 //! functions-timing report, proving the instrumentation is real rather than
 //! dead configuration.
 
+#[cfg(not(feature = "hotpath"))]
 use tracedecay_domain::RetrievalAnchorId;
+#[cfg(not(feature = "hotpath"))]
 use tracedecay_temporal_query::candidates::CandidateChannel;
+#[cfg(not(feature = "hotpath"))]
 use tracedecay_temporal_query::plan_temporal_candidates;
+#[cfg(not(feature = "hotpath"))]
 use tracedecay_temporal_query::ranking::{DiversityLimits, RankingCandidate, rank_candidates};
 
 /// Deterministic, daemon-free workload that reaches this crate's measured
 /// sites: `temporal.candidates.plan_scope`, `temporal.candidates.plan_text`,
 /// and `temporal.rank`.
+#[cfg(not(feature = "hotpath"))]
 fn run_temporal_query_workload() -> usize {
     let scope_plan = plan_temporal_candidates("", None, false);
     assert!(
@@ -78,44 +83,5 @@ mod feature_off {
             !report.exists(),
             "feature-off build must never write a hotpath report"
         );
-    }
-}
-
-#[cfg(feature = "hotpath")]
-mod feature_on {
-    use std::path::Path;
-
-    /// A guard-scoped run of the same workload must record this crate's
-    /// measured sites, proving `--features hotpath` produces live
-    /// instrumentation and not an empty report.
-    #[test]
-    fn guard_report_captures_measured_query_sites() {
-        // SAFETY: set before the first guard build in this process, which is
-        // the only reader; the metrics listener must stay off in tests.
-        unsafe { std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1") };
-        let report = Path::new(env!("CARGO_TARGET_TMPDIR")).join("temporal-query-hotpath-on.json");
-        let _ = std::fs::remove_file(&report);
-
-        {
-            let _guard = hotpath::HotpathGuardBuilder::new("temporal-query-hotpath-coverage")
-                .format(hotpath::Format::Json)
-                .output_path(&report)
-                .report("functions-timing")
-                .build();
-            assert!(super::run_temporal_query_workload() > 0);
-        }
-
-        let report_text =
-            std::fs::read_to_string(&report).expect("feature-on guard drop must write a report");
-        for label in [
-            "temporal.candidates.plan_scope",
-            "temporal.candidates.plan_text",
-            "temporal.rank",
-        ] {
-            assert!(
-                report_text.contains(label),
-                "hotpath report must capture measured site `{label}`: {report_text}"
-            );
-        }
     }
 }

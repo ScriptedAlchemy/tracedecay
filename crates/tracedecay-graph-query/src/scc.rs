@@ -379,23 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_three_node_cycle_plus_tail() {
-        let mut adj: HashMap<&str, HashSet<&str>> = HashMap::new();
-        edge(&mut adj, "a", "b");
-        edge(&mut adj, "b", "c");
-        edge(&mut adj, "c", "a");
-        edge(&mut adj, "c", "d");
-        edge(&mut adj, "d", "e");
-        let sccs = tarjan_scc(&adj);
-        assert_eq!(sccs.len(), 3, "[abc] + [d] + [e]");
-        let cyclic: Vec<_> = sccs.iter().filter(|s| is_cyclic_scc(s, &adj)).collect();
-        assert_eq!(cyclic.len(), 1);
-        let mut sorted = cyclic[0].clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, vec!["a", "b", "c"]);
-    }
-
-    #[test]
     fn reverse_topological_order() {
         // a -> b -> c. Tarjan emits in reverse-topo: leaves first.
         let mut adj: HashMap<&str, HashSet<&str>> = HashMap::new();

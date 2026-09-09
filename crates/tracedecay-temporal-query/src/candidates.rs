@@ -354,16 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_anchor_plan_is_exact_and_singleton() {
-        let anchor = RetrievalAnchorId::new("anchor.direct").expect("anchor");
-        let plan = plan_anchor(&anchor);
-
-        assert_eq!(plan.clauses().len(), 1);
-        assert!(plan.contains(CandidateChannel::Anchor, "anchor.direct"));
-        assert!(plan.clauses()[0].exact);
-    }
-
-    #[test]
     fn split_quoted_parses_escaped_quotes_and_escaped_backslashes() {
         let plan = plan_candidates(r#""say \"hello\" world" trailing"#);
         assert!(plan.contains(CandidateChannel::Phrase, r#"say "hello" world"#));

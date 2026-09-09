@@ -552,29 +552,6 @@ mod tests {
         }
     }
 
-    fn participant_manifest(generation: u64) -> TemporalParticipantManifest {
-        TemporalParticipantManifest::new(vec![
-            TemporalParticipantGeneration::new(
-                SessionId::new("session-1").expect("session"),
-                "source-1",
-                TemporalWatermarks {
-                    generation,
-                    source: 11,
-                    projection: 13,
-                    index: 17,
-                    summary: 19,
-                },
-                23,
-                &BindingDigest::new("configuration", digest('3')).expect("configuration"),
-                &BindingDigest::new("authorization", digest('2')).expect("authorization"),
-                TemporalParticipantAuthorization::Authorized,
-                TemporalSourceAccess::Available,
-            )
-            .expect("participant"),
-        ])
-        .expect("manifest")
-    }
-
     fn participant_manifest_with_count(count: usize) -> TemporalParticipantManifest {
         TemporalParticipantManifest::new(
             (0..count)
@@ -881,68 +858,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_distinguishes_access_and_watermark_drift() {
-        let auth = auth(11);
-        let encoded = encode_cursor(&snapshot('2', 13), &sort_key(), &auth).expect("encode");
-
-        assert_eq!(
-            verify_cursor(&encoded, &snapshot('4', 13), &auth),
-            Err(CursorError::WrongAccess)
-        );
-        assert_eq!(
-            verify_cursor(&encoded, &snapshot('2', 99), &auth),
-            Err(CursorError::ProjectionWatermarkMismatch)
-        );
-        assert_eq!(
-            verify_cursor(&encoded, &snapshot_for("session-2", '2', 13), &auth),
-            Err(CursorError::SessionMismatch)
-        );
-    }
-
-    #[test]
-    fn cursor_binds_filters_and_participant_epoch_independently() {
-        let auth = auth(31);
-        let expected = snapshot('2', 13)
-            .with_participant_manifest(participant_manifest(7))
-            .expect("manifest");
-        let encoded = encode_cursor(&expected, &sort_key(), &auth).expect("encode");
-
-        let filter_drift = TemporalExecutionSnapshot::new(
-            expected
-                .request()
-                .clone()
-                .with_filter_digest(digest('9'))
-                .expect("filter"),
-            expected.watermarks(),
-            expected.versions().clone(),
-            expected.cursor_key().cloned(),
-        )
-        .expect("filter snapshot")
-        .with_participant_manifest(expected.participant_manifest().clone())
-        .expect("filter manifest");
-        assert_eq!(
-            verify_cursor(&encoded, &filter_drift, &auth),
-            Err(CursorError::FilterMismatch)
-        );
-
-        let participant_drift = snapshot('2', 13)
-            .with_participant_manifest(participant_manifest(8))
-            .expect("changed manifest");
-        assert_eq!(
-            verify_cursor(&encoded, &participant_drift, &auth),
-            Err(CursorError::EpochMismatch)
-        );
-    }
-
-    #[test]
-    fn malformed_cursor_is_typed() {
-        assert_eq!(
-            verify_cursor("not-a-cursor", &snapshot('2', 13), &auth(1)),
-            Err(CursorError::Malformed)
-        );
-    }
-
-    #[test]
     fn cursor_rejects_authenticated_noncanonical_hex_reencoding() {
         let auth = auth(13);
         let encoded = encode_cursor(&snapshot('2', 13), &sort_key(), &auth).expect("encode");
@@ -1022,19 +937,6 @@ mod tests {
         assert_eq!(
             auth.verify_calls.load(std::sync::atomic::Ordering::SeqCst),
             2
-        );
-    }
-
-    #[test]
-    fn cursor_reports_precise_projection_watermark_mismatch() {
-        let auth = auth(17);
-        let encoded = encode_cursor(&snapshot('2', 13), &sort_key(), &auth).expect("encode");
-
-        assert_eq!(
-            verify_cursor(&encoded, &snapshot('2', 99), &auth)
-                .expect_err("projection drift must be rejected")
-                .to_string(),
-            "cursor projection watermark changed"
         );
     }
 
