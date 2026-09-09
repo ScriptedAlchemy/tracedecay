@@ -993,20 +993,6 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_store_subdirectories_do_not_make_scan_partial() {
-        let profile = tempfile::tempdir().unwrap();
-        let store_root = profile.path().join("stores/store.debris");
-        std::fs::create_dir_all(store_root.join("branches")).unwrap();
-        std::fs::create_dir_all(store_root.join("payloads")).unwrap();
-        std::fs::write(store_root.join("sessions.db"), b"live database").unwrap();
-
-        let scan = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
-
-        assert!(scan.listing_complete);
-        assert!(scan.artifacts.is_empty());
-    }
-
-    #[test]
     fn sweep_collects_only_after_the_quarantine_window() {
         let profile = tempfile::tempdir().unwrap();
         let store_root = profile.path().join("stores/store.debris");

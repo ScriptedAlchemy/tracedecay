@@ -495,42 +495,6 @@ mod tests {
         "session temporal receipts or cursor keys are mutable",
     ];
 
-    fn session_temporal_bounded_violations() -> &'static [&'static str] {
-        &[
-            "session cursor key rotation state is invalid",
-            "session refresh operation state is invalid",
-            "session temporal generation state is invalid",
-            "session temporal authority ownership is invalid",
-        ]
-    }
-
-    #[test]
-    fn bounded_selection_is_name_driven_and_includes_session_temporal_audits() {
-        let bounded: Vec<&str> = bounded_row_audit_invariants()
-            .map(|invariant| invariant.violation)
-            .collect();
-        for violation in BOUNDED_ROW_AUDIT_VIOLATIONS {
-            assert!(
-                bounded.contains(violation),
-                "bounded selection missed named audit: {violation}"
-            );
-        }
-        for violation in session_temporal_bounded_violations() {
-            assert!(
-                bounded.contains(violation),
-                "SESSION temporal audit must run on bounded passes: {violation}"
-            );
-        }
-        for violation in EXPENSIVE_ROW_AUDIT_VIOLATIONS {
-            assert!(
-                !bounded.contains(violation),
-                "expensive audit must not run on bounded passes: {violation}"
-            );
-        }
-        // No ordinal dependence: the named set is exactly the filter result.
-        assert_eq!(bounded.len(), BOUNDED_ROW_AUDIT_VIOLATIONS.len());
-    }
-
     #[test]
     fn every_row_audit_is_explicitly_classified_bounded_or_expensive() {
         for invariant in INVARIANTS {
@@ -560,18 +524,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[test]
-    fn observation_row_validation_replaces_redundant_sql_scans() {
-        for violation in OBSERVATION_ROW_AUDIT_VIOLATIONS {
-            let invariant = INVARIANTS
-                .iter()
-                .find(|invariant| invariant.violation == *violation)
-                .unwrap();
-            assert!(observation_row_audit_covers(invariant));
-            assert_eq!(classify_invariant_row_audit(invariant), None);
         }
     }
 

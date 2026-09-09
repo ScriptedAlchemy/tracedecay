@@ -12,8 +12,7 @@ use super::{
 };
 use crate::configuration::contracts::{ConfigurationRollbackRequest, DirectConfigurationMutation};
 use crate::configuration::registry::ConfigurationRegistry;
-use crate::configuration::resolver::registry_default_candidate;
-use crate::configuration::resolver::resolve_configuration;
+use crate::configuration::resolver::{registry_default_candidate, resolve_configuration};
 use std::collections::BTreeSet;
 use tracedecay_domain::configuration::CredentialReferenceMetadataV1;
 use tracedecay_domain::configuration::{

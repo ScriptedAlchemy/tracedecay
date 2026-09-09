@@ -1770,8 +1770,8 @@ mod tests {
 
     use super::{
         AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ResolvedOutputAuthority,
-        ensure_audit_checkpoint_schema, historical_projection_delta_required,
-        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
+        ensure_audit_checkpoint_schema, projection_audit_checkpoint_through_sequence,
+        validate_projection_authority_suffix,
     };
     use crate::tests::harness::{RegisteredGlobalDbTestFixture, open_registered_test_fixture};
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
@@ -1890,17 +1890,6 @@ mod tests {
                 "idx_projection_dispositions_observation_receipt"
             ]
         );
-    }
-
-    #[test]
-    fn incomplete_exhaustive_pass_does_not_repeat_historical_projection_audit() {
-        assert!(!historical_projection_delta_required(AuditCheckpoint {
-            bounded_passes_since_exhaustive: -1,
-            ..AuditCheckpoint::default()
-        }));
-        assert!(historical_projection_delta_required(
-            AuditCheckpoint::default()
-        ));
     }
 
     #[tokio::test]

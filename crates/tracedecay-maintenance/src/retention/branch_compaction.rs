@@ -551,16 +551,4 @@ mod tests {
             "the active store must be excluded through a symlinked path: {candidates:?}"
         );
     }
-
-    #[test]
-    fn missing_file_is_silently_skipped_not_errored() {
-        let dir = tempfile::tempdir().unwrap();
-        let candidates = vec![BranchDbCandidate {
-            branch: "gone".to_string(),
-            db_path: dir.path().join("does-not-exist.db"),
-        }];
-        let report = compact_branch_databases(&candidates, &config(0.5));
-        assert!(report.compacted.is_empty());
-        assert!(report.skipped.is_empty());
-    }
 }

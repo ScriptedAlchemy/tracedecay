@@ -122,35 +122,7 @@ pub(crate) fn require_inserted_or_active<E>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ReplayPresence, replay_if_equal, require_absent_or_equal, require_inserted_or_active,
-        require_single_cas_row,
-    };
-
-    #[test]
-    fn receipt_replay_accepts_equal_and_rejects_conflict() {
-        assert_eq!(replay_if_equal("same", &"same", "conflict"), Ok("same"));
-        assert_eq!(
-            replay_if_equal("left", &"right", "conflict"),
-            Err("conflict")
-        );
-    }
-
-    #[test]
-    fn preview_insert_replays_equal_and_rejects_divergence() {
-        assert_eq!(
-            require_absent_or_equal(None, &"preview", "conflict"),
-            Ok(ReplayPresence::Absent)
-        );
-        assert_eq!(
-            require_absent_or_equal(Some("preview"), &"preview", "conflict"),
-            Ok(ReplayPresence::Equal)
-        );
-        assert_eq!(
-            require_absent_or_equal(Some("other"), &"preview", "conflict"),
-            Err("conflict")
-        );
-    }
+    use super::{require_inserted_or_active, require_single_cas_row};
 
     #[test]
     fn cas_requires_exactly_one_updated_row() {

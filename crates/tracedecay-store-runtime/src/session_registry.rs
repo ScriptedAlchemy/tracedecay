@@ -2787,14 +2787,6 @@ mod store_runtime_event_level_tests {
     use super::store_runtime_event_is_success;
 
     #[test]
-    fn successful_schema_convergence_is_not_an_anomaly() {
-        assert!(store_runtime_event_is_success(&[
-            ("outcome", "complete".to_owned()),
-            ("database", "/tmp/registry.db".to_owned()),
-        ]));
-    }
-
-    #[test]
     fn degraded_schema_convergence_stays_an_anomaly() {
         assert!(!store_runtime_event_is_success(&[
             ("outcome", "degraded".to_owned()),

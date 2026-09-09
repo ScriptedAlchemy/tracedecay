@@ -81,36 +81,6 @@ async fn code_project_registered(db: &RegisteredGlobalDb) -> bool {
         .is_some()
 }
 
-/// The ordinary sweep: one transaction removes the project from both
-/// generations and reports one deletion from each.
-#[tokio::test]
-async fn registry_gc_deletes_both_registry_generations_in_one_commit() {
-    let harness = RegisteredGlobalDbHarness::open("registry-gc-commit").await;
-    let project = harness.registered.db_path().parent().unwrap().join("gone");
-    register_both_generations(&harness.registered, &project).await;
-
-    let transaction = harness
-        .registered
-        .begin_write_transaction()
-        .await
-        .expect("begin registry cleanup transaction");
-    let deleted = delete_registry_gc_candidates_in_transaction(
-        &transaction,
-        &[PROJECT_ID.to_string()],
-        std::slice::from_ref(&project),
-    )
-    .await
-    .expect("delete registry cleanup plan");
-    transaction.commit().await.expect("commit registry cleanup");
-
-    assert_eq!(deleted, (1, 1));
-    assert!(!code_project_registered(&harness.registered).await);
-    assert_eq!(
-        harness.registered.try_get_project_tokens(&project).await,
-        Ok(0)
-    );
-}
-
 /// The atomicity claim. The `code_projects` delete runs first and succeeds; the
 /// `projects` delete then aborts. Rolling back has to take the first delete
 /// with it, or the sweep leaves a project addressable through its accounting

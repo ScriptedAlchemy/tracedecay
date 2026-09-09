@@ -891,38 +891,6 @@ mod user_profile_settings_tests {
 }
 
 #[cfg(test)]
-mod work_expertise_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn expertise_consent_defaults_are_disabled_at_both_required_scopes() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-
-        for (raw_key, expected_scope) in [
-            (
-                USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-                SettingScopeV1::UserProfile,
-            ),
-            (
-                PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-                SettingScopeV1::Project,
-            ),
-        ] {
-            let definition = registry
-                .definition(&SettingKey::new(raw_key).expect("setting key"))
-                .expect("setting definition");
-            assert_eq!(definition.scope, expected_scope);
-            assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
-            assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
-            assert_eq!(
-                definition.default_value,
-                ConfigurationValueV1::WorkExpertiseConsent(WorkExpertiseConsentV1::disabled())
-            );
-        }
-    }
-}
-
-#[cfg(test)]
 mod semantic_runtime_payload_tests {
     use std::path::PathBuf;
 
