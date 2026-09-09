@@ -65,7 +65,7 @@ pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
 /// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
-/// Candidate documents one lexical request hydrates before ranking. Every
+/// Summed document-frequency budget for lexical term-source admission. Every
 /// candidate is decoded from its row and scored, so the union of the request's
 /// term sources — not the winner cap — decides the lane's transient allocation
 /// and wall time: unbounded, a natural-language task whose terms include
@@ -73,11 +73,12 @@ pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 /// decoded, 5.7 s) and missed the context deadline. Term sources are admitted
 /// in ascending document-frequency order until their summed frequencies would
 /// exceed this bound; the most selective source is always admitted so a
-/// single common-term query still answers. Sized as the reader cache over a
-/// conservative 16 KiB per hydrated row (measured mean ~6.6 KiB), so one
-/// request's decode churn stays near 100 MiB.
-pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize =
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / (16 * 1024);
+/// single common-term query still answers. Phrase sources are admitted separately.
+/// This is a recall/latency policy, not a hard document or allocation ceiling:
+/// documents matching only pruned terms cannot rank. The initial 16,384 value
+/// retains the measured policy (~100 MiB decode churn at ~6.6 KiB per row);
+/// changing the reader cache must not change candidate eligibility.
+pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize = 16_384;
 
 /// Admit `(document_frequency, source)` pairs rarest-first while the summed
 /// frequency stays within [`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`]; the rarest
