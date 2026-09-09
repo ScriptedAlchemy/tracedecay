@@ -14,11 +14,11 @@ use tracedecay_store_runtime::{
 use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
-use crate::daemon::maintenance::StoreTelemetrySamplingRegistry;
-use tracedecay_store_runtime::WriterAdmissionGuard;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
+use tracedecay_store_runtime::WriterAdmissionGuard;
 
 pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     brain_id: BrainId,

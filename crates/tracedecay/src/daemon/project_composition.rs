@@ -1973,7 +1973,7 @@ fn project_dashboard_pr_autotrack_reader()
 /// the sampling authority. An unavailable registration is recorded and skipped,
 /// never fatal: telemetry must not fail an otherwise healthy project open.
 fn register_route_store_telemetry(
-    sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    sampling: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     cg: &Arc<crate::tracedecay::TraceDecay>,
     scope: &tracedecay_contracts::ResolvedScope,
     session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],
