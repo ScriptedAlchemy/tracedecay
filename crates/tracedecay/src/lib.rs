@@ -29,7 +29,6 @@
 #![allow(clippy::used_underscore_binding)]
 #![allow(clippy::manual_async_fn)]
 #![allow(clippy::unused_async)]
-#![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::if_not_else)]
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 #![allow(clippy::missing_fields_in_debug)]
