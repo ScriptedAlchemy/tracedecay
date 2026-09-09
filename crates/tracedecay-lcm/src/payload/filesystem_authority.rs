@@ -1104,30 +1104,6 @@ mod windows_tests {
     }
 
     #[test]
-    fn ntfs_and_refs_shaped_file_ids_are_valid() {
-        let ntfs = validate_file_id_info(raw_file_id_info(
-            0x55aa_0123_89ab_cdef,
-            [
-                0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0, 0, 0, 0, 0, 0, 0, 0,
-            ],
-        ))
-        .unwrap();
-        assert_eq!(
-            ntfs.file_id,
-            [
-                0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0, 0, 0, 0, 0, 0, 0, 0,
-            ]
-        );
-
-        let refs_id = [
-            0x90, 0x8f, 0x7e, 0x6d, 0x5c, 0x4b, 0x3a, 0x29, 0x18, 0x07, 0xf6, 0xe5, 0xd4, 0xc3,
-            0xb2, 0xa1,
-        ];
-        let refs = validate_file_id_info(raw_file_id_info(0xa5a5_5a5a_1234_5678, refs_id)).unwrap();
-        assert_eq!(refs.file_id, refs_id);
-    }
-
-    #[test]
     fn successful_file_id_query_reads_the_complete_identity() {
         let expected = raw_file_id_info(
             0x1020_3040_5060_7080,

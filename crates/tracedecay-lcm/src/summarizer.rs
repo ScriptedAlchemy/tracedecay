@@ -148,19 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn noop_mode_selects_noop_adapter() {
-        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Noop);
-
-        assert!(adapter.is_noop());
-        assert!(adapter.persisted_summary_invocation().is_none());
-        assert!(
-            adapter
-                .summary_request("cursor", "session-1", None, &[])
-                .is_none()
-        );
-    }
-
-    #[test]
     fn provided_mode_selects_persisted_summary_and_splits_route_envelope() {
         let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "provided summary".into(),

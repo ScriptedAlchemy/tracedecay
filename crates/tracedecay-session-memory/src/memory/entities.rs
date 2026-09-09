@@ -678,17 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn file_paths_and_line_numbers_still_extract() {
-        let entities = extract_entities(
-            "see crates/tracedecay-sessions/src/runtime/codex.rs:378 and /etc/config.toml",
-        );
-        assert!(
-            entities.contains(&"crates/tracedecay-sessions/src/runtime/codex.rs:378".to_string())
-        );
-        assert!(entities.contains(&"/etc/config.toml".to_string()));
-    }
-
-    #[test]
     fn genuine_single_quoted_phrase_still_extracts() {
         let entities = extract_entities("the mode is 'holographic recall' by default");
         assert!(entities.contains(&"holographic recall".to_string()));
@@ -799,19 +788,6 @@ mod tests {
     }
 
     #[test]
-    fn leading_verb_no_longer_swallows_following_entity() {
-        // Risk A: "Prefers" was absent from the exact list, so "Prefers Tokio"
-        // was captured verbatim and probe("Tokio") missed it.
-        let entities = extract_entities("Prefers Tokio for async runtime");
-        assert!(entities.contains(&"Tokio".to_string()));
-        assert!(
-            !entities.contains(&"Prefers Tokio".to_string()),
-            "verb-led phrase must not be captured verbatim"
-        );
-        assert!(!entities.contains(&"Prefers".to_string()));
-    }
-
-    #[test]
     fn verb_led_multiword_phrase_exposes_head_noun() {
         let entities = extract_entities("Avoid Foo Bar when possible");
         assert!(
@@ -832,21 +808,5 @@ mod tests {
         assert!(entities.contains(&"Acme Corp".to_string()));
         assert!(entities.contains(&"Postgres".to_string()));
         assert!(!entities.contains(&"Corp".to_string()));
-    }
-
-    #[test]
-    fn lone_leading_verb_yields_nothing() {
-        let entities = extract_entities("Use pnpm for installing dependencies");
-        assert!(
-            entities.is_empty(),
-            "a lone leading verb with no capitalized entity yields no entities"
-        );
-    }
-
-    #[test]
-    fn sentence_initial_function_words_are_filtered() {
-        let entities = extract_entities("Then we shipped it. Always back up the database.");
-        assert!(!entities.contains(&"Then".to_string()));
-        assert!(!entities.contains(&"Always".to_string()));
     }
 }

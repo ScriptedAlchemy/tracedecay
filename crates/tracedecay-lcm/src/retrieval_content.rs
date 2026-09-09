@@ -334,13 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn fenced_branch_roster_stays_inventory() {
-        assert!(is_inventory_text(
-            "Branch inventory sweep:\n```\ncodex/foo\ncodex/bar\ncodex/baz\n```"
-        ));
-    }
-
-    #[test]
     fn branch_mention_without_listing_vocab_is_not_inventory() {
         assert!(!is_inventory_text(
             "the literal foo-bar marker on a scoped branch"

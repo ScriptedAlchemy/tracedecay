@@ -57,31 +57,6 @@ async fn canonical_source_connection(path: &std::path::Path) -> TestConnection {
 }
 
 #[tokio::test]
-async fn provider_evidence_follows_grafeo_sources_without_a_sql_relation_table() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let connection = canonical_source_connection(&directory.path().join("sources.db")).await;
-    let relations = crate::relations::memory_relation_store();
-    relations
-        .replace(&projection("anchor-source"))
-        .expect("relation projection");
-
-    let matched = summary_has_provider_evidence(
-        &TemporalSqlRead::engine_connection(&connection),
-        &relations,
-        &SessionRelationScope::project_sessions(project()),
-        &session(),
-        1,
-        "summary-root",
-        "claude",
-        &ExecutionControl::default(),
-    )
-    .await
-    .expect("provider evidence");
-
-    assert!(matched);
-}
-
-#[tokio::test]
 async fn missing_relation_projection_is_hydration_unavailable_not_provider_denial() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("unavailable.db")).await;

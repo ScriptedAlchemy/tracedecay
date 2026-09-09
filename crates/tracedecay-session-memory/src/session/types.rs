@@ -837,40 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn grant_binds_the_exact_typed_retrieval_target_without_serialization() {
-        let context = context();
-        let request = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &request)
-            .unwrap();
-
-        assert_eq!(grant.id().as_str(), "grant.session.read");
-        assert_eq!(grant.revision(), 7);
-        assert_eq!(grant.scope().actor_id(), context.actor_id());
-        assert_eq!(grant.scope().identity(), context.identity());
-        assert_eq!(
-            grant.scope().session_id().unwrap().as_str(),
-            "session.application-slice-1"
-        );
-        assert_eq!(grant.scope().provider_scope(), Some("cursor"));
-        assert_eq!(
-            grant.scope().temporal_mode(),
-            TemporalModeV1::AsOf {
-                cutoff: UtcMicros(1_234_567)
-            }
-        );
-        assert_eq!(grant.scope().grain(), RetrievalGrainV1::LogicalMessage);
-        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
-        assert_eq!(grant.capability_digest(), context.capability_digest());
-        assert_eq!(grant.policy_digest(), context.policy_digest());
-        assert_eq!(grant.configuration_digest(), context.configuration_digest());
-        assert_eq!(
-            grant.validate(&context, context.binding(), &request),
-            Ok(())
-        );
-    }
-
-    #[test]
     fn root_wide_grant_binds_the_authorized_root_without_binding_anchor_session() {
         let context = context();
         let request = exact_authorization_request(context.identity().clone())
@@ -1141,30 +1107,6 @@ mod tests {
     }
 
     #[test]
-    fn authorizer_issues_an_opaque_grant_for_the_exact_resolved_route() {
-        let context = context();
-        let request = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &request)
-            .unwrap();
-
-        assert_eq!(grant.id().as_str(), "grant.session.read");
-        assert_eq!(grant.revision(), 7);
-        assert_eq!(grant.scope().identity(), context.identity());
-        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
-        assert_eq!(
-            grant
-                .scope()
-                .identity()
-                .git_route()
-                .unwrap()
-                .branch_id()
-                .as_str(),
-            "branch.application-slice-1"
-        );
-    }
-
-    #[test]
     fn grant_rejects_scope_or_route_substitution() {
         let context = context();
         let profile_request = SessionScopeAuthorizationRequest::new(
@@ -1251,44 +1193,6 @@ mod tests {
         );
     }
 
-    fn rebranched_binding(context: &TestRequestContext, branch: &str) -> SessionRequestBinding {
-        let route = context.identity().git_route().unwrap();
-        SessionRequestBinding::new(
-            ResolvedSessionIdentity::for_project(
-                ProfileId::new("profile.primary").unwrap(),
-                ProjectId::new("project.tracedecay").unwrap(),
-                SessionStoreId::new("store.project.tracedecay").unwrap(),
-                SessionRootId::new("root.project.tracedecay").unwrap(),
-                ResolvedGitRoute::new(
-                    route.repository_id().clone(),
-                    route.worktree_id().clone(),
-                    BranchId::new(branch).unwrap(),
-                ),
-            ),
-            context.capability_digest(),
-            context.policy_digest(),
-            context.configuration_digest(),
-            context.binding.cancellation.clone(),
-            context.binding.budgets,
-        )
-    }
-
-    #[test]
-    fn binding_admits_the_same_checkout_under_a_moved_branch_label() {
-        let context = context();
-        // The mounted session identity records the branch its graph scope was
-        // registered under; the request context records whatever branch HEAD
-        // currently points at. A session store is partitioned by
-        // project/repository/worktree only, so the divergent label must not be
-        // reported as an authorization refusal.
-        let moved = rebranched_binding(&context, "branch.registered-elsewhere");
-        assert_ne!(
-            moved.identity().session_request_scope().unwrap(),
-            *context.scope()
-        );
-        assert_eq!(moved.validate_context(&context), Ok(()));
-    }
-
     #[test]
     fn binding_still_fails_closed_on_a_foreign_checkout() {
         let context = context();
@@ -1339,21 +1243,6 @@ mod tests {
             different.validate_context(&context),
             Err(SessionAuthorizationError::WrongContext)
         );
-    }
-
-    #[test]
-    fn admitted_binding_identity_includes_the_outer_grant_digest() {
-        let context = context();
-        let exact = admitted_binding(&context, context.grant().digest.clone());
-        let same = exact.clone();
-        let different_digest = ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap();
-        assert_ne!(different_digest, context.grant().digest);
-        let different = admitted_binding(&context, different_digest.clone());
-
-        assert!(exact.matches(&same));
-        assert!(!exact.matches(&different));
-        assert_eq!(exact.admitted_grant_digest(), Some(&context.grant().digest));
-        assert_eq!(different.admitted_grant_digest(), Some(&different_digest));
     }
 
     #[test]

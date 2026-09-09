@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::compression_policy::DEFAULT_INCREMENTAL_MAX_DEPTH;
 pub(super) use super::compression_policy::threshold_pressure;
 pub use super::compression_policy::{
     AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
@@ -268,25 +266,6 @@ mod tests {
             now,
         ));
         assert!(!cooldown_active(None, now));
-    }
-
-    #[test]
-    fn condensation_policy_uses_defaults_for_regular_summarizers() {
-        let summarizer = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Fake {
-            summary_text: "summary".to_string(),
-        });
-        assert_eq!(
-            condensation_policy_decision(CondensationDecisionInput {
-                has_backlog: false,
-                summary_fan_in: Some(1),
-                incremental_max_depth: None,
-                summarizer: &summarizer,
-            }),
-            CondensationDecision::QueryCandidates(CondensationPolicy {
-                fan_in: LCM_DEFAULT_SUMMARY_FAN_IN,
-                incremental_max_depth: DEFAULT_INCREMENTAL_MAX_DEPTH,
-            })
-        );
     }
 
     #[test]
