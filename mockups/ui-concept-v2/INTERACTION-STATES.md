@@ -34,29 +34,48 @@ under reduced motion, and reflow or provide focus modes at 200% browser zoom.
    that project—code graph plus graph, memory, analytics, identity, and checkout
    authorities.
 5. Return to all projects: explicit scope clear.
-6. Real activity: bloom exact `project_id`; conduct only across a drawn real
-   relation. A shared-repository hop does not light sibling checkouts.
+6. Real activity: bloom exact `project_id`; conduct across at most one
+   evidenced, drawn relation. A shared-repository hop does not light sibling checkouts.
 7. Honest states: registry loading, empty, partial, unavailable, inconsistent,
    or truncated; stream connecting/offline; graph empty/renderer unavailable.
 
-### Loom
+### Loom — accepted final target
 
-1. Weave overview: measured time down, hosts across, strand width by message
-   count, recorded/open/unknown ends distinguished.
-2. Zoom/pan/fit: printed time window changes; marks outside it are culled.
-3. Thread selected: selected thread stays full strength and others dim. The
-   keyboard-accessible table row is the focus target.
-4. Thread chain: canonical transcript/summary plus provider-qualified commits,
-   edited files, and branch/worktree spans with separate source coverage.
-5. Replay: loaded LCM page only; paused initially; previous/next, range seek,
-   0.5-4x presentation speed, `FOLLOW LOADED TAIL`, and
-   `RETURN TO LOADED TAIL`. `NOW` labels the newest event in the loaded page;
-   it does not promise streaming or complete history.
-6. Honest states: loading, served empty, undated partial, stale, offline, store
-   unavailable, source partial/unavailable, chain unavailable, linked-boundary
-   partial.
+The [final manifest](03-loom/final/README.md) and its seven same-stem briefs
+own this horizontal target. The older vertical layout below is an implementation
+inventory, not permission to substitute legacy geometry for the final plates.
 
-## Production evidence
+1. Follow loaded tail: time runs left to right; the cursor follows the end of
+   the currently loaded LCM page. Pan or select pauses follow; return-to-tail
+   resumes it. `NOW` means the loaded page end, never a global stream.
+2. Temporal replay: seek/play a cursor within the loaded page. Future events
+   remain withheld, not merely dimmed. Playback and follow are distinct state
+   dimensions: paused playback may still follow newly admitted loaded events.
+3. Branching execution: parent → evidenced spawn → parallel agent/subagent
+   branches → evidenced handoff/rejoin. Collapse preserves counts and grades.
+4. Dense overview: deterministic workstream bundles; semantic zoom reveals
+   groups → agents → events. Unique agents and participations remain distinct.
+5. Selected event: a roomy evidence workspace with exact transcript, task,
+   diff, source identity, and graded causal neighborhood, plus exact fallbacks.
+6. Feedback continuation: local feedback and evidenced later acknowledgement,
+   action, or contradiction; no inferred acknowledgement rendered as fact.
+7. Evidence gaps: loading, empty, partial, stale, offline, denied, ambiguous,
+   unavailable sources and linked boundaries remain separate typed states.
+
+Pan, fit, minimap, keyboard seek and semantic zoom retain temporal context.
+These are accepted target interactions; a shipping route must expose their
+actual availability rather than claiming integration from the concept alone.
+
+### Loom — legacy implementation baseline
+
+The earlier weave maps measured time down and hosts across, with strand width
+by message count and recorded/open/unknown ends. Its zoom/pan/fit, selected
+thread table, canonical thread chain and loaded-page replay remain useful
+behavioral evidence. Their presence does not establish the final horizontal
+hierarchical execution layout. Preserve loaded-page bounds, separate source
+coverage, initial paused playback and 0.5–4x presentation speed during migration.
+
+## Production inventory and behavioral evidence
 
 - Brain project-body/registry-row scoping, repository-hub exclusion, and exact
   activity identity/one-hop propagation:

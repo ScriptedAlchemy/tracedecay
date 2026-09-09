@@ -15,10 +15,10 @@ relates to the stable registry.
 
 - A synapse begins only when the dashboard receives an admitted activity event
   with a stable event identity, timestamp, family, and touched identity.
-- The exact touched project blooms; energy may traverse one or more relations
-  only when each hop has evidence from the repository, worktree, session,
-  agent, task, code, or Delivery projection. Decorative inter-project firing
-  is forbidden.
+- The exact touched project blooms; energy may traverse at most one evidenced,
+  drawn relation from the repository, worktree, session, agent, task, code, or
+  Delivery projection. This one-hop limit does not authorize onward propagation
+  or lighting sibling checkouts. Decorative inter-project firing is forbidden.
 - Heat is temporary and decays independently of the persistent project body.
   Siblings stay dark unless the event actually touched them. Hover, focus,
   loading, connectivity, and selection never masquerade as activity.
