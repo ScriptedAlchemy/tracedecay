@@ -19,6 +19,29 @@ for affected behavior and broaden only for unresolved risk. Documentation-only
 edits do not require application builds. Pause for a missing decision or an
 unauthorized external action after completing independent, authorized work.
 
+## Product-first development
+
+- A working, usable build is the primary acceptance criterion. Start with a
+  short real user journey: launch, index a repository, find code, retrieve
+  session context, and restart. Fix failures there before expanding tests,
+  refactors, audits, or compatibility work. Passing suites do not establish
+  product readiness.
+- Prefer a small set of simple product checks and focused bug regressions.
+  Delete redundant, implementation-shaped tests and unnecessary test machinery;
+  do not preserve test volume for its own sake. Retain checks for actual user
+  failures, security, isolation, and data integrity.
+- Treat this project as greenfield by default. Compatibility with previous
+  development builds, contracts, and generated stores is not a goal unless the
+  user explicitly requests it. Reset and regenerate incompatible development
+  stores when that is the fastest path to a working build; do not build
+  migrations or compatibility layers merely to preserve those stores. Scope
+  resets to TraceDecay-generated state, not source repositories or original
+  agent transcripts.
+- Verify fixes by repeating the failed action in the actual installed product.
+  Use the smallest relevant check beforehand; do not delay that retry for broad
+  suites or unrelated cleanup. Prefer Sol or Terra workers for bounded
+  implementation work and keep parallelism subordinate to the working journey.
+
 ## Layout
 
 - The repository root is a **virtual workspace** — it has no package of its
@@ -130,11 +153,10 @@ unauthorized external action after completing independent, authorized work.
 - Complete cutovers in one delivery slice: migrate every caller and datum,
   then delete compatibility façades, duplicate routes, old flags, dead aliases,
   and superseded scaffolding.
-- Add a V2/V3 contract, compatibility alias, deprecation path, or data
-  migration only after proving the prior shape shipped on `origin/master`, in
-  a published package, or in a live persisted format. Branch-local and
-  unreleased contracts change in place; a `V1` suffix alone is not release
-  evidence and does not justify compatibility scaffolding.
+- Change greenfield contracts in place and remove superseded shapes. A
+  version suffix, prior development binary, or existing development database
+  does not justify compatibility aliases or migrations. Add compatibility only
+  for an explicit user requirement to preserve an existing consumer or store.
 - Keep boundaries explicit: use top-level explicit imports/reexports, avoid
   wildcard parent-child cycles and inline imports, maintain one generated wire
   authority, and do not hand-write duplicate DTOs.
@@ -159,9 +181,10 @@ unauthorized external action after completing independent, authorized work.
 
 - In shared checkouts, honor active file ownership: re-read before editing,
   commit only self-consistent owned paths, and never sweep in peer work.
-- Require measured, falsifiable verification and root-cause fixes; preserve
-  byte-exact identity contracts, and never weaken assertions, raise timeouts,
-  ignore tests, or mask gate failures.
+- Require direct evidence and root-cause fixes. Preserve current identity
+  and safety guarantees; do not hide real failures by weakening assertions or
+  raising timeouts. Remove redundant tests instead of treating their count as a
+  delivery requirement.
 - Audit all supported host integrations when changing shared host behavior;
   do not treat one host as representative of the complete integration set.
 - Parallelize independent work aggressively, but inspect active agents first,
