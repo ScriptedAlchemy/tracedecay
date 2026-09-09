@@ -237,7 +237,7 @@ impl ApplicationHandlerDescriptor {
     }
 }
 
-/// Closed set of handler descriptors supplied to root catalog composition.
+/// Closed set of handler descriptors supplied to [`crate::catalog_composition`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptors {
     descriptors: BTreeMap<UseCaseId, ApplicationHandlerDescriptor>,
@@ -381,8 +381,10 @@ fn validate_descriptor_mapping(
     Ok(())
 }
 
-/// Application-owned descriptor source. Root catalog composition remains
-/// intentionally outside this crate and is introduced by its owning packet.
+/// Application-owned descriptor source. [`crate::catalog_composition`]
+/// validates these descriptors against the catalog contributions;
+/// `tracedecay-daemon-service` binds the canonical dispatcher and the
+/// composition root mounts the result.
 pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];
