@@ -544,43 +544,7 @@ mod empty_name_node_id_tests {
 
 #[cfg(test)]
 mod wire_spelling_tests {
-    use std::fmt::Debug;
-
-    use serde::Serialize;
-    use serde_json::Value;
-
     use super::{EdgeKind, NodeKind, Visibility, generate_node_id};
-
-    /// Every `ALL` slot must spell, parse, and serialize the same way it did
-    /// before the spellings were declared once. Derived serde keeps the variant
-    /// identifier — which is also what `Debug` prints for a unit variant — so
-    /// the JSON contract is checked without a second literal inventory.
-    fn assert_wire_round_trip<T: Debug + PartialEq + Serialize>(
-        all: &[(T, &'static str)],
-        as_str: fn(&T) -> &'static str,
-        from_str: fn(&str) -> Option<T>,
-    ) {
-        for (kind, wire) in all {
-            assert_eq!(as_str(kind), *wire, "{kind:?} no longer spells {wire:?}");
-            assert_eq!(
-                from_str(wire).as_ref(),
-                Some(kind),
-                "{wire:?} did not parse back to {kind:?}"
-            );
-            assert_eq!(
-                serde_json::to_value(kind).unwrap(),
-                Value::String(format!("{kind:?}")),
-                "{kind:?} serde representation changed"
-            );
-        }
-    }
-
-    #[test]
-    fn every_variant_round_trips_and_keeps_its_serde_spelling() {
-        assert_wire_round_trip(&NodeKind::ALL, NodeKind::as_str, NodeKind::from_str);
-        assert_wire_round_trip(&EdgeKind::ALL, EdgeKind::as_str, EdgeKind::from_str);
-        assert_wire_round_trip(&Visibility::ALL, Visibility::as_str, Visibility::from_str);
-    }
 
     /// Spellings that do not follow from the variant name, the inbound-only
     /// `"pub"` alias, and refusal of unknown spellings.

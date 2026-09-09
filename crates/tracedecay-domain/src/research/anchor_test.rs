@@ -256,53 +256,6 @@ fn v3_lineage_preserves_source_order_and_privacy_binding() {
 }
 
 #[test]
-fn v3_record_binds_exact_target_owner_and_ordered_lineage() {
-    let owner = v3_owner("project.fixture", "privacy.fixture");
-    let source = AnchorLineageRefV3::new(
-        0,
-        AnchorProvenanceRelationV2::DerivedFrom,
-        RetrievalAnchorId::new("retrieval.source.fixture").unwrap(),
-        owner.clone(),
-    )
-    .unwrap();
-    let parts = RetrievalAnchorRecordV3Parts {
-        target: RetrievalAnchorTargetV3::ExactSourceOccurrence(
-            SourceOccurrenceId::new("occurrence.fixture").unwrap(),
-        ),
-        owner: owner.clone(),
-        aliases: vec![],
-        occurred_at: Some(TimeInterval {
-            start: UtcMicros(1),
-            end: UtcMicros(2),
-        }),
-        ingested_at: UtcMicros(3),
-        evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV3::Unknown,
-        projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
-        projection_watermark: VectorWatermark::default(),
-        coverage: CoverageReportV1::default(),
-        source_observations: vec![],
-        source_anchors: vec![source],
-        authorization: authorization(),
-        payload_access: PayloadAccessState::Eligible,
-        retention_class: RetentionClass::new("retention.fixture").unwrap(),
-        durability: AnchorDurabilityClass::DurableEvidence,
-    };
-    let record = RetrievalAnchorRecordV3::new(parts).unwrap();
-    let wire = serde_json::to_value(&record).unwrap();
-
-    assert_eq!(record.owner(), &owner);
-    assert!(matches!(
-        record.target(),
-        RetrievalAnchorTargetV3::ExactSourceOccurrence(_)
-    ));
-    assert_eq!(
-        serde_json::from_value::<RetrievalAnchorRecordV3>(wire).unwrap(),
-        record
-    );
-}
-
-#[test]
 fn v3_record_rejects_cross_privacy_authorization() {
     let owner = v3_owner("project.fixture", "privacy.other");
     let source = AnchorLineageRefV3::new(

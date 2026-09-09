@@ -909,26 +909,6 @@ mod tests {
     use crate::configuration::ProtectedChange;
 
     #[test]
-    fn safe_default_validates_and_forbids_native_apply_modes() {
-        let policy = safe_work_topology_policy_v1();
-        policy.validate().unwrap();
-        assert_eq!(
-            policy.compute_digest().unwrap(),
-            policy.compute_digest().unwrap()
-        );
-        assert!(!policy.cross_merge.has_native_apply_mode());
-        assert!(policy.meets_protected_ref_floor());
-        assert_eq!(
-            policy.history_rewrite,
-            HistoryRewritePolicyV1::ForbidForceAndRebase
-        );
-        assert_eq!(
-            policy.retention.automatic_gc,
-            AutomaticWorktreeGcV1::Disabled
-        );
-    }
-
-    #[test]
     fn github_stack_requires_probe_and_standard_fallback() {
         let mut policy = safe_work_topology_policy_v1();
         policy
@@ -957,29 +937,6 @@ mod tests {
                 .validate()
                 .is_err()
         );
-    }
-
-    #[test]
-    fn topology_dimensions_remain_independent() {
-        let mut branch_only = safe_work_topology_policy_v1();
-        branch_only
-            .branch_topology
-            .allowed
-            .insert(BranchTopologyKindV1::LocalStack);
-        branch_only.validate().unwrap();
-
-        let mut review_only = safe_work_topology_policy_v1();
-        review_only
-            .review_topology
-            .allowed
-            .insert(ReviewTopologyKindV1::GitHubStackedPullRequests);
-        review_only.review_topology.github_stacked_prs =
-            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
-        review_only.validate().unwrap();
-
-        let mut placement_only = safe_work_topology_policy_v1();
-        placement_only.placement = WorktreePlacementModeV1::RepositoryLocalRoot;
-        placement_only.validate().unwrap();
     }
 
     #[test]

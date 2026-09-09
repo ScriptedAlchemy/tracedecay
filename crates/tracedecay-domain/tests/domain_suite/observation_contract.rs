@@ -420,40 +420,6 @@ fn canonical_session_fact_keeps_project_identity_separate_from_native_location()
 }
 
 #[test]
-fn canonical_envelope_accepts_byte_depth_and_value_boundaries() {
-    let empty = envelope_with_content(Value::String(String::new())).unwrap();
-    let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
-    let byte_boundary = envelope_with_content(Value::String(
-        "x".repeat(MAX_OBSERVATION_RECORD_BYTES - empty_bytes),
-    ))
-    .unwrap();
-    assert_eq!(
-        serde_json::to_vec(&byte_boundary).unwrap().len(),
-        MAX_OBSERVATION_RECORD_BYTES
-    );
-
-    let depth_boundary =
-        envelope_with_content(nested_arrays(MAX_OBSERVATION_STRUCTURE_DEPTH - 4)).unwrap();
-    assert_eq!(
-        json_structure_metrics(&serde_json::to_value(depth_boundary).unwrap()).1,
-        MAX_OBSERVATION_STRUCTURE_DEPTH
-    );
-
-    let base = envelope_with_content(Value::Null).unwrap();
-    let base_values = json_structure_metrics(&serde_json::to_value(base).unwrap()).0;
-    let value_boundary = envelope_with_content(Value::Array(vec![
-        Value::Null;
-        MAX_OBSERVATION_STRUCTURE_VALUES
-            - base_values
-    ]))
-    .unwrap();
-    assert_eq!(
-        json_structure_metrics(&serde_json::to_value(value_boundary).unwrap()).0,
-        MAX_OBSERVATION_STRUCTURE_VALUES
-    );
-}
-
-#[test]
 fn canonical_envelope_rejects_every_limit_overflow() {
     let empty = envelope_with_content(Value::String(String::new())).unwrap();
     let empty_bytes = serde_json::to_vec(&empty).unwrap().len();

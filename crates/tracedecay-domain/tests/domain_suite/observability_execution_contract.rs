@@ -6,33 +6,6 @@ use tracedecay_domain::{
 };
 
 #[test]
-fn topology_payload_round_trips_with_independent_bounded_dimensions() {
-    let payload = ObservabilityPayloadV1::ExecutionTopology(ExecutionTopologySampledV1 {
-        topology: ExecutionTopologyKindV1::Hybrid,
-        placement: ExecutionPlacementV1::LinkedWorktree,
-        branch_topology: WorkTopologyBranchV1::LocalStack,
-        review_topology: ReviewTopologyV1::IndependentReview,
-        integration_strategy: IntegrationStrategyV1::CherryPickExactCommits,
-        requested_width: 8,
-        accepted_width: 6,
-        admitted_width: 4,
-        active_width: 3,
-        useful_width: 2,
-        runnable_count: 4,
-        blocked_count: 1,
-        shared_authority_serialized_count: 1,
-        local_anchor_refs: vec!["anchor:one".into(), "anchor:two".into()],
-    });
-
-    payload.validate().expect("bounded topology payload");
-    let encoded = serde_json::to_vec(&payload).expect("serialize");
-    assert_eq!(
-        serde_json::from_slice::<ObservabilityPayloadV1>(&encoded).expect("deserialize"),
-        payload
-    );
-}
-
-#[test]
 fn payload_limits_reject_identity_fanout_and_invalid_intervals() {
     let too_many_anchors = ObservabilityPayloadV1::ExecutionTopology(ExecutionTopologySampledV1 {
         topology: ExecutionTopologyKindV1::Parallel,

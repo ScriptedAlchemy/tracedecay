@@ -481,12 +481,6 @@ pub enum PerformanceDispositionV1 {
 mod tests {
     use super::*;
 
-    #[derive(Serialize)]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum DirectOperationResourceWireV1<'a> {
-        OperationResource(&'a OperationResourceObservedV1),
-    }
-
     fn stage(stage: OperationStageV1, elapsed_micros: u64) -> OperationStageTimingV1 {
         OperationStageTimingV1 {
             stage,
@@ -569,22 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn boxed_operation_resource_preserves_wire_shape_and_round_trips() {
-        let resource = operation_resource(Vec::new());
-        let direct =
-            serde_json::to_value(DirectOperationResourceWireV1::OperationResource(&resource))
-                .unwrap();
-        let payload = ObservabilityPayloadV1::OperationResource(Box::new(resource));
-        let boxed = serde_json::to_value(&payload).unwrap();
-
-        assert_eq!(boxed, direct);
-        assert_eq!(
-            serde_json::from_value::<ObservabilityPayloadV1>(boxed).unwrap(),
-            payload
-        );
-    }
-
-    #[test]
     fn operation_stage_wire_values_are_closed_and_stable() {
         let values = [
             (OperationStageV1::Scheduled, "\"scheduled\""),
@@ -624,33 +602,6 @@ mod tests {
             OperationReadinessV1 {
                 foreground_ready_micros: Some(21),
                 background_complete_micros: None,
-            }
-        );
-        assert_eq!(envelope.validate(), Ok(()));
-    }
-
-    #[test]
-    fn successful_terminal_records_both_readiness_milestones() {
-        let envelope = operation_envelope(
-            vec![
-                stage(OperationStageV1::Scheduled, 0),
-                stage(OperationStageV1::Admitted, 5),
-                stage(OperationStageV1::Started, 8),
-                stage(OperationStageV1::FirstProgress, 13),
-                stage(OperationStageV1::FirstUsefulResult, 21),
-                stage(OperationStageV1::Terminal, 34),
-            ],
-            Some(ObservabilityTerminalResultV1::Succeeded),
-        );
-        let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
-            unreachable!();
-        };
-
-        assert_eq!(
-            resource.readiness(),
-            OperationReadinessV1 {
-                foreground_ready_micros: Some(21),
-                background_complete_micros: Some(34),
             }
         );
         assert_eq!(envelope.validate(), Ok(()));

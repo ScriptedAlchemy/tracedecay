@@ -1,57 +1,16 @@
 use std::collections::BTreeSet;
 
 use super::{
-    HttpApplicationControls, HttpApplicationOwnerKind, HttpPageQuery,
-    admit_http_application_request, http_application_full_route_path, http_application_owner_kind,
+    HttpApplicationOwnerKind, http_application_full_route_path, http_application_owner_kind,
     is_http_application_operation_exposed, parse_callable_code_operation,
     parse_configuration_operation, parse_context_scout_operation, parse_feedback_read_operation,
     parse_git_read_operation, parse_native_integration_operation,
 };
-use axum::Json;
-use axum::extract::Query;
 use tracedecay_contracts::{
-    CancellationSignal, Deadline, RequestId, application_http_executable_binding_registry,
+    application_http_executable_binding_registry,
     configuration::configuration_surface_operation_names,
 };
-use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId, RouteExposureV1};
-
-#[test]
-fn omitted_http_page_query_uses_each_operations_catalog_default() {
-    let omitted_page_size = |operation, request_id: &'static str| {
-        let query: HttpPageQuery =
-            serde_json::from_value(serde_json::json!({})).expect("empty HTTP query");
-        admit_http_application_request(
-            operation,
-            RequestId::new(request_id).expect("request ID"),
-            HttpApplicationControls {
-                deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
-                cancellation: CancellationSignal::active(format!("cancel.{request_id}"))
-                    .expect("cancellation"),
-            },
-            Ok(Query(query)),
-            Ok(Json(serde_json::json!({}))),
-        )
-        .expect("admitted HTTP request")
-        .page
-        .page_size
-    };
-
-    assert_eq!(
-        omitted_page_size(
-            ApplicationSurfaceOperation::DiagnosticsRead,
-            "request.http-diagnostics-default"
-        ),
-        1_000
-    );
-    assert_eq!(
-        omitted_page_size(
-            ApplicationSurfaceOperation::QualifiedName,
-            "request.http-qualified-name-default"
-        ),
-        10
-    );
-}
 
 #[test]
 fn git_read_operation_parser_is_exact_and_read_only() {

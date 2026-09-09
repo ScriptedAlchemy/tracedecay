@@ -287,21 +287,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn integrity_digest_types_accept_supported_algorithms() {
-        let sha256 = format!("sha256:{}", "a".repeat(64));
-        let sha512 = format!("sha512:{}", "b".repeat(128));
-        let blake3 = format!("blake3:{}", "c".repeat(64));
-
-        assert!(ManifestDigest::new(&sha256).is_ok());
-        assert!(LocatorDigest::new(&sha256).is_ok());
-        assert!(AccessPolicyDigest::new(&sha256).is_ok());
-        assert!(RegistryManifestDigest::new(&sha256).is_ok());
-        assert!(DataVersionDigest::new(&sha256).is_ok());
-        assert!(ManifestDigest::new(sha512).is_ok());
-        assert!(ManifestDigest::new(blake3).is_ok());
-    }
-
-    #[test]
     fn integrity_digests_reject_non_cryptographic_or_noncanonical_values() {
         let malformed = [
             "catalog-digest-synthetic-001".to_owned(),

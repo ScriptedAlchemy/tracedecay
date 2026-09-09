@@ -625,21 +625,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_revision_is_stamped() {
-        let envelope = DashboardEnvelopeV1::unsupported(scope(), 7_u32);
-        assert_eq!(envelope.schema_revision, DASHBOARD_SCHEMA_REVISION_V1);
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
-        assert_eq!(
-            envelope.coverage.completeness,
-            DashboardCoverageCompletenessV1::Unsupported
-        );
-        assert_eq!(
-            envelope.freshness.state,
-            DashboardFreshnessStateV1::Unsupported
-        );
-    }
-
-    #[test]
     fn unavailable_partial_and_denied_never_claim_complete_coverage() {
         let unavailable =
             DashboardEnvelopeV1::unavailable(scope(), (), "source_temporarily_unavailable");

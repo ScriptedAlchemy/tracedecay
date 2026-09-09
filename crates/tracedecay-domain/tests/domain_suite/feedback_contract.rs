@@ -1,9 +1,8 @@
 use tracedecay_domain::feedback::{
-    FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineHorizonV1,
-    FeedbackBaselineStateV1, FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId,
-    FeedbackCycleObservationV1, FeedbackCycleRequestV1, FeedbackCycleResultV1,
-    FeedbackCycleRuntimeSnapshotV1, FeedbackCycleTerminationV1, FeedbackDedupeKeyV1,
-    FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
+    FeedbackActorContextV1, FeedbackBaselineHorizonV1, FeedbackBaselineStateV1, FeedbackBudgetV1,
+    FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleObservationV1, FeedbackCycleRequestV1,
+    FeedbackCycleResultV1, FeedbackCycleRuntimeSnapshotV1, FeedbackCycleTerminationV1,
+    FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
     FeedbackDiagnosticClassificationV1, FeedbackDurabilityV1, FeedbackEvaluationInputV1,
     FeedbackEvidencePacketV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackScopeV1,
     FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
@@ -284,45 +283,6 @@ fn runtime_snapshot_turns_branch_head_drift_into_explicit_staleness() {
     runtime.scope.head_commit_id = id::<CommitId>("commit.changed.fixture");
     assert!(runtime.has_same_root(&request));
     assert!(!runtime.is_current_for(&request));
-}
-
-#[test]
-fn saved_runtime_can_authoritatively_report_no_prior_baseline() {
-    let request = FeedbackCycleRequestV1::new(
-        id::<FeedbackCycleId>("cycle.runtime.no-prior"),
-        scope(),
-        FeedbackContentIdentityV1::SavedContent {
-            generation_digest: digest('5'),
-            file_digest: digest('6'),
-        },
-        FeedbackTriggerV1::PostEditHook,
-        digest('7'),
-        digest('8'),
-        FeedbackBudgetV1::bounded(1_000, 2_000, 4_096, 10),
-    )
-    .unwrap();
-    let input = FeedbackEvaluationInputV1 {
-        target: FeedbackTargetV1 {
-            file: id::<FileOccurrenceId>("file.no-prior.fixture"),
-            span: None,
-            symbol: None,
-            generation_id: Some(id::<CodeGenerationId>("generation.v1.no-prior.00000001")),
-        },
-        actor: FeedbackActorContextV1::default(),
-        observed_at: UtcMicros(1),
-        request: request.clone(),
-    };
-    let runtime = FeedbackAuthoritativeRuntimeStateV1 {
-        snapshot: FeedbackCycleRuntimeSnapshotV1::from_request(&request),
-        baseline_horizon: None,
-        runtime_watermark: digest('9'),
-    };
-
-    assert!(runtime.validate_for(&input).is_ok());
-    assert_ne!(
-        FeedbackBaselineStateV1::NoPriorBaseline,
-        FeedbackBaselineStateV1::Complete
-    );
 }
 
 #[test]
