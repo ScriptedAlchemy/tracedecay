@@ -11,7 +11,7 @@ use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_contracts::{RequestAdmission, RequestContext, ResolvedScope};
 use tracedecay_session_memory::context::application_observed_at;
 
-use tracedecay_code_index_runtime::code_index_scheduler::{
+use crate::code_index_scheduler::{
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
     CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
 };
@@ -160,7 +160,7 @@ async fn exact_serving_generation(
         .then(|| generation.manifest().generation_id.clone())
 }
 
-pub(crate) fn project_code_index_ignored_dependency_admission_port(
+pub fn project_code_index_ignored_dependency_admission_port(
     schedulers: CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
