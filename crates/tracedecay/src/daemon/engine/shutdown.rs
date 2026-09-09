@@ -80,15 +80,7 @@ impl DaemonEngine {
                     let invocation_cancel = self.invocation.clone();
                     move || invocation_cancel.cancel_admissions()
                 },
-                move |_| async move {
-                    if invocation_join.shutdown().await {
-                        ShutdownStatus::Clean
-                    } else {
-                        ShutdownStatus::Failed(
-                            "invocation runtime shutdown was incomplete".to_owned(),
-                        )
-                    }
-                },
+                move |_| async move { invocation_join.shutdown().await },
             )],
             vec![
                 ShutdownOwner::with_deadline_status(

@@ -319,15 +319,13 @@ async fn run_foreground_loopback(
         // after the producer owners settle, so nothing can admit a provider
         // process after the execution registry is emptied and leave it
         // running past shutdown.
-        vec![shutdown_coordination::ShutdownOwner::new(
+        vec![shutdown_coordination::ShutdownOwner::with_deadline_status(
             "invocation",
             {
                 let invocation_cancel = invocation.clone();
                 move || invocation_cancel.cancel_admissions()
             },
-            async move {
-                invocation_join.shutdown().await;
-            },
+            move |_| async move { invocation_join.shutdown().await },
         )],
         vec![shutdown_coordination::ShutdownOwner::new(
             "session_sync",
