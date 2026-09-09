@@ -26,20 +26,20 @@ use tracedecay_sessions::runtime::{
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
-use super::super::receipts::evidence_outcome;
-use super::super::session_retrieval_unavailable_detail;
 use super::output;
 use super::{
     cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
     role_name, session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
 };
-use tracedecay_runtime_core::timeutil::SearchTimeBound;
-use tracedecay_session_runtime::session_retrieval::{
+use crate::retained::session_retrieval_unavailable_detail;
+use crate::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,
     LcmExpandServiceOutcome, SessionApplicationRetrievalPortV1, SessionRetrievalCommand,
     SessionRetrievalFilters, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
     SessionTemporalMetadataView,
 };
+use tracedecay_contracts::retained_receipts::evidence_outcome;
+use tracedecay_runtime_core::timeutil::SearchTimeBound;
 
 const MAX_RESULTS: usize = 100;
 const EXPAND_QUERY_CONCURRENCY: usize = 8;
@@ -47,7 +47,7 @@ const EXPAND_QUERY_CONCURRENCY: usize = 8;
 // fail within_request_budgets as a persistent structural budget refusal, so
 // every query built here is sized against the one shared constant.
 const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize =
-    tracedecay_session_runtime::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES as usize;
+    crate::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES as usize;
 const DEFAULT_CONTENT_LIMIT: usize = 4_096;
 const MAX_CONTENT_LIMIT: usize = 8_192;
 const MAX_LOAD_CONTENT_LIMIT: usize = 20_000;
@@ -591,9 +591,7 @@ fn retrieval_query(
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
     .with_retrieval_scope(retrieval_scope)
-    .with_execution_limits(
-        tracedecay_session_runtime::session_retrieval::admitted_execution_limits(limit),
-    );
+    .with_execution_limits(crate::session_retrieval::admitted_execution_limits(limit));
     Ok(SessionRetrievalCommand::new(
         query,
         SessionRetrievalFilters {

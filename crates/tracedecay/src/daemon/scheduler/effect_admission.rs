@@ -12,8 +12,11 @@ use super::{
     maybe_run_global_retention, run_user_jobs_scheduler_pass, scheduler_run_observer,
     settle_scheduler_retained_automation,
 };
-use crate::daemon::automation_effect::AutomationEffectAdmission;
+use crate::daemon::automation_effect::prepare as prepare_automation_effect;
 use crate::tracedecay::TraceDecay;
+use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
+    AutomationEffectAdmission, AutomationEffectAuthority,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) fn log_scheduler_pre_admission_problem(
@@ -115,11 +118,7 @@ pub(super) async fn scheduler_automation_effect(
     request: impl FnOnce(
         &str,
     ) -> Result<tracedecay_contracts::retained_surfaces::AutomationRunRequestV1>,
-) -> Result<(
-    crate::daemon::automation_effect::AutomationEffectAdmission,
-    String,
-    AutomationRunControl,
-)> {
+) -> Result<(AutomationEffectAdmission, String, AutomationRunControl)> {
     let request_id = scheduler_automation_request_id(requested_run_id)?;
     let cancellation =
         tracedecay_contracts::CancellationSignal::active(format!("cancel.{}", request_id.as_str()))
@@ -136,7 +135,7 @@ pub(super) async fn scheduler_automation_effect(
     synchronize_scheduler_effect_control(&effect_run_control);
     let run_id = requested_run_id.map_or_else(|| request_id.as_str().to_owned(), str::to_owned);
     let request = request(&run_id)?;
-    let effect = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+    let effect = prepare_automation_effect(
         &engine.invocation.invocation_service(),
         memory,
         project_path,
@@ -260,7 +259,7 @@ pub(super) async fn abandon_reused_scheduler_skip(
     project_path: &Path,
     task: AgentTaskKind,
     run_control: &AutomationRunControl,
-    effect: crate::daemon::automation_effect::AutomationEffectAuthority,
+    effect: AutomationEffectAuthority,
     reused: tracedecay_automation_runtime::automation::runner::ReusedSchedulerSkip,
     settlement_guard: tracedecay_automation_runtime::automation::runner::AutomationRunSettlementGuard,
 ) -> Option<TraceDecayError> {
