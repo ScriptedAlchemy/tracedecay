@@ -2,9 +2,9 @@ use super::*;
 use std::any::Any;
 use std::sync::atomic::Ordering;
 
-use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_application::feedback::concrete::open_feedback_runtime;
+use tracedecay_daemon_service::DaemonCallableCodeAuthorizationSource;
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{ActorId, ConfigurationRevisionId, canonical_sha256};
 use tracedecay_hooks::HookBoundaryV1;
@@ -995,6 +995,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                                 project.path().to_path_buf(),
                                 scope.clone(),
                                 Arc::clone(graph.configuration_runtime()),
+                                crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
                             )),
                         ),
                     )
@@ -1041,6 +1042,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                     project.path().to_path_buf(),
                     scope.clone(),
                     Arc::clone(graph.configuration_runtime()),
+                    crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
                 )),
             )
             .await;
@@ -1128,6 +1130,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
                     publisher_root,
                     publisher_scope,
                     publisher_configuration,
+                    crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
                 )),
             )
             .await

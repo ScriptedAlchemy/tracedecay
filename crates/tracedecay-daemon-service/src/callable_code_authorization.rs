@@ -1,19 +1,20 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_contracts::{
-    ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
-    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
+    ApplicationContractError, ApplicationOperation, ApplicationProblem, ApplicationProblemKind,
+    AuthorityReceipt, CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
     SafeDiagnostic,
 };
-use tracedecay_daemon_service::callable_code_request_context;
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
+use crate::callable_code_request_context;
 use tracedecay_application::{
     CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
     ProjectSourceAccessSnapshot,
 };
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
@@ -23,12 +24,12 @@ type CurrentCallableCodeAccess =
     dyn Fn(UtcMicros) -> CurrentCallableCodeAccessFuture<'static> + Send + Sync;
 
 #[derive(Clone)]
-pub(super) struct DaemonCallableCodeAuthorizationSource {
+pub struct DaemonCallableCodeAuthorizationSource {
     access: Arc<CurrentCallableCodeAccess>,
 }
 
 impl DaemonCallableCodeAuthorizationSource {
-    fn new(
+    pub fn new(
         access: impl Fn(UtcMicros) -> CurrentCallableCodeAccessFuture<'static> + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -36,50 +37,56 @@ impl DaemonCallableCodeAuthorizationSource {
         }
     }
 
-    pub(super) fn production(
+    pub fn production(
         project_root: PathBuf,
         scope: ResolvedScope,
         configuration: Arc<ProjectConfigurationRuntime>,
+        source_access_at: impl Fn(
+            &ResolvedScope,
+            &Path,
+            &PinnedRuntimeConfiguration,
+            UtcMicros,
+        )
+            -> Result<ProjectSourceAccessSnapshot, ApplicationContractError>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         let project_root = Arc::new(project_root);
         let scope = Arc::new(scope);
+        let source_access_at = Arc::new(source_access_at);
         Self::new(move |observed_at| {
             let project_root = Arc::clone(&project_root);
             let scope = Arc::clone(&scope);
             let configuration = Arc::clone(&configuration);
+            let source_access_at = Arc::clone(&source_access_at);
             Box::pin(async move {
                 let current = configuration
                     .configuration_store()
                     .current()
                     .await
                     .map_err(configuration_current_problem)?;
-                let configuration =
-                    tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
-                        configuration.configuration_target().clone(),
-                        current.revision_id,
-                        current.snapshot,
-                    )
-                    .map_err(|_| concealed())?;
-                crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
-                    &scope,
-                    &project_root,
-                    &configuration,
-                    observed_at,
+                let configuration = PinnedRuntimeConfiguration::new(
+                    configuration.configuration_target().clone(),
+                    current.revision_id,
+                    current.snapshot,
                 )
-                .map_err(|_| concealed())
+                .map_err(|_| concealed())?;
+                source_access_at(&scope, &project_root, &configuration, observed_at)
+                    .map_err(|_| concealed())
             })
         })
     }
 
     #[hotpath::skip]
-    pub(super) async fn current(
+    pub async fn current(
         &self,
         observed_at: UtcMicros,
     ) -> Result<ProjectSourceAccessSnapshot, ApplicationProblem> {
         (self.access)(observed_at).await
     }
 
-    pub(super) fn authorize(
+    pub fn authorize(
         &self,
         admitted_access: ProjectSourceAccessSnapshot,
     ) -> DaemonCallableCodeAuthorization {
@@ -107,20 +114,35 @@ impl CallableCodeAuthorizationSourcePort for DaemonCallableCodeAuthorizationSour
 }
 
 #[derive(Clone)]
-pub(crate) struct DaemonCodeGraphReadAdmission {
+pub struct DaemonCodeGraphReadAdmission {
     scope: ResolvedScope,
     authorization: DaemonCallableCodeAuthorizationSource,
 }
 
 impl DaemonCodeGraphReadAdmission {
-    pub(crate) fn production(
+    pub fn production(
         project_root: PathBuf,
         scope: ResolvedScope,
         configuration: Arc<ProjectConfigurationRuntime>,
+        source_access_at: impl Fn(
+            &ResolvedScope,
+            &Path,
+            &PinnedRuntimeConfiguration,
+            UtcMicros,
+        )
+            -> Result<ProjectSourceAccessSnapshot, ApplicationContractError>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         Self::new(
             scope.clone(),
-            DaemonCallableCodeAuthorizationSource::production(project_root, scope, configuration),
+            DaemonCallableCodeAuthorizationSource::production(
+                project_root,
+                scope,
+                configuration,
+                source_access_at,
+            ),
         )
     }
 
@@ -246,7 +268,7 @@ fn map_graph_admission_problem(problem: ApplicationProblem) -> CodeGraphReadErro
     }
 }
 
-pub(super) struct DaemonCallableCodeAuthorization {
+pub struct DaemonCallableCodeAuthorization {
     source: DaemonCallableCodeAuthorizationSource,
     admitted_access: ProjectSourceAccessSnapshot,
 }

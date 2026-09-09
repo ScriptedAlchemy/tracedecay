@@ -103,7 +103,7 @@ pub(super) async fn install_remote_http_application_router(
 ) -> Result<()> {
     let runtime = store_administration.registered_runtime_registry().await?;
     let credentials = runtime.remote_credential_authority();
-    let router = super::remote_protocol::build_daemon_remote_protocol_router(
+    let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
         invocation.service.clone(),
