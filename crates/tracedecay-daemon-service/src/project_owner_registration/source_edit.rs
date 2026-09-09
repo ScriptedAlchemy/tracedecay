@@ -12,8 +12,9 @@ use tracedecay_contracts::request_identity::{PreviewIdentityDomain, derive_previ
 use tracedecay_contracts::{
     ApplicationOperation, CancellationContext, CancellationSignal, Deadline, EffectId,
     IdempotencyKey, RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationAdmissionV1,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditKind,
-    SourceEditReconciliationDispositionV1, SourceEditRequest, now_micros,
+    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditInvocationV1,
+    SourceEditKind, SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
+    SourceEditRequest, SourceEditRollbackInvocationV1, now_micros,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
@@ -280,6 +281,69 @@ impl ProjectSourceEditOwnerV1 {
             authorization,
             mutation,
         }
+    }
+
+    pub fn scope(&self) -> ResolvedScope {
+        self.authorization.scope.clone()
+    }
+
+    pub async fn execute_invocation(
+        &self,
+        request_id: RequestId,
+        invocation: SourceEditInvocationV1,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
+        self.execute(
+            invocation.edit,
+            invocation.idempotency_key,
+            invocation.expected_state,
+            request_id,
+            deadline,
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn rollback_invocation(
+        &self,
+        request_id: RequestId,
+        invocation: SourceEditRollbackInvocationV1,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
+        self.rollback(
+            invocation.effect_id,
+            invocation.original_idempotency_key,
+            invocation.idempotency_key,
+            invocation.original_input_digest,
+            invocation.expected_state,
+            request_id,
+            deadline,
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn reconcile_invocation(
+        &self,
+        request_id: RequestId,
+        invocation: SourceEditReconciliationInvocationV1,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
+        self.reconcile(
+            invocation.kind,
+            invocation.effect_id,
+            invocation.idempotency_key,
+            invocation.attempt_idempotency_key,
+            invocation.input_digest,
+            invocation.disposition,
+            request_id,
+            deadline,
+            cancellation,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]

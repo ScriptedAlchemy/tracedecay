@@ -53,6 +53,7 @@ pub mod contract;
 pub mod handshake;
 pub mod lsp_wire;
 pub mod output_format;
+pub mod request;
 pub mod surface;
 pub mod transport;
 

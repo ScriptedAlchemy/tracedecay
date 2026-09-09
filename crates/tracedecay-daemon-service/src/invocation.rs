@@ -187,6 +187,7 @@ mod registrars;
 mod retained;
 mod semantic_activation;
 pub mod semantic_evaluation;
+mod source_edit;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -216,6 +217,9 @@ use native_integration::execute_native_integration;
 use observatory::execute_observatory_read;
 use primitive::*;
 use retained::*;
+use source_edit::{
+    execute_source_edit, execute_source_edit_reconcile, execute_source_edit_rollback,
+};
 use types::*;
 use work::*;
 pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
@@ -473,6 +477,14 @@ impl DaemonInvocationService {
         &self,
     ) -> Arc<tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
         Arc::clone(&self.github_stack_coordinator)
+    }
+
+    pub async fn register_source_edit_owner(
+        &self,
+        project_root: PathBuf,
+        owner: Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1>,
+    ) -> Result<(), crate::project_runtime::ProjectRuntimeRegistryError> {
+        self.project_runtimes.register(project_root, owner).await
     }
 
     #[hotpath::measure(label = "daemon.service.invocation.retained_context", future = true)]

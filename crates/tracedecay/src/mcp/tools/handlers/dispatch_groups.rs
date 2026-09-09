@@ -1163,9 +1163,7 @@ fn dispatch_edit_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let invocation = edit::SourceEditInvocationContext {
-            executor: options.source_edit_executor.clone(),
-            reconciliation_executor: options.source_edit_reconciliation_executor.clone(),
-            rollback_executor: options.source_edit_rollback_executor.clone(),
+            executor: options.application_invocation_executor,
             request_id: options.application_request_id.clone(),
             deadline: options.application_deadline.clone(),
             cancellation: options.application_cancellation.clone(),

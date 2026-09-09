@@ -226,74 +226,6 @@ pub(crate) type CodeIndexPublicationIdentityResolver = Arc<
 /// `crate::mcp`.
 pub(crate) use tracedecay_query::code_search::*;
 
-/// User-controlled fields admitted at the MCP source-edit boundary.
-///
-/// The daemon-owned executor closes over project authority and constructs the
-/// request context, authority receipt, policy proof, and authorization service.
-/// None of those authority-bearing values may be supplied by the transport.
-pub(crate) struct SourceEditInvocationV1 {
-    pub(crate) edit: tracedecay_contracts::SourceEditRequest,
-    pub(crate) idempotency_key: Option<tracedecay_contracts::IdempotencyKey>,
-    pub(crate) expected_state: Option<tracedecay_domain::ManifestDigest>,
-    pub(crate) request_id: tracedecay_contracts::RequestId,
-    pub(crate) deadline: tracedecay_contracts::Deadline,
-    pub(crate) cancellation: tracedecay_contracts::CancellationSignal,
-}
-
-pub(crate) type SourceEditFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = tracedecay_domain::errors::Result<
-                    tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
-                >,
-            > + Send
-            + 'static,
-    >,
->;
-
-pub(crate) type SourceEditExecutor =
-    Arc<dyn Fn(SourceEditInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
-
-/// User-controlled identity and inspection conclusion for one uncertain edit.
-///
-/// Authority-bearing context and proof fields are deliberately absent: the
-/// daemon-owned executor constructs them from the current project admission.
-pub(crate) struct SourceEditReconciliationInvocationV1 {
-    pub(crate) kind: tracedecay_contracts::SourceEditKind,
-    pub(crate) effect_id: tracedecay_contracts::EffectId,
-    pub(crate) idempotency_key: tracedecay_contracts::IdempotencyKey,
-    pub(crate) attempt_idempotency_key: tracedecay_contracts::IdempotencyKey,
-    pub(crate) input_digest: tracedecay_domain::ManifestDigest,
-    pub(crate) disposition: tracedecay_contracts::SourceEditReconciliationDispositionV1,
-    pub(crate) request_id: tracedecay_contracts::RequestId,
-    pub(crate) deadline: tracedecay_contracts::Deadline,
-    pub(crate) cancellation: tracedecay_contracts::CancellationSignal,
-}
-
-pub(crate) type SourceEditReconciliationExecutor =
-    Arc<dyn Fn(SourceEditReconciliationInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
-
-/// User-controlled identity of one completed source edit whose retained
-/// preimages the caller asks the daemon to restore.
-///
-/// Authority-bearing context and proof fields are deliberately absent: the
-/// daemon-owned executor constructs them from the current project admission.
-/// The preimage bytes never cross this boundary either — they stay in the
-/// server-side rollback record and the caller only names public digests.
-pub(crate) struct SourceEditRollbackInvocationV1 {
-    pub(crate) effect_id: tracedecay_contracts::EffectId,
-    pub(crate) original_idempotency_key: tracedecay_contracts::IdempotencyKey,
-    pub(crate) idempotency_key: tracedecay_contracts::IdempotencyKey,
-    pub(crate) original_input_digest: tracedecay_domain::ManifestDigest,
-    pub(crate) expected_state: tracedecay_domain::ManifestDigest,
-    pub(crate) request_id: tracedecay_contracts::RequestId,
-    pub(crate) deadline: tracedecay_contracts::Deadline,
-    pub(crate) cancellation: tracedecay_contracts::CancellationSignal,
-}
-
-pub(crate) type SourceEditRollbackExecutor =
-    Arc<dyn Fn(SourceEditRollbackInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
-
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
     /// The served code graph. Guarded so a mid-session `git checkout` can
@@ -423,11 +355,6 @@ pub struct McpServer {
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
         tokio::sync::OnceCell<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>,
-    /// Installed only after project-open has resolved current source-edit
-    /// authority. Direct servers remain fail-closed.
-    source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
-    source_edit_reconciliation_executor: tokio::sync::OnceCell<SourceEditReconciliationExecutor>,
-    source_edit_rollback_executor: tokio::sync::OnceCell<SourceEditRollbackExecutor>,
     /// Admission supplied by an authenticated daemon application route. It is
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
@@ -1177,9 +1104,6 @@ impl McpServer {
             verified_graph_query_port,
             code_index_ignored_dependency_admission,
             generation_census_reader: tokio::sync::OnceCell::new(),
-            source_edit_executor: tokio::sync::OnceCell::new(),
-            source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
-            source_edit_rollback_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             admitted_project_scope,
             retained_project_server_resolver,
