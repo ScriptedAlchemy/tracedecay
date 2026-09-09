@@ -246,14 +246,26 @@ fn default_retention_interval_hours() -> u64 {
     24
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the optional field type; explicit None disables maintenance"
+)]
 fn default_orphan_store_gc_days() -> Option<u64> {
     Some(30)
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the optional field type; explicit None disables maintenance"
+)]
 fn default_incident_debris_retention_days() -> Option<u64> {
     Some(30)
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the optional field type; explicit None disables maintenance"
+)]
 fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
     Some(CompactionThresholdConfig::default())
 }
