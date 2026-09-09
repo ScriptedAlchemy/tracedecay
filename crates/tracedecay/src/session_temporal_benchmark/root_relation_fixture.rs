@@ -17,7 +17,7 @@ use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::ExecutionControl;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
-use super::{AllowAuthorizer, BenchResult, CONFIG_VERSION, NoopWake, PROJECTOR_VERSION};
+use super::{AllowAuthorizer, BenchResult, CONFIG_VERSION, PROJECTOR_VERSION};
 use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 
 pub(super) const ROOT_RELATION_PARTICIPANT_COUNT: usize = 64;
@@ -57,7 +57,7 @@ pub(super) async fn refresh_sessions(
     let refresh = SessionRefreshService::new(
         AllowAuthorizer,
         GlobalDbSessionTemporalStore::new(db),
-        NoopWake,
+        || Ok(()),
         SessionRefreshConfiguration::new(PROJECTOR_VERSION, CONFIG_VERSION)
             .map_err(|error| format!("root refresh configuration: {error}"))?,
     );
