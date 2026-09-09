@@ -16,7 +16,7 @@ use super::digest::{
     effect_id, normalize_candidate_files, planned_source_edit_state_digest,
     source_edit_recovery_digest, source_edit_state_digest,
 };
-use super::dispatch::{SourceEditGraphReadAuthorityV1, run_source_edit};
+use super::dispatch::run_source_edit;
 use super::journal::{
     ResolvedSourceEditPreview, SourceEditDurability, SourceEditDurableRequestV1,
     SourceEditJournalStateV1, SourceEditJournalV1, same_source_edit_authority,
@@ -553,12 +553,10 @@ where
             planned_files,
             run_source_edit(
                 graph,
-                SourceEditGraphReadAuthorityV1 {
-                    port: code_graph,
-                    context: &request.context,
-                    observed_at: request.observed_at,
-                    cancellation: graph_cancellation,
-                },
+                code_graph,
+                &request.context,
+                request.observed_at,
+                graph_cancellation,
                 request.edit.clone().with_dry_run(false),
             ),
         ),
@@ -673,12 +671,10 @@ pub(super) async fn resolve_source_edit_preview(
     };
     let (outcome, planned_files) = capture_source_edit_plan(run_source_edit(
         graph,
-        SourceEditGraphReadAuthorityV1 {
-            port: code_graph,
-            context,
-            observed_at,
-            cancellation,
-        },
+        code_graph,
+        context,
+        observed_at,
+        cancellation,
         capture_edit,
     ))
     .await;
