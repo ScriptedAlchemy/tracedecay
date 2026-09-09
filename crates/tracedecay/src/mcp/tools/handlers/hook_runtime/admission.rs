@@ -147,13 +147,15 @@ fn complete_hook_v2_pending_work(
     true
 }
 
+type HookV2WorkCompletion = Arc<dyn Fn() + Send + Sync + 'static>;
+
 fn retain_hook_v2_pending_work(
     data_root: &Path,
     pending_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     ledger_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     binding: &tracedecay_hooks::HookScopeBindingV1,
     now: UtcMicros,
-) -> Option<Arc<dyn Fn() + Send + Sync + 'static>> {
+) -> Option<HookV2WorkCompletion> {
     let _gate = hook_v2_pending_work_gate().lock().ok()?;
     let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
         hook_v2_pending_work_root(data_root, pending_envelope.producer),
@@ -330,40 +332,16 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             return HookV2AdmissionOutcomeV1::Backpressured;
         }
     }
-    let requires_producer_work = hook_v2_requires_producer_work(envelope);
-    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
-        && !requires_producer_work
-    {
-        return HookV2AdmissionOutcomeV1::ExactDuplicate;
-    }
-    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
-        && receipt.work_completed
-    {
-        let Some(cleanup) = retain_hook_v2_pending_work(
-            &cg.hook_store_layout().data_root,
-            provider_envelope,
-            envelope,
-            &snapshot.binding,
-            now,
-        ) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        cleanup();
-        return HookV2AdmissionOutcomeV1::ExactDuplicate;
-    }
-    let completion = if requires_producer_work {
-        let Some(completion) = retain_hook_v2_pending_work(
-            &cg.hook_store_layout().data_root,
-            provider_envelope,
-            envelope,
-            &snapshot.binding,
-            now,
-        ) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        Some(completion)
-    } else {
-        None
+    let completion = match prepare_hook_v2_producer_work(
+        &cg.hook_store_layout().data_root,
+        provider_envelope,
+        envelope,
+        &snapshot.binding,
+        receipt,
+        now,
+    ) {
+        Ok(completion) => completion,
+        Err(outcome) => return outcome,
     };
     let first_admission = receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::Admitted;
     // Live-activity tap: a bound hook-v2 envelope reaching admission IS an agent
@@ -406,6 +384,44 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         feedback_notice,
         github_stack_signal_available,
     }
+}
+
+fn prepare_hook_v2_producer_work(
+    data_root: &Path,
+    provider_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    binding: &tracedecay_hooks::HookScopeBindingV1,
+    receipt: tracedecay_hooks::HookAdmissionLedgerReceiptV1,
+    now: UtcMicros,
+) -> std::result::Result<Option<HookV2WorkCompletion>, HookV2AdmissionOutcomeV1> {
+    let requires_producer_work = hook_v2_requires_producer_work(envelope);
+    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+        && !requires_producer_work
+    {
+        return Err(HookV2AdmissionOutcomeV1::ExactDuplicate);
+    }
+    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+        && receipt.work_completed
+    {
+        let Some(cleanup) =
+            retain_hook_v2_pending_work(data_root, provider_envelope, envelope, binding, now)
+        else {
+            return Err(HookV2AdmissionOutcomeV1::Backpressured);
+        };
+        cleanup();
+        return Err(HookV2AdmissionOutcomeV1::ExactDuplicate);
+    }
+    let completion = if requires_producer_work {
+        let Some(completion) =
+            retain_hook_v2_pending_work(data_root, provider_envelope, envelope, binding, now)
+        else {
+            return Err(HookV2AdmissionOutcomeV1::Backpressured);
+        };
+        Some(completion)
+    } else {
+        None
+    };
+    Ok(completion)
 }
 
 async fn claim_hook_v2_guidance(

@@ -24,9 +24,9 @@ use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[allow(dead_code)]
-fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
+fn assert_begin_test_run_future_is_send(cg: &TraceDecay, started_at: UtcMicros) {
     fn assert_send<T: Send>(_: T) {}
-    assert_send(begin_test_run(cg, &[], deadline, None));
+    assert_send(begin_test_run(cg, &[], started_at, 30, None));
 }
 
 #[derive(Clone, Copy)]

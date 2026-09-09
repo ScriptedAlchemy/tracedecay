@@ -109,30 +109,27 @@ async fn replay_projectless_hermes_receipts(
     let replay = broker.begin_replay().await?;
     let mut attempted = HashSet::new();
     let mut blocked_sources = HashSet::new();
-    let mut retained_leases = Vec::new();
-    let mut retained_outcome = None;
-    let mut target_outcome = None;
-    let mut terminal_outcome = None;
+    let mut settlement = ReceiptReplaySettlement::default();
     for _ in 0..MAX_RECORDS_PER_PASS {
         let record = match replay.lease_next().await {
             Ok(Some(record)) => record,
             Ok(None) => break,
             Err(outcome) => {
-                terminal_outcome = Some(outcome);
+                settlement.terminal_outcome = Some(outcome);
                 break;
             }
         };
         if blocked_sources.contains(&record.source) {
-            retained_leases.push(record.seq);
+            settlement.retained_leases.push(record.seq);
             continue;
         }
         if !attempted.insert(record.seq) {
             let outcome = HostAdmissionOutcome::spool_ack_conflict();
             blocked_sources.insert(record.source);
-            retained_leases.push(record.seq);
-            retained_outcome.get_or_insert(outcome.clone());
+            settlement.retained_leases.push(record.seq);
+            settlement.retained_outcome.get_or_insert(outcome.clone());
             if target_seq == Some(record.seq) {
-                target_outcome = Some(outcome);
+                settlement.target_outcome = Some(outcome);
             }
             continue;
         }
@@ -144,10 +141,10 @@ async fn replay_projectless_hermes_receipts(
                 ) => {
                     let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
                     blocked_sources.insert(record.source);
-                    retained_leases.push(record.seq);
-                    retained_outcome.get_or_insert(outcome.clone());
+                    settlement.retained_leases.push(record.seq);
+                    settlement.retained_outcome.get_or_insert(outcome.clone());
                     if target_seq == Some(record.seq) {
-                        target_outcome = Some(outcome);
+                        settlement.target_outcome = Some(outcome);
                     }
                     continue;
                 }
@@ -158,21 +155,21 @@ async fn replay_projectless_hermes_receipts(
                         .await
                     {
                         Ok(_) => {
-                            retained_outcome.get_or_insert(outcome.clone());
+                            settlement.retained_outcome.get_or_insert(outcome.clone());
                             if target_seq == Some(record.seq) {
-                                target_outcome = Some(outcome);
+                                settlement.target_outcome = Some(outcome);
                             }
                         }
                         Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
                             blocked_sources.insert(record.source);
-                            retained_leases.push(record.seq);
-                            retained_outcome.get_or_insert(failure.clone());
+                            settlement.retained_leases.push(record.seq);
+                            settlement.retained_outcome.get_or_insert(failure.clone());
                             if target_seq == Some(record.seq) {
-                                target_outcome = Some(failure);
+                                settlement.target_outcome = Some(failure);
                             }
                         }
                         Err(failure) => {
-                            terminal_outcome = Some(failure);
+                            settlement.terminal_outcome = Some(failure);
                             break;
                         }
                     }
@@ -187,60 +184,67 @@ async fn replay_projectless_hermes_receipts(
             match replay.commit(record.seq).await {
                 Ok(_) => canonical_outcome,
                 Err(outcome) => {
-                    terminal_outcome = Some(outcome);
+                    settlement.terminal_outcome = Some(outcome);
                     break;
                 }
             }
         } else {
             blocked_sources.insert(record.source);
-            retained_leases.push(record.seq);
-            retained_outcome.get_or_insert(canonical_outcome.clone());
+            settlement.retained_leases.push(record.seq);
+            settlement
+                .retained_outcome
+                .get_or_insert(canonical_outcome.clone());
             canonical_outcome
         };
         if target_seq == Some(record.seq) {
-            target_outcome = Some(outcome);
+            settlement.target_outcome = Some(outcome);
         }
     }
-    settle_projectless_hermes_replay(
-        &replay,
-        retained_leases,
-        target_seq,
-        target_outcome,
-        terminal_outcome,
-        retained_outcome,
-    )
-    .await
+    settlement.finish(&replay, target_seq).await
 }
 
-async fn settle_projectless_hermes_replay(
-    replay: &HostAdmissionReplay<'_>,
+#[derive(Default)]
+struct ReceiptReplaySettlement {
     retained_leases: Vec<u64>,
-    target_seq: Option<u64>,
-    mut target_outcome: Option<HostAdmissionOutcome>,
-    terminal_outcome: Option<HostAdmissionOutcome>,
     retained_outcome: Option<HostAdmissionOutcome>,
-) -> std::result::Result<HostAdmissionOutcome, HostAdmissionOutcome> {
-    for seq in retained_leases.into_iter().rev() {
-        replay.defer(seq).await?;
+    target_outcome: Option<HostAdmissionOutcome>,
+    terminal_outcome: Option<HostAdmissionOutcome>,
+}
+
+impl ReceiptReplaySettlement {
+    async fn finish(
+        self,
+        replay: &HostAdmissionReplay<'_>,
+        target_seq: Option<u64>,
+    ) -> std::result::Result<HostAdmissionOutcome, HostAdmissionOutcome> {
+        let Self {
+            retained_leases,
+            retained_outcome,
+            mut target_outcome,
+            terminal_outcome,
+        } = self;
+        for seq in retained_leases.into_iter().rev() {
+            replay.defer(seq).await?;
+        }
+        if target_outcome.is_none()
+            && let Some(seq) = target_seq
+        {
+            // The concurrent profile worker may have already committed this
+            // seq. `HostAdmissionRuntime::commit` returns Ok(0) when
+            // `seq <= committed_through` without requiring a lease; that is
+            // the spool watermark, not an inferred ExactDuplicate. Any other
+            // commit result is the broker's typed failure (lost / never
+            // committed). `accepted_for_replay` stays only for a full drain.
+            target_outcome = Some(match replay.commit(seq).await {
+                Ok(_) => HostAdmissionOutcome::replay_completed(true, false),
+                Err(outcome) => outcome,
+            });
+        }
+        Ok(terminal_outcome
+            .or(target_outcome)
+            .or(retained_outcome)
+            .unwrap_or_else(HostAdmissionOutcome::accepted_for_replay))
     }
-    if target_outcome.is_none()
-        && let Some(seq) = target_seq
-    {
-        // The concurrent profile worker may have already committed this
-        // seq. `HostAdmissionRuntime::commit` returns Ok(0) when
-        // `seq <= committed_through` without requiring a lease; that is
-        // the spool watermark, not an inferred ExactDuplicate. Any other
-        // commit result is the broker's typed failure (lost / never
-        // committed). `accepted_for_replay` stays only for a full drain.
-        target_outcome = Some(match replay.commit(seq).await {
-            Ok(_) => HostAdmissionOutcome::replay_completed(true, false),
-            Err(outcome) => outcome,
-        });
-    }
-    Ok(terminal_outcome
-        .or(target_outcome)
-        .or(retained_outcome)
-        .unwrap_or_else(HostAdmissionOutcome::accepted_for_replay))
 }
 
 pub(crate) async fn replay_projectless_hermes_host_admission(

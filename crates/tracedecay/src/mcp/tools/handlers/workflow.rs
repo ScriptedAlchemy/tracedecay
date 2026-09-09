@@ -621,18 +621,11 @@ where
         }
     }
     let started_at = now_micros();
-    let effective_deadline = Deadline::new(UtcMicros(
-        started_at.0.saturating_add(
-            i64::try_from(run_args.timeout_secs)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(1_000_000),
-        ),
-    ))
-    .map_err(test_run_contract_error)?;
-    let emitter = begin_test_run(
+    let (emitter, effective_deadline) = begin_test_run(
         cg,
         &changed_paths,
-        effective_deadline.clone(),
+        started_at,
+        run_args.timeout_secs,
         code_index_identity,
     )
     .await?;
@@ -784,9 +777,19 @@ async fn wait_for_test_run_cancellation(
 async fn begin_test_run(
     cg: &TraceDecay,
     changed_paths: &[String],
-    deadline: Deadline,
+    started_at: UtcMicros,
+    timeout_secs: u64,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
-) -> Result<OperationEmitter> {
+) -> Result<(OperationEmitter, Deadline)> {
+    let deadline = Deadline::new(UtcMicros(
+        started_at.0.saturating_add(
+            i64::try_from(timeout_secs)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1_000_000),
+        ),
+    ))
+    .map_err(test_run_contract_error)?;
+
     let root = cg
         .project_root()
         .canonicalize()
@@ -820,17 +823,18 @@ async fn begin_test_run(
     };
     let document_content_digests =
         managed_test_document_content_digests(&root, changed_paths).await?;
-    operation_event_authority()
+    let emitter = operation_event_authority()
         .begin_managed_test_run(
             root_uri,
             request_id,
             head_commit_id,
             code_generation_id,
             document_content_digests,
-            deadline,
+            deadline.clone(),
         )
         .await
-        .map_err(test_run_event_error)
+        .map_err(test_run_event_error)?;
+    Ok((emitter, deadline))
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.digests")]
