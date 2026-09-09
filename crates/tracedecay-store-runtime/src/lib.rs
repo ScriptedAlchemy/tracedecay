@@ -28,6 +28,7 @@
 pub mod remote_credentials;
 pub mod remote_query;
 pub mod remote_replay_transaction;
+pub mod retained_memory;
 pub mod session_registry;
 pub mod store_locator_resolver;
 
