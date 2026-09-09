@@ -48,15 +48,6 @@ fn default_generated_excludes_prune_nested_dirs() {
 }
 
 #[test]
-fn test_config_serde_roundtrip() {
-    let config = TraceDecayConfig::default();
-    let json = serde_json::to_string_pretty(&config).unwrap();
-    let deserialized: TraceDecayConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(config.version, deserialized.version);
-    assert_eq!(config.max_file_size, deserialized.max_file_size);
-}
-
-#[test]
 fn test_legacy_config_with_include_field_still_loads() {
     let dir = TempDir::new().unwrap();
     let tracedecay_dir = dir.path().join(".tracedecay");

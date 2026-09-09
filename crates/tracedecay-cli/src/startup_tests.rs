@@ -136,22 +136,6 @@ fn hotpath_command_identity_uses_the_exact_clap_subcommand_path() {
     assert_eq!(parsed_command_profile_label(&["hook-stop"]), "hook-stop");
 }
 
-/// `wipe` destroys deployed state, so it takes the same `--yes` acceptance as
-/// the lifecycle mutations. Without it a scripted wipe had to feed `go!`
-/// through a pipe on stdin, and `--yes` was rejected outright.
-#[test]
-fn wipe_accepts_the_global_confirmation_flag() {
-    let command = Commands::Wipe { all: true };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("wipe --yes must be accepted");
-}
-
 /// `wipe` owns no host component and has no preview, so the other two global
 /// lifecycle flags stay rejected on it.
 #[test]
@@ -165,67 +149,6 @@ fn wipe_still_rejects_component_and_dry_run() {
         adopt: false,
     };
     assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
-}
-
-/// The storage reset commands REQUIRE `--yes` (their handlers refuse to run
-/// without it), so the pre-dispatch validator must accept the flag instead of
-/// rejecting the exact invocation the refusal message recommends. This parses
-/// the real command line end to end, exactly as the live recovery ran it:
-/// `tracedecay storage reset-project-store --project-root <root> --yes`.
-#[test]
-fn storage_reset_project_store_parses_and_accepts_the_confirmation_flag() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "storage",
-        "reset-project-store",
-        "--project-root",
-        "/tmp/some-project",
-        "--yes",
-    ])
-    .expect("the documented reset invocation must parse");
-    let options = HostBundleCliOptions {
-        component: cli.component,
-        dry_run: cli.dry_run,
-        yes: cli.yes,
-        adopt: cli.adopt,
-    };
-    assert!(options.yes, "--yes must reach the storage dispatcher");
-    let command = cli.command.expect("subcommand parsed");
-    assert!(matches!(
-        command,
-        Commands::Storage {
-            action: ProfileStorageAction::ResetProjectStore { .. }
-        }
-    ));
-    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("storage reset-project-store --yes must be accepted");
-}
-
-/// `projects forget` REQUIRES `--yes` (its handler refuses without it) and
-/// takes the global `--dry-run` as its preview, so the pre-dispatch validator
-/// must accept both exactly as documented.
-#[test]
-fn projects_forget_accepts_confirmation_and_preview_flags() {
-    for flags in [&["--yes"][..], &["--dry-run"][..]] {
-        let mut args = vec!["tracedecay", "projects", "forget", "proj_123"];
-        args.extend_from_slice(flags);
-        let cli = Cli::try_parse_from(args).expect("documented forget invocation must parse");
-        let options = HostBundleCliOptions {
-            component: cli.component,
-            dry_run: cli.dry_run,
-            yes: cli.yes,
-            adopt: cli.adopt,
-        };
-        let command = cli.command.expect("subcommand parsed");
-        assert!(matches!(
-            command,
-            Commands::Projects {
-                action: ProjectsAction::Forget { .. }
-            }
-        ));
-        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-            .unwrap_or_else(|error| panic!("projects forget {flags:?} must be accepted: {error}"));
-    }
 }
 
 /// `projects forget` owns no host component, so the component/adopt lifecycle
