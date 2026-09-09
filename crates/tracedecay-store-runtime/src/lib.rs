@@ -35,7 +35,7 @@ mod schema;
 pub use remote_credentials::{
     DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1,
     DaemonRemoteCredentialRegistryErrorV1, MAX_REGISTERED_REMOTE_NODES,
-    RegisteredRemoteNodeStoreV1, RemoteOperationalStatusProviderV1,
+    RegisteredRemoteNodeStoreV1,
 };
 pub use remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 pub use schema::register_registered_schema_installer;

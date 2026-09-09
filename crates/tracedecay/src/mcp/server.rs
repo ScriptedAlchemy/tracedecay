@@ -344,8 +344,7 @@ pub struct McpServer {
         Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
-    remote_operational_status:
-        Option<Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>>,
+    remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:

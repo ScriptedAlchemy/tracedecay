@@ -296,12 +296,7 @@ pub type DoctorReportReadFuture = Pin<
     >,
 >;
 pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
-pub type RemoteOperationalStatusReader = Arc<
-    dyn Fn() -> tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1
-        + Send
-        + Sync
-        + 'static,
->;
+pub type RemoteOperationalStatusReader = tracedecay_contracts::RemoteOperationalStatusReaderV1;
 
 /// Runtime authorities retained by one daemon-managed dashboard state.
 ///
