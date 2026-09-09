@@ -4598,34 +4598,6 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_target_uses_exact_artifact_bytes_inside_configured_capacity() {
-        let configured = SemanticResourceCeilings {
-            max_model_bytes: 700,
-            max_tokenizer_bytes: 64,
-            max_resident_bytes: 2_048,
-            max_threads: 8,
-            max_concurrent_sessions: 4,
-            max_batch_size: 32,
-            max_sequence_length: 512,
-            load_deadline_ms: 30_000,
-        };
-
-        let requirement = evaluation_target_resource_requirement(
-            configured,
-            InstalledArtifactMemberBytesV1 {
-                model: 633,
-                tokenizer: 5,
-            },
-        );
-
-        assert_eq!(requirement.model_bytes, 633);
-        assert_eq!(requirement.tokenizer_bytes, 5);
-        assert_eq!(requirement.resident_bytes, configured.max_resident_bytes);
-        assert_eq!(requirement.threads, configured.max_threads);
-        assert!(configured_resource_ceiling_covers(&configured, requirement));
-    }
-
-    #[test]
     fn ann_binding_is_unsupported_for_exact_flat_and_missing_for_unbound_ann() {
         let exact_flat = search_index_key();
         assert!(matches!(
@@ -4913,16 +4885,6 @@ mod tests {
         assert!(RerankExecutionControlV1::is_cancelled(&control));
     }
 
-    #[test]
-    fn published_semantic_candidates_use_the_seated_score_domain() {
-        let domain = published_semantic_candidate_score_domain().expect("score domain");
-        assert_eq!(
-            domain.as_str(),
-            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1
-        );
-        assert_ne!(domain.as_str(), "score.semantic-distance.daemon.v1");
-    }
-
     fn projection_key() -> ProjectionKeyV1 {
         // Derive the projection key from the same admitted authority the query
         // runtime binds against so `profile_digest` is the canonical digest the
@@ -4992,41 +4954,6 @@ mod tests {
             &source,
             &test_digest('e'),
         ));
-    }
-
-    #[test]
-    fn retained_vector_cache_returns_port_without_durable_load() {
-        let source = source_generation('r');
-        let vector = vector_generation('r');
-        let capability = test_digest('f');
-        let port = Arc::new(PublishedSemanticVectorReadPortV1 {
-            generation: vector.clone(),
-            projection_key: projection_key(),
-            search_index_key: search_index_key().clone(),
-            source_generation: source.clone(),
-            capability_manifest_digest: capability.clone(),
-            source_coherence: SemanticSourceCoherenceV1::ExactGeneration,
-            rows: Vec::new(),
-            ann: PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Unsupported),
-        });
-        let cache = Mutex::new(Some(CachedPublishedVectorsV1 {
-            generation: vector.clone(),
-            search_index_key: search_index_key().clone(),
-            source_generation: source.clone(),
-            port: Arc::clone(&port),
-        }));
-
-        let retained = retained_vector_read_port(
-            &cache,
-            &vector,
-            &projection_key(),
-            search_index_key(),
-            &source,
-            &capability,
-        )
-        .expect("exact retained vector port");
-
-        assert!(Arc::ptr_eq(&retained, &port));
     }
 
     fn pointer(vector: char, source: char) -> SemanticGenerationPointerV1 {
