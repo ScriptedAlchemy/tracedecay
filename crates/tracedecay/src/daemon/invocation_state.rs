@@ -32,6 +32,7 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod project_invocation;
 

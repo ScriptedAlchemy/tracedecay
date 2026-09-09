@@ -16,6 +16,7 @@ use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Slice of the shutdown budget reserved for writing the terminal shutdown
 /// receipts to the daemon log after the coordinator returns.

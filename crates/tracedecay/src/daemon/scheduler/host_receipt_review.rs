@@ -7,9 +7,8 @@ use tracedecay_automation_runtime::automation::AutomationRunControl;
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::{
-    DaemonEngine, DaemonHandshake, effective_automation_config_for_project, log_daemon_event,
-};
+use super::{DaemonEngine, DaemonHandshake, effective_automation_config_for_project};
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 const HOST_RECEIPT_REVIEW_BATCH_LIMIT: usize = 8;
 

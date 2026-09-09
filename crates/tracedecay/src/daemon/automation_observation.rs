@@ -7,8 +7,8 @@ use tracedecay_application::observability::{
 use tracedecay_automation_runtime::automation::observation::automation_funnel_observation_from_record;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 
-use super::log_daemon_event;
 use tracedecay_daemon_service::DaemonInvocationService;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub(crate) async fn project_run_observation_producer(
     service: &DaemonInvocationService,

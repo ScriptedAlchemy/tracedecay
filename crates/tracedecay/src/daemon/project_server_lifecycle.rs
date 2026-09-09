@@ -9,6 +9,7 @@ use super::*;
 use std::collections::HashSet;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store_runtime::{
     ShutdownTaskOutcome, ShutdownTaskReceipt, join_shutdown_tasks_until,
 };

@@ -25,7 +25,6 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
-tracing = "0.1"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
@@ -49,7 +48,6 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 libc = "0.2"
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
