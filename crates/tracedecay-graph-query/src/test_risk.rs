@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
 
 use serde::Serialize;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
@@ -9,6 +8,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use crate::VerifiedGraphQuery;
+use tracedecay_runtime_core::git::churn::file_churn;
 
 const ATTRIBUTION_DEPTH: usize = 3;
 const MAX_TEST_RISK_SYMBOLS: usize = 500_000;
@@ -417,57 +417,6 @@ pub fn verified_test_symbol_parts(
 
 fn test_risk_graph_problem(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
-}
-
-/// `file_path` → commit count for the last `days` days via `git log`.
-///
-/// A missing Git program is a typed host-CLI error. A missing checkout or a
-/// non-repository directory is empty churn, not an installation problem.
-#[hotpath::measure(label = "graph.health.test_risk.file_churn", future = true)]
-async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
-    let git = tracedecay_runtime_core::git::try_git_program().map_err(|_| {
-        TraceDecayError::HostCliUnavailable {
-            program: "git".to_string(),
-            lifecycle: "Git churn analysis".to_string(),
-        }
-    })?;
-    let output = tokio::process::Command::new(git)
-        .args([
-            "log",
-            "--format=",
-            "--name-only",
-            &format!("--since={days} days ago"),
-        ])
-        .current_dir(project_root)
-        .output()
-        .await;
-    let output = match output {
-        Ok(output) => output,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(HashMap::new());
-        }
-        Err(error) => return Err(TraceDecayError::Io(error)),
-    };
-
-    if !output.status.success() {
-        return Ok(HashMap::new());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut churn: HashMap<String, usize> = HashMap::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        *churn.entry(trimmed.to_string()).or_insert(0) += 1;
-    }
-    Ok(churn)
 }
 
 #[hotpath::measure(label = "graph.health.test_risk.attribution")]
