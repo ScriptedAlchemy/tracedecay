@@ -224,7 +224,7 @@ mod tests {
         tempfile::TempDir,
         TraceDecay,
         TraceDecay,
-        Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
+        Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         // Register the same canonical paths that retained-target lookup uses.

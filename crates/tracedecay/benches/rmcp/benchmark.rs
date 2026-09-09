@@ -28,8 +28,8 @@ use tracedecay_daemon_protocol::{
 use tracedecay_domain::ProjectId;
 
 use super::{BrokerStreamTransport, DaemonLifecycle, serve_routed_rmcp_connection};
-use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::McpServer;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use crate::tracedecay::TraceDecayOpenOptions;
 
 pub const PERSISTENT_WARMUP_REQUESTS: usize = 8;

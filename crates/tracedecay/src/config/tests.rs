@@ -572,9 +572,10 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
 
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .unwrap();
+    let gdb =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -649,9 +650,10 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
 async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .unwrap();
+    let gdb =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -720,9 +722,10 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .unwrap();
+    let gdb =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let parent_dir = TempDir::new().unwrap();
     let parent_root = parent_dir.path().canonicalize().unwrap();
@@ -894,7 +897,7 @@ mod runtime_configuration_cutover {
         cached_telemetry_config, install_pinned_runtime_configuration,
         runtime_configuration_for_layout,
     };
-    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_configuration::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
         ProjectConfigurationRuntime,
@@ -1110,6 +1113,10 @@ mod runtime_configuration_cutover {
     /// their exact values.
     #[tokio::test]
     async fn open_cached_read_and_configuration_change_share_one_runtime_pin() {
+        #[cfg(feature = "hotpath")]
+        let _hotpath = hotpath::HotpathGuardBuilder::new("configuration-runtime-pin-journey")
+            .sections(vec![hotpath::Section::FunctionsTiming])
+            .build();
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("project.configuration-shared-pin-journey");

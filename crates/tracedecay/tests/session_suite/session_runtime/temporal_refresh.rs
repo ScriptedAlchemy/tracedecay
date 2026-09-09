@@ -1,3 +1,4 @@
+use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
 use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_session_runtime::session_sync::test_harness::{
     SessionTemporalRefreshPassReport, SessionTemporalRefreshWakeState,
@@ -9,6 +10,11 @@ use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::Se
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::wake::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
     SessionTemporalRefreshUnavailableReason,
+};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_sessions::runtime::{SessionProvider, with_transcript_source_home};
+use tracedecay_store::{
+    SessionStoreError, SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1,
 };
 
 use std::collections::HashSet;
@@ -38,7 +44,7 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -1483,4 +1489,209 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
     assert_eq!(registry.project_worker_count().await, 1);
     assert!(new_state.take_dirty());
     registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn refused_reset_reingests_native_transcript_and_rejects_old_temporal_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("native-reset-project");
+    let source_dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let session_id = SessionId::new("session.native-reset").unwrap();
+    let lines = [
+        json!({"timestamp":"2026-01-01T00:00:00.000Z", "type":"session_meta",
+            "payload":{"id":session_id.as_str(),"cwd":project,"model":"gpt-5.5"}}),
+        json!({"timestamp":"2026-01-01T00:00:01.000Z", "type":"event_msg",
+            "payload":{"type":"user_message","message":"native reset alpha"}}),
+        json!({"timestamp":"2026-01-01T00:00:02.000Z", "type":"event_msg",
+            "payload":{"type":"agent_message","message":"native reset beta"}}),
+    ];
+    std::fs::write(
+        source_dir.join("rollout-2026-01-01T00-00-00-session.native-reset.jsonl"),
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let authority =
+        registered_test_database(&temp, "native-reset", HostAdmissionScope::Project).await;
+    let stats = with_transcript_source_home(
+        home.clone(),
+        authority
+            ._runtime
+            .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.messages_upserted, 2);
+    // One bounded batch projects these two messages; the next pass publishes it.
+    for pass in 0..2 {
+        let report = authority
+            .run_pass(
+                &Arc::new(SessionTemporalRefreshWakeState::default()),
+                &CanonicalSessionTemporalProjector,
+                SessionTemporalRefreshPolicy::default(),
+            )
+            .await;
+        if pass == 0 {
+            assert_eq!(report.projected_batches, 1, "{report:?}");
+        } else {
+            assert_eq!(report.completed, 1, "{report:?}");
+        }
+    }
+    let access = SessionTemporalAccess::new(authority.database());
+    let old_snapshot = access
+        .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
+            session_id.clone(),
+        ))
+        .await
+        .unwrap();
+    let request = |snapshot, after| {
+        SessionTemporalRetrievalRequestV1::new(
+            session_id.clone(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::LogicalMessage,
+            snapshot,
+            1,
+            after,
+            ExecutionControl::default(),
+        )
+        .unwrap()
+    };
+    let first = access
+        .retrieve_session_temporal_page_result(request(old_snapshot.clone(), None))
+        .await
+        .unwrap();
+    assert_eq!(first.occurrences().len(), 1);
+    assert!(first.coverage().visible > 0);
+    let old_cursor = first.next_after_occurrence_id().cloned();
+    assert!(
+        old_cursor.is_some(),
+        "two native messages must yield a continuation"
+    );
+    let db_path = authority.database().db_path().to_path_buf();
+    let registry = authority._runtime.session_registry_for_test();
+    drop(authority);
+    registry.cancel_memory_graph_reconciliation_tasks();
+    registry
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .unwrap();
+    registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .unwrap();
+    drop(registry);
+
+    // Reproduce the refused pre-release authority shape while all runtime
+    // handles are offline; reset must retire the old temporal coverage.
+    let mut connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE source_cursor_advances ADD COLUMN legacy_marker TEXT;")
+        .unwrap();
+    tracedecay_global_db::observation::reset_refused_observation_authority(&mut connection)
+        .unwrap();
+    let old_key = old_snapshot.watermarks().cursor_key().unwrap();
+    let retained_old_key: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM session_query_cursor_keys WHERE key_id = ?1 AND retired_at IS NOT NULL",
+        [old_key.key_id.as_str()], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(
+        retained_old_key, 1,
+        "rotation must preserve the historical key row"
+    );
+    drop(connection);
+
+    let authority =
+        registered_test_database(&temp, "native-reset", HostAdmissionScope::Project).await;
+    let access = SessionTemporalAccess::new(authority.database());
+    let stale = access
+        .retrieve_session_temporal_page_result(request(old_snapshot.clone(), old_cursor.clone()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(stale, SessionStoreError::Storage { ref source, .. }
+        if source.to_string() == "frozen session generation is unavailable"),
+        "{stale:?}"
+    );
+    let stats = with_transcript_source_home(
+        home.clone(),
+        authority
+            ._runtime
+            .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stats.messages_upserted, 2,
+        "reset must reread unchanged native bytes"
+    );
+    // One bounded batch projects these two messages; the next pass publishes it.
+    for pass in 0..2 {
+        let report = authority
+            .run_pass(
+                &Arc::new(SessionTemporalRefreshWakeState::default()),
+                &CanonicalSessionTemporalProjector,
+                SessionTemporalRefreshPolicy::default(),
+            )
+            .await;
+        if pass == 0 {
+            assert_eq!(report.projected_batches, 1, "{report:?}");
+        } else {
+            assert_eq!(report.completed, 1, "{report:?}");
+        }
+    }
+    let current = access
+        .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
+            session_id.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        current.watermarks().cursor_key(),
+        old_snapshot.watermarks().cursor_key()
+    );
+    let stale = access
+        .retrieve_session_temporal_page_result(request(old_snapshot, old_cursor))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(stale, SessionStoreError::Storage { ref source, .. }
+        if source.to_string() == "session temporal snapshot drifted from the frozen generation"),
+        "{stale:?}"
+    );
+    let fresh = access
+        .retrieve_session_temporal_page_result(request(current.clone(), None))
+        .await
+        .unwrap();
+    assert_eq!(fresh.occurrences().len(), 1);
+    assert!(fresh.coverage().visible > 0);
+    let next = fresh.next_after_occurrence_id().cloned().unwrap();
+    let second = access
+        .retrieve_session_temporal_page_result(request(current, Some(next)))
+        .await
+        .unwrap();
+    assert_eq!(second.occurrences().len(), 1);
+    assert!(second.next_after_occurrence_id().is_none());
+    let mut texts = Vec::new();
+    for occurrence in fresh.occurrences().iter().chain(second.occurrences()) {
+        let message = authority
+            ._runtime
+            .session_message_for_test(
+                HostAdmissionScope::Project,
+                "codex",
+                occurrence.message_id.as_ref().unwrap().as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        texts.push(message.text);
+    }
+    texts.sort();
+    assert_eq!(texts, ["native reset alpha", "native reset beta"]);
 }
