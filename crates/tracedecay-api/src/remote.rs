@@ -296,13 +296,13 @@ pub fn remote_protocol_router(
     .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
 }
 
-async fn protocol_route<Port: ?Sized, Request>(
+async fn protocol_route<Port, Request>(
     State(state): State<RemoteProtocolRouterStateV1<Port>>,
     admission: RemotePreBodyAdmissionV1<Request>,
     payload: Result<Json<RemoteHttpRequestV1<Request>>, JsonRejection>,
 ) -> Result<Response, RemoteHttpRejection>
 where
-    Port: RemoteProtocolPortV1<Request> + Send + Sync + 'static,
+    Port: RemoteProtocolPortV1<Request> + Send + Sync + 'static + ?Sized,
     Request: DeserializeOwned + RemoteSessionBoundProtocolBodyV1 + Send + 'static,
     Port::Output: Serialize + Send + 'static,
 {
@@ -390,13 +390,13 @@ where
     }
 }
 
-async fn enrollment_route<Port: ?Sized>(
+async fn enrollment_route<Port>(
     State(state): State<RemoteProtocolRouterStateV1<Port>>,
     admission: RemoteEnrollmentPreBodyAdmissionV1,
     payload: Result<Json<RemoteHttpRequestV1<EnrollmentRequestV1>>, JsonRejection>,
 ) -> Result<Response, RemoteHttpRejection>
 where
-    Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static,
+    Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static + ?Sized,
 {
     let request = hotpath::measure_block!("api.http.admission", {
         let Json(request) = match payload {
