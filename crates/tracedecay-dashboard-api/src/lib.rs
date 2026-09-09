@@ -177,9 +177,8 @@ mod settings_api;
 pub use settings_api::{
     DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
     DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
-    DashboardCodeIndexWorkerSettingsFuture, DashboardPrAutoTrackEntryV1,
-    DashboardPrAutoTrackReadPort, DashboardProfileCodeIndexWorkerSettingsPort,
-    install_dashboard_pr_autotrack_read_port,
+    DashboardCodeIndexWorkerSettingsFuture, DashboardProfileCodeIndexWorkerSettingsPort,
+    PrAutoTrackManagedSummaryEntryV1, PrAutoTrackManagedSummaryReader,
 };
 mod storage_findings_api;
 mod storage_telemetry_api;
@@ -351,6 +350,10 @@ pub struct DashboardStateCompositionV1 {
     /// it absent and the source reports typed `unsupported`.
     pub explorer_semantic_reader: Option<ExplorerSemanticReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
+    /// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
+    /// Selected projects reuse the resolver but resolve their own exact store
+    /// root on every call.
+    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     pub code_diagnostics_broker:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
@@ -463,6 +466,8 @@ pub struct DashboardState {
     /// observation owner. Selected projects reuse the resolver but resolve
     /// their own exact project root on every call.
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
+    /// Daemon-owned read over PR-autotrack managed branches for settings.
+    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     /// Storage mode resolved for the active project store.
     pub storage_mode: String,
     /// Resolved active project store root.
@@ -776,6 +781,7 @@ async fn build_state_inner(
         code_index_freshness_reader,
         explorer_semantic_reader,
         feedback_status_reader,
+        pr_autotrack_reader,
         code_diagnostics_broker,
         application_invocation_executor,
         delivery_settlement_authority,
@@ -848,6 +854,7 @@ async fn build_state_inner(
         code_index_freshness_reader,
         explorer_semantic_reader,
         feedback_status_reader,
+        pr_autotrack_reader,
         storage_mode,
         store_root,
         config_path,
@@ -933,6 +940,7 @@ pub async fn build_selected_project_state(
             // resolves the selected state's exact root on every call.
             explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
+            pr_autotrack_reader: active.pr_autotrack_reader.clone(),
             code_diagnostics_broker: None,
             // Rebinding an application transport is required only for the
             // selected project's application routes. Ordinary read routes
@@ -1077,6 +1085,7 @@ where
             code_index_freshness_reader: None,
             explorer_semantic_reader: None,
             feedback_status_reader: None,
+            pr_autotrack_reader: None,
             code_diagnostics_broker: Some(code_diagnostics_broker),
             application_invocation_executor: test_authority
                 .and_then(|authority| authority.application_invocation_executor.clone()),
@@ -2391,6 +2400,7 @@ mod authority_tests {
                 code_index_freshness_reader: None,
                 explorer_semantic_reader: None,
                 feedback_status_reader: None,
+                pr_autotrack_reader: None,
                 storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
                 store_root: layout.data_root.clone(),
                 config_path: layout.config_path.clone(),
