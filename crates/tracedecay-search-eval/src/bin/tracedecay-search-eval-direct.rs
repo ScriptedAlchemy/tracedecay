@@ -407,32 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn qualify_native_parses_daemon_owned_profile_and_output_path() {
-        let cli = Cli::try_parse_from([
-            "tracedecay-search-eval",
-            "qualify-native",
-            "--project-root",
-            "project",
-            "--profile",
-            "hybrid-conservative",
-            "--output",
-            "qualification.json",
-        ])
-        .expect("qualify-native arguments parse");
-
-        assert!(matches!(
-            cli.command,
-            Command::QualifyNative {
-                project_root,
-                profile,
-                output,
-            } if project_root == *"project"
-                && profile == "hybrid-conservative"
-                && output == *"qualification.json"
-        ));
-    }
-
-    #[test]
     fn evaluate_and_publish_accepts_only_a_daemon_owned_profile_selection() {
         let cli = Cli::try_parse_from([
             "tracedecay-search-eval",

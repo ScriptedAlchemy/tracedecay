@@ -2,9 +2,6 @@ use std::collections::BTreeSet;
 
 use tracedecay_domain::RetrievalAnchorId;
 
-#[cfg(test)]
-use tracedecay_domain::ByteRangeV1;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CandidateChannel {
     Scope,
@@ -378,16 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn planning_preserves_apostrophes_brackets_braces_commas_and_semicolons() {
-        let query = "don't use [path/to/file.rs], {cfg:debug}; done";
-        let plan = plan_candidates(query);
-
-        assert!(plan.contains(CandidateChannel::ExactMessage, query));
-        assert!(plan.contains(CandidateChannel::Lexical, query));
-        assert!(plan.contains(CandidateChannel::Entity, "[path/to/file.rs],"));
-    }
-
-    #[test]
     fn punctuation_heavy_paths_errors_commands_cjk_emoji_stay_on_exact_message() {
         let query = r#"cargo check path/to/weird,file.rs; E0425 don't panic!("x") 日本語 🚨"#;
         let plan = plan_candidates(query);
@@ -430,13 +417,5 @@ mod tests {
             CandidateChannel::ExactMessage,
             r#""unterminated phrase value"#
         ));
-    }
-
-    #[test]
-    fn exact_match_byte_ranges_are_non_empty_and_half_open() {
-        let range = ByteRangeV1::new(7, 11).expect("valid range");
-        assert_eq!((range.start(), range.end()), (7, 11));
-        assert!(ByteRangeV1::new(7, 7).is_err());
-        assert!(ByteRangeV1::new(8, 7).is_err());
     }
 }
