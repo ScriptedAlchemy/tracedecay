@@ -7,10 +7,7 @@
 //! on an async or deadline-bound path must run them on a blocking thread and
 //! bound the join itself (see the CLI status command).
 
-use std::cmp::Ordering;
 use std::time::Duration;
-
-use semver::Version;
 
 /// The Cloudflare Worker endpoint URL.
 const WORKER_URL: &str = "https://tracedecay-counter.enzinol.workers.dev";
@@ -248,41 +245,26 @@ pub fn is_beta() -> bool {
     tracedecay_dashboard_api::cloud::is_beta(env!("CARGO_PKG_VERSION"))
 }
 
-/// Returns true if `latest` is strictly newer than `current` using `SemVer`
-/// precedence (`Version::cmp_precedence`), so build metadata does not affect
-/// ordering. Stable and beta remain separate channels: a prerelease never
-/// dominates a stable release (or the reverse), even when the numeric core is
-/// higher.
-pub fn is_newer_version(current: &str, latest: &str) -> bool {
-    let Ok(current) = Version::parse(current) else {
-        return false;
-    };
-    let Ok(latest) = Version::parse(latest) else {
-        return false;
-    };
-    // Beta and stable are separate channels — never suggest cross-channel updates.
-    if current.pre.is_empty() != latest.pre.is_empty() {
-        return false;
-    }
-    latest.cmp_precedence(&current) == Ordering::Greater
+/// Admits these ureq implementations into the composition library so MCP
+/// flush/version checks can run after the binary starts. Unregistered
+/// lookups stay `None` (already best-effort).
+pub fn admit_sync_probes() {
+    tracedecay_dashboard_api::cloud::admit_sync_cloud_probes(flush_pending, fetch_latest_version);
 }
 
-/// Returns true if `latest` is a newer version than `current` AND the
-/// difference is at least a minor version bump (patch-only bumps return false).
-///
-/// Used by the CLI version warning to avoid nagging on patch releases.
-pub fn is_newer_minor_version(current: &str, latest: &str) -> bool {
-    let Ok(current) = Version::parse(current) else {
-        return false;
-    };
-    let Ok(latest) = Version::parse(latest) else {
-        return false;
-    };
-    if current.pre.is_empty() != latest.pre.is_empty() {
-        return false;
+pub fn doctor_network_probes() -> tracedecay::doctor::AdmittedDoctorNetworkProbes {
+    tracedecay::doctor::AdmittedDoctorNetworkProbes {
+        fetch_worldwide_total,
+        fetch_latest_version,
     }
-    latest.cmp_precedence(&current) == Ordering::Greater
-        && (latest.major, latest.minor) > (current.major, current.minor)
+}
+
+pub fn is_newer_version(current: &str, latest: &str) -> bool {
+    tracedecay_dashboard_api::cloud::is_newer_version(current, latest)
+}
+
+pub fn is_newer_minor_version(current: &str, latest: &str) -> bool {
+    tracedecay_dashboard_api::cloud::is_newer_minor_version(current, latest)
 }
 
 /// How tracedecay was installed, detected from the binary path.

@@ -47,7 +47,6 @@ pub mod application_surface;
 // Gated so a default or `production` build carries none of it.
 pub mod bench;
 pub mod catalog_composition;
-pub mod cloud;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod host_admission;
 pub use tracedecay_code_index as code_index;
