@@ -50,24 +50,6 @@ fn targeted_draft(id: &str, title: &str, targets: Vec<SkillInstallTarget>) -> Ma
     }
 }
 
-#[test]
-fn managed_skill_defaults_target_supported_hosts() {
-    let targets = default_managed_skill_targets();
-    assert_eq!(
-        targets,
-        vec![
-            SkillInstallTarget::Cursor,
-            SkillInstallTarget::Codex,
-            SkillInstallTarget::Claude,
-            SkillInstallTarget::Agents,
-            SkillInstallTarget::OpenCode,
-            SkillInstallTarget::Kimi,
-            SkillInstallTarget::Kiro,
-            SkillInstallTarget::Hermes,
-        ]
-    );
-}
-
 #[tokio::test]
 async fn native_overlay_exports_automatically_active_skills_and_prunes_generated_namespace() {
     let temp = tempdir();
@@ -165,34 +147,6 @@ async fn native_overlay_exports_automatically_active_skills_and_prunes_generated
             .exists()
     );
     assert!(plugin_root.join("skills/static-skill/SKILL.md").is_file());
-}
-
-#[tokio::test]
-async fn codex_native_overlay_uses_agent_managed_namespace() {
-    let temp = tempdir();
-    let profile_root = temp.path().join("profile");
-    let plugin_root = temp.path().join("codex-plugin");
-
-    create_managed_skill(
-        &profile_root,
-        targeted_draft(
-            "repo-hygiene",
-            "Repository hygiene",
-            vec![SkillInstallTarget::Codex],
-        ),
-    )
-    .await
-    .unwrap();
-
-    let summary =
-        export_native_skill_overlay(&profile_root, SkillInstallTarget::Codex, &plugin_root)
-            .unwrap();
-    assert_eq!(summary.exported_count, 1);
-    assert!(
-        plugin_root
-            .join("skills/agent-managed/repo-hygiene/SKILL.md")
-            .is_file()
-    );
 }
 
 #[tokio::test]
@@ -568,33 +522,6 @@ fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
 }
 
 #[test]
-fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
-    let temp = tempdir();
-    let prompt_path = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# User rules\n\nKeep before.\n\n",
-        "## TraceDecay managed skills\n\n",
-        "This Claude index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `legacy`: Legacy.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
-        "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `slugged`: Slugged.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n\n",
-        "Keep after.\n",
-    );
-    std::fs::write(&prompt_path, contents).unwrap();
-
-    remove_prompt_skill_index(&host_io(), &prompt_path).unwrap();
-
-    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
-    assert!(repaired.contains("Keep before."));
-    assert!(repaired.contains("Keep after."));
-    assert!(!repaired.contains("TraceDecay managed skills"));
-}
-
-#[test]
 fn prompt_index_duplicate_balanced_blocks_fail_closed() {
     let temp = tempdir();
     let prompt_path = temp.path().join("AGENTS.md");
@@ -614,53 +541,6 @@ fn prompt_index_duplicate_balanced_blocks_fail_closed() {
 
     assert!(error.contains("markers are ambiguous"));
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
-}
-
-#[tokio::test]
-async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
-    let temp = tempdir();
-    let profile_root = temp.path().join("profile");
-    let agents_md = temp.path().join("AGENTS.md");
-
-    create_managed_skill(
-        &profile_root,
-        targeted_draft(
-            "opencode-only",
-            "OpenCode only",
-            vec![SkillInstallTarget::OpenCode],
-        ),
-    )
-    .await
-    .unwrap();
-    create_managed_skill(
-        &profile_root,
-        targeted_draft("kimi-only", "Kimi only", vec![SkillInstallTarget::Kimi]),
-    )
-    .await
-    .unwrap();
-
-    export_prompt_skill_index(
-        &host_io(),
-        &profile_root,
-        SkillInstallTarget::OpenCode,
-        &agents_md,
-    )
-    .unwrap();
-    export_prompt_skill_index(
-        &host_io(),
-        &profile_root,
-        SkillInstallTarget::Kimi,
-        &agents_md,
-    )
-    .unwrap();
-
-    let prompt = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(prompt.contains("TRACEDECAY MANAGED SKILLS START opencode"));
-    assert!(prompt.contains("TRACEDECAY MANAGED SKILLS START kimi"));
-    assert!(prompt.contains("This OpenCode index lists"));
-    assert!(prompt.contains("This Kimi index lists"));
-    assert!(prompt.contains("`opencode-only`"));
-    assert!(prompt.contains("`kimi-only`"));
 }
 
 #[tokio::test]

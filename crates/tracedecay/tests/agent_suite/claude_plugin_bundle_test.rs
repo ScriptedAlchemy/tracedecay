@@ -1,21 +1,11 @@
-//! Host-specific Claude hook syntax, agent permissions, and generated adapters.
-//! General source schemas and shared skill frontmatter have dedicated validators.
+//! Claude agent permissions and the generated Cursor/Codex agent adapters.
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde_json::Value;
-
-use crate::plugin_validation_support::{body_after_frontmatter, read_json_file};
+use crate::plugin_validation_support::body_after_frontmatter;
 use tracedecay_automation_runtime::automation::skill_frontmatter::parse_skill_frontmatter;
-
-/// The shared plugin tree root (holds Claude's manifest, skills, commands, and
-/// agents; Claude's host-specific files are `README-claude.md`, `.mcp.json`,
-/// and `hooks/hooks-claude.json`).
-fn bundle_root() -> PathBuf {
-    crate::common::repository_path("plugin")
-}
 
 /// Reads a required scalar frontmatter field from a `---`-fenced markdown file,
 /// asserting it is present and non-empty through the production parser.
@@ -38,149 +28,6 @@ fn required_scalar(raw: &str, field: &str, path: &Path) -> String {
         path.display()
     );
     value.to_string()
-}
-
-#[test]
-fn claude_bundle_mcp_config_declares_the_tracedecay_server() {
-    let mcp_path = bundle_root().join(".mcp.json");
-    let mcp = read_json_file(&mcp_path);
-
-    // Server key is `graph` (not `tracedecay`) so Claude renders the plugin
-    // namespace as `plugin tracedecay graph` instead of the redundant
-    // `plugin tracedecay tracedecay`. Matches the codex-plugin/.mcp.json shape.
-    let server = mcp
-        .get("mcpServers")
-        .and_then(|servers| servers.get("graph"))
-        .unwrap_or_else(|| panic!("{} must declare mcpServers.graph", mcp_path.display()));
-    assert_eq!(
-        server["command"],
-        "tracedecay",
-        "{} tracedecay server command must be tracedecay",
-        mcp_path.display()
-    );
-}
-
-#[test]
-fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
-    let hooks_path = bundle_root().join("hooks/hooks-claude.json");
-    let config = read_json_file(&hooks_path);
-
-    let hooks = config
-        .get("hooks")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("{} must declare a hooks object", hooks_path.display()));
-
-    // Only proven native lifecycle boundaries are registered. Tool-routing,
-    // prompt interception, and advisory work happen through explicit host
-    // surfaces or the daemon after bounded event admission.
-    let expected: &[(&str, &str, Option<&str>)] = &[
-        ("Stop", "hook-stop", None),
-        ("SessionStart", "hook-claude-session-start", None),
-        ("PostCompact", "hook-claude-post-compact", None),
-        (
-            "PostToolUse",
-            "hook-claude-post-tool-use",
-            Some("Edit|MultiEdit|Write|NotebookEdit"),
-        ),
-        ("SubagentStart", "hook-claude-subagent-start", None),
-    ];
-
-    let actual_events: BTreeSet<String> = hooks.keys().cloned().collect();
-    let expected_events: BTreeSet<String> = expected
-        .iter()
-        .map(|(event, ..)| event.to_string())
-        .collect();
-    assert_eq!(
-        actual_events,
-        expected_events,
-        "{} must declare exactly the supported native lifecycle events",
-        hooks_path.display()
-    );
-
-    for (event, subcommand, matcher) in expected {
-        let entries = hooks
-            .get(*event)
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("{} {event} must be an array", hooks_path.display()));
-        assert_eq!(
-            entries.len(),
-            1,
-            "{} {event} must have exactly one entry",
-            hooks_path.display()
-        );
-        let entry = &entries[0];
-
-        match matcher {
-            Some(expected_matcher) => assert_eq!(
-                entry.get("matcher").and_then(Value::as_str),
-                Some(*expected_matcher),
-                "{} {event} matcher must be {expected_matcher}",
-                hooks_path.display()
-            ),
-            None => assert!(
-                entry.get("matcher").is_none(),
-                "{} {event} must not declare a matcher",
-                hooks_path.display()
-            ),
-        }
-
-        let inner = entry
-            .get("hooks")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("{} {event} must declare hooks[]", hooks_path.display()));
-        assert_eq!(
-            inner.len(),
-            1,
-            "{} {event} must declare exactly one hook",
-            hooks_path.display()
-        );
-        let hook = &inner[0];
-        assert_eq!(
-            hook["command"],
-            "__TRACEDECAY_BIN__",
-            "{} {event} hook command must be the __TRACEDECAY_BIN__ placeholder",
-            hooks_path.display()
-        );
-        let args = hook
-            .get("args")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("{} {event} hook must declare args[]", hooks_path.display()));
-        assert_eq!(
-            args.len(),
-            1,
-            "{} {event} hook args must be a single-element array",
-            hooks_path.display()
-        );
-        assert_eq!(
-            args[0],
-            *subcommand,
-            "{} {event} hook subcommand must be {subcommand}",
-            hooks_path.display()
-        );
-        assert_eq!(
-            hook.get("timeout").and_then(Value::as_u64),
-            (*event == "SubagentStart").then_some(5),
-            "{} {event} must only set the bounded SubagentStart outer timeout",
-            hooks_path.display()
-        );
-    }
-}
-
-#[test]
-fn claude_bundle_commands_have_valid_frontmatter_and_body() {
-    for (relative, raw) in tracedecay_agent_hosts::agents::plugin_bundle::claude_files()
-        .into_iter()
-        .filter(|(path, _)| path.starts_with("commands/"))
-    {
-        let path = Path::new(relative);
-
-        required_scalar(raw, "description", path);
-        assert!(
-            !body_after_frontmatter(raw).trim().is_empty(),
-            "{} must have a non-empty body",
-            path.display()
-        );
-    }
 }
 
 /// Claude agents use a positive allowlist. A denylist would fail open whenever

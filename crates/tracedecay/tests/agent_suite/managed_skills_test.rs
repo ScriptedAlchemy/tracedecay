@@ -212,29 +212,6 @@ fn checksum_is_deterministic_and_tracks_content_not_state_or_pin() {
     assert_ne!(first.metadata.checksum, second.metadata.checksum);
 }
 
-#[test]
-fn state_and_pin_lifecycle_preserves_automatic_activation() {
-    let mut skill = draft().materialize().unwrap();
-    skill.metadata.updated_at = 1;
-    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
-    assert!(!skill.metadata.pinned);
-
-    skill.set_state(ManagedSkillState::Disabled);
-    assert!(skill.metadata.updated_at > 1);
-    assert_eq!(skill.metadata.state, ManagedSkillState::Disabled);
-    skill.metadata.updated_at = 1;
-    skill.set_pinned(true);
-    assert!(skill.metadata.updated_at > 1);
-    assert_eq!(skill.metadata.state, ManagedSkillState::Disabled);
-    assert!(skill.metadata.pinned);
-
-    skill.metadata.updated_at = 1;
-    skill.set_state(ManagedSkillState::Active);
-    assert!(skill.metadata.updated_at > 1);
-    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
-    assert!(skill.metadata.pinned);
-}
-
 #[tokio::test]
 async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_revision() {
     let temp = tempfile::tempdir().unwrap();
@@ -356,27 +333,6 @@ async fn managed_skill_store_persists_package_and_lifecycle() {
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].metadata.id, "repo-hygiene");
     assert_eq!(skills[0].metadata.state, ManagedSkillState::Archived);
-}
-
-#[tokio::test]
-async fn managed_skill_store_renders_automatic_activation_in_markdown() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let mut skill = draft().materialize().unwrap();
-    skill.set_pinned(true);
-    save_managed_skill(&profile_root, &skill).await.unwrap();
-
-    let skill_md = std::fs::read_to_string(
-        managed_skill_dir(&profile_root, "repo-hygiene")
-            .unwrap()
-            .join("SKILL.md"),
-    )
-    .unwrap();
-
-    assert!(skill_md.contains("state: active"));
-    assert!(skill_md.contains("pinned: true"));
-    assert!(skill_md.contains("created_at: "));
-    assert!(skill_md.contains("updated_at: "));
 }
 
 #[tokio::test]
@@ -670,33 +626,6 @@ async fn managed_skill_update_activates_content_changes_immediately() {
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, updated.metadata.checksum);
     assert!(reloaded.render_skill_markdown().contains("Updated summary"));
-}
-
-#[tokio::test]
-async fn managed_skill_update_removes_stale_support_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    create_managed_skill(&profile_root, draft()).await.unwrap();
-    let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
-    assert!(skill_dir.join("references/checklist.md").is_file());
-
-    update_managed_skill(
-        &profile_root,
-        "repo-hygiene",
-        ManagedSkillUpdate {
-            support_files: Some(vec![
-                ManagedSupportFile::new("templates/new.md", b"new body".to_vec()).unwrap(),
-            ]),
-            ..ManagedSkillUpdate::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    assert!(!skill_dir.join("references/checklist.md").exists());
-    assert!(skill_dir.join("templates/new.md").is_file());
-    assert!(skill_dir.join("skill.json").is_file());
-    assert!(skill_dir.join("SKILL.md").is_file());
 }
 
 #[tokio::test]

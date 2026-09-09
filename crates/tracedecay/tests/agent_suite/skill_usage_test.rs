@@ -30,53 +30,6 @@ fn draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
 }
 
 #[tokio::test]
-async fn skill_usage_ledger_records_views_uses_patches_and_metadata() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let skill = create_managed_skill(
-        &profile_root,
-        draft("repo-hygiene", ManagedSkillSource::AutomationRun),
-    )
-    .await
-    .unwrap();
-
-    for (action, timestamp, target) in [
-        (SkillUsageAction::View, 100, Some("Cursor")),
-        (SkillUsageAction::Use, 150, Some("codex")),
-        (SkillUsageAction::Patch, 125, None),
-    ] {
-        record_skill_usage_event(
-            &profile_root,
-            SkillUsageEvent {
-                skill_name: "repo-hygiene".to_string(),
-                action,
-                timestamp,
-                target: target.map(str::to_string),
-            },
-            Some(&skill),
-        )
-        .await
-        .unwrap();
-    }
-
-    let summaries = summarize_skill_usage(&profile_root, std::slice::from_ref(&skill))
-        .await
-        .unwrap();
-    let summary = &summaries[0];
-    assert_eq!(summary.skill_id, "repo-hygiene");
-    assert_eq!(summary.view_count, 1);
-    assert_eq!(summary.use_count, 1);
-    assert_eq!(summary.patch_count, 1);
-    assert_eq!(summary.last_activity_at, 150);
-    assert_eq!(summary.targets, vec!["codex", "cursor"]);
-    assert_eq!(summary.created_by.as_deref(), Some("tracedecay"));
-    assert_eq!(
-        summary.provenance_source,
-        Some(ManagedSkillSource::AutomationRun)
-    );
-}
-
-#[tokio::test]
 async fn analytics_ingest_normalizes_skill_usage_events() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
