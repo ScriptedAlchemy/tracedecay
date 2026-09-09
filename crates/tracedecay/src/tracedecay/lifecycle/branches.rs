@@ -9,10 +9,10 @@ use crate::config::{
 };
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::DatabaseAccessMode;
-use tracedecay_runtime_core::storage::StoreLayout;
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
@@ -107,12 +107,12 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
+        let project_id = storage::registered_project_id(&store_layout)?;
+        let enrollment_roots = registered_enrollment_roots(
+            profile_database.as_ref(),
             project_root,
             &store_layout,
             &project_id,
-            profile_database.as_ref(),
         )
         .await?;
         let configuration_database = runtime_registry

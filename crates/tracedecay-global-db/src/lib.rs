@@ -129,6 +129,7 @@ pub use project_registry::{
     EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
     ProjectStoreResolutionError, ReapEntryKind, RegistryReapEntry, RegistryReapPlan,
     RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
+    registered_enrollment_roots,
 };
 pub use registered::{
     DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
@@ -158,7 +159,7 @@ pub use api_types::{
     RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal, SessionActivityRow,
     SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
-    TranscriptBatch,
+    TranscriptBatch, registry_context_candidate_roots,
 };
 pub use support::{
     AccountingMode, env_flag, env_value_truthy, global_accounting_enabled, global_accounting_mode,

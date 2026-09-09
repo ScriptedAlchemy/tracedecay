@@ -16,7 +16,7 @@ use crate::project_store_runtime::join_standalone_session_registry;
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
@@ -151,7 +151,7 @@ impl TraceDecay {
         operation: &'static str,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
-        let project_id = Self::registered_project_id(store_layout)?;
+        let project_id = storage::registered_project_id(store_layout)?;
         let canonical_database_path = &store_layout.graph_db_path;
         if matches!(access, DatabaseAccessMode::ReadOnly) {
             return runtime
@@ -244,7 +244,7 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
+        let project_id = storage::registered_project_id(&store_layout)?;
         // Persist the minted identity in the sanctioned repo-adjacent anchor:
         // the `.git/` repository identity marker. A non-git root persists
         // nothing here — its identity is deterministic from the canonical
@@ -516,12 +516,12 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
+        let project_id = storage::registered_project_id(&store_layout)?;
+        let enrollment_roots = registered_enrollment_roots(
+            profile_database.as_ref(),
             project_root,
             &store_layout,
             &project_id,
-            profile_database.as_ref(),
         )
         .await?;
         let configuration_database = runtime_registry
@@ -727,12 +727,12 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
+        let project_id = storage::registered_project_id(&store_layout)?;
+        let enrollment_roots = registered_enrollment_roots(
+            profile_database.as_ref(),
             project_root,
             &store_layout,
             &project_id,
-            profile_database.as_ref(),
         )
         .await?;
         let configuration_database = runtime_registry
