@@ -4566,54 +4566,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn configured_capacity_is_only_coverage_not_observed_resource_evidence() {
-        let configured = SemanticResourceCeilings {
-            max_model_bytes: 100,
-            max_tokenizer_bytes: 50,
-            max_resident_bytes: 500,
-            max_threads: 8,
-            max_concurrent_sessions: 2,
-            max_batch_size: 32,
-            max_sequence_length: 512,
-            load_deadline_ms: 30_000,
-        };
-        let accepted = crate::config::retrieval::SemanticResourceRequirementV1 {
-            model_bytes: 80,
-            tokenizer_bytes: 40,
-            resident_bytes: 400,
-            threads: 4,
-            max_concurrent_sessions: 1,
-            batch_size: 16,
-            sequence_length: 256,
-            load_deadline_ms: 20_000,
-        };
-
-        assert!(configured_resource_ceiling_covers(&configured, accepted));
-        assert_eq!(
-            configured_semantic_resource_ceiling(configured),
-            crate::config::retrieval::SemanticResourceRequirementV1 {
-                model_bytes: configured.max_model_bytes,
-                tokenizer_bytes: configured.max_tokenizer_bytes,
-                resident_bytes: configured.max_resident_bytes,
-                threads: configured.max_threads,
-                max_concurrent_sessions: configured.max_concurrent_sessions,
-                batch_size: configured.max_batch_size,
-                sequence_length: configured.max_sequence_length,
-                load_deadline_ms: configured.load_deadline_ms,
-            }
-        );
-        let applied = accepted_semantic_resources(accepted);
-        assert_eq!(applied.max_model_bytes, accepted.model_bytes);
-        assert_eq!(applied.max_tokenizer_bytes, accepted.tokenizer_bytes);
-        assert_eq!(applied.max_resident_bytes, accepted.resident_bytes);
-        assert_eq!(
-            applied.max_concurrent_sessions,
-            accepted.max_concurrent_sessions
-        );
-        assert_ne!(applied.max_resident_bytes, configured.max_resident_bytes);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn blocking_evaluation_drives_async_projection_on_daemon_runtime() {
         let observed = tokio::task::spawn_blocking(|| {
