@@ -54,6 +54,10 @@ vi.mock('sigma', () => ({
   },
 }));
 
+// The renderer reducer is exercised without a GPU; shader compilation belongs
+// to the real-browser pass, just as Sigma construction does.
+vi.mock('./glowProgram.ts', () => ({ GlowProgram: class {} }));
+
 const DARK: GraphPalette = {
   hot: [93, 231, 255],
   edge: [55, 83, 114],
@@ -122,6 +126,7 @@ function buildField(colors: GraphPalette): Harness {
     selectedId: () => selected,
     onNodeClick: () => undefined,
     onStageClick: () => undefined,
+    onInspect: () => undefined,
     onFocusChange: () => undefined,
   });
   const settings = captured.settings;
@@ -190,6 +195,23 @@ describe('field renderer interaction states', () => {
       harness.leaveNode();
       expect(harness.focus.target).toBe(0);
     }
+  });
+
+  it('dims glow companions with their owner instead of leaving bright orphan rings', () => {
+    const harness = buildField(DARK);
+    harness.enterNode('a');
+    harness.focus.t = 1;
+    const companion = {
+      owner: 'c',
+      glowRgb: KIND_RGB,
+      glowAlpha: 0.1,
+      color: rgba(KIND_RGB, 0.1),
+    };
+
+    expect(harness.reducer('__halo__c', companion)['color']).toBe(rgba(DARK.dim, 0.008));
+    expect(harness.reducer('__halo__b', { ...companion, owner: 'b' })['color']).toBe(
+      companion.color,
+    );
   });
 
   it('half-eased isolation dims the stranger exactly as far as the easing has got', () => {

@@ -1,20 +1,22 @@
 //! Blocking ownership of exact automation journal and ledger settlement.
 
 use super::journal::{
-    DurableAutomationAdmission, DurableSettlementClassification,
+    DurableAutomationAdmission, DurableSettlementClassification, abandon_reservation_blocking,
     classify_durable_settlement_blocking, persist_prepared_terminal_blocking,
-    promote_prepared_terminal_blocking, replay_exact_binding_after_error_blocking,
+    persist_terminal_blocking, promote_prepared_terminal_blocking,
+    replay_exact_binding_after_error_blocking,
 };
 use super::{AutomationSettledTerminal, contract_error, remove_pending_blocking};
 use crate::automation::run_ledger::{
     self, AutomationRunLedgerRecord, ExactRunPublication, ExactRunPublishOutcome,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(any(test, feature = "test-helpers"))]
 use std::sync::Arc;
 use std::time::Duration;
 use tracedecay_contracts::CancellationSignal;
 use tracedecay_domain::errors::Result;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 
 /// Exact publication state retained throughout bounded retries. The caller keeps
 /// its admission claim and scheduler guards alive until settlement returns.
@@ -293,4 +295,157 @@ fn cleanup_bound_terminal(state: &BoundSettlement) {
             "exact automation terminal is committed; pending-index cleanup remains recoverable"
         );
     }
+}
+
+/// Settles an unbound terminal while the caller retains its admission and scheduler guards.
+pub fn settle_direct(
+    dashboard_root: &Path,
+    journal_path: &Path,
+    admission: &DurableAutomationAdmission,
+    cancellation: &CancellationSignal,
+    mut terminal: AutomationSettledTerminal,
+    budget: Duration,
+) -> Result<AutomationSettledTerminal> {
+    let started = std::time::Instant::now();
+    let mut delay = Duration::from_millis(25);
+    loop {
+        let error = match settle_direct_once(dashboard_root, journal_path, admission, &mut terminal)
+        {
+            Ok(()) => return Ok(terminal),
+            Err(error) => {
+                match classify_durable_settlement_blocking(journal_path, admission, &terminal, None)
+                {
+                    Ok(classification) if classification.is_terminal() => {
+                        tracing::warn!(error = %error, "direct automation terminal committed with deferred housekeeping");
+                        cleanup_direct_terminal(dashboard_root, journal_path, admission);
+                        return Ok(terminal);
+                    }
+                    Ok(_) => {
+                        tracing::warn!(error = %error, "direct automation finalization remains pending under its blocking owner");
+                    }
+                    Err(classification_error) => tracing::warn!(
+                        error = %error,
+                        classification_error = %classification_error,
+                        "direct automation finalization remains uncertain under its blocking owner"
+                    ),
+                }
+                error
+            }
+        };
+        if cancellation.is_cancelled() {
+            return Err(contract_error(format!(
+                "direct automation settlement for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
+                admission.request.run_id
+            )));
+        }
+        if started.elapsed() >= budget {
+            return Err(contract_error(format!(
+                "direct automation settlement for run '{}' exceeded its retry budget; state remains recoverable: {error}",
+                admission.request.run_id
+            )));
+        }
+        std::thread::sleep(delay);
+        delay = delay.saturating_mul(2).min(Duration::from_secs(5));
+    }
+}
+
+fn settle_direct_once(
+    dashboard_root: &Path,
+    journal_path: &Path,
+    admission: &DurableAutomationAdmission,
+    terminal: &mut AutomationSettledTerminal,
+) -> Result<()> {
+    *terminal = persist_terminal_blocking(journal_path, admission, terminal.clone())?;
+    cleanup_direct_terminal(dashboard_root, journal_path, admission);
+    Ok(())
+}
+
+fn cleanup_direct_terminal(
+    dashboard_root: &Path,
+    journal_path: &Path,
+    admission: &DurableAutomationAdmission,
+) {
+    if let Err(error) = remove_pending_blocking(dashboard_root, journal_path) {
+        tracing::warn!(
+            run_id = %admission.request.run_id,
+            error = %error,
+            "direct automation terminal is committed; pending-index cleanup remains recoverable"
+        );
+    }
+}
+
+/// Durably abandons a reservation before the caller releases its scheduler guards.
+pub fn abandon(
+    dashboard_root: &Path,
+    journal_path: &Path,
+    admission: &DurableAutomationAdmission,
+    cancellation: &CancellationSignal,
+    budget: Duration,
+) -> Result<()> {
+    let mut reservation_abandoned = false;
+    let started = std::time::Instant::now();
+    let mut delay = Duration::from_millis(25);
+    loop {
+        match abandon_once(
+            dashboard_root,
+            journal_path,
+            admission,
+            &mut reservation_abandoned,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "automation abandonment remains pending under its blocking owner"
+                );
+                if cancellation.is_cancelled() {
+                    return Err(contract_error(format!(
+                        "automation abandonment for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
+                        admission.request.run_id
+                    )));
+                }
+                if started.elapsed() >= budget {
+                    return Err(contract_error(format!(
+                        "automation abandonment for run '{}' exceeded its retry budget; state remains recoverable: {error}",
+                        admission.request.run_id
+                    )));
+                }
+            }
+        }
+        std::thread::sleep(delay);
+        delay = delay.saturating_mul(2).min(Duration::from_secs(5));
+    }
+}
+
+fn abandon_once(
+    dashboard_root: &Path,
+    journal_path: &Path,
+    admission: &DurableAutomationAdmission,
+    reservation_abandoned: &mut bool,
+) -> Result<()> {
+    if !*reservation_abandoned {
+        if let Err(error) = abandon_reservation_blocking(journal_path, admission) {
+            match std::fs::symlink_metadata(journal_path) {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    sync_parent_directory(
+                        journal_path,
+                        DirectorySyncPolicy::Strict,
+                    )
+                    .map_err(|sync_error| {
+                        contract_error(format!(
+                            "{error}; automation abandonment absence resync failed: {sync_error}"
+                        ))
+                    })?;
+                    tracing::warn!(
+                        run_id = %admission.request.run_id,
+                        error = %error,
+                        "automation reservation removal was recovered by durable absence resnapshot"
+                    );
+                }
+                Ok(_) | Err(_) => return Err(error),
+            }
+        }
+        *reservation_abandoned = true;
+    }
+    remove_pending_blocking(dashboard_root, journal_path)
 }
