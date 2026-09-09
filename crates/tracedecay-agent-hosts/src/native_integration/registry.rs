@@ -666,6 +666,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
 
+    use super::DaemonNativeIntegrationServiceRegistry;
     use tracedecay_contracts::{
         AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal, CapabilityGrantId,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, NativeIntegrationCancelDispositionV1,
@@ -679,9 +680,6 @@ mod tests {
         ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
         WorktreeInventorySnapshotId,
     };
-    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-    use super::DaemonNativeIntegrationServiceRegistry;
     use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
     use tracedecay_runtime_core::git::try_git_program;
     use tracedecay_sessions::admission::HostAdmissionScope;
@@ -753,8 +751,6 @@ mod tests {
     }
 
     fn stack_snapshot_request(
-        project: ProjectId,
-        repository: RepositoryId,
         source: ResolvedScope,
         destination: ResolvedScope,
     ) -> NativeIntegrationStackResolutionRequestV1 {
@@ -873,12 +869,7 @@ mod tests {
             .expect("mount native integration owner");
 
         let (source, destination) = exact_pair_scopes(&project_id, &repository_id);
-        let request = stack_snapshot_request(
-            project_id.clone(),
-            repository_id.clone(),
-            source,
-            destination,
-        );
+        let request = stack_snapshot_request(source, destination);
         let topology_request = request.clone();
         let signal = CancellationSignal::active("cancel.native.snapshot.resolve").expect("signal");
         let snapshot_owner = owner.clone();
@@ -926,12 +917,7 @@ mod tests {
         let foreign_project = ProjectId::new("project.native.snapshot.foreign").expect("foreign");
         let (foreign_source, foreign_destination) =
             exact_pair_scopes(&foreign_project, &repository_id);
-        let foreign_request = stack_snapshot_request(
-            foreign_project,
-            repository_id.clone(),
-            foreign_source,
-            foreign_destination,
-        );
+        let foreign_request = stack_snapshot_request(foreign_source, foreign_destination);
         let denied_owner = owner.clone();
         let denied_signal =
             CancellationSignal::active("cancel.native.snapshot.denied").expect("signal");

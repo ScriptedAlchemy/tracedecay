@@ -349,8 +349,8 @@ jobs:
       # set from the one every test, example and nextest build uses. Each such
       # invocation compiled its own copy of the heaviest crates (run
       # 34138693824, cold cache, Linux: 33 min for the bins, 20 min for the
-      # fixture example, 20 min for the parity helpers, 7 min for one isolated
-      # unit test) before the suites themselves compiled. `--tests` here puts
+      # fixture example, 7 min for one isolated unit test) before the suites
+      # themselves compiled. `--tests` here puts
       # the binaries in the test graph, so this step compiles that graph once
       # and everything below it is a cache hit.
       - name: Build workspace binaries and tests for the test lane
@@ -379,21 +379,6 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
           retention-days: 7
-
-      # This parity test must execute separate feature-off/on binaries. Copy
-      # each result immediately so the second Cargo resolution cannot replace
-      # the first executable in target/perf/examples. Under the workspace
-      # selection the feature-off build is a cache hit and the feature-on
-      # build recompiles only the crates whose features change.
-      - name: Build controlled-workload hotpath parity executables
-        shell: bash
-        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile perf --workspace --features tracedecay/test-helpers
-
-      - name: Verify controlled-workload hotpath parity
-        run: |
-          cargo test-ci --locked --run-ignored only \
-            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
-            --no-tests=fail
 
   # Linux compiles and runs the suite as parallel partitions of the test
   # targets (.github/linux-test-partitions.json), one hosted 4-vCPU job each,

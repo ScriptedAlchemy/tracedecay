@@ -60,6 +60,7 @@ mod project_registry;
 mod protocol;
 mod read_coalescing;
 mod requests;
+pub use requests::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 mod rmcp;
 mod routing;
 mod session_refresh;
