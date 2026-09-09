@@ -2731,14 +2731,23 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
 #[test]
 fn durable_abandonment_is_idempotent_after_parent_sync() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("automation_effects").join("abandon.json");
     let admission = external_admission("run.abandon-idempotent", "request.abandon-idempotent");
+    let path = canonical_journal_path(temp.path(), &admission.request.run_id);
     let claim = match reserve_or_replay_blocking(&path, admission.clone()).expect("reserve") {
         ReservationResult::Execute { claim, .. } => claim,
         _ => panic!("fresh admission must execute"),
     };
-    abandon_reservation_blocking(&path, &admission).expect("first durable abandon");
-    abandon_reservation_blocking(&path, &admission).expect("idempotent durable abandon");
+    let cancellation = CancellationSignal::active("abandon.cancel").expect("signal");
+    for _ in 0..2 {
+        abandon(
+            temp.path(),
+            &path,
+            &admission,
+            &cancellation,
+            Duration::ZERO,
+        )
+        .expect("durable abandonment and replay");
+    }
     assert!(!path.exists());
     drop(claim);
 }
@@ -2772,4 +2781,486 @@ fn durable_settlement_classifier_requires_terminal_before_release() {
         DurableSettlementClassification::Terminal
     );
     drop(claim);
+}
+
+#[test]
+fn unbound_settlement_cancellation_and_budget_preserve_foreign_reservations() {
+    for cancelled in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("foreign.json");
+        let existing = admission("run.existing", "request.existing");
+        let _claim = reserve_or_replay_blocking(&path, existing).expect("reserve");
+        let before = std::fs::read(&path).expect("reserved bytes");
+        let requested = admission("run.requested", "request.requested");
+        let terminal = success_terminal(&requested, "run.requested");
+        let cancellation = CancellationSignal::active("settlement.cancel").expect("signal");
+        if cancelled {
+            assert!(cancellation.cancel(UtcMicros(20)));
+        }
+        let direct_error = settle_direct(
+            temp.path(),
+            &path,
+            &requested,
+            &cancellation,
+            terminal,
+            Duration::ZERO,
+        )
+        .expect_err("foreign reservation cannot settle");
+        let abandon_error = abandon(
+            temp.path(),
+            &path,
+            &requested,
+            &cancellation,
+            Duration::ZERO,
+        )
+        .expect_err("foreign reservation cannot be abandoned");
+        for error in [direct_error, abandon_error] {
+            assert!(
+                error.to_string().contains(if cancelled {
+                    "was cancelled"
+                } else {
+                    "exceeded its retry budget"
+                }),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read(&path).expect("retained bytes"), before);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let run_id = "run.retry-budget-exhausted";
+    let job_id = "retry-budget-exhausted";
+    let (run, guard) = retained_disabled_user_job(dashboard_root, run_id, job_id).await;
+
+    let mut cleanup_admission =
+        external_admission_for_job(run_id, "request.retry-budget-exhausted", job_id);
+    cleanup_admission.recovery = AutomationRecoveryBinding::External {
+        recovery_problem: reset_problem(
+            &cleanup_admission.request_id,
+            &cleanup_admission.scope,
+            &cleanup_admission.request,
+        ),
+    };
+    let cleanup_admission = seal_effect_authority(cleanup_admission);
+    let (authority, journal_path, expected_admission) =
+        retained_external_authority(dashboard_root, cleanup_admission);
+    recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
+        .expect("retain retry-budget cleanup authority");
+
+    let terminal = authority
+        .terminal_for_run(&run.ledger_record, run.committed_receipt.as_ref())
+        .expect("terminal for retry-budget fixture");
+    let always_fails_write_hook = super::PreparedWriteHook::new(|_publication| {
+        Err(super::contract_error(
+            "injected prepared journal write failure (always fails, for retry-budget test)",
+        ))
+    });
+    let state = super::RetainedBoundSettlement {
+        authority,
+        guard: super::RetainedSettlementGuardOwner::Single(guard),
+        terminal,
+        ledger: run.ledger_record,
+        publication: None,
+        observer: None,
+        phase_hook: None,
+        prepared_write_hook: Some(always_fails_write_hook),
+    };
+
+    let waiter = super::RetainedSettlementWaiter {
+        task: tokio::task::spawn_blocking(move || {
+            super::settle_bound_owner_with_budget(state, Duration::from_millis(200))
+                .map(|owned| owned.value)
+        }),
+    };
+    let error = waiter.wait().await.expect_err(
+        "settlement must resolve with an error, not hang, once its retry budget is exhausted",
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("retry budget"),
+        "expected the error to name the exceeded retry budget, got: {message}"
+    );
+
+    let reserved = read_indexed_record_blocking(&journal_path)
+        .expect("reserved journal read after retry-budget exhaustion")
+        .expect("reserved journal remains present");
+    assert!(
+        !reserved.is_terminal(),
+        "budget exhaustion must not fabricate a terminal; recovery relies on the Reserved state"
+    );
+    assert_eq!(reserved.admission(), &expected_admission);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_spool() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let run_id = "run.retained-user-job-drop";
+    let job_id = "retained-drop";
+    let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
+    let recovery_scope = scope();
+    let owner = FactOwnerV1::Project {
+        project_id: recovery_scope.project_id.clone(),
+    };
+    let mut cleanup_admission =
+        external_admission_for_job(run_id, "request.retained-user-job-drop", job_id);
+    cleanup_admission.scope = recovery_scope.clone();
+    cleanup_admission.effect_receipt_template.scope = recovery_scope.clone();
+    cleanup_admission.recovery = AutomationRecoveryBinding::External {
+        recovery_problem: reset_problem(
+            &cleanup_admission.request_id,
+            &recovery_scope,
+            &cleanup_admission.request,
+        ),
+    };
+    cleanup_admission = seal_effect_authority(cleanup_admission);
+    let (authority, journal_path, expected_admission) =
+        retained_external_authority(dashboard_root, cleanup_admission);
+    recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
+        .expect("retain settlement cleanup authority");
+
+    let (phase_tx, phase_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let phase_release = Arc::clone(&release_rx);
+    let phase_hook = super::SettlementPhaseHook::new(move |phase| {
+        phase_tx.send(phase).expect("publish settlement phase");
+        phase_release
+            .lock()
+            .expect("phase release lock")
+            .recv()
+            .expect("release settlement phase");
+    });
+    let publications = Arc::new(Mutex::new(Vec::new()));
+    let attempted_publications = Arc::clone(&publications);
+    let fail_once = Arc::new(AtomicBool::new(true));
+    let prepared_fail_once = Arc::clone(&fail_once);
+    let prepared_write_hook = super::PreparedWriteHook::new(move |publication| {
+        attempted_publications
+            .lock()
+            .expect("publication attempts")
+            .push(publication.clone());
+        if prepared_fail_once.swap(false, Ordering::SeqCst) {
+            return Err(super::contract_error(
+                "injected prepared journal write failure",
+            ));
+        }
+        Ok(())
+    });
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let (projected_tx, projected_rx) = std::sync::mpsc::channel();
+    let waiter = authority.start_retained_automation_settlement_with_phase_hooks(
+        retained,
+        Some(Box::new(move |record| {
+            observed_tx
+                .send(record.clone())
+                .expect("exact row observation");
+        })),
+        move |run| {
+            projected_tx
+                .send(run.ledger_record.clone())
+                .expect("project exact retained row");
+            (run.ledger_record, run.committed_receipt)
+        },
+        phase_hook,
+        Some(prepared_write_hook),
+    );
+    drop(waiter);
+    let expected_record = projected_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("projector executed inside detached owner");
+
+    assert_eq!(
+        phase_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("unbound retry phase"),
+        super::RetainedSettlementPhase::PreparedWriteFailed
+    );
+    let reserved = read_indexed_record_blocking(&journal_path)
+        .expect("reserved journal read")
+        .expect("reserved journal");
+    assert!(!reserved.is_terminal());
+    assert!(reserved.prepared().is_none());
+    assert_eq!(reserved.admission(), &expected_admission);
+    assert!(
+        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
+            dashboard_root,
+            run_id,
+        )
+        .expect("exact lookup after failed Prepared write")
+        .is_none()
+    );
+    assert_eq!(exact_spool_file_count(dashboard_root), 1);
+    assert!(task_lock_is_denied(dashboard_root, job_id).await);
+
+    release_tx.send(()).expect("release failed Prepared phase");
+    assert_eq!(
+        phase_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("prepared phase"),
+        super::RetainedSettlementPhase::Prepared
+    );
+    assert!(
+        read_indexed_record_blocking(&journal_path)
+            .expect("prepared journal read")
+            .expect("prepared journal")
+            .prepared()
+            .is_some()
+    );
+    assert!(
+        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
+            dashboard_root,
+            run_id,
+        )
+        .expect("exact lookup before publication")
+        .is_none()
+    );
+    let publication = {
+        let attempted_publications = publications.lock().expect("publication attempts");
+        assert_eq!(attempted_publications.len(), 2);
+        assert_eq!(attempted_publications[0], attempted_publications[1]);
+        attempted_publications[1].clone()
+    };
+    assert_eq!(exact_spool_file_count(dashboard_root), 1);
+    assert!(task_lock_is_denied(dashboard_root, job_id).await);
+
+    release_tx.send(()).expect("release prepared phase");
+    assert_eq!(
+        phase_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("published phase"),
+        super::RetainedSettlementPhase::Published
+    );
+    assert_eq!(
+        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
+            dashboard_root,
+            run_id,
+        )
+        .expect("exact lookup after publication"),
+        Some(expected_record.clone())
+    );
+    let prepared = read_indexed_record_blocking(&journal_path)
+        .expect("published journal read")
+        .expect("published journal");
+    assert!(prepared.prepared().is_some());
+    assert!(!prepared.is_terminal());
+    assert_eq!(prepared.admission(), &expected_admission);
+    assert!(task_lock_is_denied(dashboard_root, job_id).await);
+    let spool_files = exact_spool_files(dashboard_root);
+    assert_eq!(spool_files.len(), 1);
+    let spool_path = spool_files[0].clone();
+    std::fs::write(&spool_path, b"corrupt-after-exact-publication")
+        .expect("corrupt exact stable spool");
+    let prepared_terminal = read_indexed_terminal_blocking(&journal_path)
+        .expect("prepared terminal sidecar")
+        .expect("prepared terminal");
+    let cleanup_path = journal_path.clone();
+    let cleanup_admission = expected_admission.clone();
+    let cleanup_terminal = prepared_terminal.clone();
+    let cleanup_publication = publication.clone();
+    let cleanup_error =
+        crate::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+            dashboard_root,
+            run_id,
+            &publication,
+            move || {
+                Ok(classify_durable_settlement_blocking(
+                    &cleanup_path,
+                    &cleanup_admission,
+                    &cleanup_terminal,
+                    Some(&cleanup_publication),
+                )?
+                .is_terminal())
+            },
+        )
+        .await
+        .expect_err("Prepared journal must not authorize stale spool retirement");
+    assert!(
+        cleanup_error
+            .to_string()
+            .contains("lacks matching terminal authority")
+    );
+    assert_eq!(exact_spool_file_count(dashboard_root), 1);
+    assert_eq!(
+        recovery_index::indexed_journals_blocking(dashboard_root, &expected_admission.scope)
+            .expect("pre-Terminal pending authority")
+            .len(),
+        1
+    );
+
+    release_tx.send(()).expect("release published phase");
+    assert_eq!(
+        observed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("detached exact observation"),
+        expected_record.clone()
+    );
+    assert!(
+        observed_rx.try_recv().is_err(),
+        "observer must run exactly once"
+    );
+    let terminal_journal = read_indexed_record_blocking(&journal_path)
+        .expect("terminal journal read")
+        .expect("terminal journal");
+    assert!(terminal_journal.is_terminal());
+    assert_eq!(terminal_journal.admission(), &expected_admission);
+    assert_eq!(
+        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
+            dashboard_root,
+            run_id,
+        )
+        .expect("exact lookup after terminal"),
+        Some(expected_record.clone())
+    );
+    let exact_rows = std::fs::read_to_string(crate::automation::run_ledger::run_ledger_path(
+        dashboard_root,
+    ))
+    .expect("physical exact run ledger")
+    .lines()
+    .filter(|line| !line.is_empty())
+    .map(|line| serde_json::from_str::<AutomationRunLedgerRecord>(line).expect("exact ledger row"))
+    .filter(|record| record.run_id == run_id)
+    .collect::<Vec<_>>();
+    assert_eq!(
+        exact_rows,
+        vec![expected_record.clone()],
+        "physical ledger must contain the exact run row once"
+    );
+    assert_eq!(exact_spool_file_count(dashboard_root), 1);
+    let pending =
+        recovery_index::indexed_journals_blocking(dashboard_root, &expected_admission.scope)
+            .expect("pending cleanup authority");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].path, journal_path);
+    assert!(
+        crate::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
+            dashboard_root,
+            &format!("user_job_{job_id}"),
+            None,
+            now_secs(),
+        )
+        .await
+        .expect("post-terminal lock")
+        .is_some()
+    );
+
+    let journal_before_recovery = std::fs::read(&journal_path).expect("terminal journal bytes");
+    let terminal_path = terminal_sidecar_path(&journal_path).expect("terminal sidecar path");
+    let terminal_before_recovery = std::fs::read(&terminal_path).expect("terminal sidecar bytes");
+    let ledger_path = crate::automation::run_ledger::run_ledger_path(dashboard_root);
+    let ledger_before_recovery = std::fs::read(&ledger_path).expect("exact ledger bytes");
+    let cancellation = CancellationSignal::active("cancellation.corrupt-spool-recovery")
+        .expect("recovery cancellation");
+    let recovery_index::AutomationEffectRecoveryPreparation::Pending(preparation) =
+        recovery_index::prepare_reserved_automation_effect_recovery(dashboard_root, &cancellation)
+            .await
+            .expect("prepare canonical recovery")
+    else {
+        panic!("terminal cleanup remains pending")
+    };
+    let recovery = recovery_index::reconcile_prepared_automation_effects_for_project(
+        preparation,
+        |_, _| async {
+            Err(contract_error(
+                "terminal cleanup must not read memory receipts",
+            ))
+        },
+        &owner,
+        &cancellation,
+        &recovery_scope,
+    )
+    .await
+    .expect("canonical corrupt spool recovery");
+    assert_eq!(recovery.inspected, 1);
+    assert_eq!(recovery.already_terminal, 1);
+    assert_eq!(exact_spool_file_count(dashboard_root), 0);
+    assert!(
+        recovery_index::indexed_journals_blocking(dashboard_root, &expected_admission.scope)
+            .expect("post-recovery pending authority")
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("recovered terminal journal"),
+        journal_before_recovery
+    );
+    assert_eq!(
+        std::fs::read(&terminal_path).expect("recovered terminal sidecar"),
+        terminal_before_recovery
+    );
+    assert_eq!(
+        std::fs::read(&ledger_path).expect("recovered exact ledger"),
+        ledger_before_recovery
+    );
+    assert_eq!(
+        crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
+            dashboard_root,
+            run_id,
+        )
+        .expect("exact lookup after canonical recovery"),
+        Some(expected_record)
+    );
+}
+
+#[tokio::test]
+async fn external_admission_does_not_resolve_memory_owner_but_memory_admission_does() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for memory_task in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (authority, _, _) = retained_external_authority(
+            temp.path(),
+            external_admission("run.context", "request.context"),
+        );
+        let request = if memory_task {
+            admission("run.memory", "request.memory").request
+        } else {
+            external_admission("run.external", "request.external").request
+        };
+        let called = AtomicBool::new(false);
+        let result = Box::pin(AutomationEffectAuthority::prepare(
+            AdmittedAutomationEffectRequest {
+                context: authority.context.clone(),
+                cancellation: authority.cancellation.clone(),
+                observed_at: UtcMicros(2),
+                configuration_digest: authority.admission.configuration_digest.clone(),
+                request,
+                dashboard_root: temp.path().to_path_buf(),
+            },
+            || {
+                called.store(true, Ordering::SeqCst);
+                Err(contract_error("memory identity unavailable"))
+            },
+            |_, _| async { Err(contract_error("fresh admission must not read receipts")) },
+        ))
+        .await;
+        assert_eq!(called.load(Ordering::SeqCst), memory_task);
+        if memory_task {
+            assert!(
+                result
+                    .err()
+                    .expect("memory owner denial")
+                    .to_string()
+                    .contains("memory identity unavailable")
+            );
+        } else {
+            let AutomationEffectAdmission::Execute(authority) = result.expect("external admission")
+            else {
+                panic!("fresh external effect must execute")
+            };
+            authority
+                .abandon_uncommitted()
+                .await
+                .expect("abandon external admission");
+        }
+    }
 }

@@ -275,7 +275,7 @@ fn write_private_test_file(path: &std::path::Path, bytes: &[u8]) {
     );
 }
 
-fn retained_external_authority(
+async fn retained_external_authority(
     dashboard_root: &std::path::Path,
     admission: DurableAutomationAdmission,
 ) -> (
@@ -287,7 +287,6 @@ fn retained_external_authority(
 
     use tracedecay_contracts::{
         CancellationContext, CancellationSignal, CapabilityGrantSnapshot, RequestContext,
-        RetainedSurfaceExecutionContextV1,
     };
 
     let operation =
@@ -317,62 +316,35 @@ fn retained_external_authority(
     )
     .expect("request context");
     let cancellation = CancellationSignal::active(cancellation_id).expect("cancellation");
-    let execution = RetainedSurfaceExecutionContextV1 {
-        request_context: &context,
-        cancellation_signal: &cancellation,
-        operation: &operation,
-        observed_at: UtcMicros(2),
-    };
-    let prepared = tracedecay_contracts::prepare_retained_effect(
-        &execution,
-        RetainedSurfaceOperation::FactStoreCurate,
-        &admission.configuration_digest,
-        &admission.request,
-        admission.request.run_id.as_str(),
-    )
-    .expect("prepared retained effect");
-    let placeholder = digest('f');
-    let RetainedSurfaceExecutionErrorV1::PartialEffect {
-        mut committed_receipt,
-        ..
-    } = prepared.partial_error_with_digest(
-        &placeholder,
-        "application.automation-run.recovery-template",
-        "Durable automation recovery receipt template.",
-    )
-    else {
-        panic!("prepared effect must construct a recovery template")
-    };
-    committed_receipt.committed_state = None;
-    assert_ne!(
-        admission.input_digest, committed_receipt.input_digest,
-        "automation-run admission identity and retained-effect receipt identity are distinct domains"
-    );
-    let mut admission = admission;
-    admission.effect_receipt_template = *committed_receipt;
-    let admission = seal_effect_authority(admission);
-    let journal_path = canonical_journal_path(dashboard_root, &admission.request.run_id);
-    let claim = match reserve_or_replay_blocking(&journal_path, admission.clone())
+    let AutomationEffectAdmission::Execute(authority) =
+        Box::pin(AutomationEffectAuthority::prepare(
+            AdmittedAutomationEffectRequest {
+                context,
+                cancellation,
+                observed_at: UtcMicros(2),
+                configuration_digest: admission.configuration_digest.clone(),
+                request: admission.request.clone(),
+                dashboard_root: dashboard_root.to_path_buf(),
+            },
+            || {
+                Ok(FactOwnerV1::Project {
+                    project_id: admission.scope.project_id.clone(),
+                })
+            },
+            |_, _| async { Err(contract_error("fresh admission must not recover receipts")) },
+        ))
+        .await
         .expect("durable admission")
-    {
-        ReservationResult::Execute { claim, .. } => claim,
-        _ => panic!("fresh retained fixture must execute"),
+    else {
+        panic!("fresh retained fixture must execute")
     };
-    let expected_admission = admission.clone();
-    (
-        AutomationEffectAuthority::bind_reserved(
-            context,
-            cancellation,
-            operation,
-            prepared,
-            admission,
-            journal_path.clone(),
-            dashboard_root.to_path_buf(),
-            claim,
-        ),
-        journal_path,
-        expected_admission,
-    )
+    let journal_path = canonical_journal_path(dashboard_root, &admission.request.run_id);
+    let expected_admission = read_indexed_record_blocking(&journal_path)
+        .expect("admitted journal")
+        .expect("journal")
+        .admission()
+        .clone();
+    (*authority, journal_path, expected_admission)
 }
 
 async fn retained_disabled_user_job(
@@ -1598,7 +1570,8 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     let (prior_authority, prior_journal, prior_admission) = retained_external_authority(
         dashboard_root,
         admission(prior_run_id, "request.reused-scheduler-skip.prior"),
-    );
+    )
+    .await;
     recovery_index::add_pending_blocking(dashboard_root, &prior_journal, &prior_admission)
         .expect("prior pending authority");
     prior_authority
@@ -1643,7 +1616,8 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
                 wrong_task_run_id,
                 "request.reused-scheduler-skip.wrong-task",
             ),
-        );
+        )
+        .await;
     recovery_index::add_pending_blocking(
         dashboard_root,
         &wrong_task_journal,
@@ -1693,7 +1667,8 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
                 wrong_reason_run_id,
                 "request.reused-scheduler-skip.wrong-reason",
             ),
-        );
+        )
+        .await;
     recovery_index::add_pending_blocking(
         dashboard_root,
         &wrong_reason_journal,
@@ -1728,7 +1703,8 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     let (current_authority, current_journal, current_admission) = retained_external_authority(
         dashboard_root,
         admission(current_run_id, "request.reused-scheduler-skip.current"),
-    );
+    )
+    .await;
     recovery_index::add_pending_blocking(dashboard_root, &current_journal, &current_admission)
         .expect("current pending authority");
 

@@ -68,11 +68,11 @@ pub(crate) async fn prepare(
                 problem,
             )
             .map_err(contract_error)?;
+            hotpath::gauge!("daemon.effect_admission.refused.pre_admission_total").inc(1_u64);
             return Ok(AutomationEffectAdmission::PreAdmissionProblem(envelope));
         }
         Err(RegisteredRetainedRequestContextError::Runtime(error)) => return Err(error),
     };
-    let memory_owner = memory.project_memory_owner()?;
     // Runtime prepare retains journal and authority state; keep that frame
     // out of scheduler and dashboard callers.
     Box::pin(AutomationEffectAuthority::prepare(
@@ -84,7 +84,7 @@ pub(crate) async fn prepare(
             request,
             dashboard_root: dashboard_root.to_path_buf(),
         },
-        memory_owner,
+        || memory.project_memory_owner(),
         |run_id, read_control| async move {
             memory
                 .project_memory_application()
