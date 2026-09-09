@@ -50,6 +50,7 @@ pub mod lifecycle;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
+pub mod server;
 pub mod tool_call_deadline;
 pub mod tool_errors;
 pub mod tools;

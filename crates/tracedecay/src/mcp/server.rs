@@ -48,7 +48,6 @@ use tracedecay_session_memory::session::SessionRefreshServicePort;
 
 mod connection;
 mod construction;
-mod dispatch_envelope;
 mod dispatch_settlement;
 mod hook_dispatch;
 mod hook_writes;
@@ -57,7 +56,6 @@ mod lifecycle;
 mod live_transcript_refresh;
 mod project_open_access;
 mod project_registry;
-mod protocol;
 mod read_coalescing;
 mod requests;
 mod rmcp;
@@ -71,7 +69,6 @@ pub(crate) use project_registry::DaemonProjectRegistryReadService;
 pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
-use dispatch_envelope::{McpDispatchRequest, ToolCallParams};
 use dispatch_settlement::RetainedDispatchAuthority;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
@@ -82,7 +79,6 @@ pub(crate) use lifecycle::{
 pub(crate) use live_transcript_refresh::{
     LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
 };
-pub(crate) use protocol::*;
 use read_coalescing::*;
 pub(crate) use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
@@ -91,6 +87,40 @@ pub(crate) use rmcp::{
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
+use tracedecay_mcp::server::{McpDispatchRequest, ToolCallParams};
+pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
+
+/// The steering instructions advertised from the `initialize` handshake of a
+/// healthy server.
+pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
+    "tracedecay is a code-graph MCP server. \
+    Start with tracedecay_context for any code exploration task \
+    — it returns relevant symbols, relationships, and code \
+    snippets for a natural-language query. Use tracedecay_search \
+    to find specific symbols by name. Discovery and analysis \
+    tools are read-only and safe to call in parallel. Edit \
+    and session-memory tools can mutate local project state \
+    and declare readOnlyHint=false. \
+    Every tool is also available from the shell: ",
+    tracedecay_agent_hosts::cli_fallback_args_invocation_lit!(),
+    " \
+    — run `tracedecay tool` to list tools, \
+    `tracedecay tool <name> --help` for parameters). If an MCP \
+    call errors, times out, or this server disconnects, fall \
+    back to that CLI instead of querying .tracedecay databases \
+    directly or abandoning tracedecay. \
+    When a tool result contains a `tracedecay_metrics:` line, \
+    report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
+);
+
+pub(crate) fn initialize_result(
+    instructions: &str,
+) -> std::result::Result<Value, crate::product_runtime::ProductRuntimeError> {
+    Ok(tracedecay_mcp::server::initialize_result(
+        crate::version::build_version()?,
+        instructions,
+    ))
+}
 
 pub struct ServerStats {
     started_at: Instant,

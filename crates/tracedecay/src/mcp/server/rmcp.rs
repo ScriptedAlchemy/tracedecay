@@ -19,11 +19,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, Semaphore};
 
+use tracedecay_mcp::server::{McpDispatchParams, McpDispatchRequest, dispatch_is_independent_read};
 use tracedecay_mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
-use super::dispatch_envelope::{
-    McpDispatchParams, McpDispatchRequest, dispatch_is_independent_read,
-};
 use super::{ConnectionRouteState, McpServer};
 
 /// Per-RMCP-connection handoff from handler completion to the transport write.
@@ -352,7 +350,10 @@ impl RmcpConnectionAdapter {
         let id = context.id.into_json_value();
         let request_cancellation = context.ct;
         let request = McpDispatchRequest::typed(id.clone(), method, params);
-        if dispatch_is_independent_read(request.method_class(), request.tool_name()) {
+        if dispatch_is_independent_read(request.method_class(), request.tool_name(), |tool_name| {
+            crate::mcp::tools::mcp_dispatch_contract(tool_name)
+                .is_ok_and(|contract| contract.read_only())
+        }) {
             let ordering_guard = self.connection.read().await;
             let mut request_connection = ordering_guard.fork_for_independent_read();
             let result = self

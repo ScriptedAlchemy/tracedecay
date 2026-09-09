@@ -10,8 +10,8 @@ use super::dispatch_settlement::{
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::{
-    ToolResult, mark_semantic_tool_error, semantic_failure_reason, tool_error_response,
-    tool_result_has_semantic_error,
+    ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
+    tool_error_response, tool_result_has_semantic_error,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 

@@ -21,15 +21,15 @@
 //! the handler's [`JsonRpcResponse`], and the `rmcp` adapter materializes it
 //! into the typed result DTO its `ServerHandler` signature requires.
 
+use crate::transport::JsonRpcRequest;
 use rmcp::model::{CallToolRequestParams, InitializeRequestParams, ReadResourceRequestParams};
 use serde_json::Value;
-use tracedecay_mcp::transport::JsonRpcRequest;
 
 use super::protocol::{McpMethod, classify_mcp_method};
 
 /// The method-specific request payload, in whichever form its transport
 /// already owns.
-pub(crate) enum McpDispatchParams<'a> {
+pub enum McpDispatchParams<'a> {
     /// Raw JSON-RPC params, borrowed from the request the legacy transport
     /// parsed. This is also how `rmcp` delivers hook-event and cancellation
     /// notifications, which are custom (untyped) methods on that transport.
@@ -50,13 +50,13 @@ pub(crate) enum McpDispatchParams<'a> {
 ///
 /// Split out of [`McpDispatchParams`] so preparation can consume the typed
 /// payload by value; every other accessor only needs to borrow.
-pub(crate) enum ToolCallParams<'a> {
+pub enum ToolCallParams<'a> {
     Raw(Option<&'a Value>),
     Typed(CallToolRequestParams),
 }
 
 /// One MCP request, independent of the transport that received it.
-pub(crate) struct McpDispatchRequest<'a> {
+pub struct McpDispatchRequest<'a> {
     id: Option<Value>,
     method: &'a str,
     method_class: McpMethod,
@@ -68,7 +68,7 @@ impl<'a> McpDispatchRequest<'a> {
     ///
     /// Nothing is copied but the (small) request identity, which dispatch
     /// already cloned before consuming.
-    pub(crate) fn from_legacy(request: &'a JsonRpcRequest) -> Self {
+    pub fn from_legacy(request: &'a JsonRpcRequest) -> Self {
         Self::new(
             request.id.clone(),
             &request.method,
@@ -77,7 +77,7 @@ impl<'a> McpDispatchRequest<'a> {
     }
 
     /// Wraps a typed request from the `rmcp` adapter.
-    pub(crate) fn typed(id: Value, method: &'a str, params: McpDispatchParams<'a>) -> Self {
+    pub fn typed(id: Value, method: &'a str, params: McpDispatchParams<'a>) -> Self {
         Self::new(Some(id), method, params)
     }
 
@@ -91,18 +91,18 @@ impl<'a> McpDispatchRequest<'a> {
     }
 
     /// The request identity, cloned for the handlers that own their response.
-    pub(crate) fn cloned_id(&self) -> Option<Value> {
+    pub fn cloned_id(&self) -> Option<Value> {
         self.id.clone()
     }
 
     /// The method name, borrowed from the transport's own request rather than
     /// from the envelope, so callers may keep it across
     /// [`Self::into_tool_call`].
-    pub(crate) fn method(&self) -> &'a str {
+    pub fn method(&self) -> &'a str {
         self.method
     }
 
-    pub(crate) fn method_class(&self) -> McpMethod {
+    pub fn method_class(&self) -> McpMethod {
         self.method_class
     }
 
@@ -112,7 +112,7 @@ impl<'a> McpDispatchRequest<'a> {
     /// methods on both transports, so no typed variant can reach these paths;
     /// a typed payload deliberately reads as "no params" rather than being
     /// materialized into JSON to answer the question.
-    pub(crate) fn raw_notification_params(&self) -> Option<&Value> {
+    pub fn raw_notification_params(&self) -> Option<&Value> {
         match &self.params {
             McpDispatchParams::Raw(params) => *params,
             _ => None,
@@ -126,7 +126,7 @@ impl<'a> McpDispatchRequest<'a> {
     /// this DTO — so a typed initialize has never contributed a root here.
     /// Returning `None` preserves that exactly, without building the JSON tree
     /// the previous bridge built only to find no `roots` key in it.
-    pub(crate) fn initialize_roots_params(&self) -> Option<&Value> {
+    pub fn initialize_roots_params(&self) -> Option<&Value> {
         match &self.params {
             McpDispatchParams::Raw(params) => *params,
             McpDispatchParams::Initialize(_)
@@ -137,7 +137,7 @@ impl<'a> McpDispatchRequest<'a> {
     }
 
     /// The negotiated `clientInfo.name` from an `initialize` request.
-    pub(crate) fn client_info_name(&self) -> Option<&str> {
+    pub fn client_info_name(&self) -> Option<&str> {
         match &self.params {
             McpDispatchParams::Raw(params) => params
                 .and_then(|params| params.get("clientInfo"))
@@ -151,7 +151,7 @@ impl<'a> McpDispatchRequest<'a> {
     }
 
     /// The `resources/read` target URI.
-    pub(crate) fn resource_uri(&self) -> Option<&str> {
+    pub fn resource_uri(&self) -> Option<&str> {
         match &self.params {
             McpDispatchParams::Raw(params) => params
                 .and_then(|params| params.get("uri"))
@@ -167,7 +167,7 @@ impl<'a> McpDispatchRequest<'a> {
     ///
     /// Read before dispatch to decide read concurrency, so it must not disturb
     /// the owned typed params that preparation later moves out.
-    pub(crate) fn tool_name(&self) -> Option<&str> {
+    pub fn tool_name(&self) -> Option<&str> {
         self.params.tool_name()
     }
 
@@ -176,7 +176,7 @@ impl<'a> McpDispatchRequest<'a> {
     /// Only reachable for [`McpMethod::ToolsCall`]; the other variants map to
     /// absent params, which preparation refuses exactly as it refuses a raw
     /// `tools/call` with no params at all.
-    pub(crate) fn into_tool_call(self) -> ToolCallParams<'a> {
+    pub fn into_tool_call(self) -> ToolCallParams<'a> {
         match self.params {
             McpDispatchParams::Raw(params) => ToolCallParams::Raw(params),
             McpDispatchParams::ToolsCall(params) => ToolCallParams::Typed(params),
@@ -205,11 +205,13 @@ impl McpDispatchParams<'_> {
 /// One authority for both transports: the legacy loop and the `rmcp` adapter
 /// classify the same method the same way, so a read that forks connection
 /// state on one transport can never take the ordered write path on the other.
-pub(crate) fn dispatch_is_independent_read(method: McpMethod, tool_name: Option<&str>) -> bool {
+pub fn dispatch_is_independent_read(
+    method: McpMethod,
+    tool_name: Option<&str>,
+    tool_is_read_only: impl FnOnce(&str) -> bool,
+) -> bool {
     match method {
-        McpMethod::ToolsCall => tool_name
-            .and_then(|tool_name| crate::mcp::tools::mcp_dispatch_contract(tool_name).ok())
-            .is_some_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only),
+        McpMethod::ToolsCall => tool_name.is_some_and(tool_is_read_only),
         McpMethod::ToolsList
         | McpMethod::ResourcesList
         | McpMethod::ResourcesRead
@@ -350,8 +352,12 @@ mod tests {
             McpDispatchParams::ToolsCall(CallToolRequestParams::new("tracedecay_search")),
         );
         assert_eq!(
-            dispatch_is_independent_read(raw.method_class(), raw.tool_name()),
-            dispatch_is_independent_read(typed.method_class(), typed.tool_name()),
+            dispatch_is_independent_read(raw.method_class(), raw.tool_name(), |name| {
+                name == "tracedecay_search"
+            }),
+            dispatch_is_independent_read(typed.method_class(), typed.tool_name(), |name| {
+                name == "tracedecay_search"
+            }),
         );
 
         let raw_write = legacy(
@@ -366,11 +372,13 @@ mod tests {
         );
         assert!(!dispatch_is_independent_read(
             raw_write.method_class(),
-            raw_write.tool_name()
+            raw_write.tool_name(),
+            |_| false,
         ));
         assert!(!dispatch_is_independent_read(
             typed_write.method_class(),
-            typed_write.tool_name()
+            typed_write.tool_name(),
+            |_| false,
         ));
     }
 }

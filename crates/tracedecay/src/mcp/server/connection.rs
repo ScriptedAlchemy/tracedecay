@@ -376,13 +376,17 @@ fn current_cancellable_request_key(
 
 #[hotpath::measure(label = "mcp.server.connection.classify")]
 pub(super) fn request_is_independent_read(request: &JsonRpcRequest) -> bool {
-    super::dispatch_envelope::dispatch_is_independent_read(
+    tracedecay_mcp::server::dispatch_is_independent_read(
         classify_mcp_method(&request.method),
         request
             .params
             .as_ref()
             .and_then(|params| params.get("name"))
             .and_then(Value::as_str),
+        |tool_name| {
+            crate::mcp::tools::mcp_dispatch_contract(tool_name)
+                .is_ok_and(|contract| contract.read_only())
+        },
     )
 }
 
