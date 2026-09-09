@@ -66,6 +66,8 @@ pub(crate) fn retained_surface_ports(
         profile_database: authorities.profile_database,
         project_root: authorities.project_root.clone(),
         project_id: authorities.project_id.clone(),
+        store_layout_project_id: authorities.project_id.clone(),
+        served_project_root: authorities.project_root.clone(),
     };
     let mut ports = RetainedSurfacePortsV1::default().with_memory(Arc::new(
         tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::project(
@@ -168,6 +170,8 @@ pub(crate) async fn open_project_retained_memory_target(
         profile_database: cg.profile_database().clone(),
         project_root: cg.project_root().to_path_buf(),
         project_id: admitted_project_id.clone(),
+        store_layout_project_id: admitted_project_id.clone(),
+        served_project_root: cg.project_root().to_path_buf(),
     };
     tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(
         &authority,

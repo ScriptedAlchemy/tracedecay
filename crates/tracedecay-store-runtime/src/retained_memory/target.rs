@@ -23,6 +23,10 @@ pub struct RetainedMemoryTargetAuthorityV1 {
     pub profile_database: RegisteredGlobalDbLeaseV1,
     pub project_root: PathBuf,
     pub project_id: ProjectId,
+    /// On-disk store identity from `StoreLayout.identity.project_id`.
+    pub store_layout_project_id: ProjectId,
+    /// Served project root from the live graph, not the admitted request root.
+    pub served_project_root: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,7 +210,128 @@ fn map_target_infrastructure_error(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use tracedecay_daemon_identity::profile_identity;
+
     use super::*;
+
+    struct MemoryTargetFixture {
+        registry: Arc<DaemonSessionRuntimeRegistryV1>,
+        profile_database: RegisteredGlobalDbLeaseV1,
+        project_id: ProjectId,
+        project_root: PathBuf,
+        _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+        _temp: TempDir,
+    }
+
+    impl MemoryTargetFixture {
+        async fn new(label: &str) -> Self {
+            let temp = TempDir::new().expect("memory target fixture root");
+            let profile_root = temp.path().join("profile");
+            let identity =
+                profile_identity::load_or_create(&profile_root).expect("profile identity");
+            let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+                &profile_root,
+                29,
+                label,
+            )
+            .expect("daemon database scope");
+            let registry = Arc::new(
+                DaemonSessionRuntimeRegistryV1::open(identity)
+                    .await
+                    .expect("session runtime registry"),
+            );
+            let project_id =
+                ProjectId::new(format!("project.retained-memory.{label}")).expect("project id");
+            let project_root = temp.path().join("served");
+            std::fs::create_dir_all(&project_root).expect("served project root");
+            tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+                &project_root,
+                project_id.as_str(),
+            )
+            .expect("project enrollment");
+            let _mounted = registry
+                .project_memory(project_id.clone(), [project_root.clone()])
+                .await
+                .expect("mounted project memory");
+            let profile_database = registry
+                .profile_database()
+                .await
+                .expect("profile database");
+            Self {
+                registry,
+                profile_database,
+                project_id,
+                project_root,
+                _database_scope: database_scope,
+                _temp: temp,
+            }
+        }
+
+        fn authority(
+            &self,
+            store_layout_project_id: ProjectId,
+            served_project_root: PathBuf,
+        ) -> RetainedMemoryTargetAuthorityV1 {
+            RetainedMemoryTargetAuthorityV1 {
+                registry: Arc::clone(&self.registry),
+                profile_database: self.profile_database.clone(),
+                project_root: self.project_root.clone(),
+                project_id: self.project_id.clone(),
+                store_layout_project_id,
+                served_project_root,
+            }
+        }
+    }
+
+    async fn open_same_project(
+        authority: &RetainedMemoryTargetAuthorityV1,
+        registered_root: &Path,
+        admitted_project_id: &ProjectId,
+    ) -> Result<RetainedMemoryTargetV1<'static>, RetainedSurfaceExecutionErrorV1> {
+        open_project_retained_memory_target(
+            authority,
+            registered_root,
+            admitted_project_id,
+            Some(MemoryScopeV1::Project),
+            None,
+            MemoryTargetAccessV1::Read,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn same_project_open_denies_when_store_layout_identity_disagrees() {
+        let fixture = MemoryTargetFixture::new("store-id-drift").await;
+        let foreign = ProjectId::new("project.retained-memory.foreign-store").expect("foreign id");
+        let authority = fixture.authority(foreign, fixture.project_root.clone());
+        let error = open_same_project(&authority, &fixture.project_root, &fixture.project_id)
+            .await
+            .err()
+            .expect("store identity drift must deny");
+        assert!(matches!(
+            error,
+            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
+        ));
+    }
+
+    #[tokio::test]
+    async fn same_project_open_denies_when_served_root_disagrees() {
+        let fixture = MemoryTargetFixture::new("served-root-drift").await;
+        let foreign_root = fixture._temp.path().join("foreign-served");
+        std::fs::create_dir_all(&foreign_root).expect("foreign served root");
+        let authority = fixture.authority(fixture.project_id.clone(), foreign_root);
+        let error = open_same_project(&authority, &fixture.project_root, &fixture.project_id)
+            .await
+            .err()
+            .expect("served root drift must deny");
+        assert!(matches!(
+            error,
+            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
+        ));
+    }
 
     #[test]
     fn selected_target_infrastructure_failures_remain_typed() {
