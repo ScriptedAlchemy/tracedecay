@@ -11,8 +11,10 @@
 //! caller could set to make one project's store or executors look like
 //! another's. Where an authority knows its own identity, [`McpToolContext::bind`]
 //! checks that identity rather than the caller's word: a registered store
-//! lease reports the logical shard it was opened for, and a lease whose shard
-//! names a different project is refused however it was presented.
+//! lease reports the logical shard it was opened for, and a lease that is not
+//! this project's session shard is refused however it was presented — a
+//! `Project` or `Code` shard for the same project included, since those are
+//! different stores and not project-session authority.
 //!
 //! Authorization is carried, never inferred. The root validated whether this
 //! request may read the admitted project store and hands that verdict over
@@ -33,6 +35,7 @@ use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_query::code_search::{
     CodeIndexBranchDiffExecutor, CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor,
 };
+use tracedecay_store::StoreShardScopeV1;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 /// Why a proposed binding is not one coherent admitted request scope.
@@ -45,9 +48,9 @@ pub enum McpToolBindingError {
     #[error("{authority} cannot be admitted without a resolved request scope")]
     UnscopedAuthority { authority: &'static str },
     #[error(
-        "project session store lease is not scoped to a project; its shard is {shard} while this request resolved {request}"
+        "admitted project session store must be a project-sessions shard, but its lease was opened for {shard} while this request resolved {request}"
     )]
-    ProjectStoreNotProjectScoped { request: String, shard: String },
+    ProjectStoreNotSessionScoped { request: String, shard: String },
     #[error(
         "project session store lease was opened for project {lease} but this request resolved {request}"
     )]
@@ -64,7 +67,7 @@ impl McpToolBindingError {
             Self::RelativeProjectRoot { .. } => "mcp_tool_binding_root_not_absolute",
             Self::ScopeInvalid { .. } => "mcp_tool_binding_scope_invalid",
             Self::UnscopedAuthority { .. } => "mcp_tool_binding_scope_unresolved",
-            Self::ProjectStoreNotProjectScoped { .. } => "mcp_tool_binding_store_not_project_shard",
+            Self::ProjectStoreNotSessionScoped { .. } => "mcp_tool_binding_store_not_session_shard",
             Self::ProjectStoreProjectMismatch { .. } => "mcp_tool_binding_store_project_mismatch",
             Self::CodeIndexWithoutExecutor => "mcp_tool_binding_code_index_without_executor",
         }
@@ -353,19 +356,38 @@ fn require_scope<'a>(
     scope.ok_or(McpToolBindingError::UnscopedAuthority { authority })
 }
 
-/// Refuses a store lease whose own logical shard names another project.
+/// The project a shard is the *session* store for, if it is one at all.
 ///
-/// The lease reports the shard the registry opened it for, which is the
-/// store's own identity rather than a label travelling beside it. A profile or
-/// remote-node shard has no project at all and cannot serve a project-scoped
-/// read.
+/// The family is matched exactly, and exhaustively so a shard family added
+/// later must be classified here rather than silently inheriting an answer.
+/// [`StoreShardScopeV1::project_id`] cannot stand in: it reports `Project`,
+/// `ProjectSessions`, and `Code` shards alike, so a project-only comparison
+/// would accept a lease on this project's *project* store or one of its code
+/// stores as project-session authority. Those are separate stores with their
+/// own tables and retention.
+fn session_shard_project(shard: &StoreShardScopeV1) -> Option<&tracedecay_domain::ProjectId> {
+    match shard {
+        StoreShardScopeV1::ProjectSessions { project_id } => Some(project_id),
+        StoreShardScopeV1::Profile
+        | StoreShardScopeV1::ProfileMemory
+        | StoreShardScopeV1::ProfileSessions
+        | StoreShardScopeV1::RemoteNode { .. }
+        | StoreShardScopeV1::Project { .. }
+        | StoreShardScopeV1::Code { .. } => None,
+    }
+}
+
+/// Refuses a store lease that is not this project's session store.
+///
+/// The lease reports the logical shard the registry opened it for, which is
+/// the store's own identity rather than a label travelling beside it.
 fn verify_store_lease(
     scope: &ResolvedScope,
     store: AdmittedProjectStore<'_>,
 ) -> std::result::Result<(), McpToolBindingError> {
     let shard = &store.lease.binding().shard_id;
-    let Some(lease_project) = shard.scope.project_id() else {
-        return Err(McpToolBindingError::ProjectStoreNotProjectScoped {
+    let Some(lease_project) = session_shard_project(&shard.scope) else {
+        return Err(McpToolBindingError::ProjectStoreNotSessionScoped {
             request: checkout_label(scope),
             shard: format!("{:?}", shard.scope),
         });
@@ -442,6 +464,23 @@ mod tests {
             .project_database_arc()
             .expect("registered project lease");
         (runtime, lease)
+    }
+
+    /// A registered store opened for one exact shard family through the same
+    /// publication, schema installation, and client issuance route production
+    /// admission uses. The owner is returned so the caller keeps it alive.
+    async fn registered_store_for_shard(
+        home: &Path,
+        label: &str,
+        scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
+    ) -> (
+        RegisteredGlobalDbLeaseV1,
+        tracedecay_global_db::RegisteredGlobalDbOwnerV1,
+    ) {
+        let path = home.join(label).join("store.sqlite3");
+        tracedecay_global_db::tests::harness::open_registered_test_database_fixture(&path, scope)
+            .await
+            .expect("registered store fixture")
     }
 
     fn scope(project: &str) -> ResolvedScope {
@@ -599,6 +638,96 @@ mod tests {
             "the bound context must report the very lease it was admitted with"
         );
         assert_eq!(authorization, ValidatedAuthorization::Authorized);
+    }
+
+    /// The family gate fires on a real registered lease, not just on a shard
+    /// identity in isolation. The lease below is genuinely published through
+    /// the production registration route and is a real store this daemon
+    /// opens — it is simply the profile's session store rather than the
+    /// admitted project's, so it carries no project-session authority here.
+    #[tokio::test]
+    async fn a_real_non_session_shard_lease_is_refused_at_the_binding() {
+        let home = tempfile::tempdir().expect("temp home");
+        let admitted = scope("admitted");
+        let (lease, _owner) = registered_store_for_shard(
+            home.path(),
+            "profile-sessions",
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await;
+
+        let error = McpToolContext::bind(McpToolBinding {
+            project_session_store: Some(AdmittedProjectStore::new(
+                &lease,
+                ValidatedAuthorization::Authorized,
+            )),
+            ..binding(home.path(), Some(&admitted))
+        })
+        .map(|_| ())
+        .expect_err("a non-session-family lease must be refused");
+        assert_eq!(
+            error.reason_code(),
+            "mcp_tool_binding_store_not_session_shard"
+        );
+    }
+
+    /// Only `ProjectSessions` carries project-session authority, and the two
+    /// families a project-only comparison would have waved through are the
+    /// dangerous ones: this project's own `Project` and `Code` shards name the
+    /// admitted project exactly, so nothing but the family distinguishes them.
+    ///
+    /// Both are asserted against canonical production shard identities rather
+    /// than through a registered lease because neither family can hold one:
+    /// the registered global-db schema is the session store's, so the
+    /// publication route refuses a `Project` shard outright and a `Code` shard
+    /// is a graph store that never becomes a global-db lease. The lease route
+    /// itself is covered by the tests above.
+    #[test]
+    fn only_the_project_sessions_family_carries_session_authority() {
+        let project = ProjectId::new("project.admitted").expect("project id");
+        let repository = RepositoryId::new("repository.admitted").expect("repository id");
+        let worktree = WorktreeId::new("worktree.admitted").expect("worktree id");
+
+        let code = tracedecay_store::StoreShardIdV1::code(
+            tracedecay_domain::BrainId::new("brain.admitted").expect("brain id"),
+            tracedecay_domain::UserProfileId::new("profile.admitted").expect("profile id"),
+            project.clone(),
+            repository,
+            tracedecay_store::CodeShardScopeV1::Worktree {
+                worktree_id: worktree,
+            },
+        );
+        assert_eq!(
+            code.scope.project_id(),
+            Some(&project),
+            "the code shard names the admitted project, so a project-only \
+             comparison would have accepted it"
+        );
+        assert_eq!(
+            session_shard_project(&code.scope),
+            None,
+            "a code shard is not project-session authority"
+        );
+
+        assert_eq!(
+            session_shard_project(&StoreShardScopeV1::Project {
+                project_id: project.clone()
+            }),
+            None,
+            "a project shard is not project-session authority"
+        );
+        assert_eq!(
+            session_shard_project(&StoreShardScopeV1::Profile),
+            None,
+            "a profile shard has no project at all"
+        );
+        assert_eq!(
+            session_shard_project(&StoreShardScopeV1::ProjectSessions {
+                project_id: project.clone()
+            }),
+            Some(&project),
+            "the project's session shard is the one family that carries it"
+        );
     }
 
     /// A request that resolved no checkout cannot admit a store either: there

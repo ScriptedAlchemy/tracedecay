@@ -51,11 +51,17 @@ impl<'a> PrContextCursorScope<'a> {
 /// minted against another store, and that store's own registered shard is what
 /// names it. Carrying the shard makes the denial hold even between two stores
 /// that happen to serve the same checkout.
+///
+/// The shard's logical scope is carried whole through its canonical
+/// serialization rather than reduced to the project it mentions. Reducing it
+/// would give a project's `Project`, `ProjectSessions`, and `Code` shards one
+/// identity, so cursors minted against different stores for one project would
+/// verify interchangeably.
 #[derive(Clone, Copy, Serialize)]
 pub(super) struct PrContextCursorStore<'a> {
     pub brain_id: &'a str,
     pub profile_id: &'a str,
-    pub project_id: Option<&'a str>,
+    pub scope: &'a tracedecay_store::StoreShardScopeV1,
 }
 
 #[derive(Serialize)]
@@ -137,10 +143,7 @@ impl<'a> PrContextCursorStore<'a> {
         Self {
             brain_id: shard.brain_id.as_str(),
             profile_id: shard.profile_id.as_str(),
-            project_id: shard
-                .scope
-                .project_id()
-                .map(tracedecay_domain::ProjectId::as_str),
+            scope: &shard.scope,
         }
     }
 }
@@ -433,6 +436,13 @@ mod tests {
         changes: &'a [GitFileChange],
     ) -> PrContextCursorBinding<'a> {
         binding_bound_to(root, scope, None, changes)
+    }
+
+    /// The logical shard a registered project session store reports.
+    fn session_shard(project: &str) -> tracedecay_store::StoreShardScopeV1 {
+        tracedecay_store::StoreShardScopeV1::ProjectSessions {
+            project_id: tracedecay_domain::ProjectId::new(project).expect("project id"),
+        }
     }
 
     fn binding_bound_to<'a>(
@@ -777,13 +787,14 @@ mod tests {
     fn a_cursor_from_a_foreign_bound_store_is_denied() {
         let changes = Vec::new();
         let scope = resolved("project.a", None);
+        let shard = session_shard("project.a");
         let mine = snapshot_for(&binding_bound_to(
             b"/projects/shared",
             Some(PrContextCursorScope::from_resolved(&scope)),
             Some(PrContextCursorStore {
                 brain_id: "brain.mine",
                 profile_id: "profile.mine",
-                project_id: Some("project.a"),
+                scope: &shard,
             }),
             &changes,
         ));
@@ -793,7 +804,7 @@ mod tests {
             Some(PrContextCursorStore {
                 brain_id: "brain.theirs",
                 profile_id: "profile.theirs",
-                project_id: Some("project.a"),
+                scope: &shard,
             }),
             &changes,
         ));
@@ -806,6 +817,67 @@ mod tests {
 
         let refusal = decode_pr_context_cursor(&encoded, &mine, &authenticator)
             .expect_err("a foreign store's cursor must not decode");
+        assert_eq!(
+            refusal.project_route_context().map(|(reason, _, _)| reason),
+            Some("pr_context_cursor_denied"),
+            "got {refusal}"
+        );
+    }
+
+    /// One project has several registered shards — its session store, its
+    /// project store, and its code stores. They are different stores, so
+    /// reducing the shard to the project it mentions would let a cursor minted
+    /// against one verify against another.
+    #[test]
+    fn a_cursor_cannot_travel_between_shard_families_of_one_project() {
+        let changes = Vec::new();
+        let scope = resolved("project.a", None);
+        let sessions = session_shard("project.a");
+        let project = tracedecay_store::StoreShardScopeV1::Project {
+            project_id: tracedecay_domain::ProjectId::new("project.a").expect("project id"),
+        };
+
+        let store_for = |shard| {
+            binding_bound_to(
+                b"/projects/shared",
+                Some(PrContextCursorScope::from_resolved(&scope)),
+                Some(PrContextCursorStore {
+                    brain_id: "brain.local",
+                    profile_id: "profile.local",
+                    scope: shard,
+                }),
+                &changes,
+            )
+        };
+        // Denial is decided by cursor identity, so the two stores must not
+        // share one. Without this the cursor merely reads as stale.
+        assert_ne!(
+            store_for(&sessions)
+                .identity_digest()
+                .expect("session store identity"),
+            store_for(&project)
+                .identity_digest()
+                .expect("project store identity"),
+            "two shard families of one project must not share a cursor identity"
+        );
+
+        let session_binding = snapshot_for(&store_for(&sessions));
+        let project_binding = snapshot_for(&store_for(&project));
+
+        let authenticator = authenticator();
+        let (after, nodes, edges, bytes) = position();
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &project_binding,
+            &authenticator,
+        )
+        .expect("cursor issues");
+
+        let refusal = decode_pr_context_cursor(&encoded, &session_binding, &authenticator)
+            .expect_err("the project shard's cursor must not decode against the session shard");
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_denied"),
