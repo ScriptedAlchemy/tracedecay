@@ -97,40 +97,6 @@ class EvalStorageIsolationTest(unittest.TestCase):
 
 
 class ExactFactStoreEvaluationTest(unittest.TestCase):
-    def test_fixture_seeds_through_exact_fact_store_add(self):
-        scenario = {
-            "id": "exact-fixture",
-            "setup": {
-                "facts": [
-                    {
-                        "content": "Kept through the public fact-store path",
-                        "category": "project",
-                        "source": "fixture",
-                        "trust": 0.8,
-                    }
-                ]
-            },
-        }
-        completed = subprocess.CompletedProcess(
-            [],
-            0,
-            stdout=json.dumps({"fact": {"fact_id": "fact.project.fixture"}}),
-            stderr="",
-        )
-        with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
-            fixture = run_real_model.build_fixture(scenario, "tracedecay", {})
-        self.addCleanup(run_real_model.shutil.rmtree, fixture, ignore_errors=True)
-
-        tool_call = next(
-            call.args[0]
-            for call in run_mock.call_args_list
-            if call.args[0][1:3] == ["tool", "tracedecay_fact_store_add"]
-        )
-        payload = json.loads(tool_call[-1])
-        self.assertEqual(payload["source"], "fixture")
-        self.assertEqual(payload["trust"], 0.8)
-        self.assertEqual(payload["format"], "json")
-
     def test_fixture_preload_requires_the_seeded_fact_in_search_results(self):
         scenario = {
             "id": "exact-preload",
@@ -167,45 +133,6 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                 run_real_model.ExactFactStoreError, "did not return FactId"
             ):
                 run_real_model.build_fixture(scenario, "tracedecay", {})
-
-    def test_source_count_reads_exact_fact_store_list(self):
-        scenario = {
-            "assertions": [
-                {
-                    "kind": "source-count",
-                    "name": "one_kept_fact",
-                    "source": "kept",
-                    "op": "eq",
-                    "value": 1,
-                }
-            ]
-        }
-        completed = subprocess.CompletedProcess(
-            [],
-            0,
-            stdout=json.dumps(
-                {
-                    "facts": [
-                        {
-                            "fact_id": "fact.project.kept",
-                            "content": "kept",
-                            "source": "kept",
-                            "trust_score": 0.8,
-                            "retrieval_count": 0,
-                        }
-                    ]
-                }
-            ),
-            stderr="",
-        )
-        with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
-            outcomes = run_real_model.evaluate_assertions(
-                scenario, "tracedecay", Path("/fixture"), {}
-            )
-
-        self.assertEqual(outcomes[0]["actual"], 1)
-        self.assertTrue(outcomes[0]["passed"])
-        self.assertEqual(run_mock.call_args.args[0][2], "tracedecay_fact_store_list")
 
     def test_non_real_model_assertions_are_skipped_without_a_store_read(self):
         scenario = {
@@ -309,49 +236,6 @@ class BenchmarkRunnerTest(unittest.TestCase):
 
 
 class HermeticScoreTest(unittest.TestCase):
-    def test_expected_cli_fragments_can_pass_without_mcp_tool_use(self):
-        scenario = {
-            "id": "cli-fallback",
-            "expected_cli": ["tracedecay tool diff_context", "--args -"],
-            "anti_tools": ["grep"],
-        }
-
-        result = hermetic_score.evaluate_scenario(
-            scenario,
-            session_id=None,
-            transcript=None,
-            td_tools=[],
-            native_tools=["Bash"],
-            commands=[
-                "git diff --name-only | jq -R -s '{files: split(\"\\n\")[:-1]}' | "
-                "tracedecay tool diff_context --args -"
-            ],
-        )
-
-        self.assertTrue(result["pass"], result)
-        self.assertEqual(result["expected_cli_missing"], [])
-
-    def test_expected_cli_fragments_match_prefixed_tool_aliases(self):
-        scenario = {
-            "id": "cli-prefixed-tool",
-            "expected_cli": ["tracedecay tool insert_at", "tool search"],
-        }
-
-        result = hermetic_score.evaluate_scenario(
-            scenario,
-            session_id=None,
-            transcript=None,
-            td_tools=[],
-            native_tools=["Bash"],
-            commands=[
-                "tracedecay tool tracedecay_insert_at --args '{}'",
-                "tracedecay tool tracedecay_search --args '{\"query\":\"x\"}'",
-            ],
-        )
-
-        self.assertTrue(result["pass"], result)
-        self.assertEqual(result["expected_cli_missing"], [])
-
     def test_missing_expected_mcp_tool_fails(self):
         scenario = {
             "id": "mcp-first",

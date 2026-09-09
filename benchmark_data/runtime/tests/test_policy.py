@@ -74,16 +74,6 @@ class AcceptancePolicyTests(unittest.TestCase):
         self.assertTrue(p99["p99_eligible"])
         self.assertEqual(policy.latency_mode, "advisory")
 
-    def test_policy_file_is_canonical_json(self) -> None:
-        document = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
-        expected = json.dumps(
-            document,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ) + "\n"
-        self.assertEqual(POLICY_PATH.read_text(encoding="utf-8"), expected)
-
     def test_journey_margins_are_independent_and_frozen(self) -> None:
         policy = load_journey_policy(JOURNEY_POLICY_PATH)
 

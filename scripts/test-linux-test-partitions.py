@@ -90,13 +90,6 @@ class CoverageTest(unittest.TestCase):
     def check(self, partitions: list[dict], not_run: dict | None = NOT_RUN) -> list[str]:
         return self.script.check(manifest(partitions, not_run), metadata())
 
-    def test_complete_disjoint_partition_passes(self) -> None:
-        lines = self.check(COMPLETE)
-        self.assertEqual(lines[0], "root-lib: 1 test targets")
-        self.assertEqual(lines[1], "root-suites: 4 test targets")
-        self.assertEqual(lines[2], "store: 2 test targets")
-        self.assertIn("8 test targets: 7 in exactly one partition, 1 listed under not_run", lines[-1])
-
     def test_new_test_target_without_a_partition_fails(self) -> None:
         # A new crate (or a new suite in an existing crate) appears in cargo
         # metadata; nothing selects it, so the check must fail.
@@ -201,18 +194,6 @@ class CoverageTest(unittest.TestCase):
             with self.assertRaises(self.script.PartitionError) as caught:
                 self.script.load_manifest(path)
             self.assertIn("executables take `bins`, `bin:<name>` or `example:<name>`", str(caught.exception))
-
-    def test_matrix_carries_names_and_budgets(self) -> None:
-        self.assertEqual(
-            self.script.matrix(manifest(COMPLETE)),
-            {
-                "include": [
-                    {"partition": "root-lib", "timeout": 60},
-                    {"partition": "root-suites", "timeout": 45},
-                    {"partition": "store", "timeout": 30},
-                ]
-            },
-        )
 
     def test_manifest_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

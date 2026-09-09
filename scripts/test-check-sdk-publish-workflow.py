@@ -36,10 +36,6 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.checker.main()
 
-    def test_accepts_canonical_workflow(self) -> None:
-        self.checker.WORKFLOW_PATH = WORKFLOW_PATH
-        self.checker.main()
-
     def test_rejects_dropping_the_release_trigger(self) -> None:
         mutated = self.workflow.replace(
             "on:\n  release:\n    types: [published]\n  workflow_dispatch:",

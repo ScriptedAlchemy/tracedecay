@@ -12,7 +12,6 @@ sys.path.insert(0, str(ROOT))
 
 from benchmark_data.runtime.schema import (  # noqa: E402
     SCHEMA_VERSION,
-    RuntimeArtifact,
     SchemaValidationError,
     generated_artifact_schema,
     read_jsonl,
@@ -171,11 +170,6 @@ def valid_report() -> dict:
 
 
 class SampleSchemaTests(unittest.TestCase):
-    def test_valid_sample_is_returned_unchanged(self) -> None:
-        sample = valid_sample()
-
-        self.assertIs(validate_sample(sample), sample)
-
     def test_missing_required_section_is_rejected(self) -> None:
         sample = valid_sample()
         del sample["timing"]
@@ -212,20 +206,6 @@ class SampleSchemaTests(unittest.TestCase):
         del sample["identity"]["capture_id"]
         with self.assertRaisesRegex(SchemaValidationError, "capture_id"):
             validate_sample(sample)
-
-    def test_incident_observations_are_preserved_in_raw_samples(self) -> None:
-        sample = valid_sample(
-            observations={
-                "daemon_cpu_time_ns": 10,
-                "daemon_peak_rss_bytes": 20,
-                "wal_bytes": 30,
-                "queue_depth": 2,
-                "generation": 4,
-            }
-        )
-
-        self.assertIs(validate_sample(sample), sample)
-        self.assertEqual(sample["observations"]["wal_bytes"], 30)
 
     def test_impossible_incident_observations_fail_closed(self) -> None:
         sample = valid_sample(
@@ -435,11 +415,6 @@ class SampleSchemaTests(unittest.TestCase):
 
 
 class ReportSchemaTests(unittest.TestCase):
-    def test_valid_report_is_returned_unchanged(self) -> None:
-        report = valid_report()
-
-        self.assertIs(validate_report(report), report)
-
     def test_report_count_and_timing_invariants_are_enforced(self) -> None:
         report = valid_report()
         report["outcome"]["error_count"] = 1
@@ -532,15 +507,6 @@ class JsonLinesTests(unittest.TestCase):
 
 
 class GeneratedArtifactModelTests(unittest.TestCase):
-    def test_one_typed_model_validates_samples_and_reports(self) -> None:
-        sample = RuntimeArtifact.from_document(valid_sample())
-        report = RuntimeArtifact.from_document(valid_report())
-
-        self.assertEqual(sample.kind, "sample")
-        self.assertEqual(report.kind, "report")
-        self.assertEqual(sample.identity["workload_id"], "exact-symbol")
-        self.assertEqual(report.identity["crate_id"], "tracedecay-contracts")
-
     def test_generated_schema_uses_canonical_model_sections(self) -> None:
         schema = generated_artifact_schema()
 

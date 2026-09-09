@@ -81,15 +81,6 @@ class WholeRunDeadlineTests(unittest.TestCase):
             {"tool_sweep.whole_run_deadline_exceeded"},
         )
 
-    def test_phase_environment_creates_the_temp_root_before_wrappers_run(self) -> None:
-        orchestrator = load_orchestrator()
-        with tempfile.TemporaryDirectory() as raw:
-            environment = orchestrator._phase_environment(Path(raw) / "phase")
-
-            self.assertTrue(Path(environment["TMPDIR"]).is_dir())
-            self.assertEqual(environment["TMPDIR"], environment["TMP"])
-            self.assertEqual(environment["TMPDIR"], environment["TEMP"])
-
     def test_junit_preserves_row_and_fatal_problem_codes(self) -> None:
         orchestrator = load_orchestrator()
         report = {

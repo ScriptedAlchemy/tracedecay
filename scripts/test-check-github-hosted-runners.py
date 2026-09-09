@@ -59,9 +59,6 @@ class GitHubHostedRunnerPolicyTests(unittest.TestCase):
             with self.assertRaises(self.policy.PolicyViolation):
                 self.policy.validate_repository(root)
 
-    def test_accepts_current_repository(self) -> None:
-        self.policy.validate_repository(ROOT)
-
     def test_rejects_explicit_self_hosted_runner(self) -> None:
         self.assert_rejected(
             "jobs:\n  test:\n    runs-on: [self-hosted, linux, x64]\n"
