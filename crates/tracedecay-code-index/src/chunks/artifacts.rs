@@ -130,8 +130,8 @@ pub struct CodeIndexUnresolvedReferenceV1 {
     pub from_occurrence: SymbolOccurrenceId,
     pub reference_name: String,
     pub kind: RelationEdgeKindV1,
-    /// The referencing symbol's extraction-attested span — the same evidence
-    /// span its same-file edges carry.
+    /// Extraction-attested reference token span when the parser coordinates
+    /// identify it; otherwise the referencing symbol's enclosing span.
     pub evidence_span: SourceSpan,
 }
 
