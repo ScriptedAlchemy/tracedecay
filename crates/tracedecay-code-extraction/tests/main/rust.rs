@@ -281,6 +281,7 @@ impl Rect {
 fn test_rust_use_declarations() {
     let source = r#"
 use crate::target::helper;
+use crate::OrderLine;
 use std::collections::HashMap;
 use std::io::{self, Read};
 "#;
@@ -295,16 +296,27 @@ use std::io::{self, Read};
         .collect();
     assert_eq!(
         uses.len(),
-        3,
-        "expected 3 use decls, got: {:?}",
+        4,
+        "expected 4 use decls, got: {:?}",
         uses.iter().map(|n| &n.name).collect::<Vec<_>>()
     );
-    assert_eq!(artifact.imports.len(), 1);
-    let import = &artifact.imports[0];
+    assert_eq!(artifact.imports.len(), 2);
+    let import = artifact
+        .imports
+        .iter()
+        .find(|import| import.imported_name.as_deref() == Some("helper"))
+        .unwrap();
     assert_eq!(import.module_specifier, "crate::target");
     assert_eq!(import.imported_name.as_deref(), Some("helper"));
     assert_eq!(import.local_name.as_deref(), Some("helper"));
     assert_eq!(import.module_kind, ImportModuleKindV1::ProjectRelative);
+    let root_import = artifact
+        .imports
+        .iter()
+        .find(|import| import.imported_name.as_deref() == Some("OrderLine"))
+        .unwrap();
+    assert_eq!(root_import.module_specifier, "crate");
+    assert_eq!(root_import.module_kind, ImportModuleKindV1::ProjectRelative);
 }
 
 #[test]

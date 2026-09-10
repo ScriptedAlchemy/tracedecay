@@ -8,7 +8,7 @@ use tree_sitter::{Node as TsNode, Tree};
 use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1, import_module_kind,
 };
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
@@ -670,6 +670,7 @@ impl RustExtractor {
                 && let Some((module_specifier, imported_name)) = specifier.rsplit_once("::")
                 && !module_specifier.is_empty()
                 && !imported_name.is_empty()
+                && let Some(module_kind) = import_module_kind("rust", module_specifier)
             {
                 state.imports.push(ExtractedImportEvidenceV1 {
                     logical_path: state.file_path.clone(),
@@ -677,7 +678,7 @@ impl RustExtractor {
                     imported_name: Some(imported_name.to_owned()),
                     local_name: Some(imported_name.to_owned()),
                     namespace: ImportNamespaceV1::Value,
-                    module_kind: ImportModuleKindV1::ProjectRelative,
+                    module_kind,
                     span: SourceSpan {
                         start_byte: argument.start_byte() as u64,
                         end_byte: argument.end_byte() as u64,
