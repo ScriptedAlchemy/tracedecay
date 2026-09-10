@@ -336,17 +336,13 @@ async fn invoke_source_edit(
             InvocationCancellationPolicy::AuthoritativeEffect,
         )
         .await
-        .map_err(|error| TraceDecayError::Config {
-            message: error.into_application_problem().safe_message().to_owned(),
-        })?;
+        .map_err(|error| error.into_application_problem().into_trace_decay_error())?;
     match response.outcome {
         DaemonInvocationOutcome::SourceEdit { result, .. } => Ok(result),
-        DaemonInvocationOutcome::ApplicationProblem { problem } => Err(TraceDecayError::Config {
-            message: problem.safe_message().to_owned(),
-        }),
-        DaemonInvocationOutcome::Problem { problem } => Err(TraceDecayError::Config {
-            message: format!("source edit invocation refused: {problem:?}"),
-        }),
+        DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            Err(problem.into_trace_decay_error())
+        }
+        DaemonInvocationOutcome::Problem { problem } => Err(problem.into_trace_decay_error()),
         _ => Err(TraceDecayError::Config {
             message: "source edit invocation returned an unexpected outcome".to_owned(),
         }),
@@ -687,11 +683,11 @@ mod tests {
     };
     use tracedecay_contracts::{
         ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
-        ApplicationResponse, InvocationError,
+        ApplicationProblem, ApplicationResponse, InvocationError, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_daemon_protocol::{
         DaemonInvocationError, DaemonInvocationExecutorFuture, DaemonInvocationPayload,
-        DaemonInvocationResponse,
+        DaemonInvocationProblem, DaemonInvocationResponse,
     };
 
     const EXPECTED_STATE: &str =
@@ -903,6 +899,113 @@ mod tests {
         ) -> DaemonInvocationExecutorFuture<'_, tracedecay_domain::errors::Result<()>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    struct RefusingSourceEditExecutor {
+        outcome: DaemonInvocationOutcome,
+    }
+
+    impl ApplicationInvocationExecutor for RefusingSourceEditExecutor {
+        fn invoke(
+            &self,
+            _invocation: ApplicationInvocation,
+        ) -> ApplicationInvocationFuture<
+            '_,
+            std::result::Result<ApplicationResponse, InvocationError>,
+        > {
+            Box::pin(async { Err(InvocationError::Unavailable) })
+        }
+    }
+
+    impl DaemonInvocationExecutor for RefusingSourceEditExecutor {
+        fn invoke_controlled(
+            &self,
+            _request: DaemonInvocationRequest,
+            _deadline: Deadline,
+            _cancellation: CancellationSignal,
+            _policy: InvocationCancellationPolicy,
+        ) -> DaemonInvocationExecutorFuture<
+            '_,
+            std::result::Result<DaemonInvocationResponse, DaemonInvocationError>,
+        > {
+            let outcome = self.outcome.clone();
+            Box::pin(async move {
+                Ok(DaemonInvocationResponse::with_outcome(
+                    "request.mcp.source-edit.fixture".to_owned(),
+                    outcome,
+                ))
+            })
+        }
+
+        fn observe_feedback(
+            &self,
+            _subject_digest: ManifestDigest,
+            _observed_at: UtcMicros,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
+        ) -> DaemonInvocationExecutorFuture<'_, tracedecay_domain::errors::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    async fn source_edit_refusal(
+        outcome: DaemonInvocationOutcome,
+    ) -> tracedecay_domain::errors::TraceDecayError {
+        let project = tempdir().unwrap();
+        let (graph, _database_scope) = fixture_graph(project.path()).await;
+        let executor = RefusingSourceEditExecutor { outcome };
+        handle_str_replace(
+            &graph,
+            json!({"path":"src/lib.rs","old_str":"old","new_str":"new","dry_run":true}),
+            invocation_context(Some(&executor)),
+        )
+        .await
+        .expect_err("refused source edit must stay a typed failure")
+    }
+
+    #[tokio::test]
+    async fn denied_source_edit_preserves_reason_code_and_is_not_retryable() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("denial must stay a typed project-route error");
+        assert_eq!(reason_code, "not_found_or_not_authorized");
+        assert!(!retryable);
+    }
+
+    #[tokio::test]
+    async fn warming_source_edit_gate_is_retryable_unavailable() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::unavailable(
+                SafeDiagnostic::new(
+                    "application.surface.unavailable",
+                    "The project runtime for this operation is still mounting",
+                )
+                .unwrap(),
+            ),
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("warming must stay a typed project-route error");
+        assert_eq!(reason_code, "application.surface.unavailable");
+        assert!(retryable);
+    }
+
+    #[tokio::test]
+    async fn source_edit_protocol_problem_stays_typed_without_debug_formatting() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("protocol refusal must stay a typed project-route error");
+        assert_eq!(reason_code, "daemon_invocation.not_found_or_not_authorized");
+        assert!(!retryable);
+        assert!(!error.to_string().contains("NotFoundOrNotAuthorized"));
     }
 
     #[tokio::test]

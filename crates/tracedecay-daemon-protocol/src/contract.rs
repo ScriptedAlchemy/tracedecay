@@ -2781,6 +2781,46 @@ pub enum DaemonInvocationProblem {
     Unavailable,
 }
 
+impl DaemonInvocationProblem {
+    /// Preserve the typed refusal as a reason-coded error. Never format the
+    /// variant with `Debug` into a user-facing message.
+    pub fn into_trace_decay_error(self) -> tracedecay_domain::errors::TraceDecayError {
+        let (reason_code, retryable, detail) = match self {
+            Self::InvalidRequest => (
+                "daemon_invocation.invalid_request",
+                false,
+                "The daemon invocation request is invalid",
+            ),
+            Self::UnsupportedRevision => (
+                "daemon_invocation.unsupported_revision",
+                false,
+                "The daemon invocation revision is unsupported",
+            ),
+            Self::NotFoundOrNotAuthorized => (
+                "daemon_invocation.not_found_or_not_authorized",
+                false,
+                "The requested daemon invocation was not found or is not authorized",
+            ),
+            Self::ResetRequired => (
+                "daemon_invocation.reset_required",
+                false,
+                "The daemon invocation store must be reset",
+            ),
+            Self::ApplicationContractViolation => (
+                "daemon_invocation.application_contract_violation",
+                false,
+                "The daemon invocation violated its application contract",
+            ),
+            Self::Unavailable => (
+                "daemon_invocation.unavailable",
+                true,
+                "The daemon invocation is unavailable",
+            ),
+        };
+        tracedecay_domain::errors::TraceDecayError::project_route(reason_code, retryable, detail)
+    }
+}
+
 #[cfg(test)]
 mod invocation_wire_revision_tests {
     use super::{

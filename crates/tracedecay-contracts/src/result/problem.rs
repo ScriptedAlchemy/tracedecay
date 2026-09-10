@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::{CancellationStage, EffectReceipt, EffectTermination};
 use crate::error::ApplicationContractError;
@@ -902,6 +903,31 @@ impl ApplicationProblem {
             } => Some(committed_receipt),
             _ => None,
         }
+    }
+
+    /// Stable client-facing reason: the diagnostic code when one exists,
+    /// otherwise the problem kind's canonical code.
+    pub fn reason_code(&self) -> &str {
+        self.diagnostic()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .unwrap_or_else(|| self.canonical_code())
+    }
+
+    /// Preserve reason code and retryability when a root caller must surface
+    /// this problem as [`TraceDecayError`].
+    pub fn into_trace_decay_error(self) -> TraceDecayError {
+        let retryable = !matches!(self.retry(), RetryDirective::Never);
+        TraceDecayError::project_route(
+            self.reason_code().to_owned(),
+            retryable,
+            self.safe_message().to_owned(),
+        )
+    }
+}
+
+impl From<ApplicationProblem> for TraceDecayError {
+    fn from(problem: ApplicationProblem) -> Self {
+        problem.into_trace_decay_error()
     }
 }
 
