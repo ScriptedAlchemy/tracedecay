@@ -200,6 +200,7 @@ struct PartitionedPublishedGenerationRefV1<'a> {
     format_revision: u32,
     manifest: &'a CodeGenerationManifestV1,
     snapshot: &'a SanitizedCodeSnapshotV1,
+    statistics: &'a CodeIndexGenerationStatisticsV1,
     repository_parse_identity: &'a CodeIndexRepositoryParseIdentityV1,
     ignored_source_admissions: &'a [CodeIndexIgnoredSourceAdmissionV1],
     ignored_source_admissions_digest: &'a ManifestDigest,
@@ -215,6 +216,7 @@ struct PartitionedPublishedGenerationV1 {
     format_revision: u32,
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
+    statistics: CodeIndexGenerationStatisticsV1,
     repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     ignored_source_admissions_digest: ManifestDigest,
@@ -2549,6 +2551,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             reader,
             generation.manifest,
             generation.snapshot,
+            Some(generation.statistics),
             files,
             source_state_digest,
             maximum_page_chunks,
@@ -2711,10 +2714,12 @@ impl CodeIndexPublishedGenerationV1 {
         file_segments.sort_by_key(|segment| segment.file_key);
         let generation_evidence = PartitionedSegmentEncoderV1::default()
             .encode_generation_evidence(self, &mut publish_segment)?;
+        let statistics = self.generation_statistics()?;
         let generation = PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
             manifest: &self.manifest,
             snapshot: &self.snapshot,
+            statistics: &statistics,
             repository_parse_identity: &self.repository_parse_identity,
             ignored_source_admissions: self.ignored_source_roster.admissions(),
             ignored_source_admissions_digest: self.ignored_source_roster.digest(),
@@ -2841,6 +2846,7 @@ impl CodeIndexPublishedGenerationV1 {
         VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             generation.manifest,
             generation.snapshot,
+            Some(generation.statistics),
         )
         .map(Some)
     }

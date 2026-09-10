@@ -388,7 +388,15 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let (scope, seeded_generation_id, latest, replay_binding, repository_id, worktree_id) = {
+    let (
+        scope,
+        seeded_generation_id,
+        seeded_statistics,
+        latest,
+        replay_binding,
+        repository_id,
+        worktree_id,
+    ) = {
         let mut scheduler = scheduler(
             &fixture,
             scoped_store.clone(),
@@ -403,6 +411,10 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             .code_graph_replay_binding(&latest.generation().manifest().generation_id)
             .expect("seed graph replay binding");
         let snapshot = latest.generation().snapshot();
+        let statistics = latest
+            .generation()
+            .generation_statistics()
+            .expect("seed generation statistics");
         let repository_id = snapshot.repository.clone();
         let worktree_id = snapshot.worktree.clone().expect("worktree identity");
         (
@@ -414,6 +426,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             )
             .expect("resolved scope"),
             latest.generation().manifest().generation_id.clone(),
+            statistics,
             latest,
             replay_binding,
             repository_id,
@@ -734,12 +747,20 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         }
     } else {
         let settled_census = census().await;
-        assert!(matches!(
+        assert_eq!(
             settled_census,
-            GenerationCensusSnapshot::Unavailable {
-                reason: GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
-            }
-        ));
+            GenerationCensusSnapshot::Observed {
+                generation_id: seeded_generation_id.as_str().to_owned(),
+                freshness: GenerationCensusServingFreshness::Current,
+                statistics:
+                    tracedecay_session_memory::runtime_telemetry::GenerationCensusStatistics {
+                        source_total_bytes: seeded_statistics.source_total_bytes,
+                        symbol_count: seeded_statistics.symbol_count,
+                        edge_count: seeded_statistics.edge_count,
+                    },
+            },
+            "clean restart must retain the exact authenticated generation census"
+        );
     }
 
     let scheduler = registry
@@ -839,9 +860,14 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     ));
     assert!(matches!(
         census_snapshot,
-        GenerationCensusSnapshot::Unavailable {
-            reason: GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
-        }
+        GenerationCensusSnapshot::Observed {
+            generation_id,
+            freshness: GenerationCensusServingFreshness::LastCompleteStale { .. },
+            statistics,
+        } if generation_id == seeded_generation_id.as_str()
+            && statistics.source_total_bytes == seeded_statistics.source_total_bytes
+            && statistics.symbol_count == seeded_statistics.symbol_count
+            && statistics.edge_count == seeded_statistics.edge_count
     ));
 }
 
