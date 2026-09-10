@@ -15,7 +15,7 @@ const PHASE_TIMEOUT: Duration = Duration::from_secs(20);
 /// a join timeout well under the 360s harness kill turns that wedge into
 /// a typed red instead of a SIGKILL.
 #[cfg(unix)]
-const FIXTURE_DRAIN_BOUND: Duration = Duration::from_secs(120);
+const FIXTURE_DRAIN_BOUND: Duration = Duration::from_mins(2);
 const AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 struct RmcpRouteFixture {
