@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
     CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord, SymbolRelationRecord,
@@ -1531,7 +1532,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
 #[allow(clippy::too_many_arguments)]
 fn finish_direct_query<T: serde::Serialize>(
-    prepared: &PreparedCallableQueryV1,
+    prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
@@ -1564,7 +1565,7 @@ fn finish_direct_query<T: serde::Serialize>(
 /// identity did not validate, which is a degraded read rather than a caller
 /// error; `page_label` names what was being paged in that report.
 fn finish_generation_page<T: serde::Serialize>(
-    prepared: &PreparedCallableQueryV1,
+    prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
@@ -1573,7 +1574,7 @@ fn finish_generation_page<T: serde::Serialize>(
     page_label: &'static str,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let eligible = items.len() as u64;
-    let generation = prepared.latest.generation.manifest().generation_id.clone();
+    let generation = prepared.generation().clone();
     let page = match CodeQueryPage::new(generation.clone(), items, None, None, None) {
         Ok(page) => page,
         Err(error) => {
@@ -1894,6 +1895,138 @@ fn terminal_lane_evidence<T>(
         evidence.temporal.freshness = FreshnessState::Stale;
     }
     evidence
+}
+
+fn request_terminal_outcome<T>(
+    request: &RequestContext,
+    generation: CodeGenerationId,
+) -> Option<RetrievalPortOutcome<CodeQueryPage<T>>> {
+    let finished_at = query_finished_at();
+    match request.admission_at(finished_at) {
+        RequestAdmission::Admitted => None,
+        RequestAdmission::TimedOut => Some(RetrievalPortOutcome::TimedOut(terminal_lane_evidence(
+            finished_at,
+            generation,
+            OmissionReason::TimedOut,
+        ))),
+        RequestAdmission::Cancelled => {
+            let mut evidence =
+                terminal_lane_evidence(finished_at, generation, OmissionReason::Cancelled);
+            evidence.cancellation = Some(CancellationObservation {
+                stage: CancellationStage::DuringRead,
+                observed_at: finished_at,
+            });
+            Some(RetrievalPortOutcome::Cancelled(evidence))
+        }
+    }
+}
+
+fn indexed_symbol_matches(
+    latest: &LatestCodeTextGenerationV1,
+    decoded: Option<&LatestCompleteCodeIndexV1>,
+    context: &RetrievalPortContext<'_>,
+    scope: &tracedecay_contracts::CodeQueryScope,
+    mut select: impl FnMut(&LineageSymbolRecordV1, Option<&str>) -> Option<(u8, Option<f64>)>,
+) -> Result<
+    Vec<(u8, SymbolPrimitiveRecord)>,
+    RetrievalPortOutcome<CodeQueryPage<SymbolPrimitiveRecord>>,
+> {
+    let generation = latest.metadata().manifest().generation_id.clone();
+    let store = match latest.interactive_graph_store() {
+        Ok(store) => store,
+        Err(_) => {
+            let Some(decoded) =
+                decoded.filter(|decoded| decoded.generation.manifest().generation_id == generation)
+            else {
+                return Err(unavailable_for_generation(query_finished_at(), generation));
+            };
+            let mut matches = Vec::new();
+            for (position, metadata) in decoded.generation.symbols().symbols.iter().enumerate() {
+                if position.is_multiple_of(4_096)
+                    && let Some(outcome) =
+                        request_terminal_outcome(context.request, generation.clone())
+                {
+                    return Err(outcome);
+                }
+                let Some(path) = symbol_scope_path(decoded, &metadata.occurrence) else {
+                    continue;
+                };
+                if !path_is_in_code_query_scope(path, scope) {
+                    continue;
+                }
+                let signature = symbol_signature_line(decoded, &metadata.occurrence);
+                let Some((rank, score)) = select(metadata, signature) else {
+                    continue;
+                };
+                let Some(mut record) = symbol_record_by_id(decoded, &metadata.occurrence) else {
+                    continue;
+                };
+                record.score = score;
+                matches.push((rank, record));
+            }
+            return Ok(matches);
+        }
+    };
+    let cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
+    let reader = store
+        .interactive_reader_with_cancellation(&generation, Arc::clone(&cancellation))
+        .map_err(|_| {
+            request_terminal_outcome(context.request, generation.clone())
+                .unwrap_or_else(|| unavailable(query_finished_at()))
+        })?;
+    let mut after = None;
+    let mut matches = Vec::new();
+    loop {
+        if let Some(outcome) = request_terminal_outcome(context.request, generation.clone()) {
+            return Err(outcome);
+        }
+        let page = reader
+            .symbols_page(after.as_ref(), 4_096, Arc::clone(&cancellation))
+            .map_err(|_| {
+                request_terminal_outcome(context.request, generation.clone())
+                    .unwrap_or_else(|| unavailable(query_finished_at()))
+            })?;
+        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
+        for symbol in page.symbols {
+            let (Some(metadata), Some(binding)) = (symbol.metadata, symbol.binding) else {
+                continue;
+            };
+            let Some(path) = binding.logical_path else {
+                continue;
+            };
+            if binding.chunk.is_none() || !path_is_in_code_query_scope(&path, scope) {
+                continue;
+            }
+            let Some((rank, score)) = select(&metadata, metadata.signature.as_deref()) else {
+                continue;
+            };
+            let name = last_qualified_segment(&metadata.qualified_name).to_owned();
+            let is_async = metadata
+                .signature
+                .as_deref()
+                .is_some_and(|signature| signature.split_whitespace().any(|part| part == "async"));
+            matches.push((
+                rank,
+                SymbolPrimitiveRecord {
+                    node_id: symbol.occurrence.as_str().to_owned(),
+                    name,
+                    qualified_name: metadata.qualified_name,
+                    kind: metadata.kind,
+                    file: path,
+                    start_line_zero_based: 0,
+                    end_line_zero_based: 0,
+                    line: 1,
+                    end_line: 1,
+                    signature: metadata.signature,
+                    is_async,
+                    score,
+                },
+            ));
+        }
+        if !page.has_more {
+            return Ok(matches);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2364,7 +2497,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeSymbolSearchRequest,
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let (prepared, binding) = prepare_callable_query_or_return!(
+            let (prepared, binding) = prepare_text_callable_query_or_return!(
                 self,
                 context,
                 request,
@@ -2378,24 +2511,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let query = request.query.as_str().to_ascii_lowercase();
-            let mut ranked = prepared
-                .latest
-                .generation
-                .symbols()
-                .symbols
-                .iter()
-                .filter_map(|symbol| {
-                    if !ascii_contains_ignore_case(&symbol.simple_name, &query)
-                        && !ascii_contains_ignore_case(&symbol.qualified_name, &query)
-                    {
-                        return None;
-                    }
-                    let path = symbol_scope_path(&prepared.latest, &symbol.occurrence)?;
-                    if !path_is_in_code_query_scope(path, &request.scope) {
-                        return None;
-                    }
-                    let name = last_qualified_segment(&symbol.qualified_name);
-                    let qualified = symbol.qualified_name.as_str();
+            let decoded = self
+                .latest_complete_serving_for_scope(context.request.scope())
+                .await;
+            let mut ranked = match indexed_symbol_matches(
+                &prepared.latest,
+                decoded.as_ref(),
+                &context,
+                &request.scope,
+                |metadata, _| {
+                    let name = last_qualified_segment(&metadata.qualified_name);
+                    let qualified = metadata.qualified_name.as_str();
                     let tier = if name.eq_ignore_ascii_case(&query)
                         || qualified.eq_ignore_ascii_case(&query)
                     {
@@ -2411,15 +2537,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     } else {
                         return None;
                     };
-                    let mut record = symbol_record_by_id(&prepared.latest, &symbol.occurrence)?;
-                    record.score = Some(match tier {
-                        0 => 1.0,
-                        1 => 0.75,
-                        _ => 0.5,
-                    });
-                    Some((tier, record))
-                })
-                .collect::<Vec<_>>();
+                    Some((
+                        tier,
+                        Some(match tier {
+                            0 => 1.0,
+                            1 => 0.75,
+                            _ => 0.5,
+                        }),
+                    ))
+                },
+            ) {
+                Ok(ranked) => ranked,
+                Err(outcome) => return outcome,
+            };
             ranked.sort_by(|left, right| {
                 left.0
                     .cmp(&right.0)
@@ -2495,7 +2625,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeSignatureRequest,
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let (prepared, binding) = prepare_callable_query_or_return!(
+            let (prepared, binding) = prepare_text_callable_query_or_return!(
                 self,
                 context,
                 request,
@@ -2510,18 +2640,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
-            let mut items = prepared
-                .latest
-                .generation
-                .symbols()
-                .symbols
-                .iter()
-                .filter_map(|symbol| {
-                    let path = symbol_scope_path(&prepared.latest, &symbol.occurrence)?;
-                    if !path_is_in_code_query_scope(path, &request.scope) {
-                        return None;
-                    }
-                    let signature = symbol_signature_line(&prepared.latest, &symbol.occurrence)?;
+            let decoded = self
+                .latest_complete_serving_for_scope(context.request.scope())
+                .await;
+            let mut items = match indexed_symbol_matches(
+                &prepared.latest,
+                decoded.as_ref(),
+                &context,
+                &request.scope,
+                |_, signature| {
+                    let signature = signature?;
                     if request
                         .returns
                         .as_ref()
@@ -2538,9 +2666,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     }) {
                         return None;
                     }
-                    symbol_record_by_id(&prepared.latest, &symbol.occurrence)
-                })
-                .collect::<Vec<_>>();
+                    Some((0, None))
+                },
+            ) {
+                Ok(items) => items
+                    .into_iter()
+                    .map(|(_, record)| record)
+                    .collect::<Vec<_>>(),
+                Err(outcome) => return outcome,
+            };
             items.sort_by(|left, right| {
                 left.qualified_name
                     .cmp(&right.qualified_name)
