@@ -682,8 +682,9 @@ mod tests {
         SourceEditSurfaceOutcomeV1, SourceEditSurfaceResultV1,
     };
     use tracedecay_contracts::{
-        ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
-        ApplicationProblem, ApplicationResponse, InvocationError, RetryDirective, SafeDiagnostic,
+        ApplicationExecutionFailureClassV1, ApplicationInvocation, ApplicationInvocationExecutor,
+        ApplicationInvocationFuture, ApplicationProblem, ApplicationResponse, InvocationError,
+        LegalAction, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_daemon_protocol::{
         DaemonInvocationError, DaemonInvocationExecutorFuture, DaemonInvocationPayload,
@@ -992,6 +993,50 @@ mod tests {
             .expect("warming must stay a typed project-route error");
         assert_eq!(reason_code, "application.surface.unavailable");
         assert!(retryable);
+    }
+
+    #[tokio::test]
+    async fn kernel_digest_mismatch_reaches_mcp_with_reason_code_and_retryability() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::Conflict {
+                diagnostic: SafeDiagnostic::new(
+                    "source_edit.expected_state_mismatch",
+                    "source edit candidate state changed while its exact preview was captured",
+                )
+                .unwrap(),
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            },
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("digest mismatch must stay a typed project-route error");
+        assert_eq!(reason_code, "source_edit.expected_state_mismatch");
+        assert!(retryable);
+        assert_ne!(reason_code, "not_found_or_not_authorized");
+    }
+
+    #[tokio::test]
+    async fn kernel_conflict_reaches_mcp_with_reason_code_and_retryability() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::execution_failed(
+                ApplicationExecutionFailureClassV1::Permanent,
+                SafeDiagnostic::new(
+                    "source_edit.idempotency_conflict",
+                    "source edit idempotency key conflicts with a prior input",
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("idempotency conflict must stay a typed project-route error");
+        assert_eq!(reason_code, "source_edit.idempotency_conflict");
+        assert!(!retryable);
+        assert_ne!(reason_code, "not_found_or_not_authorized");
     }
 
     #[tokio::test]

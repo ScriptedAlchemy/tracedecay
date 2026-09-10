@@ -3,10 +3,13 @@
 use std::sync::Arc;
 
 use tracedecay_contracts::{
-    ApplicationProblem, CancellationContext, Deadline, RequestId, RetryDirective,
-    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
+    ApplicationExecutionFailureClassV1, ApplicationProblem, CancellationContext, Deadline,
+    LegalAction, RequestId, RetryDirective, SafeDiagnostic, SourceEditInvocationV1,
+    SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
 };
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::errors::TraceDecayError;
 
 use crate::project_owner_registration::{ProjectSourceEditOwnerV1, SourceEditOwnerError};
 
@@ -196,7 +199,55 @@ fn map_source_edit_error(
                 legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
             },
         ),
-        SourceEditOwnerError::Other(_) => concealed_application_problem(request_id),
+        SourceEditOwnerError::AdmissionFailed(_) => concealed_application_problem(request_id),
+        SourceEditOwnerError::ExecutionFailed(error) => {
+            map_source_edit_execution_error(request_id, error)
+        }
+    }
+}
+
+fn source_edit_execution_problem(
+    error: TraceDecayError,
+) -> Result<ApplicationProblem, tracedecay_contracts::ApplicationContractError> {
+    let (code, retryable, message) = match error.project_route_context() {
+        Some((code, retryable, detail)) => (code.to_owned(), retryable, detail.to_owned()),
+        None => (
+            "source_edit.execution_failed".to_owned(),
+            false,
+            error.to_string(),
+        ),
+    };
+    let diagnostic = match SafeDiagnostic::new(code, message) {
+        Ok(diagnostic) => diagnostic,
+        Err(_) => SafeDiagnostic::new(
+            "source_edit.execution_failed",
+            "Source edit execution failed",
+        )?,
+    };
+    if retryable {
+        Ok(ApplicationProblem::Conflict {
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        })
+    } else {
+        ApplicationProblem::execution_failed(
+            ApplicationExecutionFailureClassV1::Permanent,
+            diagnostic,
+        )
+    }
+}
+
+fn map_source_edit_execution_error(
+    request_id: String,
+    error: TraceDecayError,
+) -> DaemonInvocationResponse {
+    match source_edit_execution_problem(error) {
+        Ok(problem) => application_problem(request_id, problem),
+        Err(_) => DaemonInvocationResponse::problem(
+            request_id,
+            DaemonInvocationProblem::ApplicationContractViolation,
+        ),
     }
 }
 
@@ -204,15 +255,34 @@ fn map_source_edit_error(
 mod tests {
     use super::*;
     use tracedecay_contracts::ApplicationProblemKind;
-    use tracedecay_domain::errors::TraceDecayError;
 
-    fn classified_kind(error: SourceEditOwnerError) -> ApplicationProblemKind {
+    fn classified_problem(error: SourceEditOwnerError) -> ApplicationProblem {
         match map_source_edit_error("request.source-edit.classify".to_owned(), error).outcome {
-            DaemonInvocationOutcome::ApplicationProblem { problem } => problem.kind(),
+            DaemonInvocationOutcome::ApplicationProblem { problem } => problem,
             outcome => {
                 panic!("source-edit refusals must stay application problems, got {outcome:?}")
             }
         }
+    }
+
+    fn classified_kind(error: SourceEditOwnerError) -> ApplicationProblemKind {
+        classified_problem(error).kind()
+    }
+
+    fn kernel_digest_mismatch() -> SourceEditOwnerError {
+        SourceEditOwnerError::ExecutionFailed(TraceDecayError::project_route(
+            "source_edit.expected_state_mismatch",
+            true,
+            "source edit candidate state changed while its exact preview was captured",
+        ))
+    }
+
+    fn kernel_idempotency_conflict() -> SourceEditOwnerError {
+        SourceEditOwnerError::ExecutionFailed(TraceDecayError::project_route(
+            "source_edit.idempotency_conflict",
+            false,
+            "source edit idempotency key conflicts with a prior input",
+        ))
     }
 
     #[test]
@@ -234,14 +304,42 @@ mod tests {
             ApplicationProblemKind::InvalidRequest
         );
 
-        let reworded = SourceEditOwnerError::Other(TraceDecayError::Config {
+        let reworded = SourceEditOwnerError::AdmissionFailed(TraceDecayError::Config {
             message: "warming failed to publish not found or is not authorized invocation contract is invalid"
                 .to_owned(),
         });
         assert_eq!(
             classified_kind(reworded),
             ApplicationProblemKind::NotFoundOrNotAuthorized,
-            "message text must not reclassify a typed Other refusal"
+            "message text must not reclassify a typed AdmissionFailed refusal"
         );
+    }
+
+    #[test]
+    fn source_edit_kernel_digest_mismatch_keeps_reason_code_and_retryability() {
+        let problem = classified_problem(kernel_digest_mismatch());
+        assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
+        assert_eq!(problem.reason_code(), "source_edit.expected_state_mismatch");
+        assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
+        let error = problem.into_trace_decay_error();
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("digest mismatch must stay a typed project-route error");
+        assert_eq!(reason_code, "source_edit.expected_state_mismatch");
+        assert!(retryable);
+    }
+
+    #[test]
+    fn source_edit_kernel_conflict_keeps_reason_code_and_retryability() {
+        let problem = classified_problem(kernel_idempotency_conflict());
+        assert_eq!(problem.kind(), ApplicationProblemKind::ExecutionFailed);
+        assert_eq!(problem.reason_code(), "source_edit.idempotency_conflict");
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        let error = problem.into_trace_decay_error();
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("idempotency conflict must stay a typed project-route error");
+        assert_eq!(reason_code, "source_edit.idempotency_conflict");
+        assert!(!retryable);
     }
 }

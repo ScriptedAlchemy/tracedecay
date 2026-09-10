@@ -269,7 +269,9 @@ pub enum SourceEditOwnerError {
     #[error("source edit invocation contract is invalid")]
     InvalidContract,
     #[error(transparent)]
-    Other(#[from] TraceDecayError),
+    AdmissionFailed(TraceDecayError),
+    #[error(transparent)]
+    ExecutionFailed(TraceDecayError),
 }
 
 pub struct ProjectSourceEditOwnerV1 {
@@ -350,17 +352,16 @@ impl ProjectSourceEditOwnerV1 {
                         context.request_id(),
                         &edit,
                     )
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("source edit preview identity failed: {error}"),
+                    .map_err(|error| {
+                        SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+                            message: format!("source edit preview identity failed: {error}"),
+                        })
                     })?;
                     IdempotencyKey::new(format!("preview.{preview_identity}"))
                         .map_err(source_edit_contract_error)?
                 }
                 None => {
-                    return Err(TraceDecayError::Config {
-                        message: "source edit apply requires an idempotency key".to_owned(),
-                    }
-                    .into());
+                    return Err(SourceEditOwnerError::InvalidContract);
                 }
             };
             let expected_state = match expected_state {
@@ -370,14 +371,13 @@ impl ProjectSourceEditOwnerV1 {
                     context.request_id(),
                     &edit,
                 ))
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("source edit preview state identity failed: {error}"),
+                .map_err(|error| {
+                    SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+                        message: format!("source edit preview state identity failed: {error}"),
+                    })
                 })?,
                 None => {
-                    return Err(TraceDecayError::Config {
-                        message: "source edit apply requires an expected state".to_owned(),
-                    }
-                    .into());
+                    return Err(SourceEditOwnerError::InvalidContract);
                 }
             };
             let request = tracedecay_contracts::SourceEditEffectRequestV1 {
@@ -399,7 +399,7 @@ impl ProjectSourceEditOwnerV1 {
             )
             .await
             .and_then(source_edit_surface_result)
-            .map_err(SourceEditOwnerError::from)
+            .map_err(SourceEditOwnerError::ExecutionFailed)
         })
         .await
     }
@@ -465,7 +465,7 @@ impl ProjectSourceEditOwnerV1 {
         )
         .await
         .and_then(source_edit_surface_result)
-        .map_err(SourceEditOwnerError::from)
+        .map_err(SourceEditOwnerError::ExecutionFailed)
     }
 
     #[hotpath::measure(label = "daemon.project.source_edit_reconciliation", future = true)]
@@ -530,7 +530,7 @@ impl ProjectSourceEditOwnerV1 {
         )
         .await
         .and_then(source_edit_surface_result)
-        .map_err(SourceEditOwnerError::from)
+        .map_err(SourceEditOwnerError::ExecutionFailed)
     }
 }
 
@@ -557,8 +557,10 @@ fn source_edit_request_context(
         operation.capability_id(),
         operation.use_case_id(),
     ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("source edit route grant unavailable: {error}"),
+    .map_err(|error| {
+        SourceEditOwnerError::AdmissionFailed(TraceDecayError::Config {
+            message: format!("source edit route grant unavailable: {error}"),
+        })
     })?;
     let grant = tracedecay_contracts::CapabilityGrantSnapshot::new(
         tracedecay_contracts::CapabilityGrantId::new(format!(
@@ -639,13 +641,13 @@ mod tests {
 
     #[test]
     fn source_edit_refusal_state_is_constructed_not_inferred_from_message_text() {
-        let reworded = SourceEditOwnerError::Other(TraceDecayError::Config {
+        let reworded = SourceEditOwnerError::AdmissionFailed(TraceDecayError::Config {
             message: "warming failed to publish not found or is not authorized invocation contract is invalid"
                 .to_owned(),
         });
         assert!(
-            matches!(reworded, SourceEditOwnerError::Other(_)),
-            "a reworded Config message must stay Other, not a classified refusal"
+            matches!(reworded, SourceEditOwnerError::AdmissionFailed(_)),
+            "a reworded Config message must stay AdmissionFailed, not a classified refusal"
         );
     }
 }
