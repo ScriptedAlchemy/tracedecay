@@ -12,7 +12,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::catalog_composition::{
     ApplicationCatalogComposition, compose_application_catalog,
 };
-use tracedecay_daemon_service::application_surface::separate_application_tool_request;
+use tracedecay_daemon_protocol::separate_application_tool_request;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{ToolCallRegistryOptions, application_surface};

@@ -323,6 +323,7 @@ impl SourceEditRequest {
 }
 
 mod effect_authorization;
+mod invocation;
 mod output;
 mod rename;
 mod surface_request;
@@ -331,6 +332,9 @@ pub use effect_authorization::{
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
     SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
     SourceEditReconciliationRequestV1,
+};
+pub use invocation::{
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
 };
 pub use output::{
     SourceEditCancelledResultV1, SourceEditDurableEffectPayloadV1, SourceEditEffectUnknownResultV1,

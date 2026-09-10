@@ -331,11 +331,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor:
         Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
-    pub(crate) source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
-    pub(crate) source_edit_reconciliation_executor:
-        Option<crate::mcp::server::SourceEditReconciliationExecutor>,
-    pub(crate) source_edit_rollback_executor:
-        Option<crate::mcp::server::SourceEditRollbackExecutor>,
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     /// The checkout the serving route was admitted for. Every scoped authority
     /// a moved handler family reads binds against this one scope; absent, no
@@ -406,9 +401,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_reconcile_sink: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
-            source_edit_executor: None,
-            source_edit_reconciliation_executor: None,
-            source_edit_rollback_executor: None,
             code_index_search_authority: None,
             admitted_project_scope: None,
             code_graph_projection_read_port: None,

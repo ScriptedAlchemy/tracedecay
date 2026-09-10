@@ -16,6 +16,7 @@ mod source_edit;
 pub use lsp::{production_lsp_registration, project_open_lsp_scope_grant};
 pub use source_edit::{
     ProjectSourceEditAuthorizationV1, ProjectSourceEditOwnerV1, SourceEditMutationGate,
+    SourceEditOwnerError,
 };
 
 pub fn project_owner_capabilities() -> Result<BTreeSet<CapabilityId>, ApplicationContractError> {

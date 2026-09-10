@@ -1,15 +1,13 @@
 //! Typed Git application-surface requests and bounded Git-read decoding.
 
 use serde_json::Value;
-use tracedecay_application::git_query::{
-    GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES,
-};
 use tracedecay_contracts::git::GitReadRequestV1;
-use tracedecay_daemon_protocol::GitReadSurfaceRequest;
+use tracedecay_contracts::{GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES};
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::ApplicationSurfaceAdapterError;
+use crate::surface::GitReadSurfaceRequest;
 
 #[hotpath::measure(label = "application_surface.git.parse")]
 pub(super) fn parse_git_read_surface_request(

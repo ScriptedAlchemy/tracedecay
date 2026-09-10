@@ -34,6 +34,7 @@ use thiserror::Error;
 use tracedecay_code_index::git_projection::{
     GitTopologyProjectionError, GitTopologyProjectionStore,
 };
+use tracedecay_contracts::{GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES};
 use tracedecay_domain::code_intelligence::CodeGenerationId;
 use tracedecay_domain::git::{
     GitBlameV1, GitChangeKindV1, GitCoverageV1, GitDegradationV1, GitDiffScopeV1, GitDiffV1,
@@ -55,13 +56,6 @@ pub const GIT_QUERY_SCHEMA_VERSION_V1: &str = "tracedecay.git-query.v1";
 /// query-layer evidence over typed status and worktree-diff identity — it is
 /// not a native Git tree id and never authorizes object reconstruction.
 pub const WORKTREE_DIGEST_DOMAIN: &str = "tracedecay.git-query.worktree.v1";
-
-/// Default entry bound (files, status paths, commits, blame lines, or
-/// hunk references retained by one query).
-pub const GIT_QUERY_DEFAULT_MAX_ENTRIES: u32 = 1_000;
-
-/// Default byte bound for one serialized query result.
-pub const GIT_QUERY_DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Per-query resource bounds and cancellation.
 ///

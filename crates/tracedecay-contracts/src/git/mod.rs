@@ -43,9 +43,10 @@ pub use public_wire::{
     GitReadResultV1, GitStatusSummaryV1, GitStatusSurfaceRequest, GitSurfaceDiffScopeV1,
 };
 pub use read::{
-    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
-    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
-    GitIntelligenceError, GitReadPort, is_canonical_repository_relative_path,
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GIT_QUERY_DEFAULT_MAX_BYTES,
+    GIT_QUERY_DEFAULT_MAX_ENTRIES, GitBlameRequest, GitHistoricalBlobReadPort,
+    GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest, GitIntelligenceError,
+    GitReadPort, is_canonical_repository_relative_path,
 };
 pub use stack_signal_expand::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,

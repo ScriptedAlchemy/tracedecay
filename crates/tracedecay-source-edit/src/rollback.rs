@@ -21,7 +21,9 @@ use super::plan::{PlannedSourceEditFile, rollback_planned_source_edit_files};
 use super::port::SourceEditRuntime;
 use super::reconcile::recover_source_edit_transaction;
 use super::records::{applied_record, durable_record, interrupted_record, unknown_record};
-use super::verify::{application_contract_error, application_problem, config_error};
+use super::verify::{
+    application_contract_error, application_problem, config_error, idempotency_conflict,
+};
 
 fn durable_request(
     operation: &ApplicationOperation,
@@ -98,7 +100,7 @@ fn persist_pre_effect(
 ) -> Result<SourceEditApplicationResult> {
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != *input_digest {
-            return Err(config_error(
+            return Err(idempotency_conflict(
                 "source edit rollback idempotency key conflicts with a prior input",
             ));
         }
@@ -225,7 +227,7 @@ where
     recover_source_edit_transaction(&durability, graph, request.context.scope()).await?;
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != input_digest {
-            return Err(config_error(
+            return Err(idempotency_conflict(
                 "source edit rollback idempotency key conflicts with a prior input",
             ));
         }

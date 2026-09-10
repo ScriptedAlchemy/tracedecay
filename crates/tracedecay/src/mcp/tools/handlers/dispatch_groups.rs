@@ -853,9 +853,7 @@ fn dispatch_application_surface_tools_inner<'a>(
             return Err(unknown_tool_error(tool_name));
         };
         let normalized_args =
-            match tracedecay_daemon_service::application_surface::adapt_application_tool_request(
-                tool_name, args,
-            ) {
+            match tracedecay_daemon_protocol::adapt_application_tool_request(tool_name, args) {
                 Ok(args) => args,
                 Err(error) => {
                     return Err(TraceDecayError::Config {
@@ -1311,9 +1309,7 @@ fn dispatch_edit_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let invocation = edit::SourceEditInvocationContext {
-            executor: options.source_edit_executor.clone(),
-            reconciliation_executor: options.source_edit_reconciliation_executor.clone(),
-            rollback_executor: options.source_edit_rollback_executor.clone(),
+            executor: options.application_invocation_executor,
             request_id: options.application_request_id.clone(),
             deadline: options.application_deadline.clone(),
             cancellation: options.application_cancellation.clone(),
@@ -1397,11 +1393,10 @@ fn dispatch_retained_application_tools_inner<'a>(
         // session's own runtime, and only the selector names the project the
         // retained owner actually opened.
         let selected_project_id = super::tool_call_support::selected_project_id_argument(&args);
-        let normalized =
-            tracedecay_daemon_service::application_surface::separate_application_tool_request(args)
-                .map_err(|error| TraceDecayError::Config {
-                    message: error.to_string(),
-                })?;
+        let normalized = tracedecay_daemon_protocol::separate_application_tool_request(args)
+            .map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })?;
         let requested_format = normalized.requested_format;
         let request = hotpath::measure_block!(
             "mcp.retained.decode",

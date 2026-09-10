@@ -40,17 +40,20 @@ use tracedecay_contracts::{
     OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_daemon_protocol::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
+    parse_application_surface_request,
+};
+use tracedecay_daemon_protocol::{
     DaemonHandshake, DaemonInvocationClient, DaemonLspSessionClient, FramePoll, FrameSend,
     RequestedOutputFormat,
-};
-use tracedecay_daemon_service::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
-    execute_application_surface, http_application_router, parse_application_surface_request,
-    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_daemon_service::application_surface::{
     GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+};
+use tracedecay_daemon_service::application_surface::{
+    execute_application_surface, http_application_router,
+    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
