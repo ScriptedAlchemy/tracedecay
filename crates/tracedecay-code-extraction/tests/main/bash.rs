@@ -1,6 +1,30 @@
 use tracedecay_code_extraction::BashExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
+use tracedecay_code_extraction::incremental::{
+    ParseDocumentIdentity, ParseLimits, ParseReuse, RetainedParseDocument,
+};
+use tracedecay_code_extraction::parsed_extraction::{
+    ParsedExtractionDisposition, ParsedExtractionResetReason,
+};
 use tracedecay_domain::*;
+
+fn id<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Display,
+{
+    T::try_from(value.to_owned()).unwrap_or_else(|error| panic!("{value}: {error}"))
+}
+
+fn bash_overlay(version: i64, content: &str) -> ParseDocumentIdentity {
+    ParseDocumentIdentity::SessionOverlay {
+        scope_identity: id::<ManifestDigest>(&format!("sha256:{:064x}", 1)),
+        document_identity: id::<ManifestDigest>(&format!("sha256:{:064x}", 2)),
+        version,
+        content_digest: id::<ContentDigest>(&format!("sha256:{content:0>64}")),
+        logical_path: "usage.sh".to_owned(),
+    }
+}
 
 #[test]
 fn test_bash_extract_functions() {
@@ -79,6 +103,11 @@ fn test_bash_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
+    let script = result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Module && node.name == "sample")
+        .expect("script execution scope");
     assert!(!call_refs.is_empty(), "should have call refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "echo"),
@@ -98,6 +127,88 @@ fn test_bash_call_sites() {
             .any(|r| r.reference_name == "validate_config"),
         "should find validate_config call"
     );
+    assert_eq!(
+        call_refs
+            .iter()
+            .filter(|r| r.reference_name == "validate_config")
+            .count(),
+        1,
+        "script-level extraction must skip commands inside function definitions"
+    );
+    assert!(
+        call_refs
+            .iter()
+            .any(|r| { r.reference_name == "main" && r.from_node_id == script.id })
+    );
+    assert_eq!(
+        result
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::Contains
+                    && edge.source == script.id
+                    && result
+                        .nodes
+                        .iter()
+                        .any(|node| node.kind == NodeKind::Function && node.id == edge.target)
+            })
+            .count(),
+        5
+    );
+}
+
+#[test]
+fn test_bash_incremental_edit_rebuilds_script_scope() {
+    let before =
+        "kept() { echo kept; }\noldfn() { echo old; }\nnewfn() { echo new; }\nkept\noldfn\n";
+    let after =
+        "kept() { echo kept; }\noldfn() { echo old; }\nnewfn() { echo new; }\nkept\nnewfn\n";
+    let (mut document, opened) =
+        RetainedParseDocument::open(bash_overlay(1, "1"), "bash", before, ParseLimits::default())
+            .expect("initial Bash parse");
+    let initial = document
+        .extract_canonical(&BashExtractor, &opened, None)
+        .expect("initial Bash extraction");
+
+    let report = document
+        .reparse(bash_overlay(2, "2"), after)
+        .expect("incremental Bash parse");
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let updated = document
+        .extract_canonical(&BashExtractor, &report, Some(&initial.result))
+        .expect("updated Bash extraction");
+    assert_eq!(
+        updated.disposition,
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ChangedRootIdentity
+        }
+    );
+
+    let script = updated
+        .result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Module)
+        .expect("script module");
+    let mut functions = updated
+        .result
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Function)
+        .map(|node| node.name.as_str())
+        .collect::<Vec<_>>();
+    functions.sort_unstable();
+    assert_eq!(functions, ["kept", "newfn", "oldfn"]);
+    let top_level_calls = updated
+        .result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| reference.from_node_id == script.id)
+        .map(|reference| reference.reference_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(top_level_calls.contains(&"kept"));
+    assert!(top_level_calls.contains(&"newfn"));
+    assert!(!top_level_calls.contains(&"oldfn"));
 }
 
 #[test]
