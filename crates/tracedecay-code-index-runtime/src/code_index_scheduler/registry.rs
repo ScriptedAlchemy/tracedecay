@@ -6700,6 +6700,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // waiter must not detach an in-flight blocking reconcile or lose the
         // handle a later shutdown needs to join.
         retiring.extend(mounted);
+        let mut owner_releases = Vec::new();
         while let Some(root) = retiring.keys().next().cloned() {
             if let Some(worktree) = retiring.get_mut(&root) {
                 let _ = hotpath::future!(
@@ -6714,8 +6715,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 // generation-sized candidate is seconds of deallocation.
                 // Freeing it inline would block this runtime worker for that
                 // long and hide it inside the owner's join budget, so the
-                // release runs on the blocking pool and shutdown moves on.
-                drop(tokio::task::spawn_blocking(move || {
+                // release runs on the blocking pool. Shutdown still joins it
+                // below: ownership must be gone when this returns.
+                owner_releases.push(tokio::task::spawn_blocking(move || {
                     hotpath::measure_block!(
                         "daemon.code_index.shutdown.owner_release",
                         drop(worktree)
@@ -6727,6 +6729,13 @@ impl CodeIndexSchedulerRegistryV1 {
         drop(retiring);
         for mut completion in cold_mount_completions {
             let _ = completion.changed().await;
+        }
+        for release in owner_releases {
+            let _ = hotpath::future!(
+                release,
+                label = "daemon.code_index.shutdown.owner_release_join"
+            )
+            .await;
         }
     }
 
