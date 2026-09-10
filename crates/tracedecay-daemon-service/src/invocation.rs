@@ -96,9 +96,8 @@ use tracedecay_configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
     ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,
     ConfigurationMutationGrantAuthorityFuture, ConfigurationRollbackRequest,
-    CredentialWriteHandleV1, DirectConfigurationMutation,
-    PolicyBackedConfigurationMutationAuthorization, ProjectConfigurationRuntime,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
+    DirectConfigurationMutation, PolicyBackedConfigurationMutationAuthorization,
+    ProjectConfigurationRuntime, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
     configuration_layer_scope_digest,
 };
 use tracedecay_contracts::ConfigurationWireRequestV1;

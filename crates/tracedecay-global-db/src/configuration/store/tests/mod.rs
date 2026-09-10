@@ -8,7 +8,7 @@ use super::{
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
     ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationSqlStore,
     ConfigurationValueV1, Connection, GlobalDbConfigurationControlStore, ManifestDigest,
-    TestConnection, TransactionBehavior, WriteOnlyCredentialMutation, ensure_configuration_schema,
+    TestConnection, TransactionBehavior, ensure_configuration_schema,
 };
 use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
 use crate::configuration::registry::ConfigurationRegistry;
@@ -318,17 +318,13 @@ fn control_authority(
     operation: ConfigurationMutationOperationV1,
     expected_revision: &ConfigurationRevisionId,
 ) -> ConfigurationMutationAuthority {
-    let idempotency_key = matches!(
-        operation,
-        ConfigurationMutationOperationV1::DirectMutation
-            | ConfigurationMutationOperationV1::CredentialWrite
-    )
-    .then(|| {
-        id(&format!(
-            "configuration.idempotency.{}",
-            format!("{operation:?}").to_lowercase()
-        ))
-    });
+    let idempotency_key = matches!(operation, ConfigurationMutationOperationV1::DirectMutation)
+        .then(|| {
+            id(&format!(
+                "configuration.idempotency.{}",
+                format!("{operation:?}").to_lowercase()
+            ))
+        });
     control_authority_with_key(operation, expected_revision, idempotency_key)
 }
 
@@ -352,10 +348,6 @@ fn control_authority_with_key_for_layer(
     direct_layer: ConfigurationLayerIdV1,
 ) -> ConfigurationMutationAuthority {
     let (sink, effect) = match operation {
-        ConfigurationMutationOperationV1::CredentialWrite => (
-            ConfigurationMutationSinkV1::CredentialStore,
-            ConfigurationMutationEffectV1::WriteCredentialReference,
-        ),
         ConfigurationMutationOperationV1::ProtectedDryRun
         | ConfigurationMutationOperationV1::RollbackDryRun => (
             ConfigurationMutationSinkV1::ConfigurationStore,

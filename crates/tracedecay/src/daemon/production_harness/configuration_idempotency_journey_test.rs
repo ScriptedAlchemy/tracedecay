@@ -5,12 +5,11 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay_contracts::{
     ApplicationResult, CancellationSignal, ConfigurationBatchRequestV1,
-    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1,
-    ConfigurationWriteCredentialRequestV1, Deadline, PageRequest,
+    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1, Deadline, PageRequest,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, CredentialKindV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    ConfigurationValueV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
@@ -599,58 +598,6 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
         current_revision(&harness, &project).await,
         committed_revision,
         "idempotency conflict must not advance configuration"
-    );
-    harness.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn credential_effect_uses_the_durable_request_operation_digest() {
-    let isolation = TempDir::new().expect("journey isolation");
-    let project = isolation.path().join("project");
-    initialize_project(&project);
-
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
-        .await
-        .expect("production composition");
-    let request = ConfigurationWriteCredentialRequestV1 {
-        expected_reference_id: None,
-        kind: CredentialKindV1::ApiToken,
-        write_handle: "credential-write-handle.production-journey".to_owned(),
-        expected_revision: current_revision(&harness, &project).await,
-        idempotency_key: ConfigurationIdempotencyKey::new(
-            "configuration.idempotency.credential-digest",
-        )
-        .expect("idempotency key"),
-    };
-    // Application-surface tools render markdown unless the caller asks for
-    // JSON; `format` is a transport key the surface strips before the reviewed
-    // request schema sees it. This journey asserts on the typed effect record,
-    // so it requests the machine-readable presentation explicitly.
-    let mut arguments = serde_json::to_value(&request).expect("credential request");
-    arguments["format"] = serde_json::json!("json");
-    let response = harness
-        .call_tool(
-            &project,
-            "tracedecay_configuration_write_credential",
-            arguments,
-        )
-        .await
-        .expect("credential effect");
-    let envelope = tool_payload(&response);
-    let effect = &envelope["outcome"]["value"];
-    let operation_digest = &effect["payload"]["operation_digest"];
-    assert_eq!(
-        &effect["receipt"]["input_digest"], operation_digest,
-        "the effect must carry the canonical digest accepted by the credential store"
-    );
-    assert_ne!(
-        operation_digest, &effect["payload"]["reference_digest"],
-        "the durable request digest must not be replaced by the metadata digest"
-    );
-    assert_eq!(
-        effect["execution"]["effective_deadline"]["expires_at"],
-        effect["payload"]["effective_deadline_at"],
-        "effect execution must replay the accepted credential deadline"
     );
     harness.shutdown().await;
 }
