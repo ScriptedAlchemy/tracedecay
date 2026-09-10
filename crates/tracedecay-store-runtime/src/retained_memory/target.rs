@@ -35,9 +35,10 @@ pub struct RetainedMemoryTargetAuthorityV1 {
 pub enum MemoryTargetAccessV1 {
     Read,
     Write,
-    /// Search records a retrieval projection. Writable graphs take a write
-    /// lease; a read-only graph or owner degrades to a read-only lease and
-    /// reports `ReadOnly` telemetry instead of refusing.
+    /// Search records a retrieval projection, and both Search and Related
+    /// reconcile the memory graph inline on read. Writable graphs take a
+    /// write lease; a read-only graph or owner degrades to a read-only lease
+    /// and reports `ReadOnly` telemetry instead of refusing.
     RecordRetrieval,
 }
 
