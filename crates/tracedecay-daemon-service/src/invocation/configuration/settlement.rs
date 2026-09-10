@@ -1,7 +1,25 @@
 //! Durable configuration effect rendering and runtime reconciliation.
 
 use super::*;
+use tracedecay_domain::configuration::RestartRequirementV1;
+use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+fn requires_daemon_restart(
+    observed: &ConfigurationSnapshotV1,
+    desired: &ConfigurationSnapshotV1,
+) -> Result<bool, ConfigurationError> {
+    observed
+        .validate()
+        .map_err(ConfigurationError::validation)?;
+    desired.validate().map_err(ConfigurationError::validation)?;
+    let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
+    Ok(registry.definitions().any(|definition| {
+        definition.restart_requirement == RestartRequirementV1::DaemonRestart
+            && observed.effective_values.get(&definition.key)
+                != desired.effective_values.get(&definition.key)
+    }))
+}
 
 #[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
 pub(super) async fn reconcile_configuration_runtime(
@@ -25,6 +43,48 @@ pub(super) async fn reconcile_configuration_runtime(
             return;
         }
     };
+    let observed = match registered.runtime.activated_configuration() {
+        Ok(observed) => observed,
+        Err(error) => {
+            tracing::warn!(
+                receipt_id = %receipt.receipt_id,
+                error = %error,
+                "configuration committed; observed runtime configuration is unavailable"
+            );
+            return;
+        }
+    };
+    match requires_daemon_restart(observed.snapshot(), current.snapshot()) {
+        Ok(true) => {
+            tracing::info!(
+                receipt_id = %receipt.receipt_id,
+                desired_revision_id = %current.revision_id(),
+                observed_revision_id = %observed.revision_id(),
+                "configuration committed; daemon restart is required before activation"
+            );
+            if let Err(error) = registered
+                .runtime
+                .record_runtime_activation(Some(observed.revision_id().clone()), None, now)
+                .await
+            {
+                tracing::warn!(
+                    receipt_id = %receipt.receipt_id,
+                    error = %error,
+                    "configuration committed; restart requirement observation remains pending"
+                );
+            }
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(
+                receipt_id = %receipt.receipt_id,
+                error = %error,
+                "configuration committed; restart requirement could not be resolved"
+            );
+            return;
+        }
+    }
     let revision_id = current.revision_id().clone();
     let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
         tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
@@ -170,6 +230,105 @@ pub(super) fn configuration_effect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolved_snapshot(
+        key: &str,
+        value: tracedecay_domain::configuration::ConfigurationValueV1,
+    ) -> ConfigurationSnapshotV1 {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let key = tracedecay_domain::configuration::SettingKey::new(key).unwrap();
+        let project_id = ProjectId::new("project.configuration.restart.fixture").unwrap();
+        tracedecay_global_db::configuration::resolver::resolve_configuration(
+            &registry,
+            &[
+                tracedecay_global_db::configuration::resolver::ConfigurationLayerV1 {
+                    layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                        project_id,
+                    },
+                    revision_id: ConfigurationRevisionId::new(
+                        "configuration.revision.restart.fixture",
+                    )
+                    .unwrap(),
+                    entries: std::collections::BTreeMap::from([(key, value)]),
+                },
+            ],
+        )
+        .unwrap()
+        .snapshot
+    }
+
+    #[test]
+    fn executable_binding_transition_requires_daemon_restart() {
+        use tracedecay_domain::WorkExecutableReference;
+        use tracedecay_domain::configuration::{
+            WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
+            WorkExecutableCapabilityV1,
+        };
+
+        let registry = ConfigurationRegistry::core().unwrap();
+        let observed =
+            tracedecay_global_db::configuration::resolver::resolve_configuration(&registry, &[])
+                .unwrap()
+                .snapshot;
+        let executable = WorkExecutableReference::new(
+            "provider.configuration.restart.fixture".to_owned(),
+            digest('e'),
+        )
+        .unwrap();
+        let binding = WorkExecutableBindingV1::new(
+            executable,
+            std::path::PathBuf::from("/tmp/provider-configuration-restart-fixture"),
+            vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+            Vec::new(),
+        )
+        .unwrap();
+        let desired = resolved_snapshot(
+            WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+            tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(vec![
+                binding,
+            ]),
+        );
+
+        assert!(requires_daemon_restart(&observed, &desired).unwrap());
+    }
+
+    #[test]
+    fn live_setting_transition_does_not_require_daemon_restart() {
+        use tracedecay_domain::configuration::{
+            ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+        };
+
+        let observed = resolved_snapshot(
+            DIAGNOSTICS_PREWARM_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
+        );
+        let desired = resolved_snapshot(
+            DIAGNOSTICS_PREWARM_SETTING_KEY,
+            ConfigurationValueV1::Boolean(true),
+        );
+
+        assert!(!requires_daemon_restart(&observed, &desired).unwrap());
+    }
+
+    #[test]
+    fn reverted_restart_setting_can_settle_current_without_restart() {
+        use tracedecay_domain::configuration::{
+            ConfigurationValueV1, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+        };
+
+        let registry = ConfigurationRegistry::core().unwrap();
+        let observed =
+            tracedecay_global_db::configuration::resolver::resolve_configuration(&registry, &[])
+                .unwrap()
+                .snapshot;
+        let reverted = resolved_snapshot(
+            WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+            ConfigurationValueV1::WorkExecutableBindings(Vec::new()),
+        );
+
+        assert_ne!(observed.snapshot_id, reverted.snapshot_id);
+        assert!(!requires_daemon_restart(&observed, &reverted).unwrap());
+    }
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
