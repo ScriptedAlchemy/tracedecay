@@ -63,7 +63,8 @@ use tracedecay_application::observability::{
 use tracedecay_contracts::{
     WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
     WorkAttemptEffectStoragePortV1, WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1,
-    WorkProviderAvailabilityV1, WorkProviderFallbackRecordV1,
+    WorkProviderAvailabilityV1, WorkProviderFallbackRecordV1, WorkflowArtifactPayload,
+    WorkflowArtifactStorePort, workflow_artifact_payload_digest,
 };
 use tracedecay_domain::configuration::TopologyPolicyDigestV1;
 use tracedecay_domain::{
@@ -89,6 +90,63 @@ mod provider_output;
 
 use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_observation};
 use provider_output::{overflow_outcome, provider_session, read_capped, stream_summary};
+
+fn provider_stdout_artifacts<S: WorkflowArtifactStorePort>(
+    identity: &WorkAttemptIdentityV1,
+    captured: Option<&(Vec<u8>, u64)>,
+    store: Option<&S>,
+) -> Result<Vec<WorkArtifactRefV1>, ()> {
+    let Some((bytes, total)) = captured.filter(|(bytes, total)| {
+        !bytes.is_empty() && *total == u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+    }) else {
+        return Ok(Vec::new());
+    };
+    let Some(store) = store else {
+        tracing::warn!(
+            task = identity.task_id().as_str(),
+            "work attempt provider output store is unavailable"
+        );
+        return Err(());
+    };
+    let artifact_id =
+        WorkArtifactId::new("artifact.provider.stdout".to_owned()).map_err(|error| {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?error,
+                "work attempt provider stdout identity could not be sealed"
+            );
+        })?;
+    let digest = workflow_artifact_payload_digest(bytes).map_err(|error| {
+        tracing::warn!(
+            task = identity.task_id().as_str(),
+            ?error,
+            "work attempt provider stdout digest could not be sealed"
+        );
+    })?;
+    let artifact = WorkArtifactRefV1::new(artifact_id, digest, *total).map_err(|error| {
+        tracing::warn!(
+            task = identity.task_id().as_str(),
+            ?error,
+            "work attempt provider stdout artifact could not be sealed"
+        );
+    })?;
+    let payload =
+        WorkflowArtifactPayload::new(artifact.clone(), bytes.clone()).map_err(|error| {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?error,
+                "work attempt provider stdout payload could not be verified"
+            );
+        })?;
+    store.persist(&payload).map_err(|error| {
+        tracing::warn!(
+            task = identity.task_id().as_str(),
+            ?error,
+            "work attempt provider stdout payload could not be persisted"
+        );
+    })?;
+    Ok(vec![artifact])
+}
 
 #[cfg(test)]
 mod tests;
@@ -486,6 +544,13 @@ async fn run_attempt(
     };
     let attempts = services.attempts();
     let attempt_effects = services.attempt_effects();
+    let workflow_artifacts = registered.database.workflow_storage().map_err(|error| {
+        tracing::warn!(
+            task = attempt.identity().task_id().as_str(),
+            ?error,
+            "work attempt provider output store could not be attached"
+        );
+    });
     let identity = attempt.identity().clone();
     // The registration-pinned work topology policy carries the concurrency
     // policy this attempt was admitted under; its canonical digest is the
@@ -511,6 +576,7 @@ async fn run_attempt(
                 execute_app_server(
                     attempts,
                     attempt_effects,
+                    workflow_artifacts.as_ref().ok(),
                     &context,
                     &attempt,
                     &selection,
@@ -526,6 +592,7 @@ async fn run_attempt(
                 execute_provider_with_environment(
                     attempts,
                     attempt_effects,
+                    workflow_artifacts.as_ref().ok(),
                     &context,
                     &attempt,
                     &selection,
@@ -845,6 +912,7 @@ fn admitted_provider_environment(
 async fn execute_provider_with_environment<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
     attempt_effects: &WorkAttemptEffectServiceV1<S>,
+    workflow_artifacts: Option<&tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -985,42 +1053,15 @@ async fn execute_provider_with_environment<S>(
 
     let captured_stdout = stdout_task.await.ok().flatten();
     let provider_session = provider_session(resolved.protocol, captured_stdout.as_ref());
-    let stdout = stream_summary(captured_stdout);
+    let stdout = stream_summary(captured_stdout.clone());
     let stderr = stream_summary(stderr_task.await.ok().flatten());
     let mut outcome = overflow_outcome(outcome, &stdout, &stderr);
-    let artifacts = match stdout
-        .as_ref()
-        .filter(|summary| summary.byte_length > 0 && !summary.truncated)
-    {
-        None => Vec::new(),
-        Some(summary) => match WorkArtifactId::new("artifact.provider.stdout".to_owned()) {
-            Ok(artifact_id) => match WorkArtifactRefV1::new(
-                artifact_id,
-                summary.digest.clone(),
-                summary.byte_length,
-            ) {
-                Ok(artifact) => vec![artifact],
-                Err(error) => {
-                    tracing::warn!(
-                        task = identity.task_id().as_str(),
-                        ?error,
-                        "work attempt provider stdout artifact could not be sealed"
-                    );
-                    outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
-                    Vec::new()
-                }
-            },
-            Err(error) => {
-                tracing::warn!(
-                    task = identity.task_id().as_str(),
-                    ?error,
-                    "work attempt provider stdout identity could not be sealed"
-                );
+    let artifacts =
+        provider_stdout_artifacts(&identity, captured_stdout.as_ref(), workflow_artifacts)
+            .unwrap_or_else(|()| {
                 outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
                 Vec::new()
-            }
-        },
-    };
+            });
     let terminal = std::time::Instant::now();
     let evidence = WorkAttemptEvidenceRecordV1 {
         identity: identity.clone(),
@@ -1088,6 +1129,7 @@ struct AppServerSessionOutput {
 async fn execute_app_server<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
     attempt_effects: &WorkAttemptEffectServiceV1<S>,
+    workflow_artifacts: Option<&tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -1267,14 +1309,21 @@ async fn execute_app_server<S>(
         AppServerEnding::Session(Err(_)) => WorkAttemptProviderOutcomeV1::ProtocolFailed,
     };
 
-    let stdout = stream_summary(text.map(|answer| {
+    let captured_stdout = text.map(|answer| {
         let bytes = answer.into_bytes();
         let total = bytes.len() as u64;
         let cap = usize::try_from(envelope.budget().max_stdout_bytes()).unwrap_or(usize::MAX);
         let retained = bytes[..cap.min(bytes.len())].to_vec();
         (retained, total)
-    }));
-    let outcome = overflow_outcome(outcome, &stdout, &None);
+    });
+    let stdout = stream_summary(captured_stdout.clone());
+    let mut outcome = overflow_outcome(outcome, &stdout, &None);
+    let artifacts =
+        provider_stdout_artifacts(&identity, captured_stdout.as_ref(), workflow_artifacts)
+            .unwrap_or_else(|()| {
+                outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
+                Vec::new()
+            });
     let terminal = std::time::Instant::now();
     let evidence = WorkAttemptEvidenceRecordV1 {
         identity: identity.clone(),
@@ -1297,7 +1346,7 @@ async fn execute_app_server<S>(
     ) {
         return;
     }
-    match attempts.settle(context, &identity, &evidence) {
+    match attempts.settle_with_artifacts(context, &identity, &evidence, artifacts) {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
             if let Some(observation) = launch_receipt.started_at().and_then(|started| {

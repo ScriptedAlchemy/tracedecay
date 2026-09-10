@@ -793,6 +793,7 @@ const CLEAN_PROVIDER: &str = "#!/bin/sh\ncat > /dev/null\nexit 0\n";
 #[cfg(unix)]
 #[tokio::test]
 async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let argv_marker = root.join("argv");
@@ -824,6 +825,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
     execute_provider_with_environment(
         &fixture.attempts,
         &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -867,6 +869,13 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         "artifact.provider.stdout"
     );
     assert_eq!(settled.artifacts()[0].byte_length(), stream.len() as u64);
+    assert_eq!(
+        workflow_artifacts
+            .load(&settled.artifacts()[0])
+            .unwrap()
+            .bytes(),
+        stream.as_bytes()
+    );
     let scheduled = std::time::Instant::now();
     let admitted = scheduled + std::time::Duration::from_micros(5);
     let started = scheduled + std::time::Duration::from_micros(10);
@@ -946,6 +955,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
 #[cfg(unix)]
 #[tokio::test]
 async fn initial_provider_child_uses_values_captured_for_that_spawn() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let environment_marker = root.join("environment");
@@ -988,6 +998,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
     execute_provider_with_environment(
         &fixture.attempts,
         &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1026,6 +1037,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
 #[cfg(unix)]
 #[tokio::test]
 async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let argv_marker = root.join("argv");
@@ -1062,6 +1074,7 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
     execute_provider_with_environment(
         &fixture.attempts,
         &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1175,6 +1188,7 @@ fn overflow_classification_names_the_channel_and_yields_to_cancellation() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let started_marker = root.join("started");
@@ -1242,6 +1256,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
         () = execute_provider_with_environment(
             &fixture.attempts,
             &fixture.effects,
+            Some(&workflow_artifacts),
             &fixture.context,
             &fixture.attempt,
             &provider,
@@ -1290,6 +1305,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
 #[cfg(unix)]
 #[tokio::test]
 async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_terminal() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
@@ -1338,6 +1354,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
     execute_provider_with_environment(
         &fixture.attempts,
         &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1501,6 +1518,7 @@ fn a_resolvable_app_server_is_preferred_over_an_equally_resolvable_codex_cli() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_evidence() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let (app_server, app_server_path) =
@@ -1575,6 +1593,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
     execute_provider_with_environment(
         &fixture.attempts,
         &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &selection,
@@ -1801,6 +1820,7 @@ fn crossed_backend_protocol_pairs_cannot_be_admitted_upstream() {
 
 #[tokio::test]
 async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let absent = root.join("provider-that-was-never-installed");
@@ -1816,6 +1836,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
     execute_provider_with_environment(
         &fixture.attempts,
         &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -2026,4 +2047,27 @@ fn the_process_registry_isolates_equal_attempt_ids_by_worktree() {
     registry.release_for_worktree(fixture.identity(), &first_worktree);
     assert!(!registry.holds_attempt(&first_worktree, fixture.identity()));
     assert!(registry.holds_attempt(&second_worktree, fixture.identity()));
+}
+
+async fn provider_artifact_store() -> (
+    tempfile::TempDir,
+    tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+) {
+    use tracedecay_runtime_core::db::{
+        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
+    tracedecay_global_db::register_test_schema_installer();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("artifacts.db");
+    let authority = DatabaseAuthority::acquire_test(&path, "provider artifacts").unwrap();
+    let (database, _) = Database::publish_registered_test_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestDatabaseRuntimeScope::Profile,
+    )
+    .await
+    .unwrap();
+    let store = database.workflow_storage().unwrap();
+    (directory, store)
 }
