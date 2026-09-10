@@ -1,6 +1,8 @@
 //! `tracedecay_test_risk` and `tracedecay_test_map`.
 
 use super::*;
+use tracedecay_code_index::is_test_file;
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 
 const MAX_TEST_MAP_FILE_SYMBOLS: usize = 50_000;
@@ -8,9 +10,8 @@ const MAX_TEST_MAP_IMPACT_SYMBOLS: usize = 20_000;
 const MAX_TEST_MAP_RELATIONS_PER_HOP: usize = 20_000;
 
 #[hotpath::measure(label = "mcp.health.test_risk.total")]
-pub(crate) async fn handle_test_risk(
-    cg: &TraceDecay,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+pub async fn handle_test_risk(
+    graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -42,7 +43,7 @@ pub(crate) async fn handle_test_risk(
     );
 
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(graph.project_root()?),
         &args,
         &output,
         vec![],
@@ -50,36 +51,30 @@ pub(crate) async fn handle_test_risk(
 }
 
 #[hotpath::measure(label = "mcp.health.test_map.total")]
-pub(crate) async fn handle_test_map(
-    cg: &TraceDecay,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+pub async fn handle_test_map(
+    graph: &VerifiedGraphQuery,
     args: Value,
     _scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let (source_nodes, test_evidence) = hotpath::measure_block!("mcp.health.test_map.graph", {
-        let source_nodes = if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
-            let nodes = graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
-            if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
-                return Err(test_map_unavailable(
-                    "verified test-map file census exceeded its symbol budget",
-                ));
-            }
-            nodes
-        } else if let Some(node_id) = args
-            .get("node_id")
-            .or(args.get("id"))
-            .and_then(|v| v.as_str())
-        {
-            let occurrence = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("invalid test-map symbol occurrence: {error}"),
+        let source_nodes = match test_map_target(&args)? {
+            TestMapTarget::File(file) => {
+                let nodes = graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
+                if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
+                    return Err(test_map_unavailable(
+                        "verified test-map file census exceeded its symbol budget",
+                    ));
                 }
-            })?;
-            graph.symbol_summary(&occurrence)?.into_iter().collect()
-        } else {
-            return Err(TraceDecayError::Config {
-                message: "missing required parameter: 'file' or 'node_id'".to_string(),
-            });
+                nodes
+            }
+            TestMapTarget::NodeId(node_id) => {
+                let occurrence = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!("invalid test-map symbol occurrence: {error}"),
+                    }
+                })?;
+                graph.symbol_summary(&occurrence)?.into_iter().collect()
+            }
         };
         let test_evidence = tracedecay_graph_query::test_risk::verified_test_evidence(graph)?;
         (source_nodes, test_evidence)
@@ -118,7 +113,7 @@ pub(crate) async fn handle_test_map(
                         tracedecay_graph_query::test_risk::verified_test_symbol_parts(
                             &caller.summary,
                         )?;
-                    if !crate::tracedecay::is_test_file(caller_file)
+                    if !is_test_file(caller_file)
                         && !test_evidence
                             .test_annotated
                             .contains(caller.summary.occurrence.as_str())
@@ -172,7 +167,7 @@ pub(crate) async fn handle_test_map(
         .collect::<Result<Vec<_>>>()?;
     let touched_files = unique_file_paths(touched_files.into_iter().map(|(_, file)| file));
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(graph.project_root()?),
         &args,
         &output,
         touched_files,
@@ -181,4 +176,53 @@ pub(crate) async fn handle_test_map(
 
 fn test_map_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
+}
+
+fn test_map_target(args: &Value) -> Result<TestMapTarget<'_>> {
+    if let Some(file) = args.get("file").and_then(Value::as_str) {
+        Ok(TestMapTarget::File(file))
+    } else if let Some(node_id) = args
+        .get("node_id")
+        .or(args.get("id"))
+        .and_then(Value::as_str)
+    {
+        Ok(TestMapTarget::NodeId(node_id))
+    } else {
+        Err(TraceDecayError::Config {
+            message: "missing required parameter: 'file' or 'node_id'".to_string(),
+        })
+    }
+}
+
+#[derive(Debug)]
+enum TestMapTarget<'a> {
+    File(&'a str),
+    NodeId(&'a str),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{test_map_target, test_map_unavailable};
+    use serde_json::json;
+
+    #[test]
+    fn test_map_requires_file_or_node_id() {
+        let error = test_map_target(&json!({})).expect_err("selector is required");
+        assert!(
+            error.to_string().contains("file") && error.to_string().contains("node_id"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_map_budget_exhaustion_is_a_typed_project_route() {
+        let error =
+            test_map_unavailable("verified test-map file census exceeded its symbol budget");
+        assert_eq!(
+            error
+                .project_route_context()
+                .map(|(reason, retryable, _)| (reason, retryable)),
+            Some(("verified-test-evidence-unavailable", false))
+        );
+    }
 }

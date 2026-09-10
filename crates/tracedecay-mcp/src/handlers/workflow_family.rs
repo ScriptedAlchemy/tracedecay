@@ -1,38 +1,46 @@
 //! MCP adapter for the canonical Workflow application owner.
 //!
-//! Workflow owns a typed HTTP envelope already. MCP invokes that exact owner
-//! and returns its envelope as JSON content, so request decoding, binding
-//! lookup, cancellation policy, result contracts, and failure taxonomy cannot
-//! drift between the two transports. This is the Work adapter's mirror; the
-//! only thing that differs is which descriptor names the operation.
+//! Workflow owns a typed HTTP envelope already. MCP builds that exact request
+//! and returns the owner's envelope as JSON content, so request decoding,
+//! binding lookup, cancellation policy, result contracts, and failure taxonomy
+//! cannot drift between the two transports. This is the Work adapter's mirror;
+//! the composition root supplies the daemon-owned invoke.
 
-use axum::body::to_bytes;
+use std::future::Future;
+
 use serde_json::Value;
 use tracedecay_api::{HttpApplicationControls, WorkflowHttpRequest, WorkflowOperation};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
+use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::ToolResult;
+use crate::ToolResult;
+use crate::text_tool_result;
 
-use super::tool_call_support::json_result;
+fn json_result(value: &Value) -> ToolResult {
+    text_tool_result(&value.to_string(), Vec::new())
+}
 
 #[hotpath::measure(future = true, label = "mcp.workflow.total")]
-pub(super) async fn handle_workflow(
+pub async fn handle_workflow<Invoke, InvokeFuture>(
     tool_name: &str,
     mut body: Value,
-    executor: Option<&dyn DaemonInvocationExecutor>,
+    invoke: Invoke,
     protocol_request_id: Option<RequestId>,
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
-) -> Result<ToolResult> {
+) -> Result<ToolResult>
+where
+    Invoke: FnOnce(WorkflowHttpRequest) -> InvokeFuture,
+    InvokeFuture: Future<Output = Result<Value>>,
+{
     let (operation, request_id, controls) =
         hotpath::measure_block!("mcp.workflow.request_build", {
-            let operation = crate::mcp::tools::binding::workflow_operation_for_tool(tool_name)
-                .ok_or_else(|| TraceDecayError::Config {
+            let operation =
+                workflow_operation_for_tool(tool_name).ok_or_else(|| TraceDecayError::Config {
                     message: format!("unknown tool: {tool_name}"),
                 })?;
             let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
@@ -50,36 +58,17 @@ pub(super) async fn handle_workflow(
             }
             (operation, request_id, controls)
         });
-    let response = hotpath::future!(
-        tracedecay_daemon_service::application_surface::invoke_workflow_operation(
-            executor,
-            WorkflowHttpRequest {
-                operation,
-                request_id,
-                controls,
-                body,
-            },
-        ),
+    let payload = hotpath::future!(
+        invoke(WorkflowHttpRequest {
+            operation,
+            request_id,
+            controls,
+            body,
+        }),
         label = "mcp.workflow.invoke"
     )
-    .await;
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .map_err(|error| {
-            TraceDecayError::project_route(
-                "workflow.response_unavailable",
-                true,
-                format!("The Workflow application response could not be read: {error}"),
-            )
-        })?;
+    .await?;
     hotpath::measure_block!("mcp.workflow.result_assemble", {
-        let payload = serde_json::from_slice::<Value>(&body).map_err(|error| {
-            TraceDecayError::project_route(
-                "workflow.response_invalid",
-                true,
-                format!("The Workflow application response was not valid JSON: {error}"),
-            )
-        })?;
         let result = json_result(&payload);
         Ok(
             if payload.get("kind").and_then(Value::as_str) == Some("problem") {
@@ -89,6 +78,13 @@ pub(super) async fn handle_workflow(
             },
         )
     })
+}
+
+pub fn workflow_operation_for_tool(tool_name: &str) -> Option<WorkflowOperation> {
+    let key = tool_name.strip_prefix("tracedecay_workflow_")?;
+    WorkflowOperation::ALL
+        .into_iter()
+        .find(|operation| operation.operation_key() == key)
 }
 
 fn mint_request_id() -> Result<RequestId> {
@@ -162,57 +158,17 @@ fn workflow_controls(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
-    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
-    use tracedecay_domain::UtcMicros;
-
-    use super::handle_workflow;
+    use super::workflow_operation_for_tool;
 
     #[test]
     fn maps_every_canonical_workflow_operation_without_a_second_name_list() {
         for operation in tracedecay_api::WorkflowOperation::ALL {
             let name = format!("tracedecay_workflow_{}", operation.operation_key());
-            assert_eq!(
-                crate::mcp::tools::binding::workflow_operation_for_tool(&name),
-                Some(operation)
-            );
+            assert_eq!(workflow_operation_for_tool(&name), Some(operation));
         }
         assert_eq!(
-            crate::mcp::tools::binding::workflow_operation_for_tool("tracedecay_workflow_missing"),
+            workflow_operation_for_tool("tracedecay_workflow_missing"),
             None
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_executor_returns_the_registered_workflow_problem_envelope() {
-        let request_id = RequestId::new("request.workflow-missing-executor").expect("request id");
-        let deadline = Deadline::new(UtcMicros(
-            tracedecay_daemon_protocol::invocation_now_micros().0 + 30_000_000,
-        ))
-        .expect("deadline");
-        let cancellation = CancellationSignal::active("cancellation.workflow-missing-executor")
-            .expect("cancellation");
-        let result = handle_workflow(
-            "tracedecay_workflow_list_definitions",
-            serde_json::json!({}),
-            None,
-            Some(request_id),
-            Some(deadline),
-            Some(cancellation),
-        )
-        .await
-        .expect("MCP Workflow adapter response");
-        let text = result.value["content"][0]["text"]
-            .as_str()
-            .expect("MCP Workflow JSON content");
-        let payload: Value = serde_json::from_str(text).expect("Workflow envelope");
-        // Either the request body was rejected as invalid for this operation or
-        // the absent executor produced the canonical unavailable problem. Both
-        // are typed envelopes from the same owner; neither is an MCP-specific
-        // transport error, which is the property under test.
-        assert!(
-            payload.get("kind").is_some(),
-            "the Workflow owner must answer a typed envelope, got {payload}"
         );
     }
 }
