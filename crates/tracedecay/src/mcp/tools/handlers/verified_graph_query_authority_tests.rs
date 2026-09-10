@@ -34,7 +34,6 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         "tracedecay_dead_code",
         "tracedecay_circular",
         "tracedecay_hotspots",
-        "tracedecay_unused_imports",
         "tracedecay_rank",
         "tracedecay_largest",
         "tracedecay_coupling",
