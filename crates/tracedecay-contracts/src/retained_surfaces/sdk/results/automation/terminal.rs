@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED};
 
 use crate::retained_surfaces::AutomationTaskV1;
+use crate::retrieval::SessionRetrievalBudgetStageV1;
 
 const MAX_AUTOMATION_TERMINAL_COUNT: u64 = 1_000_000;
 
@@ -89,6 +90,20 @@ impl AutomationSkipReasonV1 {
                 Self::SessionCursorManifestLimitExceeded
             }
             SESSION_EVIDENCE_BUDGET_EXHAUSTED => Self::SessionEvidenceBudgetExhausted,
+            reason
+                if reason
+                    .strip_prefix("session_evidence_budget_exhausted_")
+                    .is_some_and(|stage| {
+                        SessionRetrievalBudgetStageV1::deserialize(
+                            serde::de::value::StrDeserializer::<serde::de::value::Error>::new(
+                                stage,
+                            ),
+                        )
+                        .is_ok()
+                    }) =>
+            {
+                Self::SessionEvidenceBudgetExhausted
+            }
             SESSION_EVIDENCE_BUDGET_SUPPRESSED => Self::SessionEvidenceBudgetSuppressed,
             "session_evidence_timed_out" => Self::SessionEvidenceTimedOut,
             "session_evidence_cancelled" => Self::SessionEvidenceCancelled,
@@ -180,4 +195,23 @@ pub enum AutomationRunTerminalV1 {
         reason: AutomationSkipReasonV1,
         summary: AutomationRunSummaryV1,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AutomationSkipReasonV1;
+
+    #[test]
+    fn budget_stage_skips_accept_known_stages_only() {
+        assert_eq!(
+            AutomationSkipReasonV1::from_ledger_reason(
+                "session_evidence_budget_exhausted_execution_work_exhausted"
+            ),
+            Some(AutomationSkipReasonV1::SessionEvidenceBudgetExhausted),
+        );
+        assert_eq!(
+            AutomationSkipReasonV1::from_ledger_reason("session_evidence_budget_exhausted_unknown"),
+            None,
+        );
+    }
 }
