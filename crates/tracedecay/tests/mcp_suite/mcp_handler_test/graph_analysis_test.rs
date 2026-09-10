@@ -271,6 +271,190 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 }
 
 #[tokio::test]
+async fn rust_trait_tools_keep_unresolved_external_impl_evidence() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"trait_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            r#"pub trait Local {}
+pub struct LocalType;
+impl Local for LocalType {}
+
+pub struct StdDisplay;
+impl std::fmt::Display for StdDisplay {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("std")
+    }
+}
+
+pub struct CoreDisplay;
+impl core::fmt::Display for CoreDisplay {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("core")
+    }
+}
+
+pub struct GenericRenderer;
+impl external::Render<u8> for GenericRenderer {}
+
+pub trait Render {}
+pub struct LocalRenderer;
+impl Render for LocalRenderer {}
+
+pub trait Disabled {}
+pub struct DisabledType;
+impl !Disabled for DisabledType {}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/types.ts"),
+            "export interface Renderable { render(): string; }\n\
+             export class Widget implements Renderable { render(): string { return 'widget'; } }\n",
+        )
+        .unwrap();
+    })
+    .await;
+
+    let impls = handle_tool_call(
+        &fixture,
+        "tracedecay_impls",
+        json!({"trait": "Display", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let impls: Value = serde_json::from_str(extract_text(&impls.value)).unwrap();
+    assert_eq!(impls["count"], 2);
+    let impls = impls["impls"].as_array().unwrap();
+    let mut trait_evidence = impls
+        .iter()
+        .map(|entry| {
+            (
+                entry["trait"].as_str().unwrap(),
+                entry["trait_id"].is_null(),
+            )
+        })
+        .collect::<Vec<_>>();
+    trait_evidence.sort_unstable();
+    assert_eq!(
+        trait_evidence,
+        vec![("core::fmt::Display", true), ("std::fmt::Display", true)]
+    );
+    assert!(impls.iter().all(|entry| entry["impl_id"].is_string()));
+
+    let implementations = handle_tool_call(
+        &fixture,
+        "tracedecay_implementations",
+        json!({"trait": "Display", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let implementations: Value =
+        serde_json::from_str(extract_text(&implementations.value)).unwrap();
+    assert_eq!(implementations["match_count"], 2);
+    assert!(
+        implementations["implementations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["trait_id"].is_null() && entry["impl_id"].is_string())
+    );
+
+    let local = handle_tool_call(
+        &fixture,
+        "tracedecay_implementations",
+        json!({"trait": "Local", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let local: Value = serde_json::from_str(extract_text(&local.value)).unwrap();
+    assert_eq!(local["match_count"], 1);
+    assert!(local["implementations"][0]["trait_id"].is_string());
+
+    let bounded_mixed = handle_tool_call(
+        &fixture,
+        "tracedecay_implementations",
+        json!({"trait": "Render", "limit": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let bounded_mixed: Value = serde_json::from_str(extract_text(&bounded_mixed.value)).unwrap();
+    assert_eq!(bounded_mixed["match_count"], 1);
+    assert_eq!(
+        bounded_mixed["implementations"].as_array().unwrap().len(),
+        1
+    );
+    assert!(bounded_mixed["implementations"][0]["trait_id"].is_string());
+
+    let generic = handle_tool_call(
+        &fixture,
+        "tracedecay_impls",
+        json!({"trait": "external::Render", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let generic: Value = serde_json::from_str(extract_text(&generic.value)).unwrap();
+    assert_eq!(generic["count"], 1);
+    assert_eq!(generic["impls"][0]["trait"], "external::Render<u8>");
+
+    let different_generic = handle_tool_call(
+        &fixture,
+        "tracedecay_impls",
+        json!({"trait": "external::Render<u16>", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let different_generic: Value =
+        serde_json::from_str(extract_text(&different_generic.value)).unwrap();
+    assert_eq!(different_generic["count"], 0);
+
+    let typescript = handle_tool_call(
+        &fixture,
+        "tracedecay_implementations",
+        json!({"trait": "Renderable", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let typescript: Value = serde_json::from_str(extract_text(&typescript.value)).unwrap();
+    assert_eq!(typescript["match_count"], 1);
+    assert_eq!(typescript["implementations"][0]["type"], "Widget");
+    assert!(typescript["implementations"][0]["trait_id"].is_string());
+
+    let negative = handle_tool_call(
+        &fixture,
+        "tracedecay_impls",
+        json!({"trait": "Disabled", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let negative: Value = serde_json::from_str(extract_text(&negative.value)).unwrap();
+    assert_eq!(negative["count"], 0);
+
+    close_test_graph(fixture).await;
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
