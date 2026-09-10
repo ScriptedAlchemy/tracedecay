@@ -28,12 +28,22 @@ impl CodeIndexPublishedGenerationV1 {
     pub fn generation_statistics(
         &self,
     ) -> Result<CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1> {
+        Ok(self.statistics.clone())
+    }
+}
+
+impl CodeIndexGenerationStatisticsV1 {
+    pub(super) fn from_generation_parts(
+        files: &[std::sync::Arc<super::FileGenerationArtifactsV1>],
+        symbol_count: usize,
+        edge_count: usize,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
         let source_total_bytes =
-            checked_source_total(self.files.iter().map(|file| &file.extraction.coverage))?;
-        let symbol_count = u64::try_from(self.symbols.symbols.len()).map_err(|_| {
+            checked_source_total(files.iter().map(|file| &file.extraction.coverage))?;
+        let symbol_count = u64::try_from(symbol_count).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("generation symbol count exceeds u64".to_owned())
         })?;
-        let edge_count = u64::try_from(self.edges.len()).map_err(|_| {
+        let edge_count = u64::try_from(edge_count).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("generation edge count exceeds u64".to_owned())
         })?;
         Ok(CodeIndexGenerationStatisticsV1 {
