@@ -27,6 +27,9 @@ use crate::ports::hook_runtime::HookRuntimeV1;
 use super::analytics::HookTimingSpan;
 use super::dispatch::NativeContextScoutLifecycleV1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DaemonAdmissionRetentionUnavailable;
+
 pub(crate) struct DaemonAdmissionPort<'a> {
     runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
@@ -61,11 +64,13 @@ impl<'a> DaemonAdmissionPort<'a> {
         }
     }
 
-    pub(crate) fn take_context_scout_address(&self) -> Option<ContextScoutAddressV1> {
+    pub(crate) fn take_context_scout_address(
+        &self,
+    ) -> Result<Option<ContextScoutAddressV1>, DaemonAdmissionRetentionUnavailable> {
         self.context_scout_address
             .lock()
-            .ok()
-            .and_then(|mut address| address.take())
+            .map_err(|_| DaemonAdmissionRetentionUnavailable)
+            .map(|mut address| address.take())
     }
 
     pub(crate) fn take_feedback_notice(
@@ -215,9 +220,10 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
                 return HookImmediateAdmissionV1::Unavailable;
             };
             let response = daemon_admission_response(&response);
-            if let Some(address) = response.context_scout_address
-                && let Ok(mut retained) = self.context_scout_address.lock()
-            {
+            if let Some(address) = response.context_scout_address {
+                let Ok(mut retained) = self.context_scout_address.lock() else {
+                    return HookImmediateAdmissionV1::Unavailable;
+                };
                 *retained = Some(address);
             }
             if let Some(notice) = response.feedback_notice
