@@ -49,8 +49,8 @@ pub use diagnostics::{
     DiagnosticPublicationReceiptV1, DiagnosticRecordStateKindV1, DiagnosticStore,
     DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,
     diagnostic_evidence_class_name, diagnostic_producer_kind_name, diagnostic_severity_name,
-    diagnostic_state_columns, parse_diagnostic_evidence_class, parse_diagnostic_producer_kind,
-    parse_diagnostic_severity,
+    diagnostic_snapshot_observation_eq, diagnostic_state_columns, parse_diagnostic_evidence_class,
+    parse_diagnostic_producer_kind, parse_diagnostic_severity,
 };
 pub use evidence_assembly::{
     CanonicalSourceOccurrenceSetIdentityProjectionV1, CanonicalSourceOccurrenceSetRecordV1,
