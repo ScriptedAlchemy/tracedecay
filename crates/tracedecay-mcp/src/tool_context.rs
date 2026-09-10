@@ -114,22 +114,14 @@ pub struct RequestControls<'a> {
 #[derive(Clone, Copy)]
 pub struct AdmittedProjectStore<'a> {
     lease: &'a RegisteredGlobalDbLeaseV1,
-    authorization: ValidatedAuthorization,
 }
 
 impl<'a> AdmittedProjectStore<'a> {
-    /// Pairs the admitted lease with the authorization bind derived from its
-    /// presence. A lease is always [`ValidatedAuthorization::Authorized`];
-    /// absence of a lease never reaches this type.
+    /// Wraps the admitted lease. Presence of the lease *is* admission;
+    /// absence never reaches this type.
     #[must_use]
-    pub fn new(
-        lease: &'a RegisteredGlobalDbLeaseV1,
-        authorization: ValidatedAuthorization,
-    ) -> Self {
-        Self {
-            lease,
-            authorization,
-        }
+    pub fn new(lease: &'a RegisteredGlobalDbLeaseV1) -> Self {
+        Self { lease }
     }
 }
 
@@ -242,10 +234,7 @@ impl McpAdmittedProjectV1 {
             }
         }
         if let Some(lease) = &project_session_store {
-            verify_store_lease(
-                &identity.scope,
-                AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized),
-            )?;
+            verify_store_lease(&identity.scope, AdmittedProjectStore::new(lease))?;
         }
         Ok(Self {
             identity,
@@ -418,7 +407,7 @@ impl<'a> McpToolContext<'a> {
         let admitted_scope = &project.identity().scope;
         let project_session_store = project
             .project_session_store()
-            .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
+            .map(AdmittedProjectStore::new);
         if !project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
                 root: project_root.display().to_string(),
