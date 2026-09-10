@@ -971,7 +971,9 @@ pub mod test_harness {
             .tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .len()
+            .iter()
+            .filter(|task| !task.task.is_finished())
+            .count()
     }
 
     pub fn push_task(service: &DaemonSessionSyncService, task: SessionSyncTaskV1) {
