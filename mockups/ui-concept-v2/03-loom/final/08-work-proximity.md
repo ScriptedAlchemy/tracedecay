@@ -64,6 +64,10 @@ evidence instead of substituting this demonstration.
 
 The dependency-free HTML is a bounded interaction prototype: 32 illustrative
 agents, two encounters, temporal-window controls and local evidence detail.
+Smooth authored layout knots give each strand a recognizable path; ordinary
+curve crossings carry no relationship claim. Only labeled encounter intervals
+carry proximity evidence. Event glyphs and minimap strands share the same path
+coordinates, including when replay revokes an encounter's local bend.
 Semantic aggregation, backend pivots and live observation ingestion remain
 production work; the execution-plate control opens the existing design reference.
 Run its focused browser journey with the dashboard's existing Playwright install:

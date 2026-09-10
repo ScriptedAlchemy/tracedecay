@@ -12,6 +12,8 @@ try {
   assert.equal(await page.locator('nav .nav').count(), 14);
   assert.equal(await page.locator('.agentPath').count(), 32);
 
+  const selectedPath = page.locator('.agentPath[data-agent="runtime-03"]');
+  const observedPath = await selectedPath.getAttribute('d');
   const marker = page.locator('[data-encounter-id="overlap"]');
   await marker.click();
   assert.equal(await page.locator('.detail.show').count(), 1);
@@ -26,13 +28,11 @@ try {
   assert.equal(await page.locator('.detail.show').count(), 0);
   assert.equal(await page.locator('.notice:visible').count(), 0);
   assert.equal(await page.locator('[data-observation]:visible').count(), 0);
-  assert.equal(await page.locator('.agentPath').evaluateAll(paths =>
-    paths.some(path => path.getAttribute('d').includes('C'))), false);
+  assert.notEqual(await selectedPath.getAttribute('d'), observedPath);
   await page.locator('#follow').click();
   assert.equal(await page.locator('.notice:visible').count(), 2);
   assert.equal(await page.locator('.miniEncounter:visible').count(), 2);
-  assert.equal(await page.locator('.agentPath').evaluateAll(paths =>
-    paths.some(path => path.getAttribute('d').includes('C'))), true);
+  assert.equal(await selectedPath.getAttribute('d'), observedPath);
 
   await page.locator('[data-range="12"]').click();
   const before = Number(await page.locator('.miniBox').getAttribute('x'));
