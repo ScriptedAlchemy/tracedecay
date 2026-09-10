@@ -1684,6 +1684,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 );
                 return Ok(None);
             }
+            Err(error @ CodeIndexProductionErrorV1::SealedRowContractRefused { revision, .. }) => {
+                tracing::warn!(
+                    target: "tracedecay::code_index",
+                    sealed_format_revision = revision,
+                    "{error}"
+                );
+                return Ok(None);
+            }
             Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => return Ok(None),
             Err(error) => return Err(error),
         };

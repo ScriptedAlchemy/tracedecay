@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::lock_admission::{LockAdmissionError, lock_until};
 
@@ -64,21 +64,26 @@ pub(super) fn write_lease_file(
 }
 
 /// Acquires the single-writer lease without waiting. Native callbacks use the
-/// deadline-aware admission path so capture and delivery share one budget.
+/// bounded admission path so capture and delivery each wait one budget.
 #[hotpath::measure(label = "hooks.spool.acquire_lease")]
 pub(super) fn acquire_lease(
     root: &Path,
     lease_duration_micros: i64,
     now: UtcMicros,
 ) -> Result<(HookSpoolWriterLeaseV1, File), HookSpoolError> {
-    acquire_lease_with_deadline(root, lease_duration_micros, now, None)
+    acquire_lease_bounded(root, lease_duration_micros, now, None)
 }
 
-pub(super) fn acquire_lease_with_deadline(
+/// `wait_budget` bounds only the lock wait and is measured from the lock
+/// attempt itself. Creating the spool root and the lease file fsync the
+/// directory first; measuring the budget from before that work let a
+/// loaded disk spend it on an uncontended first-ever open, which then
+/// reported `AdmissionTimedOut` without ever contending for anything.
+pub(super) fn acquire_lease_bounded(
     root: &Path,
     lease_duration_micros: i64,
     now: UtcMicros,
-    deadline: Option<Instant>,
+    wait_budget: Option<Duration>,
 ) -> Result<(HookSpoolWriterLeaseV1, File), HookSpoolError> {
     let expires_at = UtcMicros(
         now.0
@@ -102,11 +107,13 @@ pub(super) fn acquire_lease_with_deadline(
     if !validate_regular_or_missing(&path)? {
         return Err(HookSpoolError::UnsafePath);
     }
-    match deadline {
-        Some(deadline) => lock_until(&file, deadline).map_err(|error| match error {
-            LockAdmissionError::TimedOut => HookSpoolError::AdmissionTimedOut,
-            LockAdmissionError::Io => HookSpoolError::Io,
-        })?,
+    match wait_budget {
+        Some(wait_budget) => {
+            lock_until(&file, Instant::now() + wait_budget).map_err(|error| match error {
+                LockAdmissionError::TimedOut => HookSpoolError::AdmissionTimedOut,
+                LockAdmissionError::Io => HookSpoolError::Io,
+            })?;
+        }
         None => file.try_lock().map_err(map_try_lock_error)?,
     }
     write_lease_file(&mut file, candidate)?;

@@ -55,7 +55,8 @@ pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreError
         GraphDbError::Unavailable { message } | GraphDbError::SealedStoreImmutable { message } => {
             VectorGenerationStoreErrorV1::Unavailable(message)
         }
-        error @ GraphDbError::SourceCommitmentsUnavailable { .. } => {
+        error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
+        | GraphDbError::SealedRevisionIncompatible { .. }) => {
             VectorGenerationStoreErrorV1::Unavailable(error.to_string())
         }
         GraphDbError::InvalidRequest { message } => {

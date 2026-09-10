@@ -187,10 +187,14 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         request: Read<'_>,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let (memory_scope, selector) = request.scope();
+        // Search and Related expand through the project memory graph, whose
+        // read path reconciles (publishes) the verified generation inline and
+        // is refused for a read-only lease. A plain read lease therefore
+        // reports the mounted graph as absent; both take the recording lease,
+        // which degrades to read-only only when the owner or graph is.
         let access = match request {
-            Read::Search(_) => MemoryTargetAccessV1::RecordRetrieval,
+            Read::Search(_) | Read::Related(_) => MemoryTargetAccessV1::RecordRetrieval,
             Read::Probe(_)
-            | Read::Related(_)
             | Read::Reason(_)
             | Read::Contradict(_)
             | Read::Get(_)

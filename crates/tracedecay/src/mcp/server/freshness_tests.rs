@@ -103,6 +103,31 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+    // `add_branch` only admits the branch; until its exact graph source is
+    // published the branch is still indexing and a reopen legitimately keeps
+    // serving the nearest published ancestor (`main`). This test pins the
+    // serve-old/await-new swap, so publish the feature provenance up front.
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &layout.data_root,
+        "feature",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "project.mcp-freshness".to_owned(),
+            repository_id: "repository.mcp-freshness".to_owned(),
+            worktree_id: "worktree.mcp-freshness".to_owned(),
+            worktree_root: root.to_string_lossy().into_owned(),
+            reference: "refs/heads/feature".to_owned(),
+            source_oid: "a".repeat(40),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            published,
+            tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+        ),
+        "the feature branch must be query-eligible before the drift"
+    );
     std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
     std::fs::copy(
         &layout.graph_db_path,

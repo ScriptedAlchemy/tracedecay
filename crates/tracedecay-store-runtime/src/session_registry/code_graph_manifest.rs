@@ -37,6 +37,12 @@ fn classify_sealed_generation_decode_error(
                 sealed_state_digest: sealed_state_digest.as_str().to_owned(),
             }
         }
+        error @ CodeIndexProductionErrorV1::SealedRowContractRefused { .. } => {
+            GraphDbError::SealedRevisionIncompatible {
+                sealed_state_digest: sealed_state_digest.as_str().to_owned(),
+                message: error.to_string(),
+            }
+        }
         error => GraphDbError::Corrupt {
             message: format!("sealed code generation replay is invalid: {error}"),
         },

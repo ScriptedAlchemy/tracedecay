@@ -2199,13 +2199,16 @@ impl RetainedCodeGraphRuntimeV1 {
                         Ok(_) => {}
                         // The orphan predecessor refused deterministically:
                         // its interrupted publisher left conflicting store
-                        // state (issue #765), or its historical seal predates
-                        // authenticated source commitments. Neither can ever
-                        // complete. The compare-and-swap discard reopens only
-                        // that pending journal position for this fresh append.
+                        // state (issue #765), its historical seal predates
+                        // authenticated source commitments, or its rows are
+                        // refused by the current reader's contract. None can
+                        // ever complete. The compare-and-swap discard reopens
+                        // only that pending journal position for this fresh
+                        // append.
                         Err(
                             cause @ (GraphDbError::Conflict { .. }
-                            | GraphDbError::SourceCommitmentsUnavailable { .. }),
+                            | GraphDbError::SourceCommitmentsUnavailable { .. }
+                            | GraphDbError::SealedRevisionIncompatible { .. }),
                         ) => {
                             self.discard_interrupted_publication_row(
                                 &mut storage,

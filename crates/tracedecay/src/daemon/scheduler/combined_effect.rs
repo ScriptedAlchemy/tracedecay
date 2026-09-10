@@ -819,6 +819,7 @@ mod tests {
         run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
         scheduler_automation_effect,
     };
+    use tracedecay_daemon_service::daemon_owned_project_source_access_at;
 
     struct CombinedAdmissionFixture {
         _temp: TempDir,
@@ -875,7 +876,7 @@ mod tests {
                 .await
                 .expect("combined admission configuration");
             let configuration_revision_id = configuration.revision_id().clone();
-            let access = crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
+            let access = daemon_owned_project_source_access_at(
                 &scope,
                 &project_root,
                 &configuration,

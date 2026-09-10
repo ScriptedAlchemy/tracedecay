@@ -274,6 +274,73 @@ class StrictReadinessOutputTests(unittest.TestCase):
             strict=True,
         )
 
+    def pruned_lexical_context(self, lexical: object) -> dict[str, object]:
+        return {
+            "freshness": {"state": "fresh"},
+            "code_generation": "generation.current",
+            "coverage": {
+                "exact": "complete",
+                "lexical": lexical,
+                "graph": "complete",
+                "semantic": {"status": "unavailable", "reason": "disabled"},
+                "recall": "partial",
+            },
+            "search_matches": [{"file": "src/main.rs"}],
+            "symbols": [{"node_id": "symbol:main"}],
+        }
+
+    def test_strict_context_accepts_pruned_lexical_on_current_generation(self) -> None:
+        self.checker.validate_context(
+            self.pruned_lexical_context(
+                {"status": "partial", "reason": "candidate_sources_pruned"}
+            ),
+            strict=True,
+        )
+
+    def test_strict_context_rejects_pruned_lexical_served_stale(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stale generation=generation.old"):
+            self.checker.validate_context(
+                self.pruned_lexical_context(
+                    {
+                        "status": "partial",
+                        "generation": "generation.old",
+                        "reason": "candidate_sources_pruned",
+                    }
+                ),
+                strict=True,
+            )
+
+    def test_strict_context_rejects_pruned_lexical_when_not_fresh(self) -> None:
+        payload = self.pruned_lexical_context(
+            {"status": "partial", "reason": "candidate_sources_pruned"}
+        )
+        payload["freshness"] = {"state": "possibly_stale", "indexing": {"stale_lanes": []}}
+        with self.assertRaisesRegex(ValueError, "freshness.state=possibly_stale"):
+            self.checker.validate_context(payload, strict=True)
+
+    def test_strict_context_rejects_stale_source_partial_lexical(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reason=stale_source"):
+            self.checker.validate_context(
+                self.pruned_lexical_context({"status": "partial", "reason": "stale_source"}),
+                strict=True,
+            )
+
+    def test_strict_context_rejects_partial_lexical_without_reason(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reason=absent"):
+            self.checker.validate_context(
+                self.pruned_lexical_context({"status": "partial"}),
+                strict=True,
+            )
+
+    def test_strict_context_rejects_unavailable_lexical(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires complete lexical coverage$"):
+            self.checker.validate_context(
+                self.pruned_lexical_context(
+                    {"status": "unavailable", "reason": "retriever_unavailable"}
+                ),
+                strict=True,
+            )
+
     def test_strict_context_rejects_lexical_only_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "graph symbol evidence"):
             self.checker.validate_context(

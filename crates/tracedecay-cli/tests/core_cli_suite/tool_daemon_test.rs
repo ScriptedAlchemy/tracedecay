@@ -721,7 +721,16 @@ fn assert_capture_transport_response(label: &str, output: &Output, expected_exit
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"{}\n", "{label}: {output:?}");
-    assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    // A landed capture is silent on stderr; a refused one must name its
+    // refusal there rather than exit 1 with nothing to act on.
+    if expected_exit == 0 {
+        assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    } else {
+        assert!(
+            output.stderr.starts_with(b"tracedecay hook: "),
+            "{label}: refusal must be named on stderr: {output:?}"
+        );
+    }
 }
 
 #[test]

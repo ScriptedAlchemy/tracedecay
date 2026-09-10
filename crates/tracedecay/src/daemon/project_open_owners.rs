@@ -11,12 +11,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracedecay_application::advisory::GitHubRepositoryTargetV1;
-use tracedecay_application::project_open_authorization::{
-    ProjectOpenSourceAccessAuthorityV1, project_open_work_grant,
-};
+use tracedecay_application::project_open_authorization::project_open_work_grant;
 use tracedecay_contracts::{ApplicationContractError, ResolvedScope, now_micros};
 use tracedecay_domain::feedback::GitHubPullRequestIdV1;
-use tracedecay_domain::{ActorId, ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
 use crate::mcp::McpServer;
@@ -26,17 +24,16 @@ use tracedecay_application::semantic_runtime::{
     InitialSemanticActivationRestoreV1, ProjectSemanticActivationExt,
     classify_initial_semantic_activation_restore,
 };
-use tracedecay_application::source_authorization::{
-    ProjectSourceAccessSnapshot, ProjectSourceAccessSnapshotPort,
-};
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
-use tracedecay_daemon_service::DaemonCallableCodeAuthorizationSource;
 use tracedecay_daemon_service::{
-    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonNativeIntegrationRuntimeRegistrar, DaemonWorkProposalRoutingAuthorityV1,
+    DaemonCallableCodeAuthorizationSource, DaemonContextScoutRuntimeRegistrationError,
+    DaemonFeedbackRuntimeRegistrationError, DaemonNativeIntegrationRuntimeRegistrar,
+    DaemonWorkProposalRoutingAuthorityV1, daemon_owned_project_source_access_at,
+    project_open_source_access_authority,
     project_owner_registration::{
         ProjectSourceEditAuthorizationV1, ProjectSourceEditOwnerV1, SourceEditMutationGate,
-        production_lsp_registration, project_open_lsp_scope_grant, project_owner_capabilities,
+        production_lsp_registration, project_open_lsp_scope_grant,
     },
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -59,8 +56,6 @@ pub(crate) use automation_effect_recovery::reconcile_project_open_automation_eff
 
 use primitive_runtime::open_and_register_project_primitive_runtime;
 
-const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
-const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
 pub(super) use tracedecay_daemon_service::{
@@ -545,7 +540,6 @@ pub(super) async fn register_project_open_production_owners(
                 project_root.to_path_buf(),
                 scope.clone(),
                 Arc::clone(graph.configuration_runtime()),
-                crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
             )),
         ),
         label = "daemon.project.open.owners.feedback"
@@ -1270,34 +1264,6 @@ fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
     target
         .validate()
         .then_some((target.owner, target.repository))
-}
-
-pub(crate) fn daemon_owned_project_source_access_at(
-    scope: &ResolvedScope,
-    project_root: &Path,
-    configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
-    observed_at: UtcMicros,
-) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
-    project_open_source_access_authority()?.source_access_at(
-        scope,
-        project_root,
-        configuration,
-        observed_at,
-    )
-}
-
-fn project_open_source_access_authority()
--> std::result::Result<ProjectOpenSourceAccessAuthorityV1, ApplicationContractError> {
-    let requester = ActorId::new(DAEMON_REQUESTER.to_owned()).map_err(|_| {
-        ApplicationContractError::Inconsistent {
-            field: "project-open requester",
-        }
-    })?;
-    Ok(ProjectOpenSourceAccessAuthorityV1::new(
-        requester,
-        project_owner_capabilities()?,
-        GRANT_HORIZON,
-    ))
 }
 
 pub(super) fn project_open_retained_grant(

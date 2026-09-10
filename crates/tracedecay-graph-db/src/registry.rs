@@ -1756,16 +1756,24 @@ impl GraphDbRegistry {
                 registered_path != path || registered_format != format
             })
         {
-            return Err(GraphDbError::conflict("registry.reserve_close"));
+            return Err(GraphDbError::conflict("registry.reserve_close.identity"));
         }
         match entry {
-            RegistryEntry::Opening { .. }
-            | RegistryEntry::Closing { .. }
-            | RegistryEntry::Retiring { .. } => {
-                return Err(GraphDbError::conflict("registry.reserve_close"));
+            RegistryEntry::Opening { .. } => {
+                return Err(GraphDbError::conflict("registry.reserve_close.opening"));
+            }
+            RegistryEntry::Closing { .. } => {
+                return Err(GraphDbError::conflict("registry.reserve_close.closing"));
+            }
+            RegistryEntry::Retiring { .. } => {
+                return Err(GraphDbError::conflict("registry.reserve_close.retiring"));
             }
             RegistryEntry::Ready { owner, .. } if require_unleased && !owner.is_unleased() => {
-                return Err(GraphDbError::conflict("registry.reserve_close"));
+                return Err(GraphDbError::conflict_observed(
+                    "registry.reserve_close.leased",
+                    "unleased owner",
+                    owner.lease_summary(),
+                ));
             }
             RegistryEntry::Faulted { error, .. } => return Err(error.clone()),
             RegistryEntry::Ready { .. } => {}

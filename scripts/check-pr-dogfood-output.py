@@ -105,8 +105,34 @@ def validate_context(value: dict[str, Any], *, strict: bool = False) -> None:
     if not strict:
         return
 
-    if coverage.get("lexical") != "complete":
-        raise ValueError("strict context requires complete lexical coverage")
+    lexical = coverage.get("lexical")
+    if lexical != "complete":
+        # The strict contract is index readiness, not unbounded recall (#917):
+        # a lexical lane bounded by the retriever's document-frequency budget
+        # (`candidate_sources_pruned`, #1161) is acceptable only when served
+        # from the current generation. The lane carries `generation` exactly
+        # when it was served stale, and `freshness.state` is `fresh` only when
+        # the served generation is the one the scheduler reports current.
+        if not isinstance(lexical, dict) or lexical.get("status") != "partial":
+            raise ValueError("strict context requires complete lexical coverage")
+        reason = lexical.get("reason")
+        if reason != "candidate_sources_pruned":
+            raise ValueError(
+                "strict context requires complete lexical coverage; "
+                f"partial reason={reason or 'absent'} is not candidate_sources_pruned"
+            )
+        if lexical.get("generation") is not None:
+            raise ValueError(
+                "strict context rejects pruned lexical coverage served from a stale "
+                f"generation={lexical['generation']}"
+            )
+        freshness = value.get("freshness")
+        if not isinstance(freshness, dict) or freshness.get("state") != "fresh":
+            state = freshness.get("state", "absent") if isinstance(freshness, dict) else "absent"
+            raise ValueError(
+                "strict context requires pruned lexical coverage from a fresh generation; "
+                f"freshness.state={state}"
+            )
     if coverage.get("graph") != "complete":
         raise ValueError("strict context requires complete graph symbol evidence coverage")
     if not isinstance(value.get("search_matches"), list) or not value["search_matches"]:

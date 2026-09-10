@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationProblem, ApplicationProblemKind,
@@ -7,12 +8,14 @@ use tracedecay_contracts::{
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
     SafeDiagnostic,
 };
-use tracedecay_domain::{ComponentVersion, UtcMicros};
+use tracedecay_domain::{ActorId, ComponentVersion, UtcMicros};
 
 use crate::callable_code_request_context;
+use crate::project_owner_registration::project_owner_capabilities;
+use tracedecay_application::project_open_authorization::ProjectOpenSourceAccessAuthorityV1;
 use tracedecay_application::{
     CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
-    ProjectSourceAccessSnapshot,
+    ProjectSourceAccessSnapshot, ProjectSourceAccessSnapshotPort,
 };
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_configuration::{
@@ -22,6 +25,37 @@ use tracedecay_graph_query::CodeGraphReadError;
 
 type CurrentCallableCodeAccess =
     dyn Fn(UtcMicros) -> CurrentCallableCodeAccessFuture<'static> + Send + Sync;
+
+const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
+pub const GRANT_HORIZON: Duration = Duration::from_hours(24);
+
+pub fn project_open_source_access_authority()
+-> Result<ProjectOpenSourceAccessAuthorityV1, ApplicationContractError> {
+    let requester = ActorId::new(DAEMON_REQUESTER.to_owned()).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "project-open requester",
+        }
+    })?;
+    Ok(ProjectOpenSourceAccessAuthorityV1::new(
+        requester,
+        project_owner_capabilities()?,
+        GRANT_HORIZON,
+    ))
+}
+
+pub fn daemon_owned_project_source_access_at(
+    scope: &ResolvedScope,
+    project_root: &Path,
+    configuration: &PinnedRuntimeConfiguration,
+    observed_at: UtcMicros,
+) -> Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
+    project_open_source_access_authority()?.source_access_at(
+        scope,
+        project_root,
+        configuration,
+        observed_at,
+    )
+}
 
 #[derive(Clone)]
 pub struct DaemonCallableCodeAuthorizationSource {
@@ -41,25 +75,13 @@ impl DaemonCallableCodeAuthorizationSource {
         project_root: PathBuf,
         scope: ResolvedScope,
         configuration: Arc<ProjectConfigurationRuntime>,
-        source_access_at: impl Fn(
-            &ResolvedScope,
-            &Path,
-            &PinnedRuntimeConfiguration,
-            UtcMicros,
-        )
-            -> Result<ProjectSourceAccessSnapshot, ApplicationContractError>
-        + Send
-        + Sync
-        + 'static,
     ) -> Self {
         let project_root = Arc::new(project_root);
         let scope = Arc::new(scope);
-        let source_access_at = Arc::new(source_access_at);
         Self::new(move |observed_at| {
             let project_root = Arc::clone(&project_root);
             let scope = Arc::clone(&scope);
             let configuration = Arc::clone(&configuration);
-            let source_access_at = Arc::clone(&source_access_at);
             Box::pin(async move {
                 let current = configuration
                     .configuration_store()
@@ -72,8 +94,13 @@ impl DaemonCallableCodeAuthorizationSource {
                     current.snapshot,
                 )
                 .map_err(|_| concealed())?;
-                source_access_at(&scope, &project_root, &configuration, observed_at)
-                    .map_err(|_| concealed())
+                daemon_owned_project_source_access_at(
+                    &scope,
+                    &project_root,
+                    &configuration,
+                    observed_at,
+                )
+                .map_err(|_| concealed())
             })
         })
     }
@@ -124,25 +151,10 @@ impl DaemonCodeGraphReadAdmission {
         project_root: PathBuf,
         scope: ResolvedScope,
         configuration: Arc<ProjectConfigurationRuntime>,
-        source_access_at: impl Fn(
-            &ResolvedScope,
-            &Path,
-            &PinnedRuntimeConfiguration,
-            UtcMicros,
-        )
-            -> Result<ProjectSourceAccessSnapshot, ApplicationContractError>
-        + Send
-        + Sync
-        + 'static,
     ) -> Self {
         Self::new(
             scope.clone(),
-            DaemonCallableCodeAuthorizationSource::production(
-                project_root,
-                scope,
-                configuration,
-                source_access_at,
-            ),
+            DaemonCallableCodeAuthorizationSource::production(project_root, scope, configuration),
         )
     }
 

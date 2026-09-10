@@ -435,8 +435,7 @@ pub(crate) async fn dispatch(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) = prepare_bound_hook(host, event_json, project_root, decoded, started)
-    else {
+    let Some(prepared) = prepare_bound_hook(host, event_json, project_root, decoded) else {
         return unavailable();
     };
     let native_session_id = prepared.native_session_id.clone();
@@ -565,13 +564,9 @@ pub(crate) async fn dispatch_opencode_tool_after(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) = prepare_bound_hook(
-        HookHostV1::OpenCode,
-        event_json,
-        project_root,
-        decoded,
-        started,
-    ) else {
+    let Some(prepared) =
+        prepare_bound_hook(HookHostV1::OpenCode, event_json, project_root, decoded)
+    else {
         return unavailable();
     };
     let native_session_id = prepared.native_session_id.clone();
@@ -634,7 +629,6 @@ fn prepare_bound_hook(
     event_json: &str,
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
-    started: Instant,
 ) -> Option<PreparedBoundHook> {
     let layout = super::store_layout::layout(project_root)?;
     let config_path = tracedecay_hooks::hook_configuration_path(&layout.data_root, host);
@@ -651,8 +645,7 @@ fn prepare_bound_hook(
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields, material.event_id);
     let envelope = decoded.into_envelope(binding, material).ok()?;
     let envelope =
-        match replay_envelope_if_pending(&layout.data_root, host, binding, &envelope, now, started)
-        {
+        match replay_envelope_if_pending(&layout.data_root, host, binding, &envelope, now) {
             PendingEnvelopeV1::Missing => envelope,
             PendingEnvelopeV1::Exact(queued) => queued,
             PendingEnvelopeV1::Unavailable => return None,
@@ -713,7 +706,6 @@ async fn dispatch_decoded(
             &envelope,
             binding,
             prepared_at,
-            started,
         )),
     };
     let guidance_envelope_id = match &immediate {
@@ -869,23 +861,26 @@ fn render_host_delivery(
     })
 }
 
+/// Spool writer admission waits one synchronous budget measured from the lock
+/// attempt, not from hook start. The response lane spends its budget before it
+/// reaches the spool (analytics rows, layout resolution, the daemon admission
+/// window), so a deadline anchored at hook start was already expired on a
+/// loaded runner and refused an uncontended lock: the hook answered `{}` with
+/// exit 0 and the event was never spooled.
 fn append_for_replay(
     data_root: &Path,
     host: HookHostV1,
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
     now: UtcMicros,
-    started: Instant,
 ) -> SpoolAppendOutcomeV1 {
     let root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let Some(deadline) = started.checked_add(Duration::from_micros(
-        HookSynchronousDeadlineV1::start().remaining_micros(),
-    )) else {
-        return SpoolAppendOutcomeV1::Unavailable;
-    };
-    let Ok((mut spool, _)) =
-        HookSpoolV1::open_until(root, HookSpoolConfigV1::stock(host), now, deadline)
-    else {
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(
+        root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    ) else {
         return SpoolAppendOutcomeV1::Unavailable;
     };
     match spool.append(envelope.clone(), binding, now) {
@@ -911,17 +906,14 @@ fn replay_envelope_if_pending(
     binding: &HookScopeBindingV1,
     retry: &HookEventEnvelopeV2,
     now: UtcMicros,
-    started: Instant,
 ) -> PendingEnvelopeV1 {
     let root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let Some(deadline) = started.checked_add(Duration::from_micros(
-        HookSynchronousDeadlineV1::start().remaining_micros(),
-    )) else {
-        return PendingEnvelopeV1::Unavailable;
-    };
-    let Ok((mut spool, _)) =
-        HookSpoolV1::open_until(root, HookSpoolConfigV1::stock(host), now, deadline)
-    else {
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(
+        root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    ) else {
         return PendingEnvelopeV1::Unavailable;
     };
     let queued = match spool.pending_envelope(retry.event_id) {

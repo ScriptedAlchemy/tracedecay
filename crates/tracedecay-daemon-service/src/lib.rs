@@ -67,14 +67,15 @@ pub mod project_runtime;
 pub mod query_authority_provider;
 pub mod query_mcp_admission;
 pub mod remote_http_transport;
-pub mod remote_protocol;
+mod remote_protocol;
 pub mod request_cancellation;
 mod shutdown_coordination;
 
 mod multi_root;
 
 pub use callable_code_authorization::{
-    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission,
+    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission, GRANT_HORIZON,
+    daemon_owned_project_source_access_at, project_open_source_access_authority,
 };
 pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
 #[cfg(any(test, feature = "test-helpers"))]

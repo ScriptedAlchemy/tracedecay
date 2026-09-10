@@ -45,9 +45,11 @@ pub use queries::{
 pub use source_authority::{
     CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+pub use verified_query::admitted_verified_graph_query_port;
 pub use verified_query::{
     AdmittedVerifiedGraphQueryPort, VerifiedGraphQuery, VerifiedGraphQueryFuture,
-    VerifiedGraphQueryPort, VerifiedGraphQueryRequest, admitted_verified_graph_query_port,
+    VerifiedGraphQueryPort, VerifiedGraphQueryRequest,
     admitted_verified_graph_query_port_with_source, open_verified_graph_query,
 };
 

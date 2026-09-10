@@ -4217,17 +4217,35 @@ pub fn register_project_semantic_runtime(
         .insert(project_root, handle);
 }
 
-/// Drop a retained project semantic handle.
-pub fn unregister_project_semantic_runtime(project_root: &Path) {
-    super::unregister_project_semantic_redundancy_generation(project_root);
-    project_semantic_handles()
+/// Everything a project's semantic unregistration released from the
+/// process-local registries, handed back so the caller decides where it is
+/// freed. The retained code generations and the query runtime cache are
+/// generation-sized; dropping them inside the registry locks (or inline on
+/// the daemon shutdown drain) is what held shutdown past its TERM grace.
+#[must_use = "drop this off the registry locks; it owns generation-sized memory"]
+pub struct RetiredProjectSemanticRuntimeV1 {
+    _generations: Vec<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
+    _handle: Option<DaemonSemanticRuntimeHandleV1>,
+    _runtime: Option<ProductionSemanticRuntimeV1>,
+}
+
+/// Remove a project's semantic handle, runtime, and redundancy state from the
+/// process-local registries. The removed owners are returned, not dropped.
+pub fn unregister_project_semantic_runtime(project_root: &Path) -> RetiredProjectSemanticRuntimeV1 {
+    let generations = super::unregister_project_semantic_redundancy_generation(project_root);
+    let handle = project_semantic_handles()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
-    project_semantic_production_runtimes()
+    let runtime = project_semantic_production_runtimes()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
+    RetiredProjectSemanticRuntimeV1 {
+        _generations: generations,
+        _handle: handle,
+        _runtime: runtime,
+    }
 }
 
 pub fn project_semantic_production_runtime(

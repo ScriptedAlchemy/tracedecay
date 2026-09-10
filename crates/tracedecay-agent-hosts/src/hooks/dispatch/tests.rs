@@ -850,7 +850,6 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
             &first_envelope,
             &binding,
             UtcMicros(10),
-            Instant::now(),
         ),
         SpoolAppendOutcomeV1::Accepted,
     );
@@ -862,7 +861,6 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
             &binding,
             &retry_envelope,
             UtcMicros(99),
-            Instant::now(),
         ),
         PendingEnvelopeV1::Exact(first_envelope),
     );

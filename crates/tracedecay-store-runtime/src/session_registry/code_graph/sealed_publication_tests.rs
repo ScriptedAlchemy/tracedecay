@@ -420,18 +420,25 @@ async fn historical_pending_replay_without_source_commitments_is_discarded_befor
         .expect("historical sealed state digest"),
         projector_revision,
     };
-    assert_eq!(
-        runtime
-            .graph_manifest_provider
-            .hydrate_sealed_code_generation(
-                &fresh_key.projection,
-                &historical_sealed_source,
-                &|| Ok(()),
-            )
-            .expect_err("historical seal must remain unavailable to current readers"),
-        GraphDbError::SourceCommitmentsUnavailable {
-            sealed_state_digest: format!("sha256:{historical_digest}"),
-        }
+    // The historical fixture predates required documentation evidence, so the
+    // current reader refuses its rows by name before the source-commitment
+    // check can run (69df412d2 pins the same refusal in the code-index suite).
+    let refused = runtime
+        .graph_manifest_provider
+        .hydrate_sealed_code_generation(
+            &fresh_key.projection,
+            &historical_sealed_source,
+            &|| Ok(()),
+        )
+        .expect_err("historical seal must remain unavailable to current readers");
+    assert!(
+        matches!(
+            &refused,
+            GraphDbError::SealedRevisionIncompatible { sealed_state_digest, message }
+                if sealed_state_digest == &format!("sha256:{historical_digest}")
+                    && message.contains("missing field `docstring`")
+        ),
+        "unexpected error: {refused}"
     );
     let historical_source =
         GraphGenerationReplaySource::SealedCodeGeneration(historical_sealed_source);

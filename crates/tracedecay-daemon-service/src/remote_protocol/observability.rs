@@ -115,7 +115,7 @@ pub(super) fn record_remote_query_response(
     );
 }
 
-pub fn remote_query_result_observation(
+pub(super) fn remote_query_result_observation(
     operation_ref: &str,
     expected_shards: usize,
     result: &RemoteQueryResultV1,

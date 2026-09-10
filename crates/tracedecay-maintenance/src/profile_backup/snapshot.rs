@@ -41,6 +41,7 @@ fn map_graph_error(context: &str, path: &Path, error: GraphDbError) -> ProfileBa
         | GraphDbError::DeadlineExceeded
         | GraphDbError::Unavailable { .. }
         | GraphDbError::SourceCommitmentsUnavailable { .. }
+        | GraphDbError::SealedRevisionIncompatible { .. }
         | GraphDbError::SealedStoreImmutable { .. }
         | GraphDbError::Closed => ProfileBackupError::unavailable(message),
     }

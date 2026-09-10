@@ -3473,7 +3473,7 @@ fn historical_writer_bytes_read_through_both_partitioned_readers() {
     assert!(
         matches!(
             &refused,
-            CodeIndexProductionErrorV1::Contract(message)
+            CodeIndexProductionErrorV1::SealedRowContractRefused { message, .. }
                 if message.contains("missing field `docstring`")
         ),
         "unexpected error: {refused}"
