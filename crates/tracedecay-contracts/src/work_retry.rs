@@ -73,6 +73,31 @@ pub struct WorkRetryFailureSelectorV1 {
 }
 
 impl WorkRetryFailureSelectorV1 {
+    /// Builds the exact selector owned by one retry-eligible runtime terminal.
+    ///
+    /// This is the sole constructor for the opaque reference consumed by
+    /// retry admission. Read surfaces use it too, so clients never reproduce
+    /// the reference format from a terminal digest.
+    pub fn from_runtime_terminal(
+        attempt: &WorkAttemptV1,
+    ) -> Result<Option<Self>, WorkRuntimeContractError> {
+        let Some(terminal) = attempt.terminal() else {
+            return Ok(None);
+        };
+        if !matches!(
+            terminal,
+            WorkTerminalEvidenceV1::Failed { .. } | WorkTerminalEvidenceV1::TimedOut { .. }
+        ) {
+            return Ok(None);
+        }
+        let evidence = terminal.runtime_evidence_ref(attempt.identity().run_id().clone())?;
+        Ok(Some(Self {
+            source: WorkRetrySourceV1::Runtime,
+            cause: WorkRetryCauseV1::RuntimeFailure,
+            evidence_ref: format!("runtime-terminal:{}", evidence.evidence_digest().as_str()),
+        }))
+    }
+
     fn validate(&self) -> bool {
         self.source == WorkRetrySourceV1::Runtime
             && self.cause == WorkRetryCauseV1::RuntimeFailure
@@ -127,7 +152,7 @@ impl WorkRetryEvidencePortV1 for RuntimeWorkRetryEvidenceV1 {
         let terminal = original
             .terminal()
             .ok_or(WorkRetryEvidenceErrorV1::Conflict)?;
-        let (digest, observed_at, eligible) = match terminal {
+        let (digest, observed_at) = match terminal {
             WorkTerminalEvidenceV1::Failed {
                 evidence_digest,
                 observed_at,
@@ -135,21 +160,15 @@ impl WorkRetryEvidencePortV1 for RuntimeWorkRetryEvidenceV1 {
             | WorkTerminalEvidenceV1::TimedOut {
                 evidence_digest,
                 observed_at,
-            } => (evidence_digest, observed_at, true),
-            WorkTerminalEvidenceV1::Succeeded {
-                evidence_digest,
-                observed_at,
+            } => (evidence_digest, observed_at),
+            WorkTerminalEvidenceV1::Succeeded { .. } | WorkTerminalEvidenceV1::Cancelled { .. } => {
+                return Err(WorkRetryEvidenceErrorV1::Conflict);
             }
-            | WorkTerminalEvidenceV1::Cancelled {
-                evidence_digest,
-                observed_at,
-            } => (evidence_digest, observed_at, false),
         };
-        let expected_ref = format!("runtime-terminal:{}", digest.as_str());
-        if !eligible
-            || selector.cause != WorkRetryCauseV1::RuntimeFailure
-            || selector.evidence_ref != expected_ref
-        {
+        let expected = WorkRetryFailureSelectorV1::from_runtime_terminal(original)
+            .map_err(|_| WorkRetryEvidenceErrorV1::Conflict)?
+            .ok_or(WorkRetryEvidenceErrorV1::Conflict)?;
+        if selector != &expected {
             return Err(WorkRetryEvidenceErrorV1::Conflict);
         }
         Ok(VerifiedWorkRetryFailureV1 {

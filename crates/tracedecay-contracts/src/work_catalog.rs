@@ -29,13 +29,13 @@ use crate::{
     ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
     StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
-    WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
-    WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
-    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
-    WorkProposalComparisonV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
-    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
+    WorkAttemptStatusRequestV1, WorkAttemptStatusV1, WorkDuplicateAdjudicationAppendOutcomeV1,
+    WorkEvidenceRetrievalV1, WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1,
+    WorkExperienceRequestV1, WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkLeakAdjudicationOutcomeV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
+    WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1, WorkProductMutationRequestV1,
+    WorkProposalComparisonRequestV1, WorkProposalComparisonV1, WorkRunControlReadingV1,
+    WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
@@ -262,12 +262,12 @@ fn build_work_executable_binding_registry()
             "tracedecay_contracts::AdmitWorkSynthesisCommand",
             "tracedecay_contracts::WorkSynthesisAttemptV1",
         )?,
-        available::<WorkAttemptStatusRequestV1, WorkAttemptV1>(
+        available::<WorkAttemptStatusRequestV1, WorkAttemptStatusV1>(
             "attempt_status",
             "/application/work/attempt-status",
             EffectClass::Read,
             "tracedecay_contracts::WorkAttemptStatusRequestV1",
-            "tracedecay_domain::WorkAttemptV1",
+            "tracedecay_contracts::WorkAttemptStatusV1",
         )?,
         available::<CancelWorkAttemptCommand, WorkAttemptV1>(
             "cancel_attempt",

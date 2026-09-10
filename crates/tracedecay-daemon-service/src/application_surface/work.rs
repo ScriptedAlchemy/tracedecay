@@ -17,7 +17,7 @@ use tracedecay_contracts::{
     ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
     RetryWorkAttemptCommandV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
     WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkAttemptStatusV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
@@ -214,7 +214,11 @@ pub(crate) async fn invoke_work_operation(
             )
         }
         WorkOperation::AttemptStatus => {
-            core!(WorkAttemptStatusRequestV1, AttemptStatus, WorkAttemptV1)
+            core!(
+                WorkAttemptStatusRequestV1,
+                AttemptStatus,
+                WorkAttemptStatusV1
+            )
         }
         WorkOperation::CancelAttempt => {
             core!(CancelWorkAttemptCommand, CancelAttempt, WorkAttemptV1)

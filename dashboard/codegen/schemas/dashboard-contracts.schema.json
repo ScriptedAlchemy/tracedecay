@@ -21162,6 +21162,98 @@
       ],
       "type": "object"
     },
+    "WorkAttemptStatusV1": {
+      "additionalProperties": false,
+      "description": "One attempt status plus the exact retry selector when its terminal state is\nretry eligible. The selector is response metadata derived by the canonical\nruntime evidence authority; it is never persisted in the attempt row.",
+      "properties": {
+        "actual_route": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkProviderRouteV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/WorkArtifactRefV1"
+          },
+          "type": "array"
+        },
+        "cancellation": {
+          "$ref": "#/$defs/WorkCancellationStateV1"
+        },
+        "execution": {
+          "$ref": "#/$defs/WorkExecutionEnvelopeV1"
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "lease": {
+          "$ref": "#/$defs/WorkLeaseFenceV1"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkAttemptProgressV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projection_binding": {
+          "$ref": "#/$defs/WorkAttemptProjectionBindingV1"
+        },
+        "recovery": {
+          "$ref": "#/$defs/WorkRecoveryStateV1"
+        },
+        "requested_route": {
+          "$ref": "#/$defs/WorkProviderRouteV1"
+        },
+        "retry_failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkRetryFailureSelectorV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/WorkAttemptStateV1"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkTerminalEvidenceV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "projection_binding",
+        "execution",
+        "lease",
+        "state",
+        "progress",
+        "artifacts",
+        "cancellation",
+        "recovery",
+        "requested_route",
+        "actual_route",
+        "terminal",
+        "retry_failure"
+      ],
+      "type": "object"
+    },
     "WorkAttemptStreamChannelV1": {
       "enum": [
         "stdout",
@@ -29442,6 +29534,9 @@
     "work_attempt_recovery_report": {
       "$ref": "#/$defs/WorkAttemptRecoveryReportV1"
     },
+    "work_attempt_status": {
+      "$ref": "#/$defs/WorkAttemptStatusV1"
+    },
     "work_attempt_status_request": {
       "$ref": "#/$defs/WorkAttemptStatusRequestV1"
     },
@@ -29662,6 +29757,7 @@
     "work_admit_synthesis_command",
     "work_synthesis_attempt",
     "work_attempt_status_request",
+    "work_attempt_status",
     "work_cancel_attempt_command",
     "work_resume_attempts_command",
     "work_retry_attempt_command",

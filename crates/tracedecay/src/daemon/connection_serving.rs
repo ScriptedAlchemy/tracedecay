@@ -466,8 +466,14 @@ impl DaemonWorkDeliveryDescriptorV1 {
                 DaemonInvocationOutcome::WorkApplication {
                     outcome:
                         WorkApplicationOutcomeV1::StartAttempt(outcome)
-                        | WorkApplicationOutcomeV1::AttemptStatus(outcome)
                         | WorkApplicationOutcomeV1::CancelAttempt(outcome),
+                    ..
+                },
+            ) => application_outcome_payload(outcome).is_some(),
+            (
+                DaemonWorkDeliveryKindV1::Attempt,
+                DaemonInvocationOutcome::WorkApplication {
+                    outcome: WorkApplicationOutcomeV1::AttemptStatus(outcome),
                     ..
                 },
             ) => application_outcome_payload(outcome).is_some(),

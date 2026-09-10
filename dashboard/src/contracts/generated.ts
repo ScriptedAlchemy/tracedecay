@@ -5191,6 +5191,26 @@ export const WorkAttemptStatusRequestV1Schema = z.object({
 }).strict();
 export type WorkAttemptStatusRequestV1 = z.infer<typeof WorkAttemptStatusRequestV1Schema>;
 
+/** One attempt status plus the exact retry selector when its terminal state is
+retry eligible. The selector is response metadata derived by the canonical
+runtime evidence authority; it is never persisted in the attempt row. */
+export const WorkAttemptStatusV1Schema = z.object({
+  actual_route: z.union([z.lazy(() => WorkProviderRouteV1Schema), z.null()]),
+  artifacts: z.array(z.lazy(() => WorkArtifactRefV1Schema)),
+  cancellation: z.lazy(() => WorkCancellationStateV1Schema),
+  execution: z.lazy(() => WorkExecutionEnvelopeV1Schema),
+  identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+  lease: z.lazy(() => WorkLeaseFenceV1Schema),
+  progress: z.union([z.lazy(() => WorkAttemptProgressV1Schema), z.null()]),
+  projection_binding: z.lazy(() => WorkAttemptProjectionBindingV1Schema),
+  recovery: z.lazy(() => WorkRecoveryStateV1Schema),
+  requested_route: z.lazy(() => WorkProviderRouteV1Schema),
+  retry_failure: z.union([z.lazy(() => WorkRetryFailureSelectorV1Schema), z.null()]),
+  state: z.lazy(() => WorkAttemptStateV1Schema),
+  terminal: z.union([z.lazy(() => WorkTerminalEvidenceV1Schema), z.null()]),
+}).strict();
+export type WorkAttemptStatusV1 = z.infer<typeof WorkAttemptStatusV1Schema>;
+
 export const WorkAttemptStreamChannelV1Schema = z.enum(["stderr", "stdout"]);
 export type WorkAttemptStreamChannelV1 = z.infer<typeof WorkAttemptStreamChannelV1Schema>;
 

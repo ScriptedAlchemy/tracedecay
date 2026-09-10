@@ -450,8 +450,10 @@ pub async fn invoke_work_cli_with_delivery(
 fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplicationOutcomeV1) -> bool {
     match (operation, outcome) {
         (WorkOperation::StartAttempt, WorkApplicationOutcomeV1::StartAttempt(outcome))
-        | (WorkOperation::AttemptStatus, WorkApplicationOutcomeV1::AttemptStatus(outcome))
         | (WorkOperation::CancelAttempt, WorkApplicationOutcomeV1::CancelAttempt(outcome)) => {
+            application_outcome_payload(outcome).is_some()
+        }
+        (WorkOperation::AttemptStatus, WorkApplicationOutcomeV1::AttemptStatus(outcome)) => {
             application_outcome_payload(outcome).is_some()
         }
         (WorkOperation::HydrateArtifacts, WorkApplicationOutcomeV1::HydrateArtifacts(outcome)) => {

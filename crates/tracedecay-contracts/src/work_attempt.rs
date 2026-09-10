@@ -22,7 +22,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{ApplicationProblem, RequestAdmission, RequestContext};
+use crate::{ApplicationProblem, RequestAdmission, RequestContext, WorkRetryFailureSelectorV1};
 
 mod capacity;
 mod problem;
@@ -329,6 +329,59 @@ pub struct WorkAttemptStatusRequestV1 {
     pub task_id: TaskId,
     pub run_id: RunId,
     pub attempt_id: AttemptId,
+}
+
+/// One attempt status plus the exact retry selector when its terminal state is
+/// retry eligible. The selector is response metadata derived by the canonical
+/// runtime evidence authority; it is never persisted in the attempt row.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptStatusV1 {
+    #[serde(flatten)]
+    attempt: WorkAttemptV1,
+    retry_failure: Option<WorkRetryFailureSelectorV1>,
+}
+
+impl WorkAttemptStatusV1 {
+    pub fn new(attempt: WorkAttemptV1) -> Result<Self, WorkRuntimeContractError> {
+        let retry_failure = WorkRetryFailureSelectorV1::from_runtime_terminal(&attempt)?;
+        Ok(Self {
+            attempt,
+            retry_failure,
+        })
+    }
+
+    pub fn attempt(&self) -> &WorkAttemptV1 {
+        &self.attempt
+    }
+
+    pub fn retry_failure(&self) -> Option<&WorkRetryFailureSelectorV1> {
+        self.retry_failure.as_ref()
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkAttemptStatusV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(flatten)]
+            attempt: WorkAttemptV1,
+            retry_failure: Option<WorkRetryFailureSelectorV1>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let status = Self::new(wire.attempt).map_err(serde::de::Error::custom)?;
+        if status.retry_failure != wire.retry_failure {
+            return Err(serde::de::Error::custom(
+                "retry failure selector does not match the attempt terminal",
+            ));
+        }
+        Ok(status)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

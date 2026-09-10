@@ -15,8 +15,8 @@ use tracedecay_contracts::{
     StartWorkAttemptCommand, WorkAttemptCapacityScopeV1, WorkAttemptCapacityVerdictV1,
     WorkAttemptEvidenceRecordV1, WorkAttemptListCoverageV1, WorkAttemptListCursorV1,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptProviderOutcomeV1, WorkAttemptService,
-    WorkAttemptStatusRequestV1, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
-    WorkProductAttemptServiceV1,
+    WorkAttemptStatusRequestV1, WorkAttemptStatusV1, WorkAttemptTopologyBindingV1,
+    WorkAttemptTopologyStateV1, WorkProductAttemptServiceV1, WorkRetryCauseV1, WorkRetrySourceV1,
 };
 use tracedecay_domain::{
     CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProviderId, RefId, TaskId,
@@ -305,6 +305,18 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
     let settled = attempts
         .settle(&context, leased.identity(), &evidence)
         .unwrap();
+    let status = WorkAttemptStatusV1::new(settled.clone()).unwrap();
+    let retry = status
+        .retry_failure()
+        .expect("a failed terminal must publish its canonical retry selector");
+    assert_eq!(retry.source, WorkRetrySourceV1::Runtime);
+    assert_eq!(retry.cause, WorkRetryCauseV1::RuntimeFailure);
+    assert!(retry.evidence_ref.starts_with("runtime-terminal:sha256:"));
+    assert_eq!(
+        serde_json::from_value::<WorkAttemptStatusV1>(serde_json::to_value(&status).unwrap())
+            .unwrap(),
+        status,
+    );
     assert_eq!(
         work.graph_version(),
         graph_after_admission,

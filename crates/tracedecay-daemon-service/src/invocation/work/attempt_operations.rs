@@ -7,7 +7,8 @@ use tracedecay_application::observability::BoundedObservabilityProducerV1;
 use tracedecay_contracts::{
     AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline,
     RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryWorkAttemptCommandV1,
-    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkSynthesisAttemptV1,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkAttemptStatusV1,
+    WorkSynthesisAttemptV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1};
 use tracedecay_tool_catalog::UseCaseId;
@@ -187,7 +188,17 @@ pub(super) fn attempt_status(
         operation_key,
         use_case,
         input_digest,
-        services.attempts().status(context, &request),
+        services
+            .attempts()
+            .status(context, &request)
+            .and_then(|attempt| {
+                WorkAttemptStatusV1::new(attempt).map_err(|_| {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "work_attempt_status_projection_invalid".to_owned(),
+                        message: "The Work attempt status could not be projected".to_owned(),
+                    })
+                })
+            }),
         observed_at,
         deadline,
         WorkApplicationOutcomeV1::AttemptStatus,
