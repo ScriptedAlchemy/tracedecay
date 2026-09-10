@@ -144,10 +144,16 @@ fn coverage_value(coverage: &tracedecay_query::code_search::CodeIndexSearchCover
                 "status": "stale",
                 "generation": generation,
             }),
-            tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial { generation } => json!({
-                "status": "partial",
-                "generation": generation,
-            }),
+            tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial {
+                generation,
+                reason,
+            } => {
+                json!({
+                    "status": "partial",
+                    "generation": generation,
+                    "reason": reason,
+                })
+            }
             tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable { reason } => json!({
                 "status": "unavailable",
                 "reason": reason,

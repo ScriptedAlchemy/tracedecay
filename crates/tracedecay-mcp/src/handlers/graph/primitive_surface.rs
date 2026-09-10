@@ -35,11 +35,11 @@ fn lane_status(
                 reason: None,
             }
         }
-        tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial { generation } => {
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial { generation, reason } => {
             PrimitiveLaneStatusV1::State {
                 status: PrimitiveLaneStateV1::Partial,
                 generation: generation.clone(),
-                reason: None,
+                reason: reason.map(str::to_owned),
             }
         }
         tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable { reason } => {
