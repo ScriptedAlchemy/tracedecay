@@ -10964,7 +10964,10 @@ async fn shutdown_releases_indexed_generation_and_scheduler_owners() {
     let sources = (0..128)
         .map(|file| {
             let source = (0..16).fold(String::new(), |mut source, symbol| {
-                let _ = writeln!(source, "pub fn item_{file}_{symbol}() -> u32 {{ {symbol} }}");
+                let _ = writeln!(
+                    source,
+                    "pub fn item_{file}_{symbol}() -> u32 {{ {symbol} }}"
+                );
                 source
             });
             (format!("src/module_{file}.rs"), source)
