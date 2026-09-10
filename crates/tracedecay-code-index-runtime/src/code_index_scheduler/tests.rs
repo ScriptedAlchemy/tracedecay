@@ -12452,10 +12452,15 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         RetrievalPortOutcome::Completed(evidence) => {
             let page = evidence.payload.expect("graph page");
             assert_eq!(page.generation, generation);
-            assert!(
-                !page.items.is_empty(),
-                "graph operation must return production lane evidence"
-            );
+            assert_eq!(page.items.len(), 1);
+            let callee = &page.items[0];
+            assert_eq!(callee.edge_kind, "calls");
+            assert_eq!(callee.symbol.name, "callee");
+            assert_eq!(callee.symbol.file, "src/lib.rs");
+            assert_eq!(callee.symbol.start_line_zero_based, 1);
+            assert_eq!(callee.symbol.end_line_zero_based, 1);
+            assert_eq!(callee.symbol.line, 2);
+            assert_eq!(callee.symbol.end_line, 2);
         }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
