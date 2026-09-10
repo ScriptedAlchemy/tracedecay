@@ -1216,9 +1216,9 @@ pub(crate) mod tests {
     }
 
     /// A relative root cannot identify a project store or resolve handler
-    /// paths, so the project bundle refuses it at construction.
+    /// paths, so [`McpAdmittedProjectV1::new`] refuses it.
     #[test]
-    fn a_relative_root_is_refused_by_the_project_bundle() {
+    fn a_relative_project_root_is_refused() {
         let admitted = scope("admitted");
         let error = admit_project(
             McpProjectIdentityV1 {
