@@ -69,8 +69,8 @@ pub use callable_code::{
     CodeSymbolSearchRequest, CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord,
     ExactOccurrenceRequest, LexicalOccurrenceRecord, MAX_CALLABLE_CODE_DEPTH,
     MAX_CALLABLE_CODE_FILTERS, MAX_CALLABLE_CODE_FUZZY_EXPANSIONS, MAX_CALLABLE_CODE_QUERY_BYTES,
-    MAX_SOURCE_METADATA_FILES, ModuleApiRequest, PhraseSearchRequest, PhraseSearchSurfaceRequest,
-    QualifiedNameRequest, SourceMetadataRecord, SourceMetadataRequest,
+    MAX_SOURCE_METADATA_FILES, ModuleApiRequest, PhraseSearchRequest, QualifiedNameRequest,
+    SourceMetadataRecord, SourceMetadataRequest,
 };
 pub use callable_code_catalog::{
     callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
@@ -132,8 +132,7 @@ pub use source_read::{
     SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest, SourceReadResultV1,
 };
 pub use symbol_graph::{
-    CallableCodeSurfaceMetaV1, CodeSymbolSearchSurfaceRequestV1, ExactSymbolRequest,
-    GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,
+    ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,
     ImplementationsRequest, MAX_SYMBOL_GRAPH_DEPTH, MAX_SYMBOL_GRAPH_FILTERS,
     MAX_SYMBOL_GRAPH_QUERY_BYTES, PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap,
     SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture,
