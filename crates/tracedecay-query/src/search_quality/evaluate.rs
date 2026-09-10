@@ -974,8 +974,12 @@ fn resource_sample_verdict(
     }
     match sample.status {
         ResourceMeasurementStatusV1::Measured => {
+            // A zero high-water mark is not a measurement: every supported
+            // sampler reports a positive peak for a process that ran queries,
+            // so `Some(0)` is an unavailable observation wearing a measured
+            // label. Reject it here rather than let it pass as evidence.
             if sample.pending_reason.is_some()
-                || sample.peak_rss_bytes.is_none()
+                || !sample.peak_rss_bytes.is_some_and(|bytes| bytes > 0)
                 || sample.measured_queries != expected_queries
                 || sample.latency_samples_us.is_empty()
             {
@@ -1540,6 +1544,40 @@ mod tests {
         assert_eq!(
             super::resource_sample_verdict(&measured, 3),
             Some(super::DirectEvaluationStatusV1::Pass)
+        );
+    }
+
+    /// A host that cannot report peak RSS must stay `Pending`; it must never
+    /// arrive as a measured zero. Every sampler filters its own non-positive
+    /// reading, so a zero reaching the evaluator is an unavailable observation
+    /// relabelled as evidence, and the verdict refuses it.
+    #[test]
+    fn a_zero_peak_rss_is_not_a_measurement() {
+        let zero = resource_sample(
+            ResourceMeasurementStatusV1::Measured,
+            Some(0),
+            vec![10, 20, 30],
+            None,
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&zero, 3),
+            None,
+            "a zero peak RSS must not reach the report as passing resource evidence"
+        );
+
+        // The same unavailable reading, honestly typed, is still evidence.
+        let honest = resource_sample(
+            ResourceMeasurementStatusV1::Pending,
+            None,
+            vec![10, 20, 30],
+            Some(
+                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned \
+                 zero PeakWorkingSetSize",
+            ),
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&honest, 3),
+            Some(super::DirectEvaluationStatusV1::Pending)
         );
     }
 }
