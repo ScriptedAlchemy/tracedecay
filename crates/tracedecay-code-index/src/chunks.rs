@@ -27,7 +27,6 @@ use tracedecay_domain::{
     SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef, ValidatedCodeFileV1,
     canonical_sha256, classify_technical_token, split_subtokens, technical_tokens,
 };
-use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 use super::{
     extract::{ExtractedCodeFileV1, ExtractionCancellation},
@@ -189,27 +188,27 @@ unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
 const PARALLEL_CHUNK_THRESHOLD: usize = 16;
 
 /// Map `operation` over every chunk, fanning out across the pool once the batch
-/// is large enough. Each admitted unit meters against `background_cpu`; a
-/// standalone caller without an installed worker runtime passes `None` and
-/// runs unmetered. Results are returned in chunk order and the reported
-/// failure is always the lowest-index one, so the outcome is identical to the
-/// sequential sweep this replaces.
+/// is large enough. Each parallel unit runs through `admit`, which meters it
+/// against the CPU authority the caller executes under. Results are returned
+/// in chunk order and the reported failure is always the lowest-index one, so
+/// the outcome is identical to the sequential sweep this replaces.
 #[hotpath::measure(label = "code_index.chunk.map_ordered")]
-fn map_chunks_ordered<T, F>(
-    background_cpu: Option<&Arc<ProcessBackgroundCpuV1>>,
+fn map_chunks_ordered<T, F, A>(
+    admit: A,
     chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
 ) -> Result<Vec<T>, ChunkingFailureV1>
 where
     T: Send,
     F: Fn(&CodeSearchChunkV1) -> Result<T, ChunkingFailureV1> + Send + Sync,
+    A: Fn(&mut dyn FnMut() -> Result<T, ChunkingFailureV1>) -> Result<T, ChunkingFailureV1> + Sync,
 {
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().map(|chunk| operation(chunk)).collect();
     }
     let results: Vec<Result<T, ChunkingFailureV1>> = chunks
         .par_iter()
-        .map(|chunk| crate::parallelism::with_permits_on(background_cpu, 1, || operation(chunk)))
+        .map(|chunk| admit(&mut || operation(chunk)))
         .collect::<Vec<_>>();
     results.into_iter().collect()
 }
@@ -217,13 +216,15 @@ where
 /// Run `operation` over every chunk for its failure only, fanning out across
 /// the pool once the batch is large enough. The lowest-index failure is
 /// returned, matching the sequential sweep's short-circuit outcome.
-fn try_for_each_chunk_ordered<F>(
-    background_cpu: Option<&Arc<ProcessBackgroundCpuV1>>,
+fn try_for_each_chunk_ordered<F, A>(
+    admit: A,
     chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
 ) -> Result<(), ChunkingFailureV1>
 where
     F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> + Send + Sync,
+    A: Fn(&mut dyn FnMut() -> Result<(), ChunkingFailureV1>) -> Result<(), ChunkingFailureV1>
+        + Sync,
 {
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().try_for_each(&operation);
@@ -232,7 +233,7 @@ where
         .par_iter()
         .enumerate()
         .filter_map(|(index, chunk)| {
-            crate::parallelism::with_permits_on(background_cpu, 1, || operation(chunk))
+            admit(&mut || operation(chunk))
                 .err()
                 .map(|error| (index, error))
         })
@@ -246,7 +247,7 @@ where
 impl ExactExtractionAuthorityV1 {
     fn mint(chunks: &[Arc<CodeSearchChunkV1>]) -> Result<Self, ChunkingFailureV1> {
         let digests = map_chunks_ordered(
-            crate::parallelism::installed_background_cpu(),
+            |unit| crate::parallelism::with_background_cpu_permit(unit),
             chunks,
             |chunk| canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk),
         )?;
@@ -332,7 +333,7 @@ impl ExactExtractionAuthorityV1 {
         // The sequential sweep stopped at the first repeated identity, so only
         // the chunks ahead of it were ever digest-checked.
         try_for_each_chunk_ordered(
-            crate::parallelism::installed_background_cpu(),
+            |unit| crate::parallelism::with_background_cpu_permit(unit),
             &chunks[..repeated_at],
             |chunk| self.validate_chunk(chunk),
         )?;
@@ -359,12 +360,9 @@ impl ExactExtractionAuthorityV1 {
         if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
             return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
         }
-        let background_cpu = crate::parallelism::installed_background_cpu();
         let admitted = chunks
             .into_par_iter()
-            .map(|chunk| {
-                crate::parallelism::with_permits_on(background_cpu, 1, || self.admit(chunk))
-            })
+            .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
             .collect::<Vec<_>>();
         admitted.into_iter().collect()
     }
@@ -428,7 +426,7 @@ impl CodeFileChunksV1 {
             ));
         }
         try_for_each_chunk_ordered(
-            crate::parallelism::installed_background_cpu(),
+            |unit| crate::parallelism::with_background_cpu_permit(unit),
             &self.chunks,
             |chunk| {
                 if chunk.anchor.generation_id != self.document.generation_id
@@ -2210,6 +2208,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
+    use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
     use super::*;
     use crate::extract::ExtractionCoverageV1;
@@ -2242,7 +2241,7 @@ mod tests {
             20 * crate::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
         );
         assert!(
-            crate::parallelism::installed_background_cpu().is_none(),
+            crate::parallelism::installed_worker_status().is_none(),
             "worker-plan preview must not install the worker runtime"
         );
         let authority = Arc::new(ProcessBackgroundCpuV1::new(
@@ -2267,18 +2266,22 @@ mod tests {
             .install(|| {
                 authority.with_permit(|| {
                     let parent = rayon::current_thread_index().expect("parent Rayon worker");
-                    map_chunks_ordered(Some(&authority), &chunks, |_| {
-                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                        maximum.fetch_max(current, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(5));
-                        if rayon::current_thread_index() == Some(parent) {
-                            parent_completed.fetch_add(1, Ordering::SeqCst);
-                        } else {
-                            stolen_completed.fetch_add(1, Ordering::SeqCst);
-                        }
-                        active.fetch_sub(1, Ordering::SeqCst);
-                        Ok(())
-                    })
+                    map_chunks_ordered(
+                        |unit| authority.with_permit(unit),
+                        &chunks,
+                        |_| {
+                            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            maximum.fetch_max(current, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(5));
+                            if rayon::current_thread_index() == Some(parent) {
+                                parent_completed.fetch_add(1, Ordering::SeqCst);
+                            } else {
+                                stolen_completed.fetch_add(1, Ordering::SeqCst);
+                            }
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
                 })
             })
             .expect("nested chunk fan-out");
