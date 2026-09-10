@@ -114,6 +114,7 @@ impl VerifiedGraphQueryPort for AdmittedVerifiedGraphQueryPort {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 #[must_use]
 pub fn admitted_verified_graph_query_port(
     admission: Arc<dyn CodeGraphReadAdmissionPort>,

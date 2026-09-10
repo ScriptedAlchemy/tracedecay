@@ -51,7 +51,7 @@ use frame::{
     append_frame, decode_complete_frame, encode_frame, scan_records, scan_records_from,
     truncate_records,
 };
-use lease::{acquire_lease, acquire_lease_with_deadline};
+use lease::{acquire_lease, acquire_lease_bounded};
 use meta::{
     acknowledged_map, append_intent, normalize_acknowledgements, partial_tail_matches_intent,
     read_meta, reconcile_append_intent, validate_meta, validate_meta_against_records, write_meta,
@@ -197,20 +197,21 @@ impl HookSpoolV1 {
         Self::open_after_lease(root, config, lease, lease_file, now)
     }
 
-    /// Wait only for writer admission, under the caller's absolute deadline.
-    /// Once admitted, recovery and append retain their existing durable semantics.
-    #[hotpath::measure(label = "hooks.spool.open_until")]
-    pub fn open_until(
+    /// Wait only for writer admission, for at most `wait_budget` measured from
+    /// the lock attempt (after the spool root and lease file exist). Once
+    /// admitted, recovery and append retain their existing durable semantics.
+    #[hotpath::measure(label = "hooks.spool.open_within")]
+    pub fn open_within(
         root: impl Into<PathBuf>,
         config: HookSpoolConfigV1,
         now: UtcMicros,
-        deadline: std::time::Instant,
+        wait_budget: std::time::Duration,
     ) -> Result<(Self, HookSpoolOpenReportV1), HookSpoolError> {
         config.validate()?;
         let root = root.into();
         ensure_root(&root)?;
         let (lease, lease_file) =
-            acquire_lease_with_deadline(&root, config.writer_lease_micros, now, Some(deadline))?;
+            acquire_lease_bounded(&root, config.writer_lease_micros, now, Some(wait_budget))?;
         Self::open_after_lease(root, config, lease, lease_file, now)
     }
 

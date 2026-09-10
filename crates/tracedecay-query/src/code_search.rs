@@ -135,10 +135,36 @@ pub enum CodeIndexLaneStatusV1 {
     Stale { generation: String },
     /// The lane served some evidence, but its authenticated retriever outcome
     /// says recall is incomplete. `generation` is present when the whole
-    /// request also served an older complete code generation.
-    Partial { generation: Option<String> },
+    /// request also served an older complete code generation. `reason` is the
+    /// typed retriever failure that bounded recall (its wire tag, for example
+    /// `candidate_sources_pruned`), so a policy-bounded answer from a complete
+    /// generation is never mistaken for an incomplete index.
+    Partial {
+        generation: Option<String>,
+        reason: Option<&'static str>,
+    },
     /// The lane could not run at all for this request.
     Unavailable { reason: &'static str },
+}
+
+/// The wire tag of the typed failure that bounded a partial lane's recall:
+/// the `RetrievalFailure` serde tag, or `budget_exceeded` when the lane hit
+/// its budget. Coalesced public statuses never carry this, so it is read from
+/// the sealed internal outcome of the same composition.
+fn partial_lane_reason(outcome: &tracedecay_domain::RetrieverOutcome<()>) -> Option<&'static str> {
+    use tracedecay_domain::{RetrievalFailure, RetrieverOutcome};
+    match outcome {
+        RetrieverOutcome::Partial { reason, .. } => Some(match reason {
+            RetrievalFailure::CandidateSourcesPruned { .. } => "candidate_sources_pruned",
+            RetrievalFailure::AuthorityUnavailable { .. } => "authority_unavailable",
+            RetrievalFailure::IncompatibleProjection { .. } => "incompatible_projection",
+            RetrievalFailure::StaleSource => "stale_source",
+            RetrievalFailure::InvalidRequest { .. } => "invalid_request",
+            RetrievalFailure::Internal { .. } => "internal",
+        }),
+        RetrieverOutcome::BudgetExceeded(_) => Some("budget_exceeded"),
+        _ => None,
+    }
 }
 
 impl CodeIndexLaneStatusV1 {
@@ -218,10 +244,21 @@ impl CodeIndexSearchCoverageV1 {
 
     /// Build response coverage from the authenticated exact/lexical/graph
     /// fallback receipt instead of assuming every admitted lane completed.
+    ///
+    /// `internal` is the sealed per-lane outcome the same composition
+    /// produced; a partial lane names why its recall is incomplete (for
+    /// example `candidate_sources_pruned`: the query's common terms exceeded
+    /// the lexical document-frequency budget) so a partial answer served from
+    /// the current complete generation is never mistaken for an incomplete
+    /// index.
     pub fn from_fallback_lane_coverage(
         fallback: &BTreeMap<
             tracedecay_domain::RetrieverKind,
             tracedecay_domain::PublicRetrieverStatus,
+        >,
+        internal: &BTreeMap<
+            tracedecay_domain::RetrieverKind,
+            tracedecay_domain::RetrieverOutcome<()>,
         >,
         generation: &str,
         served_stale: bool,
@@ -231,6 +268,10 @@ impl CodeIndexSearchCoverageV1 {
             fallback: &BTreeMap<
                 tracedecay_domain::RetrieverKind,
                 tracedecay_domain::PublicRetrieverStatus,
+            >,
+            internal: &BTreeMap<
+                tracedecay_domain::RetrieverKind,
+                tracedecay_domain::RetrieverOutcome<()>,
             >,
             kind: tracedecay_domain::RetrieverKind,
             generation: &str,
@@ -252,6 +293,7 @@ impl CodeIndexSearchCoverageV1 {
                 tracedecay_domain::PublicRetrieverStatus::Partial => {
                     CodeIndexLaneStatusV1::Partial {
                         generation: served_stale.then(|| generation.to_owned()),
+                        reason: internal.get(&kind).and_then(partial_lane_reason),
                     }
                 }
                 tracedecay_domain::PublicRetrieverStatus::Stale => CodeIndexLaneStatusV1::Stale {
@@ -268,18 +310,21 @@ impl CodeIndexSearchCoverageV1 {
         Self {
             exact: lane(
                 fallback,
+                internal,
                 tracedecay_domain::RetrieverKind::ExactLiteral,
                 generation,
                 served_stale,
             ),
             lexical: lane(
                 fallback,
+                internal,
                 tracedecay_domain::RetrieverKind::Lexical,
                 generation,
                 served_stale,
             ),
             graph: lane(
                 fallback,
+                internal,
                 tracedecay_domain::RetrieverKind::Graph,
                 generation,
                 served_stale,
@@ -531,6 +576,7 @@ mod tests {
         ]);
         let unavailable = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
             &fallback,
+            &std::collections::BTreeMap::new(),
             "generation.current",
             false,
             &CodeIndexSemanticStatusV1::Complete,
@@ -551,6 +597,7 @@ mod tests {
         );
         let partial = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
             &partial_fallback,
+            &std::collections::BTreeMap::new(),
             "generation.previous",
             true,
             &CodeIndexSemanticStatusV1::Complete,
@@ -559,9 +606,60 @@ mod tests {
             partial.graph,
             CodeIndexLaneStatusV1::Partial {
                 generation: Some("generation.previous".to_owned()),
+                reason: None,
             }
         );
         assert!(partial.graph.is_servable());
+    }
+
+    /// The dogfood defect (#917): a natural-language task whose common terms
+    /// exceed the lexical document-frequency budget is served from the
+    /// current complete generation with pruned recall. The lane must say so,
+    /// rather than reading like an incomplete index.
+    #[test]
+    fn a_pruned_lexical_lane_names_why_its_recall_is_partial() {
+        let fallback = std::collections::BTreeMap::from([
+            (
+                tracedecay_domain::RetrieverKind::ExactLiteral,
+                tracedecay_domain::PublicRetrieverStatus::Complete,
+            ),
+            (
+                tracedecay_domain::RetrieverKind::Lexical,
+                tracedecay_domain::PublicRetrieverStatus::Partial,
+            ),
+            (
+                tracedecay_domain::RetrieverKind::Graph,
+                tracedecay_domain::PublicRetrieverStatus::Complete,
+            ),
+        ]);
+        let internal = std::collections::BTreeMap::from([(
+            tracedecay_domain::RetrieverKind::Lexical,
+            tracedecay_domain::RetrieverOutcome::Partial {
+                value: (),
+                reason: tracedecay_domain::RetrievalFailure::CandidateSourcesPruned {
+                    term_sources: vec![("the".to_owned(), 300_000)],
+                    document_frequency_budget: 16_384,
+                },
+            },
+        )]);
+        let coverage = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+            &fallback,
+            &internal,
+            "generation.current",
+            false,
+            &CodeIndexSemanticStatusV1::Complete,
+        );
+        assert_eq!(coverage.exact, CodeIndexLaneStatusV1::Complete);
+        assert_eq!(coverage.graph, CodeIndexLaneStatusV1::Complete);
+        assert_eq!(
+            coverage.lexical,
+            CodeIndexLaneStatusV1::Partial {
+                generation: None,
+                reason: Some("candidate_sources_pruned"),
+            }
+        );
+        assert!(coverage.lexical.is_servable());
+        assert!(coverage.is_degraded());
     }
 
     #[test]

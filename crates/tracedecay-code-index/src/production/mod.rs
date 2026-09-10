@@ -1368,6 +1368,11 @@ pub enum CodeIndexProductionErrorV1 {
     SupersededSealedGenerationRevision(u32),
     #[error("sealed code generation predates authenticated source commitments and must be rebuilt")]
     SourceCommitmentsUnavailable,
+    /// A digest-verified sealed row no longer satisfies this build's row
+    /// contract (an older writer shape). The bytes are authentic, so this is
+    /// a superseded revision to rebuild from source, not corruption.
+    #[error("sealed file segment revision {revision} rows are refused by this build: {message}")]
+    SealedRowContractRefused { revision: u32, message: String },
     #[error("code-index contract failed: {0}")]
     Contract(String),
     #[error("code-index parallel worker runtime failed: {0}")]

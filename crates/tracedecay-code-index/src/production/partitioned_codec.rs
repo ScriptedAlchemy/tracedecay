@@ -1268,6 +1268,15 @@ fn decode_verified_file_segment(
     restored.clear();
     canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, restored)?;
     let payload_decoding_failed = |error: serde_json::Error| {
+        // The payload already parsed as canonical JSON under its verified
+        // digest, so a data-shaped refusal (missing or unknown field) is an
+        // older writer's row contract, not damaged bytes.
+        if error.classify() == serde_json::error::Category::Data {
+            return CodeIndexProductionErrorV1::SealedRowContractRefused {
+                revision: segment.format_revision,
+                message: format!("sealed file segment payload decoding failed: {error}"),
+            };
+        }
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed file segment payload decoding failed: {error}"
         ))
@@ -3958,8 +3967,9 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    CodeIndexProductionErrorV1::Contract(message)
-                        if message.contains("missing field `docstring`")
+                    CodeIndexProductionErrorV1::SealedRowContractRefused { revision, message }
+                        if *revision == FILE_SEGMENT_FORMAT_REVISION_V1
+                            && message.contains("missing field `docstring`")
                 ),
                 "unexpected error: {error}"
             );

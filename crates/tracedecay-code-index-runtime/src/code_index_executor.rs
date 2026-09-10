@@ -1251,6 +1251,7 @@ where
                         .authorized
                         .fallback
                         .public_fallback_lane_coverage,
+                    &executed.query.authorized.composition.internal_lane_outcomes,
                     executed.query.generation.as_str(),
                     executed.query.served_stale,
                     &semantic,

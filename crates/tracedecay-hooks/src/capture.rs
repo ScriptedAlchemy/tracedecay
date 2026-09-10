@@ -5,7 +5,7 @@
 //! session, memory, sync, or indexing authority.
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::Duration;
 
 use tracedecay_domain::UtcMicros;
 
@@ -58,10 +58,16 @@ pub fn capture_native_event_for_replay(
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
     now: UtcMicros,
-    deadline: Instant,
+    wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
-    let outcome =
-        capture_native_event_for_replay_inner(data_root, source, payload, material, now, deadline);
+    let outcome = capture_native_event_for_replay_inner(
+        data_root,
+        source,
+        payload,
+        material,
+        now,
+        wait_budget,
+    );
     #[cfg(feature = "hotpath")]
     {
         hotpath::gauge!(match outcome {
@@ -86,7 +92,7 @@ fn capture_native_event_for_replay_inner(
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
     now: UtcMicros,
-    deadline: Instant,
+    wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
     let host = source.host();
     let decoded_result = match source {
@@ -114,18 +120,22 @@ fn capture_native_event_for_replay_inner(
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
     };
     let spool_root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let mut spool =
-        match HookSpoolV1::open_until(spool_root, HookSpoolConfigV1::stock(host), now, deadline) {
-            Ok((spool, _)) => spool,
-            Err(HookSpoolError::AdmissionTimedOut) => {
-                return NativeHookCaptureOutcomeV1::AdmissionTimedOut;
-            }
-            Err(HookSpoolError::SpoolFull) => return NativeHookCaptureOutcomeV1::Full,
-            Err(HookSpoolError::ResetRequired { .. }) => {
-                return NativeHookCaptureOutcomeV1::ResetRequired;
-            }
-            Err(_) => return NativeHookCaptureOutcomeV1::Unavailable,
-        };
+    let mut spool = match HookSpoolV1::open_within(
+        spool_root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        wait_budget,
+    ) {
+        Ok((spool, _)) => spool,
+        Err(HookSpoolError::AdmissionTimedOut) => {
+            return NativeHookCaptureOutcomeV1::AdmissionTimedOut;
+        }
+        Err(HookSpoolError::SpoolFull) => return NativeHookCaptureOutcomeV1::Full,
+        Err(HookSpoolError::ResetRequired { .. }) => {
+            return NativeHookCaptureOutcomeV1::ResetRequired;
+        }
+        Err(_) => return NativeHookCaptureOutcomeV1::Unavailable,
+    };
     let envelope = redelivered_envelope(&mut spool, &snapshot.binding, envelope);
     match spool.append(envelope, &snapshot.binding, now) {
         Ok(_) => NativeHookCaptureOutcomeV1::Captured,

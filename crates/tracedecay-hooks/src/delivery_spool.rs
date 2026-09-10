@@ -6,7 +6,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::lock_admission::{LockAdmissionError, lock_until};
 
@@ -122,22 +122,24 @@ pub struct HookDeliveryReceiptSpoolV1 {
 
 impl HookDeliveryReceiptSpoolV1 {
     /// Opens the spool without waiting for a held writer lock. Native callbacks
-    /// use `open_until` with their existing invocation deadline.
+    /// use `open_within` with one synchronous budget for the lock wait.
     #[hotpath::measure(label = "hooks.delivery.open")]
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, HookDeliverySpoolError> {
-        Self::open_with_deadline(root.into(), None)
+        Self::open_bounded(root.into(), None)
     }
 
-    pub fn open_until(
+    /// `wait_budget` bounds only the lock wait, measured from the lock attempt
+    /// after the spool root and lock file exist (see `HookSpoolV1::open_within`).
+    pub fn open_within(
         root: impl Into<PathBuf>,
-        deadline: Instant,
+        wait_budget: Duration,
     ) -> Result<Self, HookDeliverySpoolError> {
-        Self::open_with_deadline(root.into(), Some(deadline))
+        Self::open_bounded(root.into(), Some(wait_budget))
     }
 
-    fn open_with_deadline(
+    fn open_bounded(
         root: PathBuf,
-        deadline: Option<Instant>,
+        wait_budget: Option<Duration>,
     ) -> Result<Self, HookDeliverySpoolError> {
         ensure_root(&root)?;
         let lock_path = root.join(LOCK_FILE);
@@ -157,11 +159,13 @@ impl HookDeliveryReceiptSpoolV1 {
         {
             return Err(HookDeliverySpoolError::UnsafePath);
         }
-        match deadline {
-            Some(deadline) => lock_until(&lock, deadline).map_err(|error| match error {
-                LockAdmissionError::TimedOut => HookDeliverySpoolError::AdmissionTimedOut,
-                LockAdmissionError::Io => HookDeliverySpoolError::Io,
-            })?,
+        match wait_budget {
+            Some(wait_budget) => {
+                lock_until(&lock, Instant::now() + wait_budget).map_err(|error| match error {
+                    LockAdmissionError::TimedOut => HookDeliverySpoolError::AdmissionTimedOut,
+                    LockAdmissionError::Io => HookDeliverySpoolError::Io,
+                })?;
+            }
             None => {
                 hotpath::measure_block!("hooks.delivery.lock.try_lock", lock.try_lock()).map_err(
                     |error| match error {
@@ -470,25 +474,21 @@ mod tests {
             HookDeliveryReceiptSpoolV1::open(&root.0).unwrap_err(),
             HookDeliverySpoolError::Busy
         );
-        let deadline = Instant::now() + std::time::Duration::from_millis(20);
         assert_eq!(
-            HookDeliveryReceiptSpoolV1::open_until(&root.0, deadline).unwrap_err(),
+            HookDeliveryReceiptSpoolV1::open_within(&root.0, Duration::from_millis(20))
+                .unwrap_err(),
             HookDeliverySpoolError::AdmissionTimedOut
         );
         assert_eq!(fs::read(&paths[0]).unwrap(), before);
         drop(owner);
+        // An exhausted budget never admits, even when the lock is free.
         assert_eq!(
-            HookDeliveryReceiptSpoolV1::open_until(&root.0, deadline).unwrap_err(),
+            HookDeliveryReceiptSpoolV1::open_within(&root.0, Duration::ZERO).unwrap_err(),
             HookDeliverySpoolError::AdmissionTimedOut
         );
-        let admitted = HookDeliveryReceiptSpoolV1::open_until(
-            &root.0,
-            Instant::now()
-                + std::time::Duration::from_micros(
-                    crate::HookSynchronousDeadlineV1::start().remaining_micros(),
-                ),
-        )
-        .unwrap();
+        let admitted =
+            HookDeliveryReceiptSpoolV1::open_within(&root.0, crate::HOOK_SYNCHRONOUS_BUDGET)
+                .unwrap();
         assert!(!admitted.append(&original).unwrap());
         assert_eq!(fs::read(&paths[0]).unwrap(), before);
     }

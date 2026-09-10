@@ -300,7 +300,14 @@ where
             let mut coordinator_failures = failures.clone();
             let coordinator = async move {
                 let mut runner = tokio::spawn(async move {
+                    let prepare_started = tokio::time::Instant::now();
                     let plan = prepare.await;
+                    log_shutdown_phase(
+                        "plan_prepare",
+                        "complete",
+                        prepare_started,
+                        shutdown_deadline,
+                    );
                     run_daemon_shutdown(runner_lifecycle, plan, shutdown_deadline).await
                 });
                 let (mut receipt, runner_needs_join) = tokio::select! {
@@ -403,6 +410,13 @@ async fn run_daemon_shutdown(
     // cooperative wait and the forced abort/join so its duration reads as a
     // single number against DAEMON_CLIENT_DRAIN_DEADLINE /
     // DAEMON_TASK_ABORT_DEADLINE instead of only surfacing as a bare timeout.
+    let client_drain_started = tokio::time::Instant::now();
+    log_shutdown_phase(
+        "client_drain",
+        "start",
+        client_drain_started,
+        client_drain_deadline,
+    );
     let (in_flight, clients) = hotpath::measure_block!("daemon.shutdown.client_drain", {
         let _draining = DrainingGauge::arm("daemon.shutdown.draining.clients");
         let in_flight = loop {
@@ -435,6 +449,12 @@ async fn run_daemon_shutdown(
         };
         (in_flight, clients)
     });
+    log_shutdown_phase(
+        "client_drain",
+        "complete",
+        client_drain_started,
+        client_drain_deadline,
+    );
     // Forced vs graceful: graceful means in-flight client work idled out
     // cooperatively before the drain deadline; forced means the deadline
     // expired and the abort/join path did the draining.
@@ -447,6 +467,7 @@ async fn run_daemon_shutdown(
     // (semantic artifact GC, maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
     // span only measures the residual wait when it was not.
+    let background_drain_started = tokio::time::Instant::now();
     let mut background = hotpath::measure_block!("daemon.shutdown.background_drain", {
         let _draining = DrainingGauge::arm("daemon.shutdown.draining.background");
         match background_receipt {
@@ -454,6 +475,12 @@ async fn run_daemon_shutdown(
             None => background_shutdown.await,
         }
     });
+    log_shutdown_phase(
+        "background_drain",
+        "complete",
+        background_drain_started,
+        shutdown_deadline,
+    );
     // Project servers hold session-database leases whose graph clients keep
     // the session relation graph owners leased. The terminal owner drains and
     // closes those graph runtimes, so it must run only after every server has

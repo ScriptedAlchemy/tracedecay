@@ -45,7 +45,8 @@ pub use connection::{
     DatabaseOwnerWeakLeaseIssuerV1,
 };
 pub use connection::{
-    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationRetirementReservationV1,
+    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationInlinePassV1,
+    MemoryGraphReconciliationRetirementReservationV1,
     MemoryGraphReconciliationRetirementStartErrorV1, MemoryGraphReconciliationRetirementTerminalV1,
     MemoryGraphRuntimeOperationErrorV1, MemoryGraphRuntimeOperationV1,
 };

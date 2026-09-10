@@ -355,15 +355,31 @@ impl DaemonInvocationService {
 
     #[hotpath::measure(label = "daemon.service.lsp.expire_all", future = true)]
     pub async fn expire_all(&self) -> bool {
+        let started = std::time::Instant::now();
+        let step = |outcome: &str| {
+            tracedecay_runtime_core::logging::log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", outcome.to_string()),
+                    ("owner", "invocation".to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        };
         self.begin_shutdown().await;
         let lease_shutdown = self.lsp_lease_tasks.shutdown().await;
+        step("lsp_lease_tasks_joined");
         let work_attempts_clean = self.work_attempt_processes.shutdown().await;
+        step("work_attempt_processes_joined");
         self.lsp_sessions.lock().await.clear();
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
+        step("lsp_registries_cleared");
         let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
+        step("project_runtimes_shut_down");
         self.session_holder_databases.lock().await.clear();
         self.operation_events.expire_all().await;
+        step("operation_events_expired");
         let lease_shutdown_clean = lease_shutdown.is_ok();
         if let Err(problem) = lease_shutdown {
             tracing::error!(

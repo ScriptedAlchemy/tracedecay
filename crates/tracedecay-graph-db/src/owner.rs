@@ -717,6 +717,18 @@ impl GraphDbOwner {
         state.owner_attachment.is_none() && state.leases.is_empty()
     }
 
+    /// Lease evidence for a close refused on a leased owner: whether the
+    /// standing map attachment is still held and how many client leases
+    /// remain. Names the blocker class so a shutdown conflict is actionable.
+    pub(crate) fn lease_summary(&self) -> String {
+        let state = self.source.state.lock();
+        format!(
+            "owner_attachment={} leases={}",
+            state.owner_attachment.is_some(),
+            state.leases.len()
+        )
+    }
+
     fn from_database(
         database: Arc<GraphDb>,
         authority_attachment: Option<Box<dyn RetainedGraphStoreOwnerAttachmentV1>>,

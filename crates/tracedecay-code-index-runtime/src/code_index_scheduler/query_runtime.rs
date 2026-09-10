@@ -943,6 +943,25 @@ where
     if let Some(observability) = schedulers.index_observability_for_scope(scope).await {
         observability.record_retrieval_composition(&authorized, &request.budget);
     }
+    // Names what was served and why at the one site every search and context
+    // answer passes through: a lane that is partial from the current complete
+    // generation (for example lexical `candidate_sources_pruned`, with the
+    // pruned terms and their document frequencies) is a query policy bound,
+    // not an unconverged index (#917).
+    if authorized
+        .composition
+        .internal_lane_outcomes
+        .values()
+        .any(|outcome| !matches!(outcome, RetrieverOutcome::Complete(())))
+    {
+        tracing::info!(
+            event = "code_index_query_lane_coverage",
+            generation = generation.as_str(),
+            served_stale,
+            lane_outcomes = ?authorized.composition.internal_lane_outcomes,
+            "code-index query served with degraded lane coverage"
+        );
+    }
     Ok(ExecutedQuerySearchV1 {
         generation,
         authorized,
