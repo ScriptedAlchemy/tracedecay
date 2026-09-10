@@ -436,9 +436,9 @@ pub(super) async fn register_project_open_production_owners(
         .clone();
     let work_proposal_routing = DaemonWorkProposalRoutingAuthorityV1::mount(
         scope.clone(),
-        configuration.revision_id().clone(),
-        configuration.snapshot(),
+        &configuration,
         &access.configuration_digest,
+        &work_grant,
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("project-open Work proposal routing is unavailable: {error}"),

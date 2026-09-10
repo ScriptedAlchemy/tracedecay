@@ -288,6 +288,7 @@ mod tests {
             reference.clone(),
             executable_path.clone(),
             vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+            Vec::new(),
         )
         .unwrap();
         let configuration = pinned(directory.path(), vec![binding]);

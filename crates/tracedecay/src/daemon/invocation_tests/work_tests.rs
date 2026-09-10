@@ -129,7 +129,8 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     let _configuration_digest =
         ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).expect("configuration digest");
     let service = DaemonInvocationService::default();
-    let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let (proposal_routing, configuration_digest) =
+        empty_work_proposal_routing(scope.clone(), &grant);
     let policy_digest = mount_test_work_observability(
         &service,
         project.path(),
@@ -543,7 +544,8 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     )
     .expect("Work authority");
     let service = DaemonInvocationService::default();
-    let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let (proposal_routing, configuration_digest) =
+        empty_work_proposal_routing(scope.clone(), &grant);
     let policy_digest = mount_test_work_observability(
         &service,
         project.path(),
