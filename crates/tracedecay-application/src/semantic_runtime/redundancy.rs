@@ -346,7 +346,14 @@ pub fn commit_project_semantic_redundancy_authority_under_gate(
         .insert(project_root, state);
 }
 
-pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &Path) {
+/// Returns the retained code generations instead of dropping them: each is a
+/// generation-sized decoded owner, and freeing the last reference to one under
+/// the activation gate and the retained-generation lock held every other
+/// project's reads and the daemon shutdown drain for seconds on a
+/// repository-sized corpus. The caller drops them off those locks.
+pub(crate) fn unregister_project_semantic_redundancy_generation(
+    project_root: &Path,
+) -> Vec<Arc<CodeIndexPublishedGenerationV1>> {
     let activation = project_semantic_activation_gate(project_root);
     let _activation = activation
         .lock()
@@ -354,7 +361,7 @@ pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &P
     let mut retained = retained_generations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    retained.remove(project_root);
+    let removed = retained.remove(project_root);
     record_retained_generation_count(&retained);
     drop(retained);
     redundancy_states()
@@ -365,6 +372,9 @@ pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &P
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
+    removed.map_or_else(Vec::new, |project| {
+        project.generations.into_values().collect()
+    })
 }
 
 #[inline(always)]
@@ -713,7 +723,7 @@ mod tests {
             "the snapshot must observe the concurrent clearing, never a stale Ready pairing"
         );
         reader.join().expect("status reader thread");
-        unregister_project_semantic_runtime(&project_root);
+        drop(unregister_project_semantic_runtime(&project_root));
     }
 
     #[test]
@@ -790,7 +800,9 @@ mod tests {
         let gate_probe = Arc::downgrade(&gate);
         drop(gate);
 
-        unregister_project_semantic_redundancy_generation(project_root);
+        drop(unregister_project_semantic_redundancy_generation(
+            project_root,
+        ));
 
         assert!(
             redundancy_states()
