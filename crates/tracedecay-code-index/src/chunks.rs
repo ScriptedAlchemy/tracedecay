@@ -2477,6 +2477,8 @@ mod tests {
             start_line: source[..start].matches('\n').count() as u32,
             signature: None,
             docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             parent: None,
             identity: id(&digest(identity_byte)),
