@@ -49,7 +49,8 @@ impl HostAdmissionTestRuntimeV1 {
                 profile_root: Some(&self.profile_root),
                 session_authorities: self.mcp_session_authorities(),
                 ..Default::default()
-            },
+            }
+            .admit_opened_project(cg)?,
         )
         .await
     }

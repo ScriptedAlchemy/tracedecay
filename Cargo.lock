@@ -6745,8 +6745,6 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -6772,8 +6770,11 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-code-index-runtime",
+ "tracedecay-configuration",
  "tracedecay-contracts",
+ "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
+ "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-framing",
  "tracedecay-global-db",
@@ -6786,6 +6787,7 @@ dependencies = [
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-store-runtime",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
  "tracing",

@@ -324,10 +324,8 @@ pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
     Ok(definitions)
 }
 
-pub fn default_catalog_discovery_authority() -> Result<
-    BTreeSet<CapabilityId>,
-    tracedecay_daemon_service::application_surface::ApplicationSurfaceAdapterError,
-> {
+pub fn default_catalog_discovery_authority()
+-> Result<BTreeSet<CapabilityId>, tracedecay_daemon_protocol::ApplicationSurfaceAdapterError> {
     Ok(
         tracedecay_daemon_service::application_surface::application_surface_catalog_ref()?
             .capabilities()

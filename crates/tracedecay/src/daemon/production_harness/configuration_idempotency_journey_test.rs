@@ -112,7 +112,7 @@ async fn cli_configuration_set(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
-            tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Set(request),
             ),
             PageRequest::first(10).expect("CLI page"),
@@ -210,7 +210,7 @@ async fn configuration_batch_via_surface(
         return tracedecay_daemon_service::application_surface::resolve_dashboard_application_surface(
             operation,
             request_id,
-            tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
@@ -228,7 +228,7 @@ async fn configuration_batch_via_surface(
             surface,
             operation,
             request_id,
-            tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             PageRequest::first(10).expect("surface page"),

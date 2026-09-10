@@ -3260,3 +3260,141 @@ async fn external_admission_does_not_resolve_memory_owner_but_memory_admission_d
         }
     }
 }
+
+#[tokio::test]
+async fn cancelled_after_admission_does_not_reserve_journal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (authority, _, _) = retained_external_authority(
+        temp.path(),
+        external_admission("run.fixture-cancel", "request.fixture-cancel"),
+    );
+    let context = authority.context.clone();
+    let cancellation = authority.cancellation.clone();
+    let configuration_digest = authority.admission.configuration_digest.clone();
+    authority
+        .abandon_uncommitted()
+        .await
+        .expect("abandon fixture reservation");
+
+    let request =
+        session_reflector_admission("run.pre-admission-cancel", "request.pre-admission-cancel")
+            .request;
+    let journal_path = canonical_journal_path(temp.path(), &request.run_id);
+    assert!(
+        cancellation.cancel(UtcMicros(3)),
+        "post-admission cancel must win the live signal"
+    );
+
+    let result = Box::pin(AutomationEffectAuthority::prepare(
+        AdmittedAutomationEffectRequest {
+            context: context.clone(),
+            cancellation,
+            observed_at: UtcMicros(2),
+            configuration_digest,
+            request,
+            dashboard_root: temp.path().to_path_buf(),
+        },
+        || {
+            Ok(FactOwnerV1::Project {
+                project_id: context.scope().project_id.clone(),
+            })
+        },
+        |_, _| async { Err(contract_error("cancelled admission must not read receipts")) },
+    ))
+    .await
+    .expect("typed pre-admission outcome");
+
+    let AutomationEffectAdmission::PreAdmissionProblem(envelope) = result else {
+        panic!("cancelled run must stay a typed pre-admission problem, not reserve durable state");
+    };
+    assert_eq!(
+        envelope.problem.source(),
+        &tracedecay_contracts::ApplicationProblem::cancelled_before_admission()
+    );
+    assert!(
+        envelope.problem.is_pre_admission(),
+        "cancellation after admission and before reservation is still pre-admission"
+    );
+    assert!(
+        !journal_path.exists(),
+        "cancelled run must not reserve journal state"
+    );
+    assert!(
+        recovery_index::indexed_journals_blocking(temp.path(), context.scope())
+            .expect("pending index")
+            .is_empty(),
+        "cancelled run must not enter the pending journal index"
+    );
+}
+
+#[tokio::test]
+async fn timed_out_after_admission_does_not_reserve_journal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (authority, _, _) = retained_external_authority(
+        temp.path(),
+        external_admission("run.fixture-timeout", "request.fixture-timeout"),
+    );
+    // Snapshot admission stays valid: observed_at (2) is before expires_at (100).
+    // The live usecase clock is far past that deadline, so the reservation
+    // recheck must refuse without writing journal state.
+    let context = authority
+        .context
+        .clone()
+        .with_deadline(Deadline::new(UtcMicros(100)).expect("elapsed deadline"));
+    let cancellation = authority.cancellation.clone();
+    let configuration_digest = authority.admission.configuration_digest.clone();
+    authority
+        .abandon_uncommitted()
+        .await
+        .expect("abandon fixture reservation");
+
+    let request =
+        session_reflector_admission("run.pre-admission-timeout", "request.pre-admission-timeout")
+            .request;
+    let journal_path = canonical_journal_path(temp.path(), &request.run_id);
+    assert!(
+        tracedecay_contracts::now_micros() >= UtcMicros(100),
+        "fresh clock must be past the admitted deadline"
+    );
+
+    let result = Box::pin(AutomationEffectAuthority::prepare(
+        AdmittedAutomationEffectRequest {
+            context: context.clone(),
+            cancellation,
+            observed_at: UtcMicros(2),
+            configuration_digest,
+            request,
+            dashboard_root: temp.path().to_path_buf(),
+        },
+        || {
+            Ok(FactOwnerV1::Project {
+                project_id: context.scope().project_id.clone(),
+            })
+        },
+        |_, _| async { Err(contract_error("timed-out admission must not read receipts")) },
+    ))
+    .await
+    .expect("typed pre-admission outcome");
+
+    let AutomationEffectAdmission::PreAdmissionProblem(envelope) = result else {
+        panic!("timed-out run must stay a typed pre-admission problem, not reserve durable state");
+    };
+    assert_eq!(
+        envelope.problem.source(),
+        &tracedecay_contracts::ApplicationProblem::timed_out_before_admission()
+    );
+    assert!(
+        envelope.problem.is_pre_admission(),
+        "timeout after admission and before reservation is still pre-admission"
+    );
+    assert!(
+        !journal_path.exists(),
+        "timed-out run must not reserve journal state"
+    );
+    assert!(
+        recovery_index::indexed_journals_blocking(temp.path(), context.scope())
+            .expect("pending index")
+            .is_empty(),
+        "timed-out run must not enter the pending journal index"
+    );
+}

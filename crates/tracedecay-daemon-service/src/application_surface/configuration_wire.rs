@@ -12,7 +12,7 @@ use tracedecay_tool_catalog::{
     ReceiptContract, ReconciliationContract, TerminalState, TerminalStateContract,
 };
 
-use super::ApplicationSurfaceAdapterError;
+use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 
 pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
     ApplicationSurfaceOperation::ConfigurationList,

@@ -26,17 +26,16 @@ use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindin
 use super::registered_http::RegisteredHttpOperation;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
-    APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, ApplicationSurfaceAdapterError,
-    ApplicationSurfaceRequest, CallableCodeSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
+    APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, CallableCodeSurfaceRequest,
+    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
+    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, HttpCancellationRegistry,
     HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
-    adapt_application_tool_request, application_http_context, application_negotiated_features,
+    application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
-    parse_application_surface_request, parse_http_application_surface_request,
-    resolve_application_binding, resolve_application_surface_dispatch,
-    resolve_authenticated_http_request_context, surface_rejection_metadata,
+    parse_http_application_surface_request, resolve_application_binding,
+    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
+    surface_rejection_metadata,
 };
 use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
@@ -49,6 +48,10 @@ use tracedecay_contracts::feedback::observations::{
 };
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
+    adapt_application_tool_request, parse_application_surface_request,
+};
 
 fn operation_context(project_id: &ProjectId) -> RequestContext {
     let observed_at = current_micros().expect("current time");

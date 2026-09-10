@@ -27,7 +27,8 @@ use super::port::SourceEditRuntime;
 use super::reconcile::{recover_or_replay, recover_source_edit_transaction};
 use super::records::{applied_record, durable_record, interrupted_record, unknown_record};
 use super::verify::{
-    application_contract_error, application_problem, config_error, run_edit_verifications,
+    application_contract_error, application_problem, config_error, expected_state_mismatch,
+    idempotency_conflict, run_edit_verifications,
 };
 
 fn durable_request(
@@ -91,7 +92,7 @@ fn persist_pre_effect_result(
     } = state;
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != *input_digest {
-            return Err(config_error(
+            return Err(idempotency_conflict(
                 "source edit idempotency key conflicts with a prior input",
             ));
         }
@@ -705,7 +706,7 @@ pub(super) async fn resolve_source_edit_preview(
     let expected_state = planned_source_edit_state_digest(&candidate_files, &planned_files, false)?;
     let observed_state = source_edit_state_digest(graph.project_root(), &candidate_files)?;
     if observed_state != expected_state {
-        return Err(config_error(
+        return Err(expected_state_mismatch(
             "source edit candidate state changed while its exact preview was captured",
         ));
     }

@@ -5,7 +5,7 @@ use std::pin::Pin;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 
-use super::super::{DaemonEngine, DaemonHandshake, log_daemon_event};
+use super::super::{DaemonEngine, DaemonHandshake};
 use super::{
     automation_scheduler_has_work, effective_automation_config_for_project,
     log_scheduler_automation_replay, log_scheduler_task_error, log_scheduler_task_start,
@@ -18,6 +18,7 @@ use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub(super) fn log_scheduler_pre_admission_problem(
     project_path: &Path,

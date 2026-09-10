@@ -31,7 +31,9 @@ async fn runtime_mcp_marks_missing_generation_census_authority_unavailable() {
         json!({ "format": "json" }),
         None,
         None,
-        ToolCallRegistryOptions::default(),
+        ToolCallRegistryOptions::default()
+            .admit_opened_project(&cg)
+            .expect("opened fixture admits"),
     )
     .await
     .expect("missing generation authority is an observed runtime state");

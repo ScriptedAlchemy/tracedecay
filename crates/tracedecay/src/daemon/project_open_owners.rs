@@ -67,79 +67,26 @@ pub(super) use tracedecay_daemon_service::{
     LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1,
 };
 
-fn install_project_open_source_edit_owners(
+async fn install_project_open_source_edit_owners(
     server: &McpServer,
+    project_root: &Path,
     owner: Arc<ProjectSourceEditOwnerV1>,
 ) -> Result<()> {
-    let edit_owner = Arc::clone(&owner);
-    server
-        .install_source_edit_executor(Arc::new(move |request| {
-            let owner = Arc::clone(&edit_owner);
-            Box::pin(async move {
-                owner
-                    .execute(
-                        request.edit,
-                        request.idempotency_key,
-                        request.expected_state,
-                        request.request_id,
-                        request.deadline,
-                        request.cancellation,
-                    )
-                    .await
-            })
-        }))
-        .map_err(|_| TraceDecayError::Config {
-            message: "project-open source edit authority was already installed".to_owned(),
-        })?;
-    let rollback_owner = Arc::clone(&owner);
-    server
-        .install_source_edit_rollback_executor(Arc::new(move |request| {
-            let owner = Arc::clone(&rollback_owner);
-            Box::pin(async move {
-                owner
-                    .rollback(
-                        request.effect_id,
-                        request.original_idempotency_key,
-                        request.idempotency_key,
-                        request.original_input_digest,
-                        request.expected_state,
-                        request.request_id,
-                        request.deadline,
-                        request.cancellation,
-                    )
-                    .await
-            })
-        }))
-        .map_err(|_| TraceDecayError::Config {
-            message: "project-open source edit rollback authority was already installed".to_owned(),
-        })?;
-    server
-        .install_source_edit_reconciliation_executor(Arc::new(move |request| {
-            let owner = Arc::clone(&owner);
-            Box::pin(async move {
-                owner
-                    .reconcile(
-                        request.kind,
-                        request.effect_id,
-                        request.idempotency_key,
-                        request.attempt_idempotency_key,
-                        request.input_digest,
-                        request.disposition,
-                        request.request_id,
-                        request.deadline,
-                        request.cancellation,
-                    )
-                    .await
-            })
-        }))
-        .map_err(|_| TraceDecayError::Config {
-            message: "project-open source edit reconciliation authority was already installed"
+    let Some(service) = server.daemon_invocation_service() else {
+        return Err(TraceDecayError::Config {
+            message: "project-open source edit authority requires the daemon invocation service"
                 .to_owned(),
-        })?;
-    Ok(())
+        });
+    };
+    service
+        .register_source_edit_owner(project_root.to_path_buf(), owner)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open source edit authority failed to register: {error}"),
+        })
 }
 
-pub(crate) fn install_project_open_source_edit_preview_owner(
+pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
@@ -179,7 +126,7 @@ pub(crate) fn install_project_open_source_edit_preview_owner(
         authorization,
         Arc::clone(&mutation),
     ));
-    install_project_open_source_edit_owners(server, owner)?;
+    install_project_open_source_edit_owners(server, project_root, owner).await?;
     Ok(mutation)
 }
 
@@ -188,6 +135,9 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
     server: &McpServer,
 ) -> Result<bool> {
     let graph = server.cg().await;
+    if server.daemon_invocation_service().is_none() {
+        return Ok(false);
+    }
     let Some(code_graph) = server.code_graph_projection_read_port() else {
         // A directly constructed test server carries no production code-graph
         // projection port, so the daemon-owned source-edit authority cannot
@@ -209,7 +159,8 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         code_graph,
         &project_root,
         project_id.as_str(),
-    )?;
+    )
+    .await?;
     mutation.mark_ready();
     Ok(true)
 }
@@ -400,13 +351,11 @@ pub(super) async fn register_project_open_production_owners(
                 message: format!("project-open retained grant is invalid: {error}"),
             }
         })?;
-    let retained_ports = server
-        .retained_surface_ports(
-            project_root,
-            scope.project_id.clone(),
-            access.configuration_digest.clone(),
-        )
-        .await;
+    let retained_ports = server.retained_surface_ports(
+        project_root,
+        scope.project_id.clone(),
+        access.configuration_digest.clone(),
+    );
     hotpath::future!(
         invocation.retained_runtime_registrar().register(
             project_root.to_path_buf(),

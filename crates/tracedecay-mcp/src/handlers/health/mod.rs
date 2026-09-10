@@ -2,10 +2,12 @@
 
 mod dsm;
 mod reports;
+mod runtime;
 mod test_map;
 
 pub use dsm::handle_dsm;
 pub use reports::{handle_dependency_depth, handle_gini, handle_health};
+pub use runtime::{collect_database_snapshot, handle_runtime};
 pub use test_map::{handle_test_map, handle_test_risk};
 
 use std::collections::{HashMap, HashSet};

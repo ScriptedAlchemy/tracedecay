@@ -198,11 +198,6 @@ lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
 lang-quint = ["tracedecay-code-index/lang-quint"]
 lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
-# Shipped `tracedecay bench` / MCP `admin_project` action `bench`. Off the
-# default library graph; `tracedecay-cli`'s `production` feature selects it
-# so the command stays in the binary without compiling this module into
-# `cargo check -p tracedecay --lib`.
-bench = []
 
 # Integration fixture surface. `HostAdmissionTestRuntimeV1` and the registered
 # database scaffolding it owns are assembled by the composition root, so they

@@ -6,9 +6,11 @@
 use std::time::Duration;
 
 use tracedecay_contracts::{CancellationSignal, Deadline, PageRequest, RequestId};
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_daemon_service::application_surface::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
     execute_application_surface, observe_surface_argument_rejection,
     resolve_application_surface_dispatch_with_controls,
 };

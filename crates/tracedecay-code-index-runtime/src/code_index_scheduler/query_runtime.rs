@@ -189,22 +189,11 @@ pub enum DeferredMountAttemptV1 {
 pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
-    scope: ResolvedScope,
     mut attempt: F,
 ) where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = DeferredMountAttemptV1>,
 {
-    if crate::project_reads::code_index_disabled_for_scope(registry, &scope) {
-        tracing::info!(
-            event = "query_authority_mount",
-            outcome = "code_index_disabled",
-            project_id = %scope.project_id,
-            deferred = true,
-            "route indexes no code by contract; deferred query authority is terminal"
-        );
-        return;
-    }
     let mut publications = registry.subscribe_generation_publications();
     let mut ready_poll = tokio::time::interval(Duration::from_secs(1));
     ready_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -222,6 +211,8 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
             publication = publications.recv() => match publication {
                 Ok(publication) if publication.project_root == project_root => {}
                 Ok(_) => {}
+                // A lagged receiver dropped publications; one of them may have
+                // been this project's, so attempt the mount anyway.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }

@@ -603,7 +603,7 @@ impl ProfileHostAdmissionBootstrapWorker {
             match result {
                 Ok(()) => {
                     if consecutive_retryable > 0 {
-                        tracing::info!(
+                        tracing::warn!(
                             event = "profile_host_admission_bootstrap_recovered",
                             attempts = consecutive_retryable + 1,
                         );
@@ -625,7 +625,7 @@ impl ProfileHostAdmissionBootstrapWorker {
                     consecutive_retryable = consecutive_retryable.saturating_add(1);
                     self.backoff_count.fetch_add(1, Ordering::AcqRel);
                     if consecutive_retryable == 1 {
-                        tracing::info!(
+                        tracing::warn!(
                             event = "profile_host_admission_bootstrap_retry",
                             reason_code,
                         );

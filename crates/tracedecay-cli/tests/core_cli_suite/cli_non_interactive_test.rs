@@ -2579,7 +2579,7 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
 /// rather than asserting a success the product does not offer there.
 #[cfg(unix)]
 #[test]
-fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifacts() {
+fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifacts() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
@@ -2590,19 +2590,52 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
     git(&project_root, &["checkout", "-b", "feature/new"]);
     let project_id = default_profile_project_id(&project_root);
     let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
-    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["branch", "add", "feature/new"]);
     let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
-        "branch add must complete the daemon's exact branch sealing journey\nstdout:\n{}\nstderr:\n{}",
+        "branch add must admit exact branch publication\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
-        .expect("branch add must publish tracking metadata in the profile shard");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("indexing continues in the background"),
+        "branch add must report truthful pending state"
+    );
+    let mut pending = tracedecay_command_without_daemon(home.path(), &project_root);
+    pending.args(["branch", "list"]);
+    let pending = run_with_timeout(pending, cli_timeout());
+    let pending_stderr = String::from_utf8_lossy(&pending.stderr);
+    assert!(
+        pending.status.success(),
+        "branch list must read durable admission\nstdout:\n{}\nstderr:\n{pending_stderr}",
+        String::from_utf8_lossy(&pending.stdout)
+    );
+    assert!(
+        pending_stderr
+            .lines()
+            .any(|line| line.contains("feature/new") && line.contains("indexing")),
+        "admitted branch must be durably visible as indexing: {pending_stderr}"
+    );
+    let started = Instant::now();
+    let meta = loop {
+        if let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
+            && meta
+                .branches
+                .get("feature/new")
+                .is_some_and(|entry| entry.graph_source.is_some())
+        {
+            break meta;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "background branch publication did not seal exact provenance"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     let entry = meta
         .branches
         .get("feature/new")
@@ -2615,7 +2648,7 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
     let source = entry
         .graph_source
         .as_ref()
-        .expect("branch add must seal exact branch provenance before replying");
+        .expect("background branch publication must seal exact provenance");
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(&project_root)
@@ -2667,6 +2700,26 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
     assert!(
         !shard_root.join("branches").exists(),
         "branch add must not create a per-branch database"
+    );
+
+    drop(daemon);
+    let _restarted_daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut list = tracedecay_command_without_daemon(home.path(), &project_root);
+    list.args(["branch", "list"]);
+    let listed = run_with_timeout(list, cli_timeout());
+    let stderr = String::from_utf8_lossy(&listed.stderr);
+    assert!(
+        listed.status.success(),
+        "branch list must reopen persisted branch tracking\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    let branch = stderr
+        .lines()
+        .find(|line| line.contains("feature/new"))
+        .expect("reopened branch list must retain feature/new");
+    assert!(
+        !branch.contains("indexing") && !branch.contains("missing-db"),
+        "reopened branch must remain exact and ready: {branch}"
     );
 
     let mut remove = tracedecay_command_without_daemon(home.path(), &project_root);

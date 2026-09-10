@@ -722,7 +722,8 @@ pub async fn handle_branch_diff(ctx: &McpToolContext<'_>, args: Value) -> Result
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        branched_repository, ref_read_guard, standalone_context, standalone_context_on_branch,
+        branched_repository, fixture_context, fixture_project, fixture_project_on_branch,
+        ref_read_guard,
     };
     use super::*;
 
@@ -733,7 +734,8 @@ mod tests {
     async fn branch_search_without_an_admitted_executor_is_capability_unavailable() {
         let _serialized = ref_read_guard().await;
         let repo = branched_repository();
-        let ctx = standalone_context(repo.path());
+        let project = fixture_project(repo.path());
+        let ctx = fixture_context(&project);
 
         let result = handle_branch_search(&ctx, json!({ "branch": "feature", "query": "after" }))
             .await
@@ -753,7 +755,8 @@ mod tests {
     async fn branch_diff_without_an_admitted_executor_is_capability_unavailable() {
         let _serialized = ref_read_guard().await;
         let repo = branched_repository();
-        let ctx = standalone_context(repo.path());
+        let project = fixture_project(repo.path());
+        let ctx = fixture_context(&project);
 
         let result = handle_branch_diff(&ctx, json!({ "base": "main", "head": "feature" }))
             .await
@@ -776,19 +779,22 @@ mod tests {
         let _serialized = ref_read_guard().await;
         let repo = branched_repository();
 
-        let without_branch =
-            handle_branch_diff(&standalone_context(repo.path()), json!({ "base": "main" })).await;
+        let without_project = fixture_project(repo.path());
+        let without_branch = handle_branch_diff(
+            &fixture_context(&without_project),
+            json!({ "base": "main" }),
+        )
+        .await;
         assert!(matches!(
             without_branch,
             Err(TraceDecayError::Config { .. })
         ));
 
-        let with_branch = handle_branch_diff(
-            &standalone_context_on_branch(repo.path(), "feature"),
-            json!({ "base": "main" }),
-        )
-        .await
-        .expect("the context's active branch resolves head");
+        let with_project = fixture_project_on_branch(repo.path(), "feature");
+        let with_branch =
+            handle_branch_diff(&fixture_context(&with_project), json!({ "base": "main" }))
+                .await
+                .expect("the context's active branch resolves head");
         assert_eq!(with_branch.semantic_error(), Some(true));
     }
 

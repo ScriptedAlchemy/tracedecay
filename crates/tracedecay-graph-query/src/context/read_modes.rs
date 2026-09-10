@@ -349,6 +349,7 @@ mod tests {
                 line_span,
                 start_line,
                 signature: signature.map(str::to_owned),
+                docstring: None,
                 skip_test_coverage: false,
                 file_identity: digest('e'),
                 content_digest: digest('d'),

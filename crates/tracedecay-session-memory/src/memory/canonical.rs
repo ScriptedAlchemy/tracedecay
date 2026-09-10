@@ -338,7 +338,7 @@ fn commit_proof(
 fn store_error(error: MemoryUseCaseError<FactStoreError>) -> MemoryApplicationError {
     match error {
         MemoryUseCaseError::Invariant(error) => invariant_error(error),
-        MemoryUseCaseError::Authority(error) => MemoryApplicationError::Store(error),
+        MemoryUseCaseError::Authority(error) => MemoryApplicationError::from(error),
     }
 }
 

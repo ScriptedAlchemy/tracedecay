@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+#[cfg(test)]
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -97,6 +98,7 @@ pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value
 /// or array is caller error, not a broken invariant — asserting it would
 /// panic the daemon's client task and the caller would see only a dropped
 /// connection.
+#[cfg(test)]
 pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
     if args.is_object() {
         return Ok(());
@@ -108,6 +110,7 @@ pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
 
 /// Decode one catalog-owned primitive request after removing keys owned by
 /// the MCP transport rather than the application operation.
+#[cfg(test)]
 pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
     args: &Value,
     tool_name: &str,

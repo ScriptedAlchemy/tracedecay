@@ -33,11 +33,6 @@
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
 
-// Query-bench implementation for `tracedecay bench` / MCP `admin_project`
-// action `bench`. Kept off the default library graph; the CLI production
-// feature selects `bench` so the shipped command still compiles.
-#[cfg(any(test, feature = "bench", feature = "test-helpers"))]
-#[path = "../benches/query_bench/harness.rs"]
 pub mod bench;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.

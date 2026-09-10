@@ -116,7 +116,7 @@ fn matches_test_file(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::test_support::{branched_repository, standalone_context};
+    use super::test_support::{branched_repository, fixture_context, fixture_project};
     use super::*;
 
     /// A terminal graph failure must reach the caller as an error. Degrading
@@ -125,7 +125,8 @@ mod tests {
     #[tokio::test]
     async fn pr_context_propagates_terminal_graph_failures() {
         let repo = branched_repository();
-        let ctx = standalone_context(repo.path());
+        let project = fixture_project(repo.path());
+        let ctx = fixture_context(&project);
         let terminal_errors = [
             tracedecay_graph_query::map_code_graph_read_runtime_error(
                 tracedecay_graph_query::CodeGraphReadError::Cancelled,
@@ -172,10 +173,9 @@ mod tests {
     /// failure every other git error uses, so a caller never sees a bare hang.
     #[test]
     fn an_elapsed_dispatch_deadline_is_a_typed_semantic_failure() {
-        let result = git_dispatch_deadline_result(
-            &standalone_context(std::path::Path::new("/unread")),
-            "tracedecay_pr_context",
-        );
+        let project = fixture_project(std::path::Path::new("/unread"));
+        let result =
+            git_dispatch_deadline_result(&fixture_context(&project), "tracedecay_pr_context");
 
         assert_eq!(result.semantic_error(), Some(true));
         let message = result.failure_message().unwrap_or_default();

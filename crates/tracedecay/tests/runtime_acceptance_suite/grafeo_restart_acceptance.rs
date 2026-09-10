@@ -11,8 +11,8 @@ use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1;
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_contracts::{ApplicationEnvelope, RequestId};
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 use tracedecay_daemon_protocol::{DaemonHandshake, DaemonInvocationClient, RequestedOutputFormat};
-use tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn initialize_project(home: &Path, project: &Path) {

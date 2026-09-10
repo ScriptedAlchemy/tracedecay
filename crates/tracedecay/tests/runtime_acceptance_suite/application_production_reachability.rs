@@ -18,10 +18,13 @@ use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
     ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
 };
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    parse_application_surface_request,
+};
 use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay_daemon_service::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, CallableCodeSurfaceMeta,
-    CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest, parse_application_surface_request,
+    CallableCodeSurfaceMeta, CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest,
     resolve_http_application_surface,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;

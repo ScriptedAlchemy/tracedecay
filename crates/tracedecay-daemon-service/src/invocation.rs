@@ -187,6 +187,7 @@ mod registrars;
 mod retained;
 mod semantic_activation;
 pub mod semantic_evaluation;
+mod source_edit;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -216,6 +217,9 @@ use native_integration::execute_native_integration;
 use observatory::execute_observatory_read;
 use primitive::*;
 use retained::*;
+use source_edit::{
+    execute_source_edit, execute_source_edit_reconcile, execute_source_edit_rollback,
+};
 use types::*;
 use work::*;
 pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
@@ -256,7 +260,7 @@ pub use registrars::{
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
     DaemonRetainedRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
-    DaemonWorkRuntimeRegistrar,
+    DaemonSourceEditOwnerRegistrationError, DaemonWorkRuntimeRegistrar,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use types::{
@@ -473,6 +477,38 @@ impl DaemonInvocationService {
         &self,
     ) -> Arc<tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
         Arc::clone(&self.github_stack_coordinator)
+    }
+
+    /// Registers this project's one source-edit owner, or joins the incumbent.
+    ///
+    /// Identity is the authorized scope, exactly as
+    /// [`DaemonRetainedRuntimeRegistrar::register`] keys the retained runtime.
+    /// A linked worktree or a reopen of the same canonical root builds its own
+    /// owner object; that route aliases the incumbent instead of being refused,
+    /// while a foreign scope is refused with a typed error rather than
+    /// replacing the incumbent.
+    #[hotpath::skip]
+    pub async fn register_source_edit_owner(
+        &self,
+        project_root: PathBuf,
+        owner: Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1>,
+    ) -> Result<(), DaemonSourceEditOwnerRegistrationError> {
+        let scope = owner.scope();
+        self.project_runtimes
+            .register_or_reconcile(
+                project_root,
+                |incumbent: &mut Arc<
+                    crate::project_owner_registration::ProjectSourceEditOwnerV1,
+                >| {
+                    if incumbent.scope() == scope {
+                        Ok(())
+                    } else {
+                        Err(DaemonSourceEditOwnerRegistrationError::ForeignAuthority)
+                    }
+                },
+                || async { Ok(owner) },
+            )
+            .await
     }
 
     #[hotpath::measure(label = "daemon.service.invocation.retained_context", future = true)]

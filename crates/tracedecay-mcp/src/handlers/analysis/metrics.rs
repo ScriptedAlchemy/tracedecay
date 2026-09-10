@@ -314,12 +314,16 @@ pub async fn handle_inheritance_depth(
     });
     let (symbols, memo) = hotpath::measure_block!("mcp.analysis.inheritance_depth.compute", {
         let mut parents = HashMap::<SymbolOccurrenceId, Vec<SymbolOccurrenceId>>::new();
+        let mut hierarchy_symbols = HashSet::new();
         for edge in edges {
+            hierarchy_symbols.insert(edge.edge.from_occurrence.clone());
+            hierarchy_symbols.insert(edge.edge.to_occurrence.clone());
             parents
                 .entry(edge.edge.from_occurrence)
                 .or_default()
                 .push(edge.edge.to_occurrence);
         }
+        symbols.retain(|symbol| hierarchy_symbols.contains(&symbol.occurrence));
         let mut memo = HashMap::<SymbolOccurrenceId, u64>::new();
         for symbol in &symbols {
             inheritance_depth(&symbol.occurrence, &parents, &mut HashSet::new(), &mut memo)?;

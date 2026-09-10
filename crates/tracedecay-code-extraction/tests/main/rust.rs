@@ -91,6 +91,31 @@ fn helper() {}
 }
 
 #[test]
+fn test_rust_enum_variant_docstrings() {
+    let source = r#"
+pub enum Mode {
+    /// Uses the safe behavior.
+    Safe,
+    Fast,
+}
+"#;
+    let result = RustExtractor.extract("mode.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let safe = result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::EnumVariant && node.name == "Safe")
+        .expect("Safe variant");
+    let fast = result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::EnumVariant && node.name == "Fast")
+        .expect("Fast variant");
+    assert_eq!(safe.docstring.as_deref(), Some("Uses the safe behavior."));
+    assert_eq!(fast.docstring, None);
+}
+
+#[test]
 fn test_rust_async_function() {
     let source = r#"
 pub async fn fetch_data() -> String {

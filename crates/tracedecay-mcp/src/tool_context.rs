@@ -16,26 +16,38 @@
 //! `Project` or `Code` shard for the same project included, since those are
 //! different stores and not project-session authority.
 //!
-//! Authorization is carried, never inferred. The root validated whether this
-//! request may read the admitted project store and hands that verdict over
-//! with the lease; the context reports it verbatim and cannot upgrade a
-//! missing or unauthorized verdict into an apparent capability.
+//! A session-store lease is admitted by presence: attached means the daemon
+//! admitted it; absent is the typed unavailable/denied state. Bind derives
+//! that typed state from the lease and does not invent a verdict the daemon
+//! does not produce.
 //!
 //! Absence stays typed. An authority the daemon never admitted is `None` here
-//! and each handler turns that into its own unavailable state. With no
-//! admitted scope no scoped authority may be admitted at all, and graph
-//! verification refuses rather than waving a query through.
+//! and each handler turns that into its own unavailable state. Every binding
+//! carries an admitted project; a call that never published a checkout is a
+//! typed root failure, not a second binding shape. Graph verification refuses
+//! rather than waving a query through.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use tracedecay_configuration::ProjectConfigurationRuntime;
+use tracedecay_contracts::doctor::SemanticOwnerStateV1;
 use tracedecay_contracts::{CancellationSignal, Deadline, ResolvedScope};
+use tracedecay_dashboard_api::AdmittedDoctorReportV1;
+use tracedecay_dashboard_api::code_index_freshness_api::{
+    CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReader,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_query::code_search::{
     CodeIndexBranchDiffExecutor, CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor,
 };
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::storage::StoreLayout;
+use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_store::StoreShardScopeV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 /// Why a proposed binding is not one coherent admitted request scope.
@@ -45,8 +57,6 @@ pub enum McpToolBindingError {
     RelativeProjectRoot { root: String },
     #[error("admitted request scope is not self-consistent: {detail}")]
     ScopeInvalid { detail: String },
-    #[error("{authority} cannot be admitted without a resolved request scope")]
-    UnscopedAuthority { authority: &'static str },
     #[error(
         "admitted project session store must be a project-sessions shard, but its lease was opened for {shard} while this request resolved {request}"
     )]
@@ -57,6 +67,8 @@ pub enum McpToolBindingError {
     ProjectStoreProjectMismatch { request: String, lease: String },
     #[error("code index admission carries no executor to authorize")]
     CodeIndexWithoutExecutor,
+    #[error("store layout project '{layout}' does not match admitted scope {request}")]
+    StoreLayoutProjectMismatch { request: String, layout: String },
 }
 
 impl McpToolBindingError {
@@ -66,10 +78,12 @@ impl McpToolBindingError {
         match self {
             Self::RelativeProjectRoot { .. } => "mcp_tool_binding_root_not_absolute",
             Self::ScopeInvalid { .. } => "mcp_tool_binding_scope_invalid",
-            Self::UnscopedAuthority { .. } => "mcp_tool_binding_scope_unresolved",
             Self::ProjectStoreNotSessionScoped { .. } => "mcp_tool_binding_store_not_session_shard",
             Self::ProjectStoreProjectMismatch { .. } => "mcp_tool_binding_store_project_mismatch",
             Self::CodeIndexWithoutExecutor => "mcp_tool_binding_code_index_without_executor",
+            Self::StoreLayoutProjectMismatch { .. } => {
+                "mcp_tool_binding_store_layout_project_mismatch"
+            }
         }
     }
 }
@@ -92,34 +106,22 @@ pub struct RequestControls<'a> {
     pub cancellation: Option<&'a CancellationSignal>,
 }
 
-/// The registered project session store the daemon opened for this request,
-/// with the authorization the daemon validated for reading it.
+/// The registered project session store the daemon opened for this request.
 ///
-/// Both halves come from the root. The lease knows the logical shard it was
-/// opened for, so [`McpToolContext::bind`] can check it against the admitted
-/// checkout instead of trusting how it was presented; the authorization is the
-/// root's own verdict and is carried through untouched.
+/// Presence of the lease *is* admission. [`McpToolContext::bind`] derives
+/// [`ValidatedAuthorization::Authorized`] from that presence; an absent lease
+/// is the typed unavailable/denied state, not a second verdict.
 #[derive(Clone, Copy)]
 pub struct AdmittedProjectStore<'a> {
     lease: &'a RegisteredGlobalDbLeaseV1,
-    authorization: ValidatedAuthorization,
 }
 
 impl<'a> AdmittedProjectStore<'a> {
-    /// Pairs the lease the root opened with the verdict the root reached.
-    ///
-    /// `authorization` must be the authorization the daemon validated for this
-    /// request. Passing [`ValidatedAuthorization::Unauthorized`] keeps every
-    /// store-backed handler denied; there is no value that means "decide later".
+    /// Wraps the admitted lease. Presence of the lease *is* admission;
+    /// absence never reaches this type.
     #[must_use]
-    pub fn new(
-        lease: &'a RegisteredGlobalDbLeaseV1,
-        authorization: ValidatedAuthorization,
-    ) -> Self {
-        Self {
-            lease,
-            authorization,
-        }
+    pub fn new(lease: &'a RegisteredGlobalDbLeaseV1) -> Self {
+        Self { lease }
     }
 }
 
@@ -156,20 +158,218 @@ impl<'a> AdmittedCodeIndex<'a> {
     }
 }
 
+/// The checkout identity a request-scoped admitted project snapshot carries.
+#[derive(Clone, Debug)]
+pub struct McpProjectIdentityV1 {
+    pub project_root: PathBuf,
+    pub scope: ResolvedScope,
+    pub active_branch: Option<String>,
+    pub serving_branch: Option<String>,
+    /// Ancestor-fallback warning retained at project open, when serving from a
+    /// branch DB that is not the live HEAD. Status/active-project diagnostics
+    /// need it to build the same [`tracedecay_application::tracedecay::BranchDiagnostics`]
+    /// the root used to compute on `TraceDecay`.
+    pub fallback_warning: Option<String>,
+}
+
+/// Request-scoped handles a moved handler family may read.
+///
+/// Lives exactly as long as the request's `Arc<TraceDecay>` snapshot and must
+/// never be cached. A `Database` retained across a branch reopen would be a
+/// stale handle: project-open swaps the served instance, then reconciles
+/// owners (`mcp/server/lifecycle.rs`). The composition root builds this
+/// snapshot per call from the instance that request already holds.
+///
+/// In-process handles are not wire contracts. The graph database, store
+/// runtime, and configuration runtime are the same required `TraceDecay`
+/// handles the root already holds; a session-store lease stays `None` when
+/// the daemon never admitted one.
+///
+/// Trimmed to what graph leftovers, status/active-project, and runtime health
+/// actually read: profile-session and diagnostics-database handles are not
+/// on this snapshot because those families do not touch them.
+pub struct McpAdmittedProjectV1 {
+    identity: McpProjectIdentityV1,
+    store_layout: StoreLayout,
+    graph_database: Database,
+    graph_db_path: PathBuf,
+    store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+    configuration_runtime: Arc<ProjectConfigurationRuntime>,
+    project_session_store: Option<RegisteredGlobalDbLeaseV1>,
+}
+
+impl McpAdmittedProjectV1 {
+    /// Validates one request-scoped snapshot and freezes it.
+    ///
+    /// The root must be absolute, the admitted scope self-consistent, the
+    /// store layout must name that same project, and a session lease — when
+    /// present — must be a `ProjectSessions` shard for that project. Nothing
+    /// is defaulted or repaired.
+    pub fn new(
+        identity: McpProjectIdentityV1,
+        store_layout: StoreLayout,
+        graph_database: Database,
+        graph_db_path: PathBuf,
+        store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+        configuration_runtime: Arc<ProjectConfigurationRuntime>,
+        project_session_store: Option<RegisteredGlobalDbLeaseV1>,
+    ) -> std::result::Result<Self, McpToolBindingError> {
+        if !identity.project_root.is_absolute() {
+            return Err(McpToolBindingError::RelativeProjectRoot {
+                root: identity.project_root.display().to_string(),
+            });
+        }
+        if let Err(error) = identity.scope.validate() {
+            return Err(McpToolBindingError::ScopeInvalid {
+                detail: error.to_string(),
+            });
+        }
+        match store_layout.identity.project_id.as_deref() {
+            Some(layout_project) if layout_project == identity.scope.project_id.as_str() => {}
+            other => {
+                return Err(McpToolBindingError::StoreLayoutProjectMismatch {
+                    request: checkout_label(&identity.scope),
+                    layout: other.unwrap_or("<missing>").to_owned(),
+                });
+            }
+        }
+        if let Some(lease) = &project_session_store {
+            verify_store_lease(&identity.scope, AdmittedProjectStore::new(lease))?;
+        }
+        Ok(Self {
+            identity,
+            store_layout,
+            graph_database,
+            graph_db_path,
+            store_runtime,
+            configuration_runtime,
+            project_session_store,
+        })
+    }
+
+    /// The same branch diagnostic shape status and active-project used to
+    /// read off `TraceDecay`.
+    #[must_use]
+    pub fn branch_diagnostics(&self) -> tracedecay_application::tracedecay::BranchDiagnostics {
+        tracedecay_application::tracedecay::build_branch_diagnostics(
+            &self.identity.project_root,
+            &self.store_layout.data_root,
+            self.identity.active_branch.clone(),
+            self.identity.serving_branch.clone(),
+            self.identity.fallback_warning.clone(),
+            self.graph_db_path.clone(),
+        )
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &McpProjectIdentityV1 {
+        &self.identity
+    }
+
+    #[must_use]
+    pub fn store_layout(&self) -> &StoreLayout {
+        &self.store_layout
+    }
+
+    #[must_use]
+    pub fn graph_database(&self) -> &Database {
+        &self.graph_database
+    }
+
+    #[must_use]
+    pub fn graph_db_path(&self) -> &Path {
+        self.graph_db_path.as_path()
+    }
+
+    #[must_use]
+    pub fn store_runtime(&self) -> &DaemonSessionRuntimeRegistryV1 {
+        self.store_runtime.as_ref()
+    }
+
+    #[must_use]
+    pub fn configuration_runtime(&self) -> &ProjectConfigurationRuntime {
+        self.configuration_runtime.as_ref()
+    }
+
+    #[must_use]
+    pub fn project_session_store(&self) -> Option<&RegisteredGlobalDbLeaseV1> {
+        self.project_session_store.as_ref()
+    }
+}
+
+impl std::fmt::Debug for McpAdmittedProjectV1 {
+    /// Names the admitted set without reaching into opaque handles.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpAdmittedProjectV1")
+            .field("identity", &self.identity)
+            .field(
+                "store_layout_project_id",
+                &self.store_layout.identity.project_id,
+            )
+            .field("graph_db_path", &self.graph_db_path)
+            .field(
+                "has_project_session_store",
+                &self.project_session_store.is_some(),
+            )
+            .finish()
+    }
+}
+
+/// Semantic-owner snapshot the root computed for this request.
+///
+/// One state, not an `Option` plus a flag: a caller cannot claim the daemon
+/// service was both attached and unattached.
+#[derive(Clone, Copy, Default)]
+pub enum McpSemanticOwnerV1<'a> {
+    /// No daemon invocation service was attached to this call.
+    #[default]
+    NotAttached,
+    /// The service was attached and the owner task has no registered state.
+    AttachedAbsent,
+    Attached(&'a SemanticOwnerStateV1),
+}
+
+/// Doctor-report snapshot the root computed for this request.
+///
+/// One state, not an `Option` plus a flag: a caller cannot claim the reader
+/// both failed and was never attached.
+#[derive(Clone, Copy, Default)]
+pub enum McpDoctorReportV1<'a> {
+    /// No doctor reader was attached to this call.
+    #[default]
+    NotAttached,
+    /// The reader ran and failed. Status/runtime report this as `unknown`.
+    ReadFailed,
+    Read(&'a AdmittedDoctorReportV1),
+}
+
+/// Per-request snapshots and admitted executors a moved handler family may read.
+///
+/// Snapshots, not readers: the root computes freshness, census, semantic-owner,
+/// and doctor report once per call and passes the values. Absence is typed.
+#[derive(Clone, Copy, Default)]
+pub struct McpRequestAuthoritiesV1<'a> {
+    pub controls: RequestControls<'a>,
+    pub code_index: Option<AdmittedCodeIndex<'a>>,
+    /// Scheduler-freshness reader invoked at serve time, not at bind.
+    /// Search and context call it after the lanes settle.
+    pub freshness: Option<&'a CodeIndexFreshnessReader>,
+    pub generation_census: Option<&'a GenerationCensusSnapshot>,
+    pub semantic_owner: McpSemanticOwnerV1<'a>,
+    pub doctor_report: McpDoctorReportV1<'a>,
+}
+
 /// Everything the composition root admits for one MCP tool call.
+///
+/// One serving shape: the route published a project snapshot, and root,
+/// scope, branch, and session store live only on that snapshot — there is
+/// no second label a caller can set beside it. A call that never published
+/// a checkout is a typed root failure, not a second binding shape.
 #[derive(Clone, Copy)]
 pub struct McpToolBinding<'a> {
-    /// The admitted worktree root every handler resolves paths against.
-    pub project_root: &'a Path,
-    /// The branch git resolved for that worktree, when it has one.
-    pub active_branch: Option<&'a str>,
-    pub controls: RequestControls<'a>,
-    /// The one checkout the daemon admitted for this request. Absent on a
-    /// standalone server and on the core server that answers before
-    /// project-open publication resolves a route.
-    pub scope: Option<&'a ResolvedScope>,
-    pub project_session_store: Option<AdmittedProjectStore<'a>>,
-    pub code_index: Option<AdmittedCodeIndex<'a>>,
+    pub project: &'a McpAdmittedProjectV1,
+    pub request: McpRequestAuthoritiesV1<'a>,
 }
 
 /// Admitted daemon authorities for one MCP tool call.
@@ -178,15 +378,15 @@ pub struct McpToolBinding<'a> {
 /// the handler family only reads them, so no handler can outlive the
 /// admission that produced them.
 pub struct McpToolContext<'a> {
+    project: &'a McpAdmittedProjectV1,
+    request: McpRequestAuthoritiesV1<'a>,
     project_root: &'a Path,
     active_branch: Option<&'a str>,
     deadline: Option<&'a Deadline>,
     cancellation: Option<&'a CancellationSignal>,
     /// The one checkout every admitted authority in this binding belongs to.
-    admitted_scope: Option<&'a ResolvedScope>,
+    admitted_scope: &'a ResolvedScope,
     project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
-    /// The root's verdict for reading `project_session_db`, carried verbatim.
-    project_session_authorization: Option<ValidatedAuthorization>,
     code_index_search_executor: Option<&'a CodeIndexSearchExecutor>,
     code_index_branch_diff_executor: Option<&'a CodeIndexBranchDiffExecutor>,
     code_index_search_authority: Option<&'a CodeIndexSearchAuthorityV1>,
@@ -202,44 +402,109 @@ impl<'a> McpToolContext<'a> {
     /// it. Nothing is defaulted or repaired: a binding that does not prove one
     /// coherent request scope is refused whole.
     pub fn bind(binding: McpToolBinding<'a>) -> std::result::Result<Self, McpToolBindingError> {
-        if !binding.project_root.is_absolute() {
+        let McpToolBinding { project, request } = binding;
+        let project_root = project.identity().project_root.as_path();
+        let admitted_scope = &project.identity().scope;
+        let project_session_store = project
+            .project_session_store()
+            .map(AdmittedProjectStore::new);
+        if !project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
-                root: binding.project_root.display().to_string(),
+                root: project_root.display().to_string(),
             });
         }
-        if let Some(scope) = binding.scope
-            && let Err(error) = scope.validate()
-        {
+        if let Err(error) = admitted_scope.validate() {
             return Err(McpToolBindingError::ScopeInvalid {
                 detail: error.to_string(),
             });
         }
-        if let Some(store) = binding.project_session_store {
-            verify_store_lease(
-                require_scope(binding.scope, "project session store")?,
-                store,
-            )?;
-        }
-        if binding.code_index.is_some() {
-            require_scope(binding.scope, "code index")?;
+        if let Some(store) = project_session_store {
+            verify_store_lease(admitted_scope, store)?;
         }
 
         Ok(Self {
-            project_root: binding.project_root,
-            active_branch: binding.active_branch,
-            deadline: binding.controls.deadline,
-            cancellation: binding.controls.cancellation,
-            admitted_scope: binding.scope,
-            project_session_db: binding.project_session_store.map(|store| store.lease),
-            project_session_authorization: binding
-                .project_session_store
-                .map(|store| store.authorization),
-            code_index_search_executor: binding.code_index.and_then(|code_index| code_index.search),
-            code_index_branch_diff_executor: binding
+            project,
+            request,
+            project_root,
+            active_branch: project.identity().active_branch.as_deref(),
+            deadline: request.controls.deadline,
+            cancellation: request.controls.cancellation,
+            admitted_scope,
+            project_session_db: project_session_store.map(|store| store.lease),
+            code_index_search_executor: request.code_index.and_then(|code_index| code_index.search),
+            code_index_branch_diff_executor: request
                 .code_index
                 .and_then(|code_index| code_index.branch_diff),
-            code_index_search_authority: binding.code_index.map(|code_index| code_index.authority),
+            code_index_search_authority: request.code_index.map(|code_index| code_index.authority),
         })
+    }
+
+    #[must_use]
+    pub fn project(&self) -> &'a McpAdmittedProjectV1 {
+        self.project
+    }
+
+    #[must_use]
+    pub fn request(&self) -> McpRequestAuthoritiesV1<'a> {
+        self.request
+    }
+
+    #[must_use]
+    pub fn store_layout(&self) -> &'a StoreLayout {
+        self.project.store_layout()
+    }
+
+    #[must_use]
+    pub fn graph_database(&self) -> &'a Database {
+        self.project.graph_database()
+    }
+
+    #[must_use]
+    pub fn graph_db_path(&self) -> &'a Path {
+        self.project.graph_db_path()
+    }
+
+    #[must_use]
+    pub fn store_runtime(&self) -> &'a DaemonSessionRuntimeRegistryV1 {
+        self.project.store_runtime()
+    }
+
+    #[must_use]
+    pub fn configuration_runtime(&self) -> &'a ProjectConfigurationRuntime {
+        self.project.configuration_runtime()
+    }
+
+    #[must_use]
+    pub fn serving_branch(&self) -> Option<&'a str> {
+        self.project.identity().serving_branch.as_deref()
+    }
+
+    /// Reads scheduler freshness now. Search and context must call this after
+    /// the lanes settle so the verdict describes serve time, not bind time.
+    pub async fn freshness(&self) -> Option<CodeIndexFreshnessPayloadV1> {
+        let reader = self.request.freshness?;
+        let worktree = reader(self.project_root().to_path_buf()).await;
+        Some(CodeIndexFreshnessPayloadV1::from_scheduler_read(worktree))
+    }
+
+    #[must_use]
+    pub fn generation_census(&self) -> Option<&'a GenerationCensusSnapshot> {
+        self.request.generation_census
+    }
+
+    #[must_use]
+    pub fn semantic_owner(&self) -> McpSemanticOwnerV1<'a> {
+        self.request.semantic_owner
+    }
+
+    #[must_use]
+    pub fn doctor_report(&self) -> McpDoctorReportV1<'a> {
+        self.request.doctor_report
+    }
+
+    #[must_use]
+    pub fn branch_diagnostics(&self) -> tracedecay_application::tracedecay::BranchDiagnostics {
+        self.project.branch_diagnostics()
     }
 
     #[must_use]
@@ -262,24 +527,23 @@ impl<'a> McpToolContext<'a> {
         self.cancellation
     }
 
-    /// The one checkout this call is admitted for, when the daemon resolved one.
+    /// The one checkout this call is admitted for.
     #[must_use]
-    pub fn admitted_scope(&self) -> Option<&'a ResolvedScope> {
+    pub fn admitted_scope(&self) -> &'a ResolvedScope {
         self.admitted_scope
     }
 
-    /// The admitted project store together with the root's authorization.
+    /// The admitted project store, or the typed unavailable/denied absence.
     ///
-    /// The verdict is the root's, carried through [`Self::bind`] unchanged: a
-    /// handler cannot decide for itself that a store read is authorized, and
-    /// this accessor never supplies a verdict of its own. With no admitted
-    /// store the caller receives the typed absence instead.
+    /// Attached means admitted: bind derives [`ValidatedAuthorization::Authorized`]
+    /// from the lease's presence. An absent lease is the typed denied state,
+    /// not an inferred capability.
     #[must_use]
     pub fn authorized_project_session_db(
         &self,
     ) -> Option<(&'a RegisteredGlobalDbLeaseV1, ValidatedAuthorization)> {
         self.project_session_db
-            .zip(self.project_session_authorization)
+            .map(|lease| (lease, ValidatedAuthorization::Authorized))
     }
 
     #[must_use]
@@ -306,7 +570,7 @@ impl<'a> McpToolContext<'a> {
     /// admitted scope there is nothing to isolate against and the query is
     /// refused rather than trusted.
     pub fn verify_graph_scope(&self, graph: &VerifiedGraphQuery) -> Result<()> {
-        verify_scope_isolation(self.admitted_scope, graph.request_context().scope())
+        verify_scope_isolation(Some(self.admitted_scope), graph.request_context().scope())
     }
 }
 
@@ -317,16 +581,26 @@ impl std::fmt::Debug for McpToolContext<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("McpToolContext")
+            .field("project_id", &self.project.identity().scope.project_id)
+            .field("has_freshness_reader", &self.request.freshness.is_some())
+            .field(
+                "has_generation_census",
+                &self.request.generation_census.is_some(),
+            )
+            .field(
+                "semantic_owner",
+                &matches!(self.request.semantic_owner, McpSemanticOwnerV1::Attached(_)),
+            )
+            .field(
+                "doctor_report",
+                &matches!(self.request.doctor_report, McpDoctorReportV1::Read(_)),
+            )
             .field("project_root", &self.project_root)
             .field("active_branch", &self.active_branch)
             .field("admitted_scope", &self.admitted_scope)
             .field("has_deadline", &self.deadline.is_some())
             .field("has_cancellation", &self.cancellation.is_some())
             .field("has_project_session_db", &self.project_session_db.is_some())
-            .field(
-                "project_session_authorization",
-                &self.project_session_authorization,
-            )
             .field(
                 "has_code_index_search_executor",
                 &self.code_index_search_executor.is_some(),
@@ -341,19 +615,6 @@ impl std::fmt::Debug for McpToolContext<'_> {
             )
             .finish()
     }
-}
-
-/// The admitted scope a scoped authority needs, or a typed refusal.
-///
-/// An authority the daemon scoped cannot be admitted into a request that never
-/// resolved a checkout: there would be nothing to isolate it against, and a
-/// handler reading it would answer from whatever project the authority happens
-/// to hold.
-fn require_scope<'a>(
-    scope: Option<&'a ResolvedScope>,
-    authority: &'static str,
-) -> std::result::Result<&'a ResolvedScope, McpToolBindingError> {
-    scope.ok_or(McpToolBindingError::UnscopedAuthority { authority })
 }
 
 /// The project a shard is the *session* store for, if it is one at all.
@@ -439,8 +700,12 @@ fn checkout_label(scope: &ResolvedScope) -> String {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use tracedecay_configuration::{
+        OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, RuntimeConfigurationTarget,
+    };
+    use tracedecay_domain::configuration::ConfigurationRevisionId;
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
@@ -483,7 +748,7 @@ mod tests {
             .expect("registered store fixture")
     }
 
-    fn scope(project: &str) -> ResolvedScope {
+    pub(crate) fn scope(project: &str) -> ResolvedScope {
         ResolvedScope::new(
             ProjectId::new(format!("project.{project}")).expect("project id"),
             RepositoryId::new(format!("repository.{project}")).expect("repository id"),
@@ -493,15 +758,217 @@ mod tests {
         .expect("scope")
     }
 
-    fn binding<'a>(root: &'a Path, scope: Option<&'a ResolvedScope>) -> McpToolBinding<'a> {
-        McpToolBinding {
-            project_root: root,
-            active_branch: None,
-            controls: RequestControls::default(),
-            scope,
-            project_session_store: None,
-            code_index: None,
+    struct FixtureHandles {
+        graph_database: Database,
+        store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+        configuration_runtime: Arc<ProjectConfigurationRuntime>,
+    }
+
+    fn fixture_handles() -> &'static FixtureHandles {
+        static HANDLES: std::sync::OnceLock<FixtureHandles> = std::sync::OnceLock::new();
+        HANDLES.get_or_init(open_fixture_handles_blocking)
+    }
+
+    fn open_fixture_handles_blocking() -> FixtureHandles {
+        std::thread::Builder::new()
+            .name("mcp-admitted-handles".into())
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("fixture runtime");
+                let handles = runtime.block_on(open_fixture_handles());
+                std::mem::forget(runtime);
+                handles
+            })
+            .expect("spawn fixture thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    async fn open_fixture_handles() -> FixtureHandles {
+        let temp = tempfile::tempdir().expect("fixture home");
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).expect("profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("private profile root");
         }
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "mcp-admitted-handles",
+        )
+        .expect("daemon database scope");
+        let store_runtime = Arc::new(
+            DaemonSessionRuntimeRegistryV1::open(identity)
+                .await
+                .expect("store runtime"),
+        );
+        let graph_path = temp.path().join("graph.db");
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &graph_path,
+            "mcp admitted project fixture",
+        )
+        .expect("test database authority");
+        let (graph_database, _) = Database::publish_test_runtime(
+            &graph_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("graph database");
+        let project_id = ProjectId::new("project.admitted-handles".to_owned()).expect("project id");
+        let sessions = RegisteredGlobalDbTestRuntime::project(
+            profile_root.join("sessions-profile"),
+            temp.path().join("checkout"),
+            project_id.clone(),
+        )
+        .await
+        .expect("configuration store");
+        let lease = sessions
+            .project_database_arc()
+            .expect("configuration lease");
+        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
+            &tracedecay_configuration::config::registry::ConfigurationRegistry::core()
+                .expect("configuration registry"),
+            &[],
+        )
+        .expect("default configuration")
+        .snapshot;
+        let pinned = PinnedRuntimeConfiguration::new(
+            RuntimeConfigurationTarget {
+                project_id,
+                project_root: temp.path().to_path_buf(),
+            },
+            ConfigurationRevisionId::new("configuration.revision.mcp-admitted-handles")
+                .expect("revision"),
+            snapshot,
+        )
+        .expect("pinned configuration");
+        let (configuration_runtime, _) =
+            ProjectConfigurationRuntime::open(OpenedRuntimeConfiguration::new(pinned, lease))
+                .expect("configuration runtime");
+        std::mem::forget(temp);
+        std::mem::forget(scope);
+        std::mem::forget(sessions);
+        FixtureHandles {
+            graph_database,
+            store_runtime,
+            configuration_runtime: Arc::new(configuration_runtime),
+        }
+    }
+
+    fn runtime_handles() -> (
+        Database,
+        Arc<DaemonSessionRuntimeRegistryV1>,
+        Arc<ProjectConfigurationRuntime>,
+    ) {
+        let handles = fixture_handles();
+        (
+            handles.graph_database.clone(),
+            Arc::clone(&handles.store_runtime),
+            Arc::clone(&handles.configuration_runtime),
+        )
+    }
+
+    fn test_store_layout(root: &Path, project_id: &str) -> StoreLayout {
+        StoreLayout {
+            identity: tracedecay_runtime_core::storage::ProjectIdentity {
+                project_id: Some(project_id.to_owned()),
+                display_root: root.to_path_buf(),
+                primary_alias: root.to_path_buf(),
+            },
+            store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProjectLocal,
+            project_root: root.to_path_buf(),
+            data_root: root.join(".tracedecay"),
+            graph_db_path: root.join("graph.db"),
+            config_path: root.join("config.toml"),
+            branch_meta_path: root.join("branch-meta.json"),
+            sessions_db_path: root.join("sessions.db"),
+            response_handle_root: root.join("handles"),
+            lcm_payload_root: root.join("lcm"),
+            dashboard_root: root.join("dashboard"),
+            manifest_path: None,
+            dirty_path: root.join("dirty"),
+            sync_lock_path: root.join("sync.lock"),
+            branch_add_lock_path: root.join("branch-add.lock"),
+        }
+    }
+
+    fn project_identity(root: &Path, admitted: &ResolvedScope) -> McpProjectIdentityV1 {
+        McpProjectIdentityV1 {
+            project_root: root.to_path_buf(),
+            scope: admitted.clone(),
+            active_branch: None,
+            serving_branch: None,
+            fallback_warning: None,
+        }
+    }
+
+    fn admit_project(
+        identity: McpProjectIdentityV1,
+        store_layout: StoreLayout,
+        graph_db_path: PathBuf,
+        lease: Option<RegisteredGlobalDbLeaseV1>,
+    ) -> std::result::Result<McpAdmittedProjectV1, McpToolBindingError> {
+        let (graph_database, store_runtime, configuration_runtime) = runtime_handles();
+        McpAdmittedProjectV1::new(
+            identity,
+            store_layout,
+            graph_database,
+            graph_db_path,
+            store_runtime,
+            configuration_runtime,
+            lease,
+        )
+    }
+
+    pub(crate) fn project_bundle(
+        root: &Path,
+        admitted: &ResolvedScope,
+        lease: Option<RegisteredGlobalDbLeaseV1>,
+    ) -> McpAdmittedProjectV1 {
+        admit_project(
+            project_identity(root, admitted),
+            test_store_layout(root, admitted.project_id.as_str()),
+            root.join("graph.db"),
+            lease,
+        )
+        .expect("coherent project bundle")
+    }
+
+    /// Test-only admitted snapshot for a worktree root. Git family tests use
+    /// this instead of a production `Unprojected` binding — every served
+    /// route is admitted.
+    pub(crate) fn fixture_project(
+        root: &Path,
+        active_branch: Option<&str>,
+    ) -> McpAdmittedProjectV1 {
+        let admitted = scope("git-fixture");
+        let mut identity = project_identity(root, &admitted);
+        identity.active_branch = active_branch.map(str::to_owned);
+        admit_project(
+            identity,
+            test_store_layout(root, admitted.project_id.as_str()),
+            root.join("graph.db"),
+            None,
+        )
+        .expect("fixture project")
+    }
+
+    pub(crate) fn fixture_context(project: &McpAdmittedProjectV1) -> McpToolContext<'_> {
+        McpToolContext::bind(McpToolBinding {
+            project,
+            request: McpRequestAuthoritiesV1::default(),
+        })
+        .expect("admitted fixture binds")
     }
 
     fn authority() -> CodeIndexSearchAuthorityV1 {
@@ -513,15 +980,6 @@ mod tests {
             )
             .expect("revision"),
         }
-    }
-
-    /// A relative root cannot anchor path resolution or identity, so it is
-    /// refused instead of silently joined against the process directory.
-    #[test]
-    fn a_relative_project_root_is_refused() {
-        let error = McpToolContext::bind(binding(Path::new("relative/root"), None))
-            .expect_err("relative root must be refused");
-        assert_eq!(error.reason_code(), "mcp_tool_binding_root_not_absolute");
     }
 
     /// A code-index admission with no executor is an empty capability claim:
@@ -538,27 +996,6 @@ mod tests {
             error.reason_code(),
             "mcp_tool_binding_code_index_without_executor"
         );
-    }
-
-    /// A request that resolved no checkout has nothing to isolate a scoped
-    /// authority against, so admitting one fails closed rather than reading
-    /// whatever project the authority happens to hold.
-    #[test]
-    fn a_code_index_cannot_be_admitted_without_a_resolved_scope() {
-        let temp = tempfile::tempdir().expect("temp root");
-        let authority = authority();
-        let search: CodeIndexSearchExecutor =
-            std::sync::Arc::new(|_| unreachable!("binding must be refused before any search runs"));
-
-        let error = McpToolContext::bind(McpToolBinding {
-            code_index: Some(
-                AdmittedCodeIndex::new(&authority, Some(&search), None).expect("admission"),
-            ),
-            ..binding(temp.path(), None)
-        })
-        .expect_err("an unscoped code index admission must be refused");
-
-        assert_eq!(error.reason_code(), "mcp_tool_binding_scope_unresolved");
     }
 
     /// A graph admitted for another checkout is refused before a handler reads
@@ -607,14 +1044,12 @@ mod tests {
             registered_project_store(home.path(), "foreign").await;
         let admitted = scope("admitted");
 
-        let error = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
-                &foreign_lease,
-                ValidatedAuthorization::Authorized,
-            )),
-            ..binding(home.path(), Some(&admitted))
-        })
-        .map(|_| ())
+        let error = admit_project(
+            project_identity(home.path(), &admitted),
+            test_store_layout(home.path(), admitted.project_id.as_str()),
+            home.path().join("graph.db"),
+            Some(foreign_lease),
+        )
         .expect_err("another project's real lease must be refused");
         assert_eq!(
             error.reason_code(),
@@ -622,14 +1057,8 @@ mod tests {
         );
         assert!(error.to_string().contains("project.foreign"), "got {error}");
 
-        let bound = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
-                &admitted_lease,
-                ValidatedAuthorization::Authorized,
-            )),
-            ..binding(home.path(), Some(&admitted))
-        })
-        .expect("the admitted project's own lease must bind");
+        let project = project_bundle(home.path(), &admitted, Some(admitted_lease.clone()));
+        let bound = fixture_context(&project);
         let (bound_lease, authorization) = bound
             .authorized_project_session_db()
             .expect("the bound store is reported");
@@ -656,14 +1085,12 @@ mod tests {
         )
         .await;
 
-        let error = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
-                &lease,
-                ValidatedAuthorization::Authorized,
-            )),
-            ..binding(home.path(), Some(&admitted))
-        })
-        .map(|_| ())
+        let error = admit_project(
+            project_identity(home.path(), &admitted),
+            test_store_layout(home.path(), admitted.project_id.as_str()),
+            home.path().join("graph.db"),
+            Some(lease),
+        )
         .expect_err("a non-session-family lease must be refused");
         assert_eq!(
             error.reason_code(),
@@ -730,48 +1157,35 @@ mod tests {
         );
     }
 
-    /// A request that resolved no checkout cannot admit a store either: there
-    /// would be no identity to check the lease's shard against.
-    #[tokio::test]
-    async fn a_real_lease_cannot_be_admitted_without_a_resolved_scope() {
-        let home = tempfile::tempdir().expect("temp home");
-        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
+    /// An absent lease is the typed denied state: bind must not invent an
+    /// authorized store read from nothing.
+    #[test]
+    fn an_unauthorized_verdict_survives_binding() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = scope("admitted");
+        let project = project_bundle(temp.path(), &admitted, None);
+        let bound = fixture_context(&project);
 
-        let error = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
-                &lease,
-                ValidatedAuthorization::Authorized,
-            )),
-            ..binding(home.path(), None)
-        })
-        .map(|_| ())
-        .expect_err("an unscoped store admission must be refused");
-
-        assert_eq!(error.reason_code(), "mcp_tool_binding_scope_unresolved");
+        assert!(
+            bound.authorized_project_session_db().is_none(),
+            "an absent lease is the typed unavailable/denied state"
+        );
     }
 
-    /// The root's verdict is carried, not re-derived: a context bound with an
-    /// unauthorized store reports exactly that, so every store-backed handler
-    /// denies instead of reading it.
-    #[tokio::test]
-    async fn an_unauthorized_verdict_survives_binding() {
-        let home = tempfile::tempdir().expect("temp home");
-        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
+    /// An admitted snapshot without a session-store lease must not become an
+    /// authorized store read. Presence of the lease is admission; absence is
+    /// the typed denied state the first authorized-only read refuses.
+    #[test]
+    fn an_admitted_denied_verdict_refuses_the_first_authorized_store_read() {
+        let temp = tempfile::tempdir().expect("temp root");
         let admitted = scope("admitted");
+        let project = project_bundle(temp.path(), &admitted, None);
+        let bound = fixture_context(&project);
 
-        let bound = McpToolContext::bind(McpToolBinding {
-            project_session_store: Some(AdmittedProjectStore::new(
-                &lease,
-                ValidatedAuthorization::Unauthorized,
-            )),
-            ..binding(home.path(), Some(&admitted))
-        })
-        .expect("an unauthorized store is still a coherent binding");
-
-        let (_, authorization) = bound
-            .authorized_project_session_db()
-            .expect("the store is reported with its verdict");
-        assert_eq!(authorization, ValidatedAuthorization::Unauthorized);
+        assert!(
+            bound.authorized_project_session_db().is_none(),
+            "bind must not invent an authorized store from an absent lease"
+        );
     }
 
     /// A checkout differs from another by project, repository, or worktree —
@@ -794,5 +1208,147 @@ mod tests {
 
         verify_scope_isolation(Some(&registered), &switched)
             .expect("the same checkout on another branch must still bind");
+    }
+
+    /// A relative root cannot identify a project store or resolve handler
+    /// paths, so [`McpAdmittedProjectV1::new`] refuses it.
+    #[test]
+    fn a_relative_project_root_is_refused() {
+        let admitted = scope("admitted");
+        let error = admit_project(
+            McpProjectIdentityV1 {
+                project_root: PathBuf::from("relative/root"),
+                scope: admitted.clone(),
+                active_branch: None,
+                serving_branch: None,
+                fallback_warning: None,
+            },
+            test_store_layout(Path::new("/tmp/admitted"), admitted.project_id.as_str()),
+            PathBuf::from("relative/root/graph.db"),
+            None,
+        )
+        .expect_err("a relative project root must be refused");
+        assert_eq!(error.reason_code(), "mcp_tool_binding_root_not_absolute");
+    }
+
+    /// The store layout names a different project than the admitted scope.
+    /// Handlers would otherwise read that project's graph and sessions under
+    /// the wrong checkout label.
+    #[test]
+    fn a_store_layout_for_another_project_is_refused() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = scope("admitted");
+        let error = admit_project(
+            project_identity(temp.path(), &admitted),
+            test_store_layout(temp.path(), "project.foreign"),
+            temp.path().join("graph.db"),
+            None,
+        )
+        .expect_err("a foreign store-layout project id must be refused");
+        assert_eq!(
+            error.reason_code(),
+            "mcp_tool_binding_store_layout_project_mismatch"
+        );
+        assert!(error.to_string().contains("project.foreign"), "got {error}");
+    }
+
+    /// A real registered lease that is not a `ProjectSessions` shard cannot
+    /// become the project-session authority on the bundle.
+    #[tokio::test]
+    async fn a_non_session_shard_lease_is_refused_by_the_project_bundle() {
+        let home = tempfile::tempdir().expect("temp home");
+        let admitted = scope("admitted");
+        let (lease, _owner) = registered_store_for_shard(
+            home.path(),
+            "profile-sessions",
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await;
+
+        let error = admit_project(
+            project_identity(home.path(), &admitted),
+            test_store_layout(home.path(), admitted.project_id.as_str()),
+            home.path().join("graph.db"),
+            Some(lease),
+        )
+        .expect_err("a non-session-family lease must be refused");
+        assert_eq!(
+            error.reason_code(),
+            "mcp_tool_binding_store_not_session_shard"
+        );
+    }
+
+    /// Missing optional request authorities stay typed absence: a handler
+    /// reading them gets `None`, never a panic and never an invented empty
+    /// success value.
+    #[test]
+    fn a_missing_optional_authority_is_typed_absence() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = scope("admitted");
+        let project = project_bundle(temp.path(), &admitted, None);
+
+        let bound = McpToolContext::bind(McpToolBinding {
+            project: &project,
+            request: McpRequestAuthoritiesV1::default(),
+        })
+        .expect("a snapshot with no optional request authorities must still bind");
+
+        assert!(
+            bound.generation_census().is_none(),
+            "census absence must stay None"
+        );
+        assert!(
+            matches!(bound.semantic_owner(), McpSemanticOwnerV1::NotAttached),
+            "semantic-owner absence must stay NotAttached"
+        );
+        assert!(
+            bound.request().freshness.is_none(),
+            "freshness-reader absence must stay None"
+        );
+        assert!(
+            matches!(bound.doctor_report(), McpDoctorReportV1::NotAttached),
+            "doctor-report absence must stay NotAttached"
+        );
+        assert!(
+            bound.authorized_project_session_db().is_none(),
+            "session-store absence must stay None"
+        );
+        assert_eq!(
+            tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+            },
+            bound.generation_census().cloned().unwrap_or(
+                tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                    reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+                }
+            ),
+            "the typed unavailable census is what a handler must emit, not an empty success"
+        );
+    }
+
+    /// An admitted snapshot is the only source of root, scope, and store.
+    /// [`McpToolBinding`] has no fields that could supply a second label;
+    /// bind reports the snapshot's identity.
+    #[test]
+    fn an_admitted_binding_cannot_carry_a_second_root_or_scope() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = scope("admitted");
+        let project = project_bundle(temp.path(), &admitted, None);
+
+        let bound = McpToolContext::bind(McpToolBinding {
+            project: &project,
+            request: McpRequestAuthoritiesV1::default(),
+        })
+        .expect("admitted snapshot binds");
+
+        assert_eq!(
+            bound.project_root(),
+            project.identity().project_root.as_path()
+        );
+        assert_eq!(bound.admitted_scope(), &project.identity().scope);
+        assert_eq!(
+            bound.project().identity().project_root,
+            project.identity().project_root
+        );
     }
 }

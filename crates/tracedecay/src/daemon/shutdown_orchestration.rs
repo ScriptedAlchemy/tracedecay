@@ -13,9 +13,10 @@ use super::shutdown_coordination::{
 use super::{
     DAEMON_BACKGROUND_DRAIN_DEADLINE, DAEMON_CLIENT_DRAIN_DEADLINE,
     DAEMON_PROJECT_SERVER_DRAIN_DEADLINE, DAEMON_STORE_CLOSE_RESERVE, DAEMON_TASK_ABORT_DEADLINE,
-    DaemonLifecycle, core_lifecycle::DaemonShutdownClaim, log_daemon_event,
+    DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
 };
 use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt};
 
 type ProjectServerShutdownFuture =

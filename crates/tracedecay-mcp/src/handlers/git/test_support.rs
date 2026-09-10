@@ -4,36 +4,24 @@
 use std::path::Path;
 use std::sync::LazyLock;
 
-use crate::tool_context::{McpToolBinding, McpToolContext, RequestControls};
+use crate::tool_context::{McpAdmittedProjectV1, McpToolContext};
 
-/// The binding a standalone (non-daemon) server produces: a worktree root and
-/// no admitted authority at all.
-pub(super) fn standalone_context(project_root: &Path) -> McpToolContext<'_> {
-    McpToolContext::bind(McpToolBinding {
-        project_root,
-        active_branch: None,
-        controls: RequestControls::default(),
-        scope: None,
-        project_session_store: None,
-        code_index: None,
-    })
-    .expect("an absolute root binds standalone")
+/// An admitted snapshot for a worktree root. Every served route is admitted;
+/// git family tests build the same shape the root publishes after project-open.
+pub(super) fn fixture_project(project_root: &Path) -> McpAdmittedProjectV1 {
+    crate::tool_context::tests::fixture_project(project_root, None)
 }
 
-/// The same standalone binding with the branch git resolved for the worktree.
-pub(super) fn standalone_context_on_branch<'a>(
-    project_root: &'a Path,
-    active_branch: &'a str,
-) -> McpToolContext<'a> {
-    McpToolContext::bind(McpToolBinding {
-        project_root,
-        active_branch: Some(active_branch),
-        controls: RequestControls::default(),
-        scope: None,
-        project_session_store: None,
-        code_index: None,
-    })
-    .expect("an absolute root binds standalone")
+/// The same fixture with the branch git resolved for the worktree.
+pub(super) fn fixture_project_on_branch(
+    project_root: &Path,
+    active_branch: &str,
+) -> McpAdmittedProjectV1 {
+    crate::tool_context::tests::fixture_project(project_root, Some(active_branch))
+}
+
+pub(super) fn fixture_context(project: &McpAdmittedProjectV1) -> McpToolContext<'_> {
+    crate::tool_context::tests::fixture_context(project)
 }
 
 /// The branch-ref admission semaphore is process-wide, and

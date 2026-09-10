@@ -1,7 +1,7 @@
 //! Live-compaction outcome → operator receipt.
 
-use crate::log_maintenance_event;
 use crate::retention::live_compaction::LiveStoreCompactionOutcomeV1;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Record one live-compaction outcome and return whether the store is healthy.
 #[must_use]
@@ -15,7 +15,7 @@ pub fn record_live_compaction_outcome(
             freelist_before,
             freelist_after,
         } => {
-            log_maintenance_event(
+            log_daemon_event(
                 "retention_compaction",
                 &[
                     ("store", store_name.to_owned()),
@@ -28,7 +28,7 @@ pub fn record_live_compaction_outcome(
             true
         }
         LiveStoreCompactionOutcomeV1::Failed(failure) => {
-            log_maintenance_event(
+            log_daemon_event(
                 "retention_degraded",
                 &[
                     ("pass", "compaction".to_owned()),

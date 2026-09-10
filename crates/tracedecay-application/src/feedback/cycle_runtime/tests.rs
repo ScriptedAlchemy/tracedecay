@@ -133,6 +133,7 @@ fn impact_reader() -> CodeGraphInteractiveReader {
                 line_span: 1,
                 start_line: 1,
                 signature: None,
+                docstring: None,
                 skip_test_coverage: false,
                 file_identity: FileIdentityDigest::new(format!(
                     "sha256:{}",

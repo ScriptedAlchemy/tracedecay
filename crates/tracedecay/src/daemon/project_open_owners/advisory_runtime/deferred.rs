@@ -13,7 +13,6 @@ use super::{
     DaemonInvocationState, ProjectOpenDependentOwnerState, register_production_advisory_owner,
     register_production_feedback_and_advisory, register_production_feedback_cycle,
 };
-use crate::daemon::log_daemon_event;
 use tracedecay_contracts::doctor::{
     SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
 };
@@ -21,6 +20,7 @@ use tracedecay_contracts::now_micros;
 use tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// The deferred advisory owner is a detached background task: when it gives up
 /// (or never sees a publication) nothing in the request path reports it, and a

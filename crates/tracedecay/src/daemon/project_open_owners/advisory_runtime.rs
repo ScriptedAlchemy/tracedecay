@@ -1157,14 +1157,12 @@ async fn register_production_advisory_owner(
     feedback_scope: FeedbackScopeV1,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
 ) -> Result<()> {
-    let scout_owner =
-        state
-            .graph
-            .context_scout_owner()
-            .cloned()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open Context Scout owner is unavailable".to_owned(),
-            })?;
+    let scout_owner = state
+        .graph
+        .context_scout_owner()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open Context Scout owner is unavailable".to_owned(),
+        })?;
     let configuration = state
         .graph
         .configuration_runtime()

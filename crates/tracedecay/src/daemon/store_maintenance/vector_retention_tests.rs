@@ -21,6 +21,7 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::UtcMicros;
 use tracedecay_maintenance::store_maintenance::{
     CodeGenerationRetentionOutcomeV1, VectorRetentionInventoryV1, apply_code_generation_retention,
@@ -273,6 +274,7 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
+    let compaction = CompactionThresholdConfig::default();
     let fixture = open_unseated_graph_fixture().await;
     let root = fixture.graph.project_root();
 
@@ -355,7 +357,7 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
             &fixture.schedulers,
             &fixture.observations,
             &fixture.cancellation,
-            None,
+            Some(&compaction),
             continuation,
         )
         .await;
@@ -385,6 +387,7 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn semantic_vector_continuation_skips_code_generation_retention() {
+    let compaction = CompactionThresholdConfig::default();
     let fixture = open_unseated_graph_fixture().await;
     let before = sealed_generation_files(&fixture.store_root);
 
@@ -393,7 +396,7 @@ async fn semantic_vector_continuation_skips_code_generation_retention() {
         &fixture.schedulers,
         &fixture.observations,
         &fixture.cancellation,
-        None,
+        Some(&compaction),
         Some(tracedecay_maintenance::tick::MaintenanceContinuation::SemanticVectorRetention),
     )
     .await;

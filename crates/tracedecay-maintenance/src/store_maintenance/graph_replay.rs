@@ -1,11 +1,11 @@
 use std::path::Path;
 
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
-use crate::log_maintenance_event;
 use tracedecay_code_index_retention::code_index_generations::{
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
     try_acquire_code_generation_store_lock,
 };
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub enum ReconcileOutcome {
     /// Every queued release event has been consumed.
@@ -68,7 +68,7 @@ fn log_code_generation_retention_degraded_with_error(
     error: &dyn std::fmt::Debug,
 ) {
     observations.mark_loud_retention_log();
-    log_maintenance_event(
+    log_daemon_event(
         "retention_degraded",
         &[
             ("pass", "code_generations".to_string()),
@@ -224,7 +224,7 @@ pub async fn reconcile_graph_replay_releases(
                     retire_generation_read_bundle(store_root, &release.generation.generation_file)
                 {
                     observations.mark_loud_retention_log();
-                    log_maintenance_event(
+                    log_daemon_event(
                         "retention_degraded",
                         &[
                             ("pass", "code_generations".to_string()),

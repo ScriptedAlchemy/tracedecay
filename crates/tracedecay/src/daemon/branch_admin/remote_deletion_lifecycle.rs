@@ -770,6 +770,10 @@ impl StoreAdministration {
                     error,
                 )
             })?;
+        super::retire_registered_context_scout_owner(
+            &typed_project_id,
+            &data_root.join(crate::config::db_filename(&data_root)),
+        );
         self.git_index_transaction_services
             .retire_project_database(&typed_project_id, &project_sessions_path)
             .await

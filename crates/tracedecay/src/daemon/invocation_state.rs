@@ -33,6 +33,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_store_runtime::ShutdownStatus;
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod project_invocation;
 

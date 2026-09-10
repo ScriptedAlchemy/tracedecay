@@ -97,9 +97,7 @@ impl<'a> PrContextCursorBinding<'a> {
     ) -> Self {
         Self {
             protocol: "tracedecay.pr-context.cursor.v2",
-            scope: ctx
-                .admitted_scope()
-                .map(PrContextCursorScope::from_resolved),
+            scope: Some(PrContextCursorScope::from_resolved(ctx.admitted_scope())),
             store: ctx
                 .authorized_project_session_db()
                 .map(|(lease, _)| PrContextCursorStore::from_shard(&lease.binding().shard_id)),
@@ -230,31 +228,21 @@ pub(super) struct PrContextCursorPosition {
 ///
 /// The signing key is the store's own pre-provisioned cursor key, so a cursor
 /// minted here can only be verified by the same store — that is what keeps a
-/// foreign store's cursor from continuing this pagination. Authorization is
-/// read off the admitted binding rather than asserted locally: with no
-/// admitted store there is no key and no snapshot.
+/// foreign store's cursor from continuing this pagination. Attached means
+/// admitted; an absent lease is the typed denied state.
 #[hotpath::measure(label = "mcp.git.cursor.authority")]
 pub(super) async fn pr_context_cursor_authority(
     ctx: &McpToolContext<'_>,
     binding: &PrContextCursorBinding<'_>,
 ) -> Result<(TemporalExecutionSnapshot, GlobalDbCursorKeyProvider)> {
     let Some((session_db, authorization)) = ctx.authorized_project_session_db() else {
-        return Err(TraceDecayError::project_route(
-            "pr_context_cursor_authority_unavailable",
-            true,
-            "no admitted project session store can authenticate a PR context cursor",
-        ));
-    };
-    // The root's verdict decides. An unauthorized store is a denial, not a
-    // missing capability: the store is right there and the caller may not read
-    // it, and retrying the same request cannot change that.
-    if !authorization.is_authorized() {
+        // Attached means admitted; absent is the typed denied state.
         return Err(TraceDecayError::project_route(
             "pr_context_cursor_denied",
             false,
             "this request is not authorized to read the admitted project session store",
         ));
-    }
+    };
     let session_db: &RegisteredGlobalDb = session_db;
     let authenticator = hotpath::future!(
         session_db.load_preprovisioned_session_cursor_key_provider_result(),
@@ -414,7 +402,6 @@ mod tests {
     use std::os::unix::ffi::OsStrExt as _;
 
     use super::*;
-    use crate::tool_context::{AdmittedProjectStore, McpToolBinding, RequestControls};
     use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
@@ -701,11 +688,9 @@ mod tests {
         assert_eq!(decoded.after.as_str(), after.as_str());
     }
 
-    /// The root's verdict decides whether this request may read the admitted
-    /// store, and an unauthorized verdict must deny rather than degrade into a
-    /// missing capability. The store below is a real registered project store,
-    /// so the denial comes from the carried authorization and not from an
-    /// absent authority.
+    /// An absent session-store lease is the typed denied state: the first
+    /// authorized-only cursor read refuses rather than degrading into a
+    /// missing capability. The authorized half uses a real registered store.
     #[tokio::test]
     async fn an_unauthorized_store_denies_the_cursor_authority() {
         let home = tempfile::tempdir().expect("temp home");
@@ -745,19 +730,8 @@ mod tests {
             maximum_symbols: 25,
             changes: &changes,
         };
-        let context_for = |authorization| {
-            McpToolContext::bind(McpToolBinding {
-                project_root: home.path(),
-                active_branch: None,
-                controls: RequestControls::default(),
-                scope: Some(&scope),
-                project_session_store: Some(AdmittedProjectStore::new(&lease, authorization)),
-                code_index: None,
-            })
-            .expect("a real lease for the admitted project binds")
-        };
-
-        let denied_context = context_for(ValidatedAuthorization::Unauthorized);
+        let denied_project = crate::tool_context::tests::project_bundle(home.path(), &scope, None);
+        let denied_context = crate::tool_context::tests::fixture_context(&denied_project);
         let root = tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(
             denied_context.project_root().as_os_str(),
         );
@@ -771,7 +745,9 @@ mod tests {
             "got {refusal}"
         );
 
-        let authorized_context = context_for(ValidatedAuthorization::Authorized);
+        let authorized_project =
+            crate::tool_context::tests::project_bundle(home.path(), &scope, Some(lease));
+        let authorized_context = crate::tool_context::tests::fixture_context(&authorized_project);
         let authorized_binding =
             PrContextCursorBinding::new(&authorized_context, &root, comparison());
         pr_context_cursor_authority(&authorized_context, &authorized_binding)

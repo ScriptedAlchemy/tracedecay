@@ -34,7 +34,7 @@ where
 /// Request grants are issued only after the adapter supplies exact controls.
 struct ProjectlessConnectionStateV1 {
     client_identity: DaemonClientIdentity,
-    profile_authority: crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
+    profile_authority: tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
 }
 
 /// Two profile roots name the same profile when they resolve to the same
@@ -87,7 +87,7 @@ fn admit_projectless_connection(
         profile_identity.profile_id().clone(),
     );
     let serving_db = user_sessions_db_path(&pinned_profile_root);
-    let serving = crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
+    let serving = tracedecay_session_runtime::retained::profile_session_retrieval_serving_identity(
         profile_identity,
         &shard,
         &serving_db,
@@ -99,10 +99,11 @@ fn admit_projectless_connection(
         DaemonSessionRetrievalRoot::profile(serving).ok_or_else(|| TraceDecayError::Config {
             message: "projectless profile session authority is unavailable".to_owned(),
         })?;
-    let profile_authority = crate::daemon::retained_owner::profile_retained_connection_authority(
-        profile_identity,
-        profile_session_root.identity(),
-    )?;
+    let profile_authority =
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
+            profile_identity,
+            profile_session_root.identity(),
+        )?;
     Ok(ProjectlessConnectionStateV1 {
         client_identity: DaemonClientIdentity::new(
             pinned_profile_root.clone(),
@@ -556,7 +557,7 @@ async fn projectless_profile_retained_response(
         &connection.profile_authority,
         None,
         session_refresh.as_deref().map(|service| {
-            service as &dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1
+            service as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1
         }),
         None,
         None,

@@ -10,8 +10,8 @@ use tracedecay_contracts::{
     ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
     ConfigurationWireRequestV1,
 };
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 use tracedecay_daemon_protocol::{RequestedOutputFormat, invocation_now_micros};
-use tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,

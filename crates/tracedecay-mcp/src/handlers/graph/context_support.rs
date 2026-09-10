@@ -17,15 +17,18 @@ use tracedecay_store::{
     ProjectMemoryFactSearchQuery,
 };
 
-use crate::tracedecay::TraceDecay;
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::context_headings::{
+use crate::McpToolContext;
+use crate::context_headings::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
     CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,
     CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
     CONTEXT_TEST_COVERAGE_HEADING,
 };
+use tracedecay_application::tracedecay::project_memory_owner_from_layout_id;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
+use tracedecay_session_memory::fact_store::{ProjectFactStore, ProjectMemoryDbHandle};
+use tracedecay_session_memory::memory::MemoryApplication;
 
 const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
 const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
@@ -72,7 +75,7 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
     }
     let prefix = utf8_prefix_at_or_before(lane, budget);
     preview.push_str(prefix);
-    if tracedecay_mcp::tools::render::has_open_markdown_fence(prefix) {
+    if crate::tools::render::has_open_markdown_fence(prefix) {
         preview.push_str("\n```\n");
     }
     preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
@@ -251,7 +254,7 @@ pub(super) struct ContextMemoryOutcome {
 
 #[hotpath::measure(future = true, label = "mcp.graph.context_memory")]
 pub(super) async fn context_memory_outcome(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     task: &str,
     options: &ContextMemoryOptions,
     read_control: Option<&FactReadControl>,
@@ -263,7 +266,7 @@ pub(super) async fn context_memory_outcome(
             error: None,
         };
     };
-    match context_memory_matches(cg, task, options, read_control).await {
+    match context_memory_matches(ctx, task, options, read_control).await {
         Ok(matches) => ContextMemoryOutcome {
             hits: matches.hits,
             graph_coverage: Some(matches.graph_coverage),
@@ -279,13 +282,24 @@ pub(super) async fn context_memory_outcome(
     }
 }
 
+fn context_memory_application<'a>(
+    ctx: &'a McpToolContext<'a>,
+) -> Result<MemoryApplication<ProjectFactStore<'a>>> {
+    let project = ctx.project();
+    let database = project.graph_database();
+    let owner =
+        project_memory_owner_from_layout_id(project.store_layout().identity.project_id.as_deref())?;
+    let store = ProjectMemoryDbHandle::Active(database).into_fact_store();
+    MemoryApplication::new(owner, store).map_err(memory_application_error)
+}
+
 async fn context_memory_matches(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     task: &str,
     options: &ContextMemoryOptions,
     read_control: &FactReadControl,
 ) -> Result<ContextMemoryMatches> {
-    let memory = cg.project_memory_application()?;
+    let memory = context_memory_application(ctx)?;
     let min_trust =
         Confidence::new(options.min_trust).map_err(|error| TraceDecayError::Config {
             message: format!("invalid context memory trust threshold: {error}"),

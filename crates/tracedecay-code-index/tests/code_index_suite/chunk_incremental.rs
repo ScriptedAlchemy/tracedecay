@@ -272,6 +272,7 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                         line_span: 1,
                         start_line: 0,
                         signature: None,
+                        docstring: None,
                         skip_test_coverage: false,
                         file_identity: id::<FileIdentityDigest>(&format!(
                             "sha256:{}",

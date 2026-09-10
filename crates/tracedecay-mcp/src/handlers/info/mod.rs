@@ -15,6 +15,7 @@ mod registry;
 mod remote_status;
 mod signature_search;
 mod simplify_scan;
+mod status;
 mod todos;
 mod type_hierarchy;
 mod verified;
@@ -30,6 +31,7 @@ pub use registry::{handle_project_context, handle_project_list, handle_project_s
 pub use remote_status::handle_remote_status;
 pub use signature_search::handle_signature_search;
 pub use simplify_scan::handle_simplify_scan;
+pub use status::{graph_statistics_value, handle_active_project, handle_status};
 pub use todos::handle_todos;
 pub use type_hierarchy::handle_type_hierarchy;
 

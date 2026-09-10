@@ -351,7 +351,7 @@ impl TraceDecay {
             let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
         }
 
-        let mut ts = Self {
+        let ts = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -365,8 +365,6 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -381,20 +379,19 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            ts.context_scout_owner =
-                tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
-                    ts.db.clone(),
-                    project_id,
-                    tracedecay_domain::UtcMicros(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(1, |duration| {
-                                duration.as_micros().min(i64::MAX as u128) as i64
-                            }),
-                    ),
-                    None,
-                )
-                .await;
+            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                ts.db.clone(),
+                project_id,
+                tracedecay_domain::UtcMicros(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(1, |duration| {
+                            duration.as_micros().min(i64::MAX as u128) as i64
+                        }),
+                ),
+                None,
+            )
+            .await;
         }
         ts.register_project_store_in_global_registry().await?;
         Ok(ts)
@@ -589,7 +586,7 @@ impl TraceDecay {
         .into_parts();
         let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        let mut ts = Self {
+        let ts = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -603,8 +600,6 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -617,20 +612,19 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            ts.context_scout_owner =
-                tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
-                    ts.db.clone(),
-                    project_id,
-                    tracedecay_domain::UtcMicros(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(1, |duration| {
-                                duration.as_micros().min(i64::MAX as u128) as i64
-                            }),
-                    ),
-                    None,
-                )
-                .await;
+            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                ts.db.clone(),
+                project_id,
+                tracedecay_domain::UtcMicros(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(1, |duration| {
+                            duration.as_micros().min(i64::MAX as u128) as i64
+                        }),
+                ),
+                None,
+            )
+            .await;
         }
 
         ts.register_project_store_in_global_registry().await?;
@@ -813,8 +807,6 @@ impl TraceDecay {
             fallback_warning,
             read_only: true,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -834,6 +826,288 @@ fn configuration_runtime_unavailable() -> TraceDecayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use tracedecay_agent_hosts::agents::context_scout_ports::{
+        AdmittedContextScoutHookV1, ContextScoutAddressBindOutcomeV1, ContextScoutAuthorityPinV1,
+        ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
+        ProjectContextScoutAddressRegistryV1,
+    };
+    use tracedecay_application::configuration::ConfigurationCurrentStateV1;
+    use tracedecay_contracts::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::canonical_sha256;
+    use tracedecay_domain::configuration::{
+        CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CandidateDispositionV1, ConfigurationCandidateV1,
+        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
+        ConfigurationValueV1, ContextScoutSettingsV1, SettingKey,
+    };
+    use tracedecay_domain::feedback::FeedbackScopeV1;
+    use tracedecay_domain::{ActorId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_hooks::{
+        HookCapabilityV1, HookEventFamily, HookHostV1, HookScopeBindingV1,
+        NativeEnvelopeMaterialV1, decode_bound_native_hook_event, stock_event_support,
+    };
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    async fn mount_verified_reopen_claim(
+        owner: &tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1,
+    ) -> (
+        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        tracedecay_contracts::context_scout::ContextScoutAddressV1,
+    ) {
+        fn id<T: TryFrom<String>>(value: &str) -> T
+        where
+            T::Error: std::fmt::Debug,
+        {
+            T::try_from(value.to_owned()).unwrap()
+        }
+
+        let observed_at = UtcMicros(10);
+        let project_id = id::<tracedecay_domain::ProjectId>("project.scout.fixture");
+        let repository_id = id::<RepositoryId>("repository.scout.fixture");
+        let worktree_id = id::<WorktreeId>("worktree.scout.fixture");
+        let scope = ResolvedScope::new(
+            project_id.clone(),
+            repository_id.clone(),
+            worktree_id.clone(),
+            Some(id("refs/heads/main")),
+        )
+        .expect("scope");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.scout.reopen").expect("grant"),
+            1,
+            canonical_sha256(&"scout.reopen").expect("digest"),
+            ActorId::new("actor.scout.issuer").expect("issuer"),
+            UtcMicros(1),
+            UtcMicros(10_000),
+            scope.clone(),
+            BTreeSet::from([CapabilityId::new("capability.scout.reopen").expect("capability")]),
+            BTreeSet::from([UseCaseId::new("use-case.scout.reopen").expect("use case")]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        let context = tracedecay_contracts::RequestContext::new(
+            ActorId::new("actor.scout.requester").expect("actor"),
+            scope,
+            grant,
+            RequestId::new("request.scout.reopen").expect("request"),
+            Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            CancellationContext::active("cancel.scout.reopen").expect("cancel"),
+        )
+        .expect("request context");
+        let setting_key = SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).expect("setting");
+        let revision_id = ConfigurationRevisionId::new("revision.scout.reopen").expect("revision");
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::from([(
+                setting_key.clone(),
+                ConfigurationValueV1::ContextScoutSettings(ContextScoutSettingsV1::disabled()),
+            )]),
+            BTreeMap::from([(
+                setting_key,
+                vec![ConfigurationCandidateV1 {
+                    layer: ConfigurationLayerIdV1::Project {
+                        project_id: project_id.clone(),
+                    },
+                    revision_id: revision_id.clone(),
+                    disposition: CandidateDispositionV1::Winning,
+                    safe_reason: None,
+                }],
+            )]),
+        )
+        .expect("snapshot");
+        let configuration =
+            ContextScoutConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {
+                revision_id,
+                snapshot,
+            })
+            .expect("configuration pin");
+        let pin = ContextScoutAuthorityPinV1::new(
+            &context,
+            FeedbackScopeV1 {
+                project_id,
+                repository_id,
+                worktree_id,
+                branch_ref: "refs/heads/main".to_owned(),
+                head_commit_id: id("commit.scout.fixture"),
+            },
+            configuration,
+            observed_at,
+        )
+        .expect("authority pin");
+        let binding = HookScopeBindingV1 {
+            host: HookHostV1::ClaudeCode,
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: 1,
+            binding_token: [4; 32],
+            capabilities: [
+                HookEventFamily::SessionBoundary,
+                HookEventFamily::PromptBoundary,
+                HookEventFamily::ToolLifecycle,
+                HookEventFamily::SavedEdit,
+                HookEventFamily::TestLifecycle,
+            ]
+            .into_iter()
+            .map(|family| HookCapabilityV1 {
+                family,
+                support: stock_event_support(HookHostV1::ClaudeCode, family),
+            })
+            .collect(),
+        };
+        let envelope = decode_bound_native_hook_event(
+            HookHostV1::ClaudeCode,
+            include_bytes!(
+                "../../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+            ),
+            &binding,
+            NativeEnvelopeMaterialV1 {
+                event_id: [5; 16],
+                protected_session_id: [6; 32],
+                observed_at,
+                tool_id: Some([7; 16]),
+                effect_receipt_id: Some([8; 16]),
+                file_id: Some([9; 16]),
+                changed_range_count: 1,
+            },
+        )
+        .expect("hook envelope");
+        let hook = AdmittedContextScoutHookV1::new(envelope, &binding).expect("admitted hook");
+        let registry = ProjectContextScoutAddressRegistryV1::new(
+            owner.store().database().clone(),
+            id("project.scout.fixture"),
+        )
+        .expect("address registry");
+        let lifecycle = ContextScoutLifecycleAddressV1 {
+            profile_id: id("profile.scout.fixture"),
+            provider_id: id("provider.claude"),
+            project_id: id("project.scout.fixture"),
+            worktree_id: id("worktree.scout.fixture"),
+            session_id: id("session.scout.fixture"),
+            thread_id: id("thread.scout.fixture"),
+            turn_id: id("turn.scout.fixture"),
+            agent_id: id("agent.scout.fixture"),
+            logical_message_id: id("message.scout.reopen"),
+        };
+        let address = match registry.bind(&hook, &pin, lifecycle.clone()).await {
+            ContextScoutAddressBindOutcomeV1::Bound(address)
+            | ContextScoutAddressBindOutcomeV1::Existing(address) => address,
+            other => panic!("expected bound reopen address, got {other:?}"),
+        };
+        assert_eq!(
+            owner
+                .mount_current_claim_authority(
+                    registry,
+                    &hook,
+                    pin,
+                    context,
+                    lifecycle.clone(),
+                    address,
+                    [9; 32],
+                    observed_at,
+                    true,
+                )
+                .await,
+            tracedecay_agent_hosts::agents::context_scout_owner::ContextScoutClaimAdmissionV1::Mounted,
+            "one claim authority must be admissible before reopen"
+        );
+        (lifecycle, address)
+    }
+
+    #[tokio::test]
+    async fn context_scout_owner_survives_branch_reopen() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("create project root");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let opened = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize project graph");
+        let project_id =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(opened.hook_store_layout())
+                .expect("initialized project has hook identity");
+        let owner = opened
+            .context_scout_owner()
+            .expect("Context Scout owner starts with the project");
+        let registered =
+            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+                project_id,
+            );
+        assert!(
+            registered
+                .iter()
+                .any(|candidate| Arc::ptr_eq(candidate, &owner)),
+            "startup must publish the owner into the process-global registry"
+        );
+
+        let (lifecycle, address) = mount_verified_reopen_claim(&owner).await;
+
+        let reopened = opened
+            .reopen_for_current_branch()
+            .await
+            .expect("reopen onto the live branch");
+        let after = reopened
+            .context_scout_owner()
+            .expect("Context Scout owner must remain resolvable after branch reopen");
+        assert!(
+            Arc::ptr_eq(&owner, &after),
+            "Context Scout owner is keyed by project identity, not by the TraceDecay instance"
+        );
+        assert_eq!(
+            after.resolve_admitted_claim(&lifecycle).await,
+            Some((address, [9; 32])),
+            "mounted claim authority must remain resolvable after branch reopen"
+        );
+        let registered =
+            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+                project_id,
+            );
+        assert_eq!(
+            registered.len(),
+            1,
+            "one project identity has one Context Scout owner"
+        );
+        assert!(Arc::ptr_eq(&owner, &registered[0]));
+    }
+
+    #[tokio::test]
+    async fn read_only_open_does_not_resolve_writable_context_scout_owner() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("create project root");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let writable = TraceDecay::init_with_options(&project, options.clone())
+            .await
+            .expect("initialize writable project graph");
+        assert!(
+            writable.context_scout_owner().is_some(),
+            "a writable open starts and registers the Context Scout owner"
+        );
+        let read_only = TraceDecay::open_read_only_with_options(&project, options)
+            .await
+            .expect("open the same project read-only");
+        assert!(
+            matches!(
+                read_only.context_scout_owner_lookup(),
+                crate::tracedecay::ContextScoutOwnerLookupV1::ReadOnly
+            ),
+            "a read-only open must not resolve the writable instance's owner"
+        );
+        assert!(
+            read_only.context_scout_owner().is_none(),
+            "read-only TraceDecay has no Context Scout owner"
+        );
+    }
 
     #[tokio::test]
     async fn nonempty_wrong_schema_read_only_open_returns_reset_required() {

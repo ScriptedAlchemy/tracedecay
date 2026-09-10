@@ -416,8 +416,6 @@ pub(crate) async fn register_dashboard_test_retained_runtime(
     let retained_ports = super::retained_owner::retained_surface_ports(
         super::retained_owner::ProductionRetainedAuthoritiesV1 {
             cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(cg))),
-            store_runtime_registry: cg.retained_store_runtime_registry(),
-            profile_database: cg.profile_database().clone(),
             project_root: project_root.clone(),
             project_id,
             mounted_profile_id: None,

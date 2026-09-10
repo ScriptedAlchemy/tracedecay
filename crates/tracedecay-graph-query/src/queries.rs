@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+    CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 
 use super::map_projection_error;
@@ -44,6 +44,11 @@ pub struct VerifiedHealthFileAggregateV1 {
     pub dead_function_methods: usize,
 }
 
+pub struct VerifiedHealthInputsV1 {
+    pub adjacency: HashMap<String, HashSet<String>>,
+    pub aggregates: Vec<VerifiedHealthFileAggregateV1>,
+}
+
 /// Generation-pinned analytical queries over the verified Grafeo projection.
 pub struct GraphQueryManager<'a> {
     reader: &'a CodeGraphInteractiveReader,
@@ -59,6 +64,11 @@ impl<'a> GraphQueryManager<'a> {
             reader,
             cancellation,
         }
+    }
+
+    #[hotpath::skip]
+    pub fn generation(&self) -> &CodeGenerationId {
+        self.reader.generation()
     }
 
     #[hotpath::measure(label = "usecases.graph.query.page")]
@@ -408,6 +418,83 @@ impl<'a> GraphQueryManager<'a> {
     /// Folds every health input from one immutable graph generation. Symbol
     /// metrics are parser-attested metadata; liveness and test annotations are
     /// derived from the same generation's canonical relation set.
+    #[hotpath::measure(label = "usecases.graph.health_inputs", future = true)]
+    pub async fn health_inputs(&self, path_prefix: Option<&str>) -> Result<VerifiedHealthInputsV1> {
+        let files = hotpath::measure_block!("usecases.graph.health.files", {
+            self.reader
+                .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })
+        })?;
+        let symbols = hotpath::measure_block!("usecases.graph.health.symbols", {
+            self.page_all_symbols(
+                MAX_ANALYTICAL_SYMBOLS,
+                "verified health symbol census exceeded its analytical budget",
+            )
+        })?;
+        let occurrences = symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<Vec<_>>();
+        let edges = hotpath::measure_block!("usecases.graph.health.edges", {
+            self.reader
+                .edges_among(
+                    &occurrences,
+                    &[
+                        RelationEdgeKindV1::Calls,
+                        RelationEdgeKindV1::Uses,
+                        RelationEdgeKindV1::TypeOf,
+                        RelationEdgeKindV1::Implements,
+                        RelationEdgeKindV1::Extends,
+                        RelationEdgeKindV1::Returns,
+                        RelationEdgeKindV1::Receives,
+                        RelationEdgeKindV1::Annotates,
+                    ],
+                    MAX_ANALYTICAL_RELATIONS,
+                    Arc::clone(&self.cancellation),
+                )
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })
+        })?;
+        let metadata = health_symbol_metadata(&symbols)?;
+        let mut adjacency = files
+            .into_iter()
+            .map(|file| (file.logical_path, HashSet::new()))
+            .collect::<HashMap<_, _>>();
+        for edge in edges.iter().filter(|edge| {
+            matches!(
+                edge.edge.kind,
+                RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses
+            )
+        }) {
+            let (Some((source, _)), Some((target, _))) = (
+                metadata.get(&edge.edge.from_occurrence),
+                metadata.get(&edge.edge.to_occurrence),
+            ) else {
+                continue;
+            };
+            if source != target {
+                adjacency
+                    .entry(source.clone())
+                    .or_default()
+                    .insert(target.clone());
+            }
+        }
+        adjacency.retain(|source, targets| {
+            if path_prefix.is_some_and(|prefix| !source.starts_with(prefix)) {
+                return false;
+            }
+            targets.retain(|target| path_prefix.is_none_or(|prefix| target.starts_with(prefix)));
+            true
+        });
+        Ok(VerifiedHealthInputsV1 {
+            adjacency,
+            aggregates: fold_health_aggregates(metadata, &edges, path_prefix),
+        })
+    }
+
     #[hotpath::measure(label = "usecases.graph.health_file_aggregates", future = true)]
     pub async fn health_file_aggregates(
         &self,
@@ -444,79 +531,108 @@ impl<'a> GraphQueryManager<'a> {
                     super::map_code_graph_read_runtime_error(map_projection_error(error))
                 })
         })?;
-        let metadata = symbols
-            .iter()
-            .filter_map(|symbol| {
-                Some((
-                    symbol.occurrence.clone(),
-                    (
-                        symbol.binding.as_ref()?.logical_path.clone()?,
-                        symbol.metadata.as_ref()?,
-                    ),
-                ))
-            })
-            .collect::<HashMap<_, _>>();
-        if metadata.len() != symbols.len() {
-            return Err(unavailable(
-                "verified health evidence is incomplete for one or more symbols",
-            ));
-        }
-        let live_targets = edges
-            .iter()
-            .filter(|edge| edge.edge.kind != RelationEdgeKindV1::Annotates)
-            .map(|edge| edge.edge.to_occurrence.clone())
-            .collect::<HashSet<_>>();
-        let test_markers = metadata
-            .iter()
-            .filter(|(_, (_, record))| is_test_marker(record))
-            .map(|(occurrence, _)| occurrence.clone())
-            .collect::<HashSet<_>>();
-        let test_annotated = edges
-            .iter()
-            .filter(|edge| {
-                edge.edge.kind == RelationEdgeKindV1::Annotates
-                    && test_markers.contains(&edge.edge.from_occurrence)
-            })
-            .map(|edge| edge.edge.to_occurrence.clone())
-            .collect::<HashSet<_>>();
-        let mut by_file = HashMap::<String, VerifiedHealthFileAggregateV1>::new();
-        for (occurrence, (file_path, record)) in metadata {
-            if path_prefix.is_some_and(|prefix| !file_path.starts_with(prefix)) {
-                continue;
-            }
-            let aggregate =
-                by_file
-                    .entry(file_path.clone())
-                    .or_insert_with(|| VerifiedHealthFileAggregateV1 {
-                        file_path,
-                        ..VerifiedHealthFileAggregateV1::default()
-                    });
-            match record.exact_complexity() {
-                Some(complexity) => {
-                    aggregate.complexity += f64::from(complexity.branches) * 2.0
-                        + f64::from(complexity.loops) * 2.0
-                        + f64::from(complexity.max_nesting) * 3.0
-                        + f64::from(record.line_span);
-                }
-                None => aggregate.incomplete_complexity_symbols += 1,
-            }
-            if !matches!(record.kind.as_str(), "function" | "method") {
-                continue;
-            }
-            aggregate.function_methods += 1;
-            aggregate.skipped_function_methods += usize::from(record.skip_test_coverage);
-            let entrypoint = record.simple_name == "main"
-                || record.simple_name.starts_with("test")
-                || record.visibility == "public"
-                || test_annotated.contains(&occurrence);
-            if !entrypoint && !live_targets.contains(&occurrence) {
-                aggregate.dead_function_methods += 1;
-            }
-        }
-        let mut aggregates = by_file.into_values().collect::<Vec<_>>();
-        aggregates.sort_by(|left, right| left.file_path.cmp(&right.file_path));
-        Ok(aggregates)
+        let metadata = health_symbol_metadata(&symbols)?;
+        Ok(fold_health_aggregates(metadata, &edges, path_prefix))
     }
+}
+
+fn health_symbol_metadata<'a>(
+    symbols: &'a [CodeGraphSymbolSummaryV1],
+) -> Result<
+    HashMap<
+        SymbolOccurrenceId,
+        (
+            String,
+            &'a tracedecay_code_index::lineage::LineageSymbolRecordV1,
+        ),
+    >,
+> {
+    let metadata = symbols
+        .iter()
+        .filter_map(|symbol| {
+            Some((
+                symbol.occurrence.clone(),
+                (
+                    symbol.binding.as_ref()?.logical_path.clone()?,
+                    symbol.metadata.as_ref()?,
+                ),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    if metadata.len() != symbols.len() {
+        return Err(unavailable(
+            "verified health evidence is incomplete for one or more symbols",
+        ));
+    }
+    Ok(metadata)
+}
+
+fn fold_health_aggregates(
+    metadata: HashMap<
+        SymbolOccurrenceId,
+        (
+            String,
+            &tracedecay_code_index::lineage::LineageSymbolRecordV1,
+        ),
+    >,
+    edges: &[CodeGraphSemanticEdgeV1],
+    path_prefix: Option<&str>,
+) -> Vec<VerifiedHealthFileAggregateV1> {
+    let live_targets = edges
+        .iter()
+        .filter(|edge| edge.edge.kind != RelationEdgeKindV1::Annotates)
+        .map(|edge| edge.edge.to_occurrence.clone())
+        .collect::<HashSet<_>>();
+    let test_markers = metadata
+        .iter()
+        .filter(|(_, (_, record))| is_test_marker(record))
+        .map(|(occurrence, _)| occurrence.clone())
+        .collect::<HashSet<_>>();
+    let test_annotated = edges
+        .iter()
+        .filter(|edge| {
+            edge.edge.kind == RelationEdgeKindV1::Annotates
+                && test_markers.contains(&edge.edge.from_occurrence)
+        })
+        .map(|edge| edge.edge.to_occurrence.clone())
+        .collect::<HashSet<_>>();
+    let mut by_file = HashMap::<String, VerifiedHealthFileAggregateV1>::new();
+    for (occurrence, (file_path, record)) in metadata {
+        if path_prefix.is_some_and(|prefix| !file_path.starts_with(prefix)) {
+            continue;
+        }
+        let aggregate =
+            by_file
+                .entry(file_path.clone())
+                .or_insert_with(|| VerifiedHealthFileAggregateV1 {
+                    file_path,
+                    ..VerifiedHealthFileAggregateV1::default()
+                });
+        match record.exact_complexity() {
+            Some(complexity) => {
+                aggregate.complexity += f64::from(complexity.branches) * 2.0
+                    + f64::from(complexity.loops) * 2.0
+                    + f64::from(complexity.max_nesting) * 3.0
+                    + f64::from(record.line_span);
+            }
+            None => aggregate.incomplete_complexity_symbols += 1,
+        }
+        if !matches!(record.kind.as_str(), "function" | "method") {
+            continue;
+        }
+        aggregate.function_methods += 1;
+        aggregate.skipped_function_methods += usize::from(record.skip_test_coverage);
+        let entrypoint = record.simple_name == "main"
+            || record.simple_name.starts_with("test")
+            || record.visibility == "public"
+            || test_annotated.contains(&occurrence);
+        if !entrypoint && !live_targets.contains(&occurrence) {
+            aggregate.dead_function_methods += 1;
+        }
+    }
+    let mut aggregates = by_file.into_values().collect::<Vec<_>>();
+    aggregates.sort_by(|left, right| left.file_path.cmp(&right.file_path));
+    aggregates
 }
 
 pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolRecordV1) -> bool {

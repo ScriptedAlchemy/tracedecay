@@ -385,7 +385,7 @@ impl ProjectContextScoutAddressRegistryV1 {
         }))
     }
 
-    async fn bind(
+    pub async fn bind(
         &self,
         hook: &AdmittedContextScoutHookV1,
         pin: &ContextScoutAuthorityPinV1,

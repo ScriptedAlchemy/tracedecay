@@ -149,6 +149,7 @@ fn requires_application_invocation_executor(tool_name: &str) -> bool {
             Some(crate::mcp::tools::binding::McpToolDispatchGroup::MultiRoot)
         )
         || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+        || is_source_edit_tool(tool_name)
 }
 
 /// Retained name for this module's call sites; the saturating clamp is the one
@@ -1948,6 +1949,31 @@ mod git_read_control_tests {
             assert!(
                 requires_application_invocation_executor(&tool_name),
                 "{tool_name} must use the mounted Workflow owner",
+            );
+        }
+    }
+
+    #[test]
+    fn source_edit_tools_request_the_daemon_invocation_executor() {
+        for tool_name in [
+            "tracedecay_str_replace",
+            "tracedecay_multi_str_replace",
+            "tracedecay_insert_at",
+            "tracedecay_ast_grep_rewrite",
+            "tracedecay_replace_symbol",
+            "tracedecay_insert_at_symbol",
+            "tracedecay_move_symbol",
+            "tracedecay_rename_symbol",
+            "tracedecay_source_edit_reconcile",
+            "tracedecay_source_edit_rollback",
+        ] {
+            assert!(
+                is_source_edit_tool(tool_name),
+                "{tool_name} must be classified as a source-edit tool",
+            );
+            assert!(
+                requires_application_invocation_executor(tool_name),
+                "{tool_name} must dispatch through the daemon invocation executor",
             );
         }
     }

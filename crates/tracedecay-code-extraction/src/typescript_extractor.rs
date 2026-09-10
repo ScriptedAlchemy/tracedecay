@@ -864,6 +864,28 @@ impl TypeScriptExtractor {
             });
         }
 
+        if let Some(heritage) = find_direct_child_by_kind(node, "extends_type_clause") {
+            let mut cursor = heritage.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let parent = cursor.node();
+                    if let Some(reference_name) = Self::declared_type_name(state, parent) {
+                        state.unresolved_refs.push(UnresolvedRef {
+                            from_node_id: id.clone(),
+                            reference_name,
+                            reference_kind: EdgeKind::Extends,
+                            line: parent.start_position().row as u32,
+                            column: parent.start_position().column as u32,
+                            file_path: state.file_path.clone(),
+                        });
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
         if let Some(body) = find_direct_child_by_kind(node, "interface_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_interface_body(state, body);
@@ -1308,8 +1330,7 @@ impl TypeScriptExtractor {
                             if inner.goto_first_child() {
                                 loop {
                                     let iface = inner.node();
-                                    if iface.kind() == "type_identifier" {
-                                        let name = state.node_text(iface).to_string();
+                                    if let Some(name) = Self::declared_type_name(state, iface) {
                                         state.unresolved_refs.push(UnresolvedRef {
                                             from_node_id: class_id.to_string(),
                                             reference_name: name,
@@ -1332,6 +1353,17 @@ impl TypeScriptExtractor {
                     }
                 }
             }
+        }
+    }
+
+    fn declared_type_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
+        match node.kind() {
+            "type_identifier" => Some(state.node_text(node).to_string()),
+            "generic_type" => node
+                .child_by_field_name("name")
+                .and_then(|name| Self::declared_type_name(state, name)),
+            "nested_type_identifier" => Some(state.node_text(node).replace('.', "::")),
+            _ => None,
         }
     }
 

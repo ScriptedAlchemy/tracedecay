@@ -135,7 +135,7 @@ fn graph_authority_error(
 ) -> DashboardGraphReadError {
     let message = error.to_string();
     match error {
-        MemoryApplicationError::Store(FactStoreError::GraphDeadlineExceeded) => {
+        MemoryApplicationError::Cancelled(FactStoreError::GraphDeadlineExceeded) => {
             DashboardGraphReadError::TimedOut(message)
         }
         MemoryApplicationError::Store(FactStoreError::GraphResetRequired { reason, .. }) => {
@@ -143,14 +143,12 @@ fn graph_authority_error(
         }
         _ if request_timed_out => DashboardGraphReadError::TimedOut(message),
         _ if request_cancelled => DashboardGraphReadError::Cancelled(message),
+        MemoryApplicationError::Cancelled(_) => DashboardGraphReadError::Cancelled(message),
         MemoryApplicationError::Store(FactStoreError::GraphConflict) => {
             DashboardGraphReadError::Conflicting(message)
         }
         MemoryApplicationError::Store(FactStoreError::GraphUnavailable) => {
             DashboardGraphReadError::Unavailable(message)
-        }
-        MemoryApplicationError::Store(FactStoreError::GraphCancelled) => {
-            DashboardGraphReadError::Cancelled(message)
         }
         MemoryApplicationError::Store(FactStoreError::GraphBudgetExhausted) => {
             DashboardGraphReadError::BudgetExhausted(message)
@@ -578,12 +576,22 @@ mod tests {
     #[test]
     fn typed_graph_deadline_and_request_terminal_state_have_precedence() {
         let error = graph_authority_error(
-            MemoryApplicationError::Store(FactStoreError::GraphDeadlineExceeded),
+            MemoryApplicationError::Cancelled(FactStoreError::GraphDeadlineExceeded),
             true,
             true,
         );
 
         assert!(matches!(error, DashboardGraphReadError::TimedOut(_)));
+
+        let error = graph_authority_error(
+            MemoryApplicationError::Cancelled(FactStoreError::GraphCancelled),
+            true,
+            false,
+        );
+        assert!(
+            matches!(error, DashboardGraphReadError::TimedOut(_)),
+            "request timeout still precedes a coincident graph cancellation"
+        );
 
         let error = graph_authority_error(
             MemoryApplicationError::Store(FactStoreError::GraphConflict),

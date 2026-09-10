@@ -41,21 +41,18 @@ pub async fn compute_verified_health_snapshot(
     graph: &GraphQueryManager<'_>,
     path_prefix: Option<&str>,
 ) -> Result<VerifiedHealthSnapshotV1> {
-    let adjacency = hotpath::future!(
-        graph.build_file_adjacency(path_prefix),
-        label = "usecases.graph.health.adjacency"
+    let inputs = hotpath::future!(
+        graph.health_inputs(path_prefix),
+        label = "usecases.graph.health.inputs"
     )
     .await?;
+    let adjacency = inputs.adjacency;
     let files_analyzed = adjacency.len();
     let total_edges = adjacency.values().map(HashSet::len).sum();
     let (acyclicity, edges_in_cycles) = acyclicity_score(&adjacency);
     let depth_result = dependency_depth(&adjacency, 1);
     let depth = depth_score(depth_result.max_depth, depth_result.ideal_depth);
-    let aggregates = hotpath::future!(
-        graph.health_file_aggregates(path_prefix),
-        label = "usecases.graph.health.aggregates"
-    )
-    .await?;
+    let aggregates = inputs.aggregates;
     let complexity_values = aggregates
         .iter()
         .map(|aggregate| aggregate.complexity)

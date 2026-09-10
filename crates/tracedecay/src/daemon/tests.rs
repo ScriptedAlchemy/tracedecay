@@ -677,25 +677,23 @@ async fn apply_project_setting_via_surface(
         format!("daemon-test-setting-{}", request_id.as_str()),
     )
     .expect("configuration idempotency key");
-    let request =
-        tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
-            tracedecay_contracts::ConfigurationWireRequestV1::Batch(
-                tracedecay_contracts::ConfigurationBatchRequestV1 {
-                    mutations: vec![
-                        tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
-                            layer:
-                                tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
-                                    project_id: target.project_id,
-                                },
-                            key,
-                            value: Box::new(value),
+    let request = tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
+        tracedecay_contracts::ConfigurationWireRequestV1::Batch(
+            tracedecay_contracts::ConfigurationBatchRequestV1 {
+                mutations: vec![
+                    tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
+                        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                            project_id: target.project_id,
                         },
-                    ],
-                    expected_revision: current.revision_id().clone(),
-                    idempotency_key,
-                },
-            ),
-        );
+                        key,
+                        value: Box::new(value),
+                    },
+                ],
+                expected_revision: current.revision_id().clone(),
+                idempotency_key,
+            },
+        ),
+    );
     let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
         "cancellation.surface.{}",
         request_id.as_str()

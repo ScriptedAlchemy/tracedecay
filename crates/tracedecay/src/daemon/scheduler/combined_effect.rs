@@ -27,6 +27,7 @@ use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     DeferredRunSettlementRequest, DeferredSettlementOutcome, DeferredSettlementRequest,
 };
 use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub(super) enum CombinedEffectAdmission {
     Execute {
@@ -107,7 +108,7 @@ fn collect_settlement_result(
             if let DeferredSettlementOutcome::Settled(settled) = &outcome
                 && let Some(problem) = settled.terminal.problem()
             {
-                super::log_daemon_event(
+                log_daemon_event(
                     "scheduler_task_application_problem",
                     &super::scheduler_application_problem_log_fields(project_path, task, problem),
                 );
@@ -229,7 +230,7 @@ where
                 }
                 Ok(terminal) => {
                     if let Some(problem) = terminal.problem() {
-                        super::log_daemon_event(
+                        log_daemon_event(
                             "scheduler_task_application_problem",
                             &super::scheduler_application_problem_log_fields(
                                 project_path,
@@ -891,8 +892,6 @@ mod tests {
             let retained_ports = crate::daemon::retained_owner::retained_surface_ports(
                 crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
                     cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&memory))),
-                    store_runtime_registry: memory.retained_store_runtime_registry(),
-                    profile_database: memory.profile_database().clone(),
                     project_root: project_root.clone(),
                     project_id: project_id.clone(),
                     mounted_profile_id: None,

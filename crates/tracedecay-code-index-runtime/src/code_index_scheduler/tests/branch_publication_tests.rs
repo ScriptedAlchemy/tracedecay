@@ -24,6 +24,7 @@ async fn mounted_registry(fixture: &GitFixture, store: &TempDir) -> CodeIndexSch
         .await
         .expect("mount worktree");
     super::wait_for_initial_generation(&registry, fixture.path()).await;
+    super::wait_for_dashboard_ready(&registry, fixture.path()).await;
     registry
 }
 
@@ -147,6 +148,71 @@ async fn cancelled_generation_wait_rolls_back_prepared_branch_metadata() {
         tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
             .is_some_and(|meta| !meta.is_tracked("cancelled-publication")),
         "cancelled generation wait must roll back prepared metadata"
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_serving_claim_does_not_erase_pending_branch_tracking() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let project_id = test_project_id();
+    let registry = mounted_registry(&fixture, &store).await;
+    let generation = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("ready serving generation");
+    let super::super::ServingGenerationInstallationOutcomeV1::Installed(held) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("fixture must hold the serving claim")
+    };
+    let context =
+        BranchPublicationContextV1::new(Some(project_id.as_str()), fixture.path(), store.path())
+            .expect("branch publication context");
+    let cancellation = CancellationToken::new();
+    let publication_registry = registry.clone();
+    let project_root = fixture.path().to_path_buf();
+    let worktree_root = project_root.clone();
+    let publication = tokio::spawn(async move {
+        context
+            .track_exact_worktree_branch(
+                &publication_registry,
+                &project_root,
+                &worktree_root,
+                "feature/replay",
+                &cancellation,
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
+                .is_some_and(|meta| meta.is_tracked("feature/replay"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pending branch metadata becomes visible");
+
+    drop(held);
+    assert!(registry.notify_hook_overflow(fixture.path()).await);
+    assert_eq!(
+        publication
+            .await
+            .expect("publication task joins")
+            .expect("released serving claim must publish"),
+        tracedecay_runtime_core::branch::BranchAddOutcome::Added
+    );
+    assert!(
+        tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
+            .is_some_and(|meta| meta.is_query_eligible("feature/replay")),
+        "a transient serving handoff must preserve and finish pending branch tracking"
     );
     registry.shutdown().await;
 }

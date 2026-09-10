@@ -401,6 +401,7 @@ mod tests {
             line_span: 1,
             start_line: 0,
             signature: Some("fn get(&self, key: u32) -> Option<u32>".to_owned()),
+            docstring: None,
             skip_test_coverage: false,
             file_identity: id::<FileIdentityDigest>(&digest('f')),
             content_digest: id::<ContentDigest>(&digest('d')),

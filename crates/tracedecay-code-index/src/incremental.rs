@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use thiserror::Error;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
@@ -82,11 +83,30 @@ impl GenerationChunkManifestV1 {
             .validate()
             .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
 
+        // Per-file validation is independent work and dominates a
+        // corpus-sized aggregate, so it fans out over the indexing pool
+        // instead of running as one serial loop; the first failure in file
+        // order is still the one reported. Each file holds one background
+        // CPU unit for its whole validation so the nested per-chunk admission
+        // inside `validate` reuses it inline instead of taking the process
+        // budget lock once per chunk.
+        let validated = crate::parallelism::install(|| {
+            files
+                .par_iter()
+                .map(|file| {
+                    crate::parallelism::with_background_cpu_permit(|| {
+                        file.validate().map_err(map_chunking_error)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        validated.into_iter().collect::<Result<(), _>>()?;
+
         let capacity = files.iter().map(|file| file.chunks.len()).sum();
         let mut chunks = Vec::with_capacity(capacity);
         let mut file_occurrences = BTreeSet::new();
         for file in files {
-            file.validate().map_err(map_chunking_error)?;
             if file.document.generation_id != generation_id {
                 return Err(ChunkIncrementErrorV1::MixedGeneration);
             }
@@ -97,7 +117,10 @@ impl GenerationChunkManifestV1 {
             }
             chunks.extend(file.chunks);
         }
-        chunks.sort_by(|left, right| left.id.cmp(&right.id));
+        // Typed identities are unique (checked below), so the parallel sort
+        // yields exactly the order the serial sort did.
+        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
         if let Some(duplicate) = chunks
             .windows(2)
             .find(|pair| pair[0].id == pair[1].id)

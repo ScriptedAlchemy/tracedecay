@@ -239,8 +239,49 @@ pub struct CodeIndexFreshnessPayloadV1 {
 }
 
 const LIVE_NOTE: &str = "last daemon scheduler execution state; generation and scope come from the durable sealed generation";
+const UNMOUNTED_NOTE: &str =
+    "the daemon scheduler registry has no mounted scheduler for this project";
 const UNAVAILABLE_NOTE: &str =
     "the dashboard is not attached to a daemon-owned code-index scheduler registry";
+
+impl CodeIndexFreshnessPayloadV1 {
+    /// Payload after the daemon scheduler registry answered for this project.
+    ///
+    /// The `note` is owned here — MCP dispatch and the HTTP freshness route
+    /// must not spell it a second time.
+    pub fn from_scheduler_observation(
+        worktrees: impl IntoIterator<Item = CodeIndexWorktreeFreshnessV1>,
+    ) -> Self {
+        Self {
+            worktrees: worktrees.into_iter().collect(),
+            note: LIVE_NOTE.to_owned(),
+        }
+    }
+
+    /// Reader attached, but no mounted scheduler for this project.
+    pub fn from_unmounted_scheduler() -> Self {
+        Self {
+            worktrees: Vec::new(),
+            note: UNMOUNTED_NOTE.to_owned(),
+        }
+    }
+
+    /// No scheduler-registry reader is attached.
+    pub fn from_unattached_registry() -> Self {
+        Self {
+            worktrees: Vec::new(),
+            note: UNAVAILABLE_NOTE.to_owned(),
+        }
+    }
+
+    /// One scheduler read: a live worktree, or the unmounted-empty payload.
+    pub fn from_scheduler_read(worktree: Option<CodeIndexWorktreeFreshnessV1>) -> Self {
+        match worktree {
+            Some(worktree) => Self::from_scheduler_observation([worktree]),
+            None => Self::from_unmounted_scheduler(),
+        }
+    }
+}
 
 /// `GET /api/code-index/freshness`
 pub async fn freshness(
@@ -264,16 +305,12 @@ async fn project_code_index_freshness(
         None => None,
     };
     let live = read.as_ref();
-    let payload = CodeIndexFreshnessPayloadV1 {
-        worktrees: read.clone().into_iter().collect(),
-        note: if live.is_some() {
-            LIVE_NOTE
-        } else if authority_attached {
-            "the daemon scheduler registry has no mounted scheduler for this project"
-        } else {
-            UNAVAILABLE_NOTE
+    let payload = match (authority_attached, read.clone()) {
+        (true, Some(worktree)) => {
+            CodeIndexFreshnessPayloadV1::from_scheduler_observation([worktree])
         }
-        .to_string(),
+        (true, None) => CodeIndexFreshnessPayloadV1::from_unmounted_scheduler(),
+        (false, _) => CodeIndexFreshnessPayloadV1::from_unattached_registry(),
     };
     match live {
         Some(worktree)
@@ -359,6 +396,27 @@ mod tests {
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
         crate::events_api::dashboard_state_fixture("project.dashboard-code-index").await
+    }
+
+    #[test]
+    fn scheduler_observation_payload_owns_the_live_note() {
+        let payload = CodeIndexFreshnessPayloadV1::from_scheduler_observation([]);
+        assert_eq!(payload.note, LIVE_NOTE);
+        assert!(payload.worktrees.is_empty());
+    }
+
+    #[test]
+    fn unmounted_and_unattached_payloads_own_their_notes() {
+        let unmounted = CodeIndexFreshnessPayloadV1::from_unmounted_scheduler();
+        assert_eq!(unmounted.note, UNMOUNTED_NOTE);
+        assert!(unmounted.worktrees.is_empty());
+        assert_eq!(
+            CodeIndexFreshnessPayloadV1::from_scheduler_read(None).note,
+            UNMOUNTED_NOTE
+        );
+        let unattached = CodeIndexFreshnessPayloadV1::from_unattached_registry();
+        assert_eq!(unattached.note, UNAVAILABLE_NOTE);
+        assert!(unattached.worktrees.is_empty());
     }
 
     #[test]

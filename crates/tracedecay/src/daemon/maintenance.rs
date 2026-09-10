@@ -16,6 +16,7 @@ use tracedecay_maintenance::tick::{
 };
 
 use super::branch_admin::StoreAdministration;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 
@@ -27,7 +28,7 @@ async fn join_abandoned_maintenance_task(task: Option<JoinHandle<()>>, owner: &'
     match tokio::time::timeout(super::DAEMON_TASK_ABORT_DEADLINE, task).await {
         Ok(Ok(()) | Err(_)) => {}
         Err(_) => {
-            super::log_daemon_event(
+            log_daemon_event(
                 "daemon_shutdown",
                 &[
                     ("outcome", "maintenance_task_abandoned".to_string()),
@@ -46,7 +47,7 @@ async fn run_registered_store_retention(
     let now = match now_secs_i64() {
         Ok(now) => now,
         Err(failure) => {
-            super::log_daemon_event(
+            log_daemon_event(
                 "retention_degraded",
                 &[
                     ("pass", "session_retention".to_owned()),
@@ -68,7 +69,7 @@ async fn run_registered_store_retention(
         Some(Ok(session_lcm)) => {
             let reclaimed = session_lcm.bytes_reclaimed();
             if reclaimed > 0 || !session_lcm.errors.is_empty() {
-                super::log_daemon_event(
+                log_daemon_event(
                     "retention_session_lcm",
                     &[
                         ("store", "mounted_sessions".to_owned()),
@@ -78,7 +79,7 @@ async fn run_registered_store_retention(
                 );
             }
         }
-        Some(Err(_)) => super::log_daemon_event(
+        Some(Err(_)) => log_daemon_event(
             "retention_degraded",
             &[
                 ("pass", "session_lcm".to_owned()),
@@ -91,7 +92,7 @@ async fn run_registered_store_retention(
         Some(Ok(observations)) => {
             let reclaimed = observations.bytes_reclaimed();
             if reclaimed > 0 || !observations.errors.is_empty() {
-                super::log_daemon_event(
+                log_daemon_event(
                     "retention_observation",
                     &[
                         ("store", "mounted_sessions".to_owned()),
@@ -101,7 +102,7 @@ async fn run_registered_store_retention(
                 );
             }
         }
-        Some(Err(_)) => super::log_daemon_event(
+        Some(Err(_)) => log_daemon_event(
             "retention_degraded",
             &[
                 ("pass", "observation".to_owned()),
@@ -112,7 +113,7 @@ async fn run_registered_store_retention(
     }
     match &report.observability {
         Ok(receipt) if receipt.expired_detail > 0 || receipt.expired_rollup > 0 => {
-            super::log_daemon_event(
+            log_daemon_event(
                 "retention_observability_analytics",
                 &[
                     ("store", "mounted_sessions".to_owned()),
@@ -121,7 +122,7 @@ async fn run_registered_store_retention(
                 ],
             );
         }
-        Err(error) => super::log_daemon_event(
+        Err(error) => log_daemon_event(
             "retention_degraded",
             &[
                 ("pass", "observability_analytics".to_owned()),
@@ -147,7 +148,7 @@ async fn run_profile_observability_retention(
     let now = match now_secs_i64() {
         Ok(now) => now,
         Err(failure) => {
-            super::log_daemon_event(
+            log_daemon_event(
                 "retention_degraded",
                 &[
                     ("pass", "observability_analytics".to_owned()),
@@ -160,7 +161,7 @@ async fn run_profile_observability_retention(
     match database.prune_observability_events(now).await {
         Ok(receipt) => {
             if receipt.expired_detail > 0 || receipt.expired_rollup > 0 {
-                super::log_daemon_event(
+                log_daemon_event(
                     "retention_observability_analytics",
                     &[
                         ("store", "global.db".to_owned()),
@@ -172,7 +173,7 @@ async fn run_profile_observability_retention(
             true
         }
         Err(_) => {
-            super::log_daemon_event(
+            log_daemon_event(
                 "retention_degraded",
                 &[
                     ("pass", "observability_analytics".to_owned()),
@@ -712,7 +713,7 @@ impl MaintenanceCoordinator {
             .store_telemetry_sampling()
             .admit_retention_tick_log(outcome)
         {
-            super::log_daemon_event("retention_maintenance_tick", &tick_fields);
+            log_daemon_event("retention_maintenance_tick", &tick_fields);
         }
         outcome
     }

@@ -1376,6 +1376,15 @@ impl DaemonRetainedRuntimeRegistrar {
     }
 }
 
+/// Typed refusal from [`DaemonInvocationService::register_source_edit_owner`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DaemonSourceEditOwnerRegistrationError {
+    #[error(transparent)]
+    Registry(#[from] ProjectRuntimeRegistryError),
+    #[error("a source-edit owner for a different authorized scope is already registered")]
+    ForeignAuthority,
+}
+
 /// Registers one native-integration owner per exact project/repository identity.
 ///
 /// The owner registry lives in `tracedecay-agent-hosts`. This registrar is the

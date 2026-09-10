@@ -8,8 +8,8 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_runtime_core::branch::BranchAdminAction;
 
 use super::branch_admin::StoreAdministration;
-use super::log_daemon_event;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 #[cfg(test)]
 mod vector_retention_tests;

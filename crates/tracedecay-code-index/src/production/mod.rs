@@ -1658,25 +1658,30 @@ where
             let changes =
                 plan_chunk_increment(active.as_ref().map(|active| &active.chunks), &staged.chunks)
                     .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let full_source = staged
-                .chunks
-                .chunks()
-                .iter()
-                .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
-                .collect::<Vec<_>>();
-            manifest.source_commitments = Some(
-                CodeGenerationSourceCommitmentsV1::from_changed_chunks(&changes, &full_source)
-                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
-            );
-            manifest.seal.expected_digest = expected_seal_digest(&manifest)
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            let capability = BaseCapabilityEmitter::new(
-                registry_for_snapshot(&validated.snapshot)?,
-                coverage,
-                validated.snapshot.sanitization_receipts.clone(),
-            )
-            .emit(&manifest)
-            .map_err(CodeIndexProductionErrorV1::Capability)?;
+            hotpath::measure_block!("code_index.build.assemble.source_commitments", {
+                let full_source = staged
+                    .chunks
+                    .chunks()
+                    .iter()
+                    .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+                    .collect::<Vec<_>>();
+                manifest.source_commitments = Some(
+                    CodeGenerationSourceCommitmentsV1::from_changed_chunks(&changes, &full_source)
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
+                );
+                manifest.seal.expected_digest = expected_seal_digest(&manifest)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                Ok::<_, CodeIndexProductionErrorV1>(())
+            })?;
+            let capability = hotpath::measure_block!("code_index.build.assemble.capability", {
+                BaseCapabilityEmitter::new(
+                    registry_for_snapshot(&validated.snapshot)?,
+                    coverage,
+                    validated.snapshot.sanitization_receipts.clone(),
+                )
+                .emit(&manifest)
+                .map_err(CodeIndexProductionErrorV1::Capability)
+            })?;
             let projection_request = projection_request(
                 active.as_deref(),
                 increment.as_ref(),
@@ -1688,8 +1693,14 @@ where
                 .map_err(CodeIndexProductionErrorV1::Projection)?;
             Self::checkpoint(control)?;
 
-            let imports = derive_import_evidence(&staged.files);
-            let (edges, edge_abstentions) = collect_edge_evidence(&staged.files);
+            let imports = hotpath::measure_block!(
+                "code_index.build.assemble.import_evidence",
+                derive_import_evidence(&staged.files)
+            );
+            let (edges, edge_abstentions) = hotpath::measure_block!(
+                "code_index.build.assemble.edge_evidence",
+                collect_edge_evidence(&staged.files)
+            );
             let candidate = CodeIndexPublishedGenerationV1 {
                 manifest,
                 snapshot: validated.snapshot,
@@ -1711,7 +1722,7 @@ where
                 chunk_policy: OnceLock::new(),
                 graph_manifest: OnceLock::new(),
             };
-            candidate.validate()?;
+            hotpath::measure_block!("code_index.build.assemble.validate", candidate.validate())?;
             Ok::<_, CodeIndexProductionErrorV1>(candidate)
         })?;
         #[cfg(feature = "hotpath")]

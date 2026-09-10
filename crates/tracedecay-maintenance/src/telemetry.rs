@@ -23,8 +23,8 @@ use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::log_maintenance_event;
 use crate::tick::MaintenanceTickOutcome;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
@@ -720,7 +720,7 @@ impl StoreTelemetrySamplingRegistry {
             "code_generations" => RetentionOperatorLogLaneV1::CodeGeneration,
             _ => {
                 self.mark_loud_retention_log();
-                log_maintenance_event(
+                log_daemon_event(
                     "retention_degraded",
                     &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
                 );
@@ -735,7 +735,7 @@ impl StoreTelemetrySamplingRegistry {
             self.mark_loud_retention_log();
             self.clear_by_design_retention_log(lane, project_root);
         }
-        log_maintenance_event(
+        log_daemon_event(
             "retention_degraded",
             &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
         );

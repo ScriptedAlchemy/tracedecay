@@ -326,12 +326,6 @@ impl McpServer {
                 code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
                 code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
-                source_edit_executor: self.source_edit_executor.get().cloned(),
-                source_edit_reconciliation_executor: self
-                    .source_edit_reconciliation_executor
-                    .get()
-                    .cloned(),
-                source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 admitted_project_scope: self.admitted_project_scope.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),

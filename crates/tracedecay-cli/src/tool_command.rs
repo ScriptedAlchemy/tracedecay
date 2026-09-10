@@ -52,13 +52,13 @@ use tracedecay::mcp::server::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
+    adapt_application_tool_request, parse_application_surface_request,
+};
+use tracedecay_daemon_protocol::{
     DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
 };
-use tracedecay_daemon_service::application_surface::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
-    adapt_application_tool_request, observe_surface_argument_rejection,
-    parse_application_surface_request,
-};
+use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{

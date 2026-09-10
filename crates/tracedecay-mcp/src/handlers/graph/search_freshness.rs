@@ -11,16 +11,15 @@
 //! whether sufficient results are usable without a status preflight.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
 use tracedecay_contracts::retrieval::{
     PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1, PrimitiveSearchFreshnessV1,
 };
 use tracedecay_dashboard_api::code_index_freshness_api::{
-    CodeIndexBuildPhaseV1, CodeIndexFreshnessReader, CodeIndexWorktreeFreshnessV1,
+    CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1, CodeIndexWorktreeFreshnessV1,
 };
 
-use crate::mcp::server::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
+use tracedecay_query::code_search::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
 
 /// What the daemon scheduler registry answered for the project root.
 pub(super) enum WorktreeFreshnessSourceV1 {
@@ -32,26 +31,21 @@ pub(super) enum WorktreeFreshnessSourceV1 {
     Unattached,
 }
 
-pub(super) async fn read_worktree_freshness(
-    reader: Option<&CodeIndexFreshnessReader>,
-    project_root: &Path,
+pub(super) fn worktree_freshness_from_payload(
+    payload: Option<&CodeIndexFreshnessPayloadV1>,
 ) -> WorktreeFreshnessSourceV1 {
-    match reader {
-        Some(reader) => match hotpath::future!(
-            reader(project_root.to_path_buf()),
-            label = "mcp.graph.search.freshness"
-        )
-        .await
-        {
-            Some(worktree) => WorktreeFreshnessSourceV1::Worktree(Box::new(worktree)),
+    match payload {
+        None => WorktreeFreshnessSourceV1::Unattached,
+        Some(payload) => match payload.worktrees.first() {
+            Some(worktree) => WorktreeFreshnessSourceV1::Worktree(Box::new(worktree.clone())),
             None => WorktreeFreshnessSourceV1::NotMounted,
         },
-        None => WorktreeFreshnessSourceV1::Unattached,
     }
 }
 
 /// The served generation of a completed search, or the typed reason no
 /// generation could be served.
+#[derive(Clone, Copy)]
 pub(super) enum ServedGenerationV1<'a> {
     Served(&'a str),
     Unavailable { reason: &'a str },
@@ -222,7 +216,7 @@ mod tests {
 
     #[test]
     fn executor_stale_lanes_are_possibly_stale_even_without_a_scheduler() {
-        let semantic = crate::mcp::server::CodeIndexSemanticStatusV1::Complete;
+        let semantic = tracedecay_query::code_search::CodeIndexSemanticStatusV1::Complete;
         let coverage = CodeIndexSearchCoverageV1::fused_stale("generation.0", &semantic);
         let freshness = search_freshness(
             ServedGenerationV1::Served("generation.0"),

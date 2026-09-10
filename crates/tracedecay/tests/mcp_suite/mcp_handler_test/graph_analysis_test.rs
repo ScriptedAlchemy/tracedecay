@@ -271,6 +271,190 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 }
 
 #[tokio::test]
+async fn constructors_distinguishes_explicit_update_and_missing_fields() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+#[derive(Default)]
+pub struct BuildOptions {
+    pub name: String,
+    pub retries: u8,
+    pub verbose: bool,
+}
+
+pub fn explicit() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: 3, verbose: true }
+}
+
+pub fn updated() -> BuildOptions {
+    BuildOptions { name: String::new(), ..Default::default() }
+}
+
+pub fn incomplete() -> BuildOptions {
+    BuildOptions { name: String::new() }
+}
+
+pub fn recovered() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "BuildOptions"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        4,
+        "all indexed literals must be returned: {payload}"
+    );
+    assert_eq!(payload["candidate_count"], 1);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "syntax_only_simple_name");
+
+    assert_eq!(sites[0]["fields"], json!(["name", "retries", "verbose"]));
+    assert_eq!(sites[0]["update_fields"], json!([]));
+    assert_eq!(sites[0]["missing_fields"], json!([]));
+    assert_eq!(sites[0]["field_coverage"], "complete");
+
+    assert_eq!(sites[1]["fields"], json!(["name"]));
+    assert_eq!(sites[1]["update_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[1]["missing_fields"], json!([]));
+    assert_eq!(sites[1]["field_coverage"], "complete");
+
+    assert_eq!(sites[2]["fields"], json!(["name"]));
+    assert_eq!(sites[2]["update_fields"], json!([]));
+    assert_eq!(sites[2]["missing_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[2]["field_coverage"], "complete");
+
+    assert_eq!(sites[3]["fields"], json!(["name", "retries"]));
+    assert_eq!(sites[3]["update_fields"], json!([]));
+    assert_eq!(sites[3]["missing_fields"], json!([]));
+    assert_eq!(sites[3]["field_coverage"], "unknown");
+}
+
+#[tokio::test]
+async fn constructors_marks_same_name_struct_resolution_unknown() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub mod first {
+    pub struct Options { pub one: u8 }
+    pub fn build() -> Options { Options { one: 1 } }
+}
+pub mod second {
+    pub struct Options { pub two: u8 }
+    pub fn build() -> Options { Options { two: 2 } }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "Options"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["candidate_count"], 2);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "ambiguous_simple_name");
+    assert!(payload["expected_fields"].is_null());
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        2,
+        "both syntax sites remain visible: {payload}"
+    );
+    assert!(sites.iter().all(|site| {
+        site["field_coverage"] == "unknown"
+            && site["update_fields"] == json!([])
+            && site["missing_fields"] == json!([])
+    }));
+}
+
+#[tokio::test]
+async fn unmounted_files_ignores_comment_quotes_when_reading_config_entries() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src/app")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        r#"{"name":"dashboard","private":true}"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("rsbuild.config.ts"),
+        r#"// Canonical dashboard build. build.rs embeds this build's output into the
+// binary served at `/`, including every client-routed workspace.
+export default defineConfig({
+  source: {
+    entry: { index: './src/app/main.tsx' },
+    dynamicEntry: `./src/app/${page}.ts`,
+  },
+});
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/main.tsx"),
+        "import './boot';\nexport const app = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/boot.ts"),
+        "export const boot = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/orphan.ts"),
+        "export const orphan = 1;\n",
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_unmounted_files",
+        json!({"ecosystem": "typescript"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files = payload["unmounted"]
+        .as_array()
+        .expect("unmounted file rows")
+        .iter()
+        .filter_map(|row| row["file"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(files, vec!["src/app/orphan.ts"], "{payload}");
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2714,6 +2898,141 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
+#[tokio::test]
+async fn typescript_interface_extends_drives_hierarchy_and_depth() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/settings.ts"),
+        r#"
+interface SettingsEditable { draft: string }
+interface SettingsUnderReview extends SettingsEditable { review: string }
+interface GenericEditable<T> { draft: T }
+interface GenericReview extends GenericEditable<string> { review: string }
+namespace left { export interface Base { left: string } }
+namespace right { export interface Base { right: string } }
+interface ScopedReview extends right.Base { review: string }
+interface Renderer<T> { render(value: T): void }
+class Screen implements Renderer<string> { render(value: string) {} }
+const unrelated = 1;
+function helper() { return unrelated; }
+"#,
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(&project_root).await;
+    let parent_id = find_node_id(&cg, "SettingsEditable").await;
+
+    let hierarchy = handle_tool_call(
+        &cg,
+        "tracedecay_type_hierarchy",
+        json!({"node_id": parent_id, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+    assert!(
+        hierarchy["tree"]
+            .as_str()
+            .unwrap()
+            .contains("extends SettingsUnderReview"),
+        "interface child missing from hierarchy: {hierarchy}"
+    );
+
+    let depth = handle_tool_call(
+        &cg,
+        "tracedecay_inheritance_depth",
+        json!({"path": "src", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let depth: Value = serde_json::from_str(extract_text(&depth.value)).unwrap();
+    let ranking = depth["ranking"].as_array().unwrap();
+    assert_eq!(
+        ranking
+            .iter()
+            .find(|item| item["name"] == "SettingsUnderReview")
+            .and_then(|item| item["depth"].as_u64()),
+        Some(1),
+        "unexpected interface depth ranking: {ranking:?}"
+    );
+    assert!(
+        ranking
+            .iter()
+            .all(|item| item["name"] != "helper" && item["name"] != "unrelated"),
+        "non-hierarchy symbols leaked into inheritance depth: {ranking:?}"
+    );
+
+    for (parent, relation, child) in [
+        ("GenericEditable", "extends", "GenericReview"),
+        ("Renderer", "implements", "Screen"),
+    ] {
+        let parent_id = find_node_id(&cg, parent).await;
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": parent_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        let expected = format!("{relation} {child}");
+        assert!(
+            hierarchy["tree"].as_str().unwrap().contains(&expected),
+            "{expected} missing from hierarchy: {hierarchy}"
+        );
+    }
+
+    let exact = handle_tool_call(
+        &cg,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "Base", "limit": 20}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let exact: Value = serde_json::from_str(extract_text(&exact.value)).unwrap();
+    let matches = exact["matches"].as_array().unwrap();
+    let namespace_id = |namespace: &str| {
+        matches
+            .iter()
+            .find(|item| {
+                item["qualified_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(&format!("::{namespace}::Base")))
+            })
+            .and_then(|item| item["id"].as_str())
+            .unwrap_or_else(|| panic!("{namespace}.Base missing from exact symbols: {exact}"))
+    };
+    for (namespace, contains_child) in [("left", false), ("right", true)] {
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": namespace_id(namespace), "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        assert_eq!(
+            hierarchy["tree"]
+                .as_str()
+                .unwrap()
+                .contains("extends ScopedReview"),
+            contains_child,
+            "qualified parent bound to the wrong namespace: {hierarchy}"
+        );
+    }
+}
+
 /// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear
 /// in more than one cycle entry. Cycles "sharing long tails" mean the SCC
 /// condensation step is broken. This stress test wires up many disjoint
@@ -3124,4 +3443,120 @@ async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
         !text.contains("safe_add"),
         "safe code should produce no findings: {text}"
     );
+}
+
+#[tokio::test]
+async fn field_sites_applies_the_qualified_field_owner() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub struct Target { pub value: u32, pub enabled: bool }
+pub struct Other { pub value: u32 }
+
+impl Target {
+    pub fn read_both(&self, other: &Other) -> u32 {
+        let target_value = self.value;
+        let other_value = other.value;
+        target_value + other_value
+    }
+}
+pub fn read_both(target: &Target, other: &Other) -> u32 {
+    let target_value = target.value;
+    let other_value = other.value;
+    target_value + other_value
+}
+pub fn read_when_enabled(target: &Target) -> u32 {
+    if target.enabled { target.value } else { 0 }
+}
+pub fn write_both(target: &mut Target, other: &mut Other) {
+    target.value = 7;
+    other.value = 9;
+}
+"#,
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_field_sites",
+        json!({"field": "Target::value", "limit": 20, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(output["qualifier_applied"], true, "payload: {output}");
+    assert_eq!(output["read_count"], 3, "payload: {output}");
+    assert_eq!(output["write_count"], 1, "payload: {output}");
+    assert!(
+        output["read_sites"]
+            .as_array()
+            .is_some_and(|sites| sites.iter().all(|site| site["snippet"]
+                .as_str()
+                .is_some_and(|snippet| !snippet.contains("other.value")))),
+        "payload: {output}"
+    );
+    assert!(
+        output["write_sites"][0]["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains("target.value")),
+        "payload: {output}"
+    );
+
+    for shadow_source in [
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn closure_then_sibling(target: &Target) -> u32 {
+    let read_other = |target: Other| target.value;
+    read_other(Other { value: 3 }) + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn if_let_then_sibling(target: &Target, other: Option<Other>) -> u32 {
+    let read_other = if let Some(target) = other { target.value } else { 0 };
+    read_other + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 {
+    let mut read_other = 0;
+    while let Some(target) = other.take() { read_other += target.value; }
+    read_other + target.value
+}
+"#,
+    ] {
+        let shadow_dir = test_temp_dir();
+        let shadow_root = shadow_dir.path().join("project");
+        fs::create_dir_all(shadow_root.join("src")).unwrap();
+        fs::write(shadow_root.join("src/lib.rs"), shadow_source).unwrap();
+        let (shadow_host, _shadow_env) = init_test_project(&shadow_root).await;
+        let error = expect_tool_error(
+            handle_tool_call(
+                &shadow_host,
+                "tracedecay_field_sites",
+                json!({"field": "Target::value", "format": "json"}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            error.contains("verified-field-qualifier-unavailable"),
+            "shadowed receiver must not be attributed to the parameter owner: {error}"
+        );
+    }
 }

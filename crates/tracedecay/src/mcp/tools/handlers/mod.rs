@@ -67,8 +67,15 @@ mod dispatch_test_support;
 )]
 mod dispatch_tests;
 pub mod edit;
-pub mod graph;
-pub mod health;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod graph_search_dispatch_tests;
 pub mod hook_runtime;
 pub mod info;
 pub(crate) mod retained_catalog;
@@ -183,6 +190,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
+use tracedecay_runtime_core::storage::registered_project_id;
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -228,9 +236,25 @@ pub async fn handle_tool_call(
         args,
         server_stats,
         scope_prefix,
-        ToolCallRegistryOptions::default(),
+        ToolCallRegistryOptions::default().admit_opened_project(cg)?,
     ))
     .await
+}
+
+/// Fixture `handle_tool_call` derives the checkout the opened project already
+/// holds so integration tests get an admitted snapshot. Production dispatch
+/// carries `admitted_project_scope` from project-open; without it the root
+/// fails closed.
+pub(crate) fn opened_project_scope(cg: &TraceDecay) -> Result<tracedecay_contracts::ResolvedScope> {
+    let project_id = registered_project_id(cg.store_layout())?;
+    tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "admitted_project_scope_unresolved",
+                false,
+                error.to_string(),
+            )
+        })
 }
 
 /// Evidence for the `code_graph_freshness` response trailer when a
@@ -307,11 +331,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor:
         Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
-    pub(crate) source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
-    pub(crate) source_edit_reconciliation_executor:
-        Option<crate::mcp::server::SourceEditReconciliationExecutor>,
-    pub(crate) source_edit_rollback_executor:
-        Option<crate::mcp::server::SourceEditRollbackExecutor>,
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     /// The checkout the serving route was admitted for. Every scoped authority
     /// a moved handler family reads binds against this one scope; absent, no
@@ -382,9 +401,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_reconcile_sink: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
-            source_edit_executor: None,
-            source_edit_reconciliation_executor: None,
-            source_edit_rollback_executor: None,
             code_index_search_authority: None,
             admitted_project_scope: None,
             code_graph_projection_read_port: None,
@@ -402,10 +418,22 @@ impl Default for ToolCallRegistryOptions<'_> {
 
 impl<'a> ToolCallRegistryOptions<'a> {
     pub fn with_session_authorities(session_authorities: SessionAuthorities<'a>) -> Self {
+        // Canonical session-store field is `registered_project_session_db`.
+        // The helper is the one place that copies the lease out of the
+        // authorities bag so dispatch never `.or()`s the two fields.
         Self {
+            registered_project_session_db: session_authorities.project.cloned(),
             session_authorities,
             ..Self::default()
         }
+    }
+
+    /// Marks this call as admitted for the opened project's checkout.
+    /// Fixture `handle_tool_call` uses this; production carries the scope
+    /// from project-open publication.
+    pub fn admit_opened_project(mut self, cg: &TraceDecay) -> Result<Self> {
+        self.admitted_project_scope = Some(opened_project_scope(cg)?);
+        Ok(self)
     }
 }
 
@@ -652,9 +680,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         // struct) so the dispatch arms below can take `options` by value.
         let project_session_db_lease = options.registered_project_session_db.clone();
         let served_stale_graph_generation = Arc::clone(&options.served_stale_graph_generation);
-        let project_session_db = project_session_db_lease
-            .as_ref()
-            .or(options.session_authorities.project);
+        let project_session_db = project_session_db_lease.as_ref();
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Graph) => {

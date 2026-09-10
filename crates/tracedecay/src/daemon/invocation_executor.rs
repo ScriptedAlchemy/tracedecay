@@ -353,13 +353,13 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
                             .with_resolved_scope(scope)
                         }
                         ApplicationSurfaceOperation::FeedbackGet => {
-                            let typed = tracedecay_daemon_service::application_surface::parse_application_surface_request(
+                            let typed = tracedecay_daemon_protocol::parse_application_surface_request(
                                 operation, payload,
                             )
                             .map_err(|_| {
                                 tracedecay_contracts::InvocationError::InvalidRequest
                             })?;
-                            let tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Feedback(
+                            let tracedecay_daemon_protocol::ApplicationSurfaceRequest::Feedback(
                                 request,
                             ) = typed
                             else {

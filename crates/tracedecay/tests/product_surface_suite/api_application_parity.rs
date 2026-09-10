@@ -15,11 +15,13 @@ use tracedecay_contracts::{
     IdempotencyKey, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_daemon_protocol::{
+    ApplicationSurfaceRequest, FeedbackSurfaceRequest, parse_application_surface_request,
+};
+use tracedecay_daemon_protocol::{
     BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
 };
 use tracedecay_daemon_service::application_surface::{
-    ApplicationSurfaceRequest, FeedbackSurfaceRequest, GitApplySurfaceRequest,
-    GitPreviewSurfaceRequest, GitReadSurfaceRequest, parse_application_surface_request,
+    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
     resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
 };
 use tracedecay_domain::{
@@ -550,10 +552,8 @@ fn mcp_primitive_definitions_use_application_contracts() {
             expected_required.iter().copied().collect::<BTreeSet<_>>(),
             "{tool_name} required properties"
         );
-        tracedecay_daemon_service::application_surface::parse_application_surface_request(
-            operation, request,
-        )
-        .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
+        tracedecay_daemon_protocol::parse_application_surface_request(operation, request)
+            .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
     }
 }
 

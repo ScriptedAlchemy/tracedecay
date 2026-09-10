@@ -36,6 +36,9 @@ pub async fn run_project_generation_maintenance(
     compaction: Option<&CompactionThresholdConfig>,
     continuation: Option<MaintenanceContinuation>,
 ) -> MaintenanceTickOutcome {
+    // Each ordered phase gets its own wall span: the outer generation span is
+    // inclusive, so a slow tick is attributed to vector retention, code
+    // generation retention, scope reconciliation, or compaction — not guessed.
     let mut outcome = hotpath::measure_block!(
         "daemon.maintenance.vector_retention",
         run_semantic_vector_generation_retention(
@@ -124,6 +127,8 @@ pub async fn run_project_generation_maintenance(
     finalize_generation_outcome(outcome, cancellation)
 }
 
+/// Cancelled and degraded ticks are recorded too: a maintenance lane that
+/// silently retries forever is exactly the waste being diagnosed.
 fn finalize_generation_outcome(
     outcome: MaintenanceTickOutcome,
     cancellation: &tracedecay_session_memory::context::CancellationToken,

@@ -1,6 +1,7 @@
+use tracedecay_runtime_core::logging::format_daemon_log_line;
 #[test]
 fn daemon_log_line_formats_stable_key_value_fields() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "scheduler_task",
         &[
             ("task", "memory_curator".to_string()),
@@ -65,7 +66,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
         tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
         &problem,
     );
-    let line = super::super::format_daemon_log_line("scheduler_task_application_problem", &fields);
+    let line = format_daemon_log_line("scheduler_task_application_problem", &fields);
 
     assert!(!line.contains(SECRET));
     assert!(!line.contains("hostile automatic fact content"));
@@ -77,7 +78,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
 }
 #[test]
 fn daemon_log_line_escapes_quotes_and_backslashes() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "client_error",
         &[("error", r#"failed at "step" \ retry"#.to_string())],
     );
@@ -90,7 +91,7 @@ fn daemon_log_line_escapes_quotes_and_backslashes() {
 
 #[test]
 fn daemon_log_line_escapes_control_characters() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "client_error",
         &[("error", "first\nsecond\rthird\tfourth".to_string())],
     );
@@ -104,7 +105,7 @@ fn daemon_log_line_escapes_control_characters() {
 #[cfg(unix)]
 #[test]
 fn scheduler_task_start_log_uses_task_key_and_project() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "scheduler_task",
         &super::super::scheduler_task_log_fields(
             std::path::Path::new("/tmp/project with spaces"),
@@ -174,7 +175,7 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
 
 #[test]
 fn query_authority_awaiting_generation_log_is_typed_not_degraded() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "project_open_phase",
         &[
             ("project", "/tmp/project".to_string()),
@@ -194,27 +195,23 @@ fn query_authority_awaiting_generation_log_is_typed_not_degraded() {
 }
 
 #[test]
-fn retention_degraded_log_names_the_pass_and_failure() {
-    let line = super::super::format_daemon_log_line(
-        "retention_degraded",
-        &[
-            ("pass", "semantic_vector_generations".to_string()),
-            (
-                "failure",
-                "unavailable:semantic retrieval is not calibrated".to_string(),
-            ),
-        ],
-    );
-
+fn retention_degraded_log_formats_the_pass_and_failure() {
+    let fields = [
+        ("pass", "semantic_vector_generations".to_string()),
+        (
+            "failure",
+            "unavailable:semantic retrieval is not calibrated".to_string(),
+        ),
+    ];
     assert_eq!(
-        line,
+        format_daemon_log_line("retention_degraded", &fields),
         "[tracedecay] event=retention_degraded pass=semantic_vector_generations failure=\"unavailable:semantic retrieval is not calibrated\""
     );
 }
 
 #[test]
 fn retention_maintenance_tick_retry_log_keeps_outcome_fields() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "retention_maintenance_tick",
         &[
             ("succeeded", "false".to_string()),

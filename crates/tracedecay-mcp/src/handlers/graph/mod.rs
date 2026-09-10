@@ -1,11 +1,21 @@
 //! Portable graph-navigation handlers over one source-bound verified query.
 
+mod context_markdown;
+mod context_support;
+mod lexical_routing;
 mod navigation;
+mod primitive_surface;
+mod search;
+mod search_evidence;
+mod search_freshness;
 mod verified;
 
 pub use navigation::{
     handle_by_qualified_name, handle_callees, handle_callers, handle_callers_for, handle_derives,
     handle_impact, handle_implementations, handle_impls, handle_node, handle_signature,
+};
+pub use search::{
+    handle_context, handle_find_exact_symbol, handle_rename_preview, handle_search, handle_similar,
 };
 pub use verified::{
     GRAPH_RELATION_READ_LIMIT, VerifiedNeighbor, canonical_relation_kind, cost_to_expand_verified,

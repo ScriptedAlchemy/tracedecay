@@ -282,6 +282,10 @@ pub struct ProjectContextScoutDurableStoreV1 {
 }
 
 impl ProjectContextScoutDurableStoreV1 {
+    pub fn database(&self) -> &Database {
+        &self.database
+    }
+
     /// Builds an owned store from the daemon's retained project database.
     pub fn from_project_database(database: Database, project_id: [u8; 16]) -> Option<Arc<Self>> {
         (project_id != [0; 16]).then(|| {

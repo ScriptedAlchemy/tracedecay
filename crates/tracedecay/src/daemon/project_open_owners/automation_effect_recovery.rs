@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tracedecay_automation_runtime::automation::effect_recovery::recovery_report_fields;
 use tracedecay_contracts::CancellationSignal;
 
-use crate::daemon::log_daemon_event;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 #[hotpath::measure(label = "daemon.project.automation_recovery", future = true)]
 pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<TraceDecay>) {

@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 
 use crate::clock::now_secs_i64;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
-use crate::log_maintenance_event;
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::MaintenanceTickOutcome;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_semantic_contracts::SemanticConfig;
 
 mod graph_replay;
@@ -172,7 +172,7 @@ pub async fn run_semantic_vector_generation_retention(
                 census.action,
                 tracedecay_graph_db::SemanticVectorRetentionAction::None
             ) {
-                log_maintenance_event(
+                log_daemon_event(
                     "retention_semantic_vector_generations",
                     &[
                         ("project", root.display().to_string()),
@@ -634,7 +634,7 @@ pub async fn apply_code_generation_retention(
             // the typed error, a pointer CAS loss under rebuild churn is
             // indistinguishable from unrecognized-file or storage failures.
             observations.mark_loud_retention_log();
-            log_maintenance_event(
+            log_daemon_event(
                 "retention_degraded",
                 &[
                     ("pass", "code_generations".to_string()),
@@ -897,7 +897,7 @@ pub async fn apply_code_generation_retention(
             );
             let reclaimed = generation_reclaimed.saturating_add(text_artifact_reclaimed);
             if reclaimed > 0 {
-                log_maintenance_event(
+                log_daemon_event(
                     "retention_code_generations",
                     &[
                         ("store", "code-index-v1".to_string()),
@@ -970,7 +970,7 @@ pub async fn apply_code_generation_retention(
             // apply step's typed error names the exact refusal (CAS loss,
             // unsafe state, storage) instead of a bare retry label.
             observations.mark_loud_retention_log();
-            log_maintenance_event(
+            log_daemon_event(
                 "retention_degraded",
                 &[
                     ("pass", "code_generations".to_string()),
@@ -1655,7 +1655,7 @@ pub async fn run_code_index_scope_reconciliation(
                 .as_ref()
                 .map_or(0, |receipt| receipt.reclaimed_bytes);
             if reclaimed > 0 || report.plan.stranded_scope_count() > 0 {
-                log_maintenance_event(
+                log_daemon_event(
                     "retention_code_index_scopes",
                     &[
                         ("store", "code-index-v1".to_string()),
@@ -1703,7 +1703,7 @@ pub async fn run_code_index_scope_reconciliation(
 /// Durable failure visibility for scope reconciliation. Every refusal names why
 /// so a fail-closed pass is never mistaken for "nothing was stranded".
 fn log_code_index_scope_reconciliation_degraded(failure: &str) {
-    log_maintenance_event(
+    log_daemon_event(
         "retention_degraded",
         &[
             ("pass", "code_index_scopes".to_string()),
@@ -1741,7 +1741,7 @@ pub fn run_branch_compaction(
     if report.policy_invalid {
         // Never silent: an out-of-range threshold disables the pass entirely
         // and would otherwise be indistinguishable from "nothing to compact".
-        log_maintenance_event(
+        log_daemon_event(
             "retention_degraded",
             &[
                 ("pass", "branch_compaction".to_string()),
@@ -1770,7 +1770,7 @@ pub fn run_branch_compaction(
                 == crate::retention::branch_compaction::BranchCompactionSkipReason::IncrementalVacuumUnavailable
         })
         .count();
-    log_maintenance_event(
+    log_daemon_event(
         "retention_branch_compaction",
         &[
             ("project", lease.project_root().display().to_string()),

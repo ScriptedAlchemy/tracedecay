@@ -267,7 +267,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
             match tracedecay_daemon_service::application_surface::resolve_dashboard_application_surface(
                 ApplicationSurfaceOperation::ConfigurationBatch,
                 request_id,
-                tracedecay_daemon_service::application_surface::ApplicationSurfaceRequest::Configuration(
+                tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                     tracedecay_contracts::ConfigurationWireRequestV1::Batch(
                         tracedecay_contracts::ConfigurationBatchRequestV1 {
                             mutations: direct_mutations,

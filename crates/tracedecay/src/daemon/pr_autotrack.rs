@@ -49,6 +49,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::TraceDecayError;
 
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 
@@ -68,7 +69,6 @@ async fn git_authority_available(repo_root: &Path) -> bool {
 
 #[cfg(test)]
 use super::branch_admin::StoreAdministration;
-use super::log_daemon_event;
 
 mod runtime;
 pub(crate) use runtime::PrAutotrackTask;

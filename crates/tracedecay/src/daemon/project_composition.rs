@@ -8,6 +8,7 @@ use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
@@ -153,6 +154,10 @@ async fn release_one_idle_project_server_before_open(
                     message: format!("retired project server identity is invalid: {error}"),
                 }
             })?;
+            super::branch_admin::retire_registered_context_scout_owner(
+                &project_id,
+                &retired_owner.graph_db_path,
+            );
             let runtime_quiescence = retirement_invocation
                 .quiesce_project_runtime_owners(
                     profile_identity.profile_id(),
@@ -1045,7 +1050,8 @@ impl ProjectOpenInputs<'_> {
                     Arc::clone(&core.ports.code_index.graph_projection_read_port),
                     self.canonical_project_path,
                     &core.project_id,
-                )?,
+                )
+                .await?,
             )
         };
         // Publish the graph/search/diagnostic core before session admission.
@@ -1414,20 +1420,24 @@ impl ProjectOpenInputs<'_> {
         core: &ComposedCoreServer,
         full_server: &crate::mcp::McpServer,
         session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        core_source_edit_mutation: Option<
+            Arc<tracedecay_daemon_service::project_owner_registration::SourceEditMutationGate>,
+        >,
     ) -> Result<()> {
         let full_setup_started = Instant::now();
         project_open_cancellation_checkpoint(self.cancellation)?;
+        // The shared invocation registry admits one source-edit owner per
+        // project root. Core publication already registered it; the full
+        // upgrade reuses that owner and marks its mutation gate ready after
+        // Git transaction authority exists.
         let source_edit_mutation_ready = if opened.project_database_is_read_only {
             None
         } else {
             Some(
-                project_open_owners::install_project_open_source_edit_preview_owner(
-                    full_server,
-                    Arc::clone(&opened.cg),
-                    Arc::clone(&core.ports.code_index.graph_projection_read_port),
-                    self.canonical_project_path,
-                    &core.project_id,
-                )?,
+                core_source_edit_mutation.ok_or_else(|| TraceDecayError::Config {
+                    message: "writable project did not install source edit preview authority"
+                        .to_owned(),
+                })?,
             )
         };
         self.log_phase("source_edit_preview_ready", None, full_setup_started);
@@ -1519,8 +1529,14 @@ impl ProjectOpenInputs<'_> {
         session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<()> {
         self.log_phase("session_capabilities_published", None, self.started);
-        Box::pin(self.mount_full_server_owners(opened, core, full_server.as_ref(), session_db))
-            .await?;
+        Box::pin(self.mount_full_server_owners(
+            opened,
+            core,
+            full_server.as_ref(),
+            session_db,
+            activation.core_source_edit_mutation.clone(),
+        ))
+        .await?;
         if *core.current_key.lock().await != opened.key {
             return Err(TraceDecayError::Config {
                 message: "project changed branch during full capability admission".to_owned(),

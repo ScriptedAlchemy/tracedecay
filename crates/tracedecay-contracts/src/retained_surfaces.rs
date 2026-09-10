@@ -211,6 +211,18 @@ pub(super) struct RetainedSurfaceSpec {
     pub(super) surfaces: &'static [BindingSurface],
 }
 
+const DEFAULT_RETAINED_DEADLINE_MILLIS: u64 = 30_000;
+// A real Codex app-server turn is allowed 80 seconds by the curator owner.
+// Keep ten seconds after that bound for validation, apply, and settlement.
+const FACT_STORE_CURATE_DEADLINE_MILLIS: u64 = 90_000;
+
+const fn retained_deadline_millis(operation: RetainedSurfaceOperation) -> u64 {
+    match operation {
+        RetainedSurfaceOperation::FactStoreCurate => FACT_STORE_CURATE_DEADLINE_MILLIS,
+        _ => DEFAULT_RETAINED_DEADLINE_MILLIS,
+    }
+}
+
 fn surface_specs() -> Vec<&'static RetainedSurfaceSpec> {
     automation::SPECS
         .iter()
@@ -663,7 +675,7 @@ fn capability(
             ]
         })?,
         deadline: DeadlineContract::new(
-            30_000,
+            retained_deadline_millis(spec.operation),
             if is_effect {
                 DeadlineBehavior::ReturnEffectReceipt
             } else {
@@ -891,6 +903,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(catalog_launchers.len(), 1);
         assert_eq!(catalog_launchers[0].capability_id(), &capability);
+        let curator_capability = contribution
+            .capabilities()
+            .iter()
+            .find(|candidate| candidate.capability_id() == &capability)
+            .expect("curator capability");
+        assert_eq!(curator_capability.deadline().maximum_millis(), 90_000);
         assert_eq!(
             catalog_launchers[0].request_schema().rust_type_path(),
             request_type

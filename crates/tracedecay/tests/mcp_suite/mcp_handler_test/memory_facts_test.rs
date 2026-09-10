@@ -978,7 +978,29 @@ async fn memory_recall_updates_retrieval_count() {
             .as_u64()
             .unwrap_or_default()
             > 0,
-        "returned facts should increment retrieval_count: {status}"
+        "writable-graph search must increment retrieval_count: {status}"
+    );
+    assert!(
+        fact["telemetry"]["last_retrieved_at"].as_i64().is_some(),
+        "writable-graph search must stamp last_retrieved_at: {status}"
+    );
+
+    let memory_status = invoke_production_tool(&cg, "tracedecay_memory_status", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        memory_status["memory"]["feedback_funnel"]["retrieval_count_total"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "memory_status retrieval funnel must move after search: {memory_status}"
+    );
+    assert!(
+        memory_status["memory"]["feedback_funnel"]["retrieved_fact_count"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "memory_status must count the retrieved fact: {memory_status}"
     );
     close_test_graph(cg).await;
 }
