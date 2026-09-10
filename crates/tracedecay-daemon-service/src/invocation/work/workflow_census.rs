@@ -56,23 +56,19 @@ fn try_persist_workflow_fan_out_census(
         .projections()
         .snapshot(context, tracedecay_contracts::MAX_WORK_PROJECTION_PAGE_SIZE)
         .ok();
-    let topology_generation = tracedecay_domain::WorkAuthority::new(
-        context.scope().project_id.clone(),
-        context.scope().repository_id.clone(),
-        context.scope().worktree_id.clone(),
-        context.actor().clone(),
-        context.grant().digest.clone(),
+    let product_binding = super::workflow_fan_out::workflow_product_binding()?;
+    let product_snapshot = super::preparation::current_product_snapshot(
+        registered,
+        context,
+        product_binding,
+        observed_at,
     )
-    .ok()
-    .and_then(|authority| {
-        work.topology()
-            .verified_snapshot(
-                &authority,
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            )
-            .ok()
-    })
-    .and_then(|topology| topology.evidence_ref().ok());
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let topology_generation = product_snapshot
+        .as_ref()
+        .map(tracedecay_contracts::WorkGraphVersionEntryV1::topology_generation_ref)
+        .transpose()
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let mut attempts = Vec::new();
     let mut attempt_reads_complete = true;
     for child in projection

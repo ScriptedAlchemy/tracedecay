@@ -60,8 +60,14 @@ pub(super) fn prepare_duplicate_adjudication(
         .projections()
         .snapshot(context, tracedecay_contracts::MAX_WORK_PROJECTION_PAGE_SIZE)
         .map_err(work_projection_problem)?;
-    let product_snapshot =
-        current_product_snapshot(registered, context, capability, use_case, observed_at)?;
+    let binding = work_product_binding(capability, use_case)?;
+    let product_snapshot = current_product_snapshot(
+        registered,
+        context,
+        binding,
+        observed_at,
+    )?
+    .ok_or_else(work_product_authority_unavailable)?;
     let topology_generation = product_snapshot
         .topology_generation_ref()
         .map_err(work_product_problem)?;
@@ -87,8 +93,10 @@ pub(super) fn current_product_topology(
     use_case: &UseCaseId,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_contracts::WorkAttemptTopologyStateV1, ApplicationProblem> {
-    let snapshot =
-        current_product_snapshot(registered, context, capability, use_case, observed_at)?;
+    let binding = work_product_binding(capability, use_case)?;
+    let Some(snapshot) = current_product_snapshot(registered, context, binding, observed_at)? else {
+        return Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Absent);
+    };
     let task_count = u32::try_from(snapshot.graph().items().len())
         .map_err(|_| work_product_authority_unavailable())?;
     let generation = snapshot
@@ -102,16 +110,12 @@ pub(super) fn current_product_topology(
     ))
 }
 
-fn current_product_snapshot(
+pub(super) fn current_product_snapshot(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
-    capability: &str,
-    use_case: &UseCaseId,
+    binding: tracedecay_contracts::WorkProductBindingV1,
     observed_at: UtcMicros,
-) -> Result<tracedecay_contracts::WorkGraphVersionEntryV1, ApplicationProblem> {
-    let capability =
-        CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
-    let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
+) -> Result<Option<tracedecay_contracts::WorkGraphVersionEntryV1>, ApplicationProblem> {
     let product = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
         &registered.database,
         binding,
@@ -124,17 +128,36 @@ fn current_product_snapshot(
         },
     ]))
     .map_err(|_| work_product_authority_unavailable())?;
-    let graph = product
-        .reads()
-        .read_graph(
-            context,
-            tracedecay_contracts::WorkGraphReadRequestV1::current(selection, observed_at),
-        )
-        .map_err(work_product_problem)?;
+    let graph = match product.reads().read_graph(
+        context,
+        tracedecay_contracts::WorkGraphReadRequestV1::current(selection, observed_at),
+    ) {
+        Ok(graph) => graph,
+        // `read_graph` has already admitted the binding and authorized this
+        // exact relation selection. Its port uses this concealed result only
+        // for the documented no-published-version state; owner denial and
+        // authority failure take the distinct error arms below.
+        Err(tracedecay_contracts::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(work_product_problem(error)),
+    };
     let tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. } = graph else {
         return Err(work_product_authority_unavailable());
     };
-    Ok(snapshot)
+    Ok(Some(snapshot))
+}
+
+fn work_product_binding(
+    capability: &str,
+    use_case: &UseCaseId,
+) -> Result<tracedecay_contracts::WorkProductBindingV1, ApplicationProblem> {
+    let capability =
+        CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
+    Ok(tracedecay_contracts::WorkProductBindingV1::new(
+        capability,
+        use_case.clone(),
+    ))
 }
 
 fn require_attempt(
