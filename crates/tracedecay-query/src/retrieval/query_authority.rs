@@ -266,14 +266,13 @@ impl QueryAuthorityV1 {
             &self.diversity,
             RetrieverKind::TaskSession,
         )?;
-        let page = self.kernel.paginate_at(
+        let page = self.kernel.paginate(
             request,
             query_view,
             &self.keyring,
             &composition,
             page_size,
             cursor,
-            request.snapshot.captured_at,
         )?;
         TaskSessionCandidateSelectionV1::new(page.ranked_candidates, page.cursor)
             .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))
@@ -357,14 +356,13 @@ impl QueryAuthorityV1 {
             },
             &self.diversity,
         )?;
-        let mut page = self.kernel.paginate_at(
+        let mut page = self.kernel.paginate(
             request,
             query_view,
             &self.keyring,
             &composition,
             page_size,
             cursor,
-            request.snapshot.captured_at,
         )?;
         hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
         for (ordinal, candidate) in page.ranked_candidates.iter_mut().enumerate() {
@@ -417,14 +415,13 @@ impl QueryAuthorityV1 {
             },
             &self.diversity,
         )?;
-        let page = self.kernel.paginate_at(
+        let page = self.kernel.paginate(
             request,
             query_view,
             &self.keyring,
             &composition,
             page_size,
             cursor,
-            request.snapshot.captured_at,
         )?;
         hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
         Ok(AuthorizedFederatedRetrievalV1 {
@@ -444,13 +441,12 @@ impl QueryAuthorityV1 {
         next_ordinal: usize,
     ) -> Result<RetrievalCursor, QueryAuthorityErrorV1> {
         self.validate_request(request)?;
-        Ok(self.kernel.cursor_at(
+        Ok(self.kernel.cursor(
             request,
             query_view,
             &self.keyring,
             composition,
             next_ordinal,
-            request.snapshot.captured_at,
         )?)
     }
 

@@ -739,7 +739,25 @@ impl CompositionKernel {
         })
     }
 
-    pub(crate) fn cursor_at(
+    pub(crate) fn cursor(
+        &self,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        keyring: &RetrievalCursorKeyringV1,
+        output: &CompositionOutputV1,
+        next_ordinal: usize,
+    ) -> Result<RetrievalCursor, RetrievalError> {
+        self.cursor_at(
+            request,
+            query_view,
+            keyring,
+            output,
+            next_ordinal,
+            current_utc_micros()?,
+        )
+    }
+
+    fn cursor_at(
         &self,
         request: &RetrievalRequest,
         query_view: &EphemeralSanitizedQueryViewV1,
