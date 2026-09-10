@@ -1044,6 +1044,27 @@ mod tests {
         }
     }
 
+    /// The budget that cut `tracedecay_context` at ten seconds in the #1203
+    /// dogfood run is this capability's own deadline contract — the retrieval
+    /// primitive declares `DeadlineContract::new(10_000, ..)` — and not
+    /// `TOOL_DISPATCH_CEILING`, the CLI request deadline, or any settlement or
+    /// ledger budget. `prepare_dispatch_control` hands this ceiling straight to
+    /// `DispatchControl`, and a caller deadline can only shorten it, so this
+    /// value alone decides when an interactive context read is refused.
+    #[test]
+    fn context_dispatches_under_its_own_ten_second_deadline_contract() {
+        let ceiling = canonical_tool_dispatch_ceiling("tracedecay_context").unwrap();
+        assert_eq!(ceiling, std::time::Duration::from_secs(10));
+        assert!(
+            ceiling < crate::mcp::tools::handlers::tool_dispatch_ceiling("tracedecay_context"),
+            "the capability contract, not the generic dispatch ceiling, bounds context"
+        );
+        assert!(
+            ceiling < tracedecay_daemon_protocol::DEFAULT_TOOL_REQUEST_DEADLINE,
+            "the CLI request deadline cannot be what refuses a context read"
+        );
+    }
+
     #[test]
     fn memory_status_is_a_read_only_retained_operation() {
         let catalog = mcp_dispatch_catalog().unwrap();
