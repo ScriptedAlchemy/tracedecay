@@ -1190,43 +1190,38 @@ mod tests {
     }
 
     #[test]
-    fn exact_fact_routes_accept_selectors_without_registered_reader_dispatch() {
+    fn exact_fact_reads_dispatch_to_their_registered_project() {
         for tool_name in [
-            "tracedecay_fact_store_add",
             "tracedecay_fact_store_search",
             "tracedecay_fact_store_probe",
             "tracedecay_fact_store_related",
             "tracedecay_fact_store_reason",
             "tracedecay_fact_store_contradict",
             "tracedecay_fact_store_get",
-            "tracedecay_fact_store_update",
-            "tracedecay_fact_store_remove",
-            "tracedecay_fact_store_supersede",
             "tracedecay_fact_store_list",
             "tracedecay_memory_status",
+            "tracedecay_message_search",
         ] {
             assert!(tool_accepts_registered_project_selector(tool_name));
-            assert!(!tool_dispatches_registered_project_reader(tool_name));
+            assert!(tool_dispatches_registered_project_reader(tool_name));
+            assert!(!tool_is_selector_bound_effect(tool_name));
         }
+    }
+
+    #[test]
+    fn exact_fact_effects_keep_the_active_project_authority() {
         for tool_name in [
             "tracedecay_fact_store_add",
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
             "tracedecay_fact_store_supersede",
+            "tracedecay_fact_feedback",
         ] {
+            assert!(tool_accepts_registered_project_selector(tool_name));
+            assert!(!tool_dispatches_registered_project_reader(tool_name));
             assert!(
                 tool_is_selector_bound_effect(tool_name),
                 "{tool_name} must stay selector-bound so writes are not dispatched into the selected store"
-            );
-        }
-        for tool_name in [
-            "tracedecay_fact_store_search",
-            "tracedecay_fact_store_get",
-            "tracedecay_memory_status",
-        ] {
-            assert!(
-                !tool_is_selector_bound_effect(tool_name),
-                "{tool_name} is a selector-bound read and must keep its existing selected-project route"
             );
         }
     }

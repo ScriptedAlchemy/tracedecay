@@ -36,6 +36,20 @@ pub(super) async fn setup_project() -> FactStoreMcpFixture {
 async fn invoke_exact_tool(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
+    arguments: Value,
+) -> tracedecay_domain::errors::Result<Value> {
+    let response_value = invoke_exact_tool_envelope(server, tool_name, arguments).await?;
+    response_value
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("{tool_name} omitted its canonical application payload"),
+        })
+}
+
+async fn invoke_exact_tool_envelope(
+    server: &tracedecay::mcp::McpServer,
+    tool_name: &str,
     mut arguments: Value,
 ) -> tracedecay_domain::errors::Result<Value> {
     arguments
@@ -63,13 +77,7 @@ async fn invoke_exact_tool(
             .to_owned();
         return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
     }
-    let payload = response_value
-        .pointer("/outcome/value/payload")
-        .cloned()
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("{tool_name} omitted its canonical application payload"),
-        })?;
-    Ok(payload)
+    Ok(response_value)
 }
 
 pub(super) async fn invoke_production_tool(
@@ -631,7 +639,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     .await
     .unwrap();
 
-    let target_list = invoke_exact_tool(
+    let target_list_envelope = invoke_exact_tool_envelope(
         &fixture.active_server,
         "tracedecay_fact_store_list",
         json!({
@@ -642,6 +650,22 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     )
     .await
     .unwrap();
+    let selected_scope = &target_list_envelope["scope"];
+    let selected_evidence = &target_list_envelope["outcome"]["value"];
+    assert_eq!(selected_scope["project_id"], target_project_id);
+    assert_eq!(
+        selected_evidence["authority"]["authorized_scope_digest"], selected_scope["scope_digest"],
+        "the selected server's project-open grant must authorize the reported scope: {target_list_envelope}"
+    );
+    assert_eq!(
+        selected_evidence["evidence_authorities"][0]["scope"], *selected_scope,
+        "selected evidence must be produced under the same scope the envelope reports: {target_list_envelope}"
+    );
+    assert_eq!(
+        selected_evidence["payload"]["owner"]["project_id"], target_project_id,
+        "the selected payload owner must match the project-open grant: {target_list_envelope}"
+    );
+    let target_list = selected_evidence["payload"].clone();
     assert_fact_list(
         &target_list,
         "Target selector fact",
