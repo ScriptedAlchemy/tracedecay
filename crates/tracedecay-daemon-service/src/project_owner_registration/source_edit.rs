@@ -268,8 +268,10 @@ pub enum SourceEditOwnerError {
     NotAuthorized,
     #[error("source edit invocation contract is invalid")]
     InvalidContract,
-    #[error(transparent)]
-    AdmissionFailed(TraceDecayError),
+    #[error("source edit was cancelled before admission")]
+    Cancelled,
+    #[error("source edit timed out before admission")]
+    TimedOut,
     #[error(transparent)]
     ExecutionFailed(TraceDecayError),
 }
@@ -542,12 +544,15 @@ fn source_edit_request_context(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> std::result::Result<RequestContext, SourceEditOwnerError> {
-    if cancellation.is_cancelled() || deadline.is_elapsed_at(observed_at) {
-        return Err(source_edit_authority_error());
+    if cancellation.is_cancelled() {
+        return Err(SourceEditOwnerError::Cancelled);
+    }
+    if deadline.is_elapsed_at(observed_at) {
+        return Err(SourceEditOwnerError::TimedOut);
     }
     let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
     if expires_at.0 <= observed_at.0 {
-        return Err(source_edit_authority_error());
+        return Err(SourceEditOwnerError::TimedOut);
     }
     let grant_digest = canonical_sha256(&(
         "tracedecay.daemon.source-edit-grant.v1",
@@ -558,7 +563,7 @@ fn source_edit_request_context(
         operation.use_case_id(),
     ))
     .map_err(|error| {
-        SourceEditOwnerError::AdmissionFailed(TraceDecayError::Config {
+        SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
             message: format!("source edit route grant unavailable: {error}"),
         })
     })?;
@@ -567,7 +572,7 @@ fn source_edit_request_context(
             "grant.daemon.source-edit.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))
-        .map_err(source_edit_contract_error)?,
+        .map_err(source_edit_construction_failed)?,
         POLICY_REVISION_V1,
         grant_digest,
         access.requester.clone(),
@@ -578,20 +583,26 @@ fn source_edit_request_context(
         BTreeSet::from([operation.use_case_id().clone()]),
         tracedecay_contracts::DisclosureClass::Sensitive,
     )
-    .map_err(source_edit_contract_error)?;
+    .map_err(source_edit_construction_failed)?;
     RequestContext::new(
         access.requester.clone(),
         access.scope.clone(),
         grant,
         request_id,
-        Deadline::new(expires_at).map_err(source_edit_contract_error)?,
+        Deadline::new(expires_at).map_err(source_edit_construction_failed)?,
         cancellation,
     )
-    .map_err(source_edit_contract_error)
+    .map_err(source_edit_construction_failed)
 }
 
 fn source_edit_contract_error(_error: impl std::fmt::Display) -> SourceEditOwnerError {
     SourceEditOwnerError::InvalidContract
+}
+
+fn source_edit_construction_failed(error: impl std::fmt::Display) -> SourceEditOwnerError {
+    SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+        message: format!("source edit request construction failed: {error}"),
+    })
 }
 
 fn source_edit_authority_error() -> SourceEditOwnerError {
@@ -641,13 +652,13 @@ mod tests {
 
     #[test]
     fn source_edit_refusal_state_is_constructed_not_inferred_from_message_text() {
-        let reworded = SourceEditOwnerError::AdmissionFailed(TraceDecayError::Config {
+        let reworded = SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
             message: "warming failed to publish not found or is not authorized invocation contract is invalid"
                 .to_owned(),
         });
         assert!(
-            matches!(reworded, SourceEditOwnerError::AdmissionFailed(_)),
-            "a reworded Config message must stay AdmissionFailed, not a classified refusal"
+            matches!(reworded, SourceEditOwnerError::ExecutionFailed(_)),
+            "a reworded Config message must stay ExecutionFailed, not a classified refusal"
         );
     }
 }

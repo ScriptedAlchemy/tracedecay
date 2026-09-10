@@ -148,6 +148,17 @@ pub(super) fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+pub(super) const SOURCE_EDIT_EXPECTED_STATE_MISMATCH: &str = "source_edit.expected_state_mismatch";
+pub(super) const SOURCE_EDIT_IDEMPOTENCY_CONFLICT: &str = "source_edit.idempotency_conflict";
+
+pub(super) fn expected_state_mismatch(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(SOURCE_EDIT_EXPECTED_STATE_MISMATCH, true, detail)
+}
+
+pub(super) fn idempotency_conflict(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(SOURCE_EDIT_IDEMPOTENCY_CONFLICT, false, detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -23,7 +23,9 @@ use super::records::{
     applied_durable_record, applied_record, durable_record,
     persist_interrupted_reconciliation_attempt, reconciliation_attempt_record, unknown_record,
 };
-use super::verify::{application_contract_error, application_problem, config_error};
+use super::verify::{
+    application_contract_error, application_problem, config_error, idempotency_conflict,
+};
 
 #[hotpath::measure(label = "usecases.edit.reconcile", future = true)]
 pub(super) async fn reconcile_source_edit_effect_unknown_inner<A>(
@@ -143,7 +145,7 @@ fn recover_reconciliation_attempt(
         return Ok(None);
     };
     if stored.input_digest != *attempt_input_digest {
-        return Err(config_error(
+        return Err(idempotency_conflict(
             "source edit reconciliation attempt idempotency key conflicts with a prior input",
         ));
     }
@@ -451,7 +453,7 @@ pub(super) fn recover_or_replay(
 ) -> Result<Option<SourceEditApplicationResult>> {
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != *input_digest {
-            return Err(config_error(
+            return Err(idempotency_conflict(
                 "source edit idempotency key conflicts with a prior input",
             ));
         }

@@ -199,42 +199,51 @@ fn map_source_edit_error(
                 legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
             },
         ),
-        SourceEditOwnerError::AdmissionFailed(_) => concealed_application_problem(request_id),
+        SourceEditOwnerError::Cancelled => {
+            application_problem(request_id, ApplicationProblem::cancelled_before_admission())
+        }
+        SourceEditOwnerError::TimedOut => {
+            application_problem(request_id, ApplicationProblem::timed_out_before_admission())
+        }
         SourceEditOwnerError::ExecutionFailed(error) => {
             map_source_edit_execution_error(request_id, error)
         }
     }
 }
 
+const SOURCE_EDIT_EXPECTED_STATE_MISMATCH: &str = "source_edit.expected_state_mismatch";
+const SOURCE_EDIT_IDEMPOTENCY_CONFLICT: &str = "source_edit.idempotency_conflict";
+const SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE: &str = "source-edit-symbol-evidence-unavailable";
+const SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE: &str = "source_edit_diagnostics_unavailable";
+
 fn source_edit_execution_problem(
     error: TraceDecayError,
 ) -> Result<ApplicationProblem, tracedecay_contracts::ApplicationContractError> {
-    let (code, retryable, message) = match error.project_route_context() {
-        Some((code, retryable, detail)) => (code.to_owned(), retryable, detail.to_owned()),
-        None => (
-            "source_edit.execution_failed".to_owned(),
-            false,
-            error.to_string(),
-        ),
+    let (code, message) = match error.project_route_context() {
+        Some((code, _, detail)) => (code.to_owned(), detail.to_owned()),
+        None => ("source_edit.execution_failed".to_owned(), error.to_string()),
     };
-    let diagnostic = match SafeDiagnostic::new(code, message) {
+    let diagnostic = match SafeDiagnostic::new(code.clone(), message) {
         Ok(diagnostic) => diagnostic,
         Err(_) => SafeDiagnostic::new(
             "source_edit.execution_failed",
             "Source edit execution failed",
         )?,
     };
-    if retryable {
-        Ok(ApplicationProblem::Conflict {
+    match diagnostic.code.as_str() {
+        SOURCE_EDIT_EXPECTED_STATE_MISMATCH => Ok(ApplicationProblem::stale(diagnostic)),
+        SOURCE_EDIT_IDEMPOTENCY_CONFLICT => Ok(ApplicationProblem::Conflict {
             diagnostic,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
-        })
-    } else {
-        ApplicationProblem::execution_failed(
+        }),
+        SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE | SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE => {
+            Ok(ApplicationProblem::unavailable(diagnostic))
+        }
+        _ => ApplicationProblem::execution_failed(
             ApplicationExecutionFailureClassV1::Permanent,
             diagnostic,
-        )
+        ),
     }
 }
 
@@ -304,42 +313,58 @@ mod tests {
             ApplicationProblemKind::InvalidRequest
         );
 
-        let reworded = SourceEditOwnerError::AdmissionFailed(TraceDecayError::Config {
+        let reworded = SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
             message: "warming failed to publish not found or is not authorized invocation contract is invalid"
                 .to_owned(),
         });
         assert_eq!(
             classified_kind(reworded),
-            ApplicationProblemKind::NotFoundOrNotAuthorized,
-            "message text must not reclassify a typed AdmissionFailed refusal"
+            ApplicationProblemKind::ExecutionFailed,
+            "message text must not reclassify a typed ExecutionFailed refusal"
         );
     }
 
     #[test]
-    fn source_edit_kernel_digest_mismatch_keeps_reason_code_and_retryability() {
+    fn source_edit_kernel_stale_keeps_reason_code_and_retryability() {
         let problem = classified_problem(kernel_digest_mismatch());
-        assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
-        assert_eq!(problem.reason_code(), "source_edit.expected_state_mismatch");
+        assert_eq!(problem.kind(), ApplicationProblemKind::Stale);
+        assert_eq!(problem.reason_code(), SOURCE_EDIT_EXPECTED_STATE_MISMATCH);
         assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
         let error = problem.into_trace_decay_error();
         let (reason_code, retryable, _) = error
             .project_route_context()
             .expect("digest mismatch must stay a typed project-route error");
-        assert_eq!(reason_code, "source_edit.expected_state_mismatch");
+        assert_eq!(reason_code, SOURCE_EDIT_EXPECTED_STATE_MISMATCH);
         assert!(retryable);
     }
 
     #[test]
     fn source_edit_kernel_conflict_keeps_reason_code_and_retryability() {
         let problem = classified_problem(kernel_idempotency_conflict());
-        assert_eq!(problem.kind(), ApplicationProblemKind::ExecutionFailed);
-        assert_eq!(problem.reason_code(), "source_edit.idempotency_conflict");
-        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
+        assert_eq!(problem.reason_code(), SOURCE_EDIT_IDEMPOTENCY_CONFLICT);
+        assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
         let error = problem.into_trace_decay_error();
         let (reason_code, retryable, _) = error
             .project_route_context()
             .expect("idempotency conflict must stay a typed project-route error");
-        assert_eq!(reason_code, "source_edit.idempotency_conflict");
-        assert!(!retryable);
+        assert_eq!(reason_code, SOURCE_EDIT_IDEMPOTENCY_CONFLICT);
+        assert!(retryable);
+    }
+
+    #[test]
+    fn source_edit_cancelled_request_is_cancelled_before_admission() {
+        let problem = classified_problem(SourceEditOwnerError::Cancelled);
+        assert_eq!(problem.kind(), ApplicationProblemKind::Cancelled);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.reason_code(), "cancelled");
+    }
+
+    #[test]
+    fn source_edit_elapsed_deadline_is_timed_out_before_admission() {
+        let problem = classified_problem(SourceEditOwnerError::TimedOut);
+        assert_eq!(problem.kind(), ApplicationProblemKind::TimedOut);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.reason_code(), "timed_out");
     }
 }
