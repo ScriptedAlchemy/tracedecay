@@ -395,6 +395,66 @@ pub mod second {
 }
 
 #[tokio::test]
+async fn unmounted_files_ignores_comment_quotes_when_reading_config_entries() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src/app")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        r#"{"name":"dashboard","private":true}"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("rsbuild.config.ts"),
+        r#"// Canonical dashboard build. build.rs embeds this build's output into the
+// binary served at `/`, including every client-routed workspace.
+export default defineConfig({
+  source: {
+    entry: { index: './src/app/main.tsx' },
+    dynamicEntry: `./src/app/${page}.ts`,
+  },
+});
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/main.tsx"),
+        "import './boot';\nexport const app = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/boot.ts"),
+        "export const boot = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/orphan.ts"),
+        "export const orphan = 1;\n",
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_unmounted_files",
+        json!({"ecosystem": "typescript"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files = payload["unmounted"]
+        .as_array()
+        .expect("unmounted file rows")
+        .iter()
+        .filter_map(|row| row["file"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(files, vec!["src/app/orphan.ts"], "{payload}");
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
