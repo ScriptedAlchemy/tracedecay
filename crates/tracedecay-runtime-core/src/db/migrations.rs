@@ -46,6 +46,13 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// closed before interpretation.
 pub const SCHEMA_VERSION: u32 = 35;
 
+/// Verifies that a rusqlite connection sees the final relational shape this
+/// binary admits, including the one shipped-v35 trigger shape it repairs on a
+/// writer open. This is query-only and shares the daemon's schema authority.
+pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Result<()> {
+    final_shape::require_admissible_final_shape_rusqlite(conn)
+}
+
 /// The one prior shape this binary steps forward in place: v34 is v35 minus
 /// the persisted payload-digest objects (#834). Every other stamp is still
 /// refused with the fresh-start remedy.
