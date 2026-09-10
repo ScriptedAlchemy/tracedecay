@@ -675,78 +675,96 @@ impl DaemonEngine {
             {
                 return Ok(server);
             }
-            let (project_path, _) = Self::project_route(handshake)?;
+            let (project_path, route) = Self::project_route(handshake)?;
             // Foreground requests must never pin a connection while a cold project
             // warm-up runs. The open task remains tracked and continues in the
             // background after this bounded wait expires.
-            let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
-            match claim {
-                ProjectOpenTaskClaim::InFlight(mut state) => {
-                    let publication = async {
-                        loop {
-                            // The claim proves an open for this exact route is
-                            // in flight, so each iteration only needs to see
-                            // its publication land on the already-bound route
-                            // alias — never a fresh identity resolution.
-                            if let Some(server) = self
-                                .route_bound_project_server(handshake, requirement)
-                                .await?
-                            {
-                                return Ok(server);
-                            }
-                            let current = state.borrow().clone();
-                            match current {
-                                ProjectOpenTaskState::Opening => {
-                                    tokio::select! {
-                                        changed = state.changed() => {
-                                            changed.map_err(|_| TraceDecayError::Config {
-                                                message: "project open task ended before reporting an outcome"
-                                                    .to_string(),
-                                            })?;
+            let mut retry_init = handshake.allow_init;
+            let publication_deadline = tokio::time::Instant::now() + PROJECT_OPEN_REQUEST_DEADLINE;
+            loop {
+                let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
+                let result = match claim {
+                    ProjectOpenTaskClaim::InFlight(mut state) => {
+                        let publication = async {
+                            loop {
+                                // The claim proves an open for this exact route is
+                                // in flight, so each iteration only needs to see
+                                // its publication land on the already-bound route
+                                // alias — never a fresh identity resolution.
+                                if let Some(server) = self
+                                    .route_bound_project_server(handshake, requirement)
+                                    .await?
+                                {
+                                    return Ok(server);
+                                }
+                                let current = state.borrow().clone();
+                                match current {
+                                    ProjectOpenTaskState::Opening => {
+                                        tokio::select! {
+                                            changed = state.changed() => {
+                                                changed.map_err(|_| TraceDecayError::Config {
+                                                    message: "project open task ended before reporting an outcome"
+                                                        .to_string(),
+                                                })?;
+                                            }
+                                            () = tokio::time::sleep(Duration::from_millis(25)) => {}
                                         }
-                                        () = tokio::time::sleep(Duration::from_millis(25)) => {}
                                     }
-                                }
-                                ProjectOpenTaskState::Ready => {
-                                    // The open task publishes the server before it
-                                    // flips to Ready, but this waiter read the
-                                    // cache before it read the state, so a
-                                    // publication that raced this iteration must
-                                    // be honored with one final cache check
-                                    // instead of a spurious failure.
-                                    if let Some(server) = self
-                                        .cached_project_server_for_requirement(
-                                            handshake,
-                                            requirement,
-                                        )
-                                        .await?
-                                    {
-                                        return Ok(server);
+                                    ProjectOpenTaskState::Ready => {
+                                        // The open task publishes the server before it
+                                        // flips to Ready, but this waiter read the
+                                        // cache before it read the state, so a
+                                        // publication that raced this iteration must
+                                        // be honored with one final cache check
+                                        // instead of a spurious failure.
+                                        if let Some(server) = self
+                                            .cached_project_server_for_requirement(
+                                                handshake,
+                                                requirement,
+                                            )
+                                            .await?
+                                        {
+                                            return Ok(server);
+                                        }
+                                        return Err(TraceDecayError::Config {
+                                            message:
+                                                "project open completed without publishing a server"
+                                                    .to_string(),
+                                        });
                                     }
-                                    return Err(TraceDecayError::Config {
-                                        message:
-                                            "project open completed without publishing a server"
-                                                .to_string(),
-                                    });
-                                }
-                                ProjectOpenTaskState::Failed(failure) => {
-                                    return Err(failure.to_error());
+                                    ProjectOpenTaskState::Failed(failure) => {
+                                        return Err(failure.to_error());
+                                    }
                                 }
                             }
-                        }
-                    };
-                    // Riding out an open is a park, not work: the admission slot is
-                    // released for the wait's duration so a tool that needs no project
-                    // owner is never shed by a queue of warming clients. The wait stays
-                    // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
-                    park_admission(wait_for_project_open_publication(
-                        &project_path,
-                        publication,
-                    ))
+                        };
+                        // Riding out an open is a park, not work: the admission slot is
+                        // released for the wait's duration so a tool that needs no project
+                        // owner is never shed by a queue of warming clients. The wait stays
+                        // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
+                        park_admission(wait_for_project_open_publication(
+                            &project_path,
+                            publication_deadline,
+                            publication,
+                        ))
+                        .await
+                    }
+                    ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
+                    ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+                };
+                if project_open_tasks(&self.project_open_gates)
                     .await
+                    .admit_explicit_init_retry(
+                        &route,
+                        &mut retry_init,
+                        result.as_ref().err(),
+                        publication_deadline,
+                    )
+                    .await?
+                {
+                    continue;
                 }
-                ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
-                ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+                return result;
             }
         })
     }
