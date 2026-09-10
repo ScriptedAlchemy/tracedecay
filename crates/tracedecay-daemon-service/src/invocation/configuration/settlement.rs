@@ -21,6 +21,21 @@ fn requires_daemon_restart(
     }))
 }
 
+pub(super) async fn refresh_live_configuration_runtime(
+    registered: &RegisteredConfigurationRuntime,
+    current: tracedecay_configuration::ConfigurationCurrentStateV1,
+) -> Result<(), String> {
+    let refresh = registered
+        .feedback_refresh
+        .read()
+        .map(|refresh| refresh.clone())
+        .map_err(|_| "feedback configuration refresh authority is unavailable".to_owned())?;
+    match refresh {
+        Some(refresh) => refresh.refresh(current).await,
+        None => Ok(()),
+    }
+}
+
 #[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
 pub(super) async fn reconcile_configuration_runtime(
     registered: &RegisteredConfigurationRuntime,
@@ -86,15 +101,22 @@ pub(super) async fn reconcile_configuration_runtime(
         );
     }
     let revision_id = current.revision_id().clone();
+    let refresh_state = tracedecay_configuration::ConfigurationCurrentStateV1 {
+        revision_id: revision_id.clone(),
+        snapshot: current.snapshot().clone(),
+    };
     let successful_observed_revision_id = if restart_required {
         observed.revision_id
     } else {
         revision_id.clone()
     };
-    let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
+    let mut installation = hotpath::measure_block!("daemon.service.configuration.activate", {
         tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
             .map_err(|error| error.to_string())
     });
+    if installation.is_ok() {
+        installation = refresh_live_configuration_runtime(registered, refresh_state).await;
+    }
     let (observed_revision_id, activation_error_code) = match installation {
         Ok(()) => (Some(successful_observed_revision_id), None),
         Err(error) => {
