@@ -1239,6 +1239,9 @@ fn graph_freshness_reader<'a>(
 /// admitted for. An authority the daemon did not admit stays absent and the
 /// handler reports its own typed unavailable state; an authority that
 /// contradicts the admitted checkout refuses the whole call.
+///
+/// The snapshot comes from [`admitted_project_authorities`]; this function
+/// is the binding constructor, not a second admission.
 fn admitted_tool_context<'a>(
     options: &'a ToolCallRegistryOptions<'a>,
     project: &'a McpAdmittedProjectV1,
