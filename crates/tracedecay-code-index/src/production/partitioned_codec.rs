@@ -2440,9 +2440,10 @@ impl PartitionedLexicalFileSourceV1 {
                 "sealed lexical file ordinal is unavailable".to_owned(),
             )
         })?;
-        let window = read_segment_window(
+        let mut buffers = vec![Vec::new(); maximum_files.max(1)];
+        let read = read_segment_window(
             descriptors,
-            maximum_files,
+            &mut buffers,
             maximum_bytes,
             |descriptor, segment| {
                 checkpoint(control)?;
@@ -2454,48 +2455,51 @@ impl PartitionedLexicalFileSourceV1 {
                 checkpoint(control)
             },
         )?;
-        if window.is_empty() {
+        if read == 0 {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical file window is empty".to_owned(),
             ));
         }
-        restore_file_pages(decode_segment_window(&window, generation_id)?)
+        restore_file_pages(decode_segment_window(
+            &descriptors[..read],
+            &buffers[..read],
+            generation_id,
+        )?)
     }
 }
 
-/// The segment bytes of one bounded decode window, read in manifest order.
-type SegmentWindowV1<'a> = Vec<(&'a PartitionedFileSegmentDescriptorV1, Vec<u8>)>;
-
-/// Read the next window of segment bytes on the calling thread: at least one
-/// file, then as many as fit within `maximum_files` and `maximum_bytes`. The
-/// reader callback owns cancellation checkpoints and the actual store read.
-fn read_segment_window<'a>(
-    descriptors: &'a [PartitionedFileSegmentDescriptorV1],
-    maximum_files: usize,
+/// Read the next window of segment bytes on the calling thread into
+/// `buffers`, one slot per file: at least one file, then as many as fit within
+/// `buffers.len()` and `maximum_bytes`. Returns how many leading descriptors
+/// were read. Callers keep the same slots across windows, so a decode never
+/// holds more than `buffers.len()` segments and each slot grows only to the
+/// largest segment it has read (the bound
+/// `partitioned_codec_has_stable_bytes_and_round_trips` asserts). The reader
+/// callback owns cancellation checkpoints and the actual store read.
+fn read_segment_window(
+    descriptors: &[PartitionedFileSegmentDescriptorV1],
+    buffers: &mut [Vec<u8>],
     maximum_bytes: u64,
     mut read_segment: impl FnMut(
         &PartitionedFileSegmentDescriptorV1,
         &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
-) -> Result<SegmentWindowV1<'a>, CodeIndexProductionErrorV1> {
-    let mut window = Vec::new();
+) -> Result<usize, CodeIndexProductionErrorV1> {
+    let mut read = 0;
     let mut bytes = 0u64;
-    for descriptor in descriptors {
-        if !window.is_empty()
-            && (window.len() >= maximum_files
-                || bytes.saturating_add(descriptor.segment_size_bytes) > maximum_bytes)
-        {
+    for (descriptor, buffer) in descriptors.iter().zip(buffers) {
+        if read > 0 && bytes.saturating_add(descriptor.segment_size_bytes) > maximum_bytes {
             break;
         }
-        let mut segment = Vec::new();
+        buffer.clear();
         hotpath::measure_block!(
             "code_index.restore.segment_read",
-            read_segment(descriptor, &mut segment)
+            read_segment(descriptor, buffer)
         )?;
         bytes = bytes.saturating_add(descriptor.segment_size_bytes);
-        window.push((descriptor, segment));
+        read += 1;
     }
-    Ok(window)
+    Ok(read)
 }
 
 /// Verify and decode one window of segment bytes on the indexing pool.
@@ -2507,10 +2511,12 @@ fn read_segment_window<'a>(
 /// Files are independent, so the whole window is one ordered fan-out with the
 /// lowest-index failure reported, exactly as the sequential loop did.
 fn decode_segment_window(
-    window: &SegmentWindowV1<'_>,
+    descriptors: &[PartitionedFileSegmentDescriptorV1],
+    segments: &[Vec<u8>],
     generation_id: &CodeGenerationId,
 ) -> Result<Vec<PersistedFileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
-    collect_bounded_ordered(window, |(descriptor, segment), _worker| {
+    let window = descriptors.iter().zip(segments).collect::<Vec<_>>();
+    collect_bounded_ordered(&window, |(descriptor, segment), _worker| {
         let mut restored = Vec::new();
         decode_file_segment(descriptor, generation_id, segment, &mut restored)
     })
@@ -2750,6 +2756,15 @@ impl CodeIndexPublishedGenerationV1 {
         })
     }
 
+    /// File segments [`Self::decode_partitioned_sealed`] holds in memory at
+    /// once: one reusable segment buffer per indexing worker. Its file
+    /// allocation is therefore bounded by this many buffers, each no larger
+    /// than the largest file segment it read.
+    #[must_use]
+    pub fn partitioned_decode_window_files() -> usize {
+        crate::parallelism::indexing_workers().max(1)
+    }
+
     pub fn decode_partitioned_sealed(
         bytes: &[u8],
         mut read_segment: impl FnMut(
@@ -2761,11 +2776,15 @@ impl CodeIndexPublishedGenerationV1 {
             return Ok(None);
         };
         let mut files = Vec::with_capacity(generation.file_segments.len());
-        let window_files = crate::parallelism::indexing_workers().max(1);
+        // One segment buffer per window slot, reused across windows: the
+        // decode holds at most `partitioned_decode_window_files()` segments,
+        // each buffer grown only to the largest segment its slot has read.
+        let mut buffers = vec![Vec::new(); Self::partitioned_decode_window_files()];
         while files.len() < generation.file_segments.len() {
-            let window = read_segment_window(
-                &generation.file_segments[files.len()..],
-                window_files,
+            let pending = &generation.file_segments[files.len()..];
+            let read = read_segment_window(
+                pending,
+                &mut buffers,
                 LEXICAL_FILE_PREFETCH_BYTES_V1,
                 |descriptor, segment| {
                     read_segment(
@@ -2778,7 +2797,8 @@ impl CodeIndexPublishedGenerationV1 {
                 },
             )?;
             files.extend(decode_segment_window(
-                &window,
+                &pending[..read],
+                &buffers[..read],
                 &generation.manifest.generation_id,
             )?);
         }
