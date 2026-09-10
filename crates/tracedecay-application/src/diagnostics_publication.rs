@@ -22,6 +22,7 @@ use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ComponentVersion, ContentDigest, DiagnosticEvidenceClassV1,
     DiagnosticProducerKindV1, DiagnosticProvenanceV1, DiagnosticRecordStateV1,
@@ -246,6 +247,20 @@ pub type CodeIndexPublicationIdentityFuture<'a> =
 /// there is to publish nothing rather than to guess an identity.
 pub trait CodeIndexPublicationIdentityPortV1: Send + Sync {
     fn resolve(&self, project_root: PathBuf) -> CodeIndexPublicationIdentityFuture<'_>;
+
+    fn resolve_current_for_scope(
+        &self,
+        project_root: PathBuf,
+        scope: ResolvedScope,
+    ) -> CodeIndexPublicationIdentityFuture<'_> {
+        Box::pin(async move {
+            let identity = self.resolve(project_root).await?;
+            (identity.repository() == &scope.repository_id
+                && identity.worktree() == Some(&scope.worktree_id)
+                && identity.reference() == scope.reference.as_ref())
+            .then_some(identity)
+        })
+    }
 }
 
 /// Normalizes a producer-reported path onto the code index's logical-path

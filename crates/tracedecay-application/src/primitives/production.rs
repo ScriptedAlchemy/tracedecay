@@ -1074,18 +1074,14 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
                 }
                 let Some(identity) = self
                     .code_index_identity
-                    .resolve(self.source_runtime.project_root().to_path_buf())
+                    .resolve_current_for_scope(
+                        self.source_runtime.project_root().to_path_buf(),
+                        context.request.scope().clone(),
+                    )
                     .await
                 else {
                     return unavailable(OmissionReason::Unavailable);
                 };
-                let scope = context.request.scope();
-                if identity.repository() != &scope.repository_id
-                    || identity.worktree() != Some(&scope.worktree_id)
-                    || identity.reference() != scope.reference.as_ref()
-                {
-                    return unavailable(OmissionReason::Stale);
-                }
                 let Some(relative) = identity.logical_path(&request.file) else {
                     return unavailable(OmissionReason::Stale);
                 };
