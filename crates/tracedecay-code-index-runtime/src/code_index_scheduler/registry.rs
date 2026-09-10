@@ -6929,6 +6929,47 @@ impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdenti
             )
         })
     }
+
+    fn resolve_current_for_scope(
+        &self,
+        project_root: PathBuf,
+        scope: tracedecay_contracts::ResolvedScope,
+    ) -> tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityFuture<'_>
+    {
+        let registry = self.clone();
+        Box::pin(async move {
+            let root = project_root.canonicalize().ok()?;
+            let root_generation = registry.latest_text_serving_for_root(&root).await?;
+            let (current, fresh) = registry
+                .latest_text_serving_freshness_for_scope(&scope)
+                .await?;
+            if !fresh
+                || root_generation.metadata().manifest().generation_id
+                    != current.metadata().manifest().generation_id
+            {
+                return None;
+            }
+            let metadata = current.metadata();
+            let snapshot = metadata.snapshot();
+            Some(
+                tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
+                    metadata.manifest().generation_id.clone(),
+                    metadata.manifest().seal.sealed_at,
+                    snapshot.repository.clone(),
+                    snapshot.worktree.clone(),
+                    snapshot.reference.clone(),
+                    snapshot.source_revision.clone(),
+                    snapshot.files.iter().map(|file| {
+                        (
+                            file.logical_path.clone(),
+                            file.file_occurrence_id.clone(),
+                            file.content_digest.clone(),
+                        )
+                    }),
+                ),
+            )
+        })
+    }
 }
 
 impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
