@@ -238,7 +238,11 @@ fn stack_snapshot_body() -> serde_json::Value {
         "inventory_epoch": 7,
         "selection": {
             "kind": "independent_branch",
-            "binding": {"proposal_digest": digest}
+            "binding": {
+                "proposal_digest": digest,
+                "source_ref": "refs/heads/source",
+                "destination_ref": "refs/heads/destination"
+            }
         },
         "grant_digest": digest,
         "policy_digest": digest
