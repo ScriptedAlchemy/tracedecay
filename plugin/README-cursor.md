@@ -260,7 +260,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_type_hierarchy",
     "tracedecay:tracedecay_unmounted_files",
     "tracedecay:tracedecay_unsafe_patterns",
-    "tracedecay:tracedecay_unused_imports",
     "tracedecay:tracedecay_work_attempt_status",
     "tracedecay:tracedecay_work_compare_proposal",
     "tracedecay:tracedecay_work_execution_history",

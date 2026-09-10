@@ -108,7 +108,7 @@ Plus dedicated tools for cross-cutting agent workflows — `tracedecay_diagnose`
 `tracedecay_diagnostics` (TypeScript LSP integration), `tracedecay_outline`,
 `tracedecay_signature_search`, `tracedecay_type_hierarchy`,
 `tracedecay_field_sites`, `tracedecay_constructors`,
-`tracedecay_unsafe_patterns`, `tracedecay_unused_imports`,
+`tracedecay_unsafe_patterns`,
 `tracedecay_implementations`, `tracedecay_impls`, `tracedecay_derives`.
 
 ### 1.4 On-demand index freshness

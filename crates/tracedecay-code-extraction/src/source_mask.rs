@@ -1,11 +1,10 @@
-//! Tree-sitter driven source masking for the text-scanning analysis handlers.
+//! Tree-sitter driven source masking for Rust token scans.
 //!
-//! Several analysis scanners (`unused_imports`, the recursion self-call probe,
-//! and `unsafe_patterns`) search Rust source *text* for tokens. A naive search
+//! Source-edit dependency discovery and the `unsafe_patterns` analysis scan
+//! search Rust source *text* for tokens. A naive search
 //! treats an identifier or keyword that appears only inside a comment or a
-//! string/char literal as a real occurrence — a false positive (or, for
-//! unused-imports, a false negative). This module blanks the byte ranges of
-//! comment and string/char literal nodes reported by the existing tree-sitter
+//! string/char literal as a real occurrence. This module blanks the byte ranges
+//! of comment and string/char literal nodes reported by the existing tree-sitter
 //! Rust grammar, replacing their bytes with spaces while preserving newlines
 //! and total byte length so 1-based line indexing stays valid.
 //!
@@ -32,7 +31,7 @@ pub struct MaskOptions {
 
 impl MaskOptions {
     /// Mask comments and string/char literals, preserving implicit format
-    /// captures. This is the behaviour the `unused_imports` scan depends on.
+    /// captures. This is the behaviour source-edit import discovery depends on.
     pub const UNUSED_IMPORTS: Self = Self {
         preserve_format_captures: true,
     };
@@ -435,7 +434,7 @@ mod tests {
         false
     }
 
-    /// Does `identifier` survive default (unused-imports) masking of `source`?
+    /// Does `identifier` survive default import-discovery masking of `source`?
     fn referenced(source: &str, identifier: &str) -> bool {
         masked_rust_source(source)
             .lines()

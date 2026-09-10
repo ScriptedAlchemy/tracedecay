@@ -672,7 +672,6 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 | Tool | What it does |
 |------|-------------|
 | `tracedecay_dead_code` | Find unreachable symbols — functions with no callers. |
-| `tracedecay_unused_imports` | Find import statements that are never referenced. |
 | `tracedecay_unmounted_files` | Find source files no build root reaches — indexed as healthy symbols, yet no compiler, bundler, or test runner ever loads them. Reports one section per ecosystem with its own verdict and blind spots. |
 | `tracedecay_circular` | Detect circular file dependencies. |
 | `tracedecay_recursion` | Detect recursive and mutually-recursive call cycles. |
