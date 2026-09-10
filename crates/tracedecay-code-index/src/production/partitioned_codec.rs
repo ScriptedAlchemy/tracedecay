@@ -1247,11 +1247,15 @@ fn decode_verified_file_segment(
     bytes: &[u8],
     restored: &mut Vec<u8>,
 ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
-    let segment: PartitionedRawFileSegmentV1 = serde_json::from_slice(bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed file segment decoding failed: {error}"
-        ))
-    })?;
+    hotpath::gauge!("code_index.restore.segment_bytes_total").inc(bytes.len());
+    let segment: PartitionedRawFileSegmentV1 = hotpath::measure_block!(
+        "code_index.restore.segment_parse",
+        serde_json::from_slice(bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed file segment decoding failed: {error}"
+            ))
+        })
+    )?;
     if !matches!(
         segment.format_revision,
         FILE_SEGMENT_FORMAT_REVISION_V1 | FILE_SEGMENT_FORMAT_REVISION_V2
@@ -1266,7 +1270,12 @@ fn decode_verified_file_segment(
         symbol_occurrences: &descriptor.symbol_occurrences,
     };
     restored.clear();
-    canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, restored)?;
+    let identity_restore = hotpath::measure_block!(
+        "code_index.restore.segment_identity_restore",
+        canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, restored)
+    );
+    hotpath::gauge!("code_index.restore.identity_restored_bytes_total").inc(restored.len());
+    identity_restore?;
     let payload_decoding_failed = |error: serde_json::Error| {
         // The payload already parsed as canonical JSON under its verified
         // digest, so a data-shaped refusal (missing or unknown field) is an
@@ -1281,21 +1290,25 @@ fn decode_verified_file_segment(
             "sealed file segment payload decoding failed: {error}"
         ))
     };
-    let mut file: PersistedFileGenerationArtifactsV1 =
+    let mut file: PersistedFileGenerationArtifactsV1 = hotpath::measure_block!(
+        "code_index.restore.segment_typed_deserialize_expand",
         if segment.format_revision == FILE_SEGMENT_FORMAT_REVISION_V1 {
-            serde_json::from_slice(restored).map_err(payload_decoding_failed)?
+            serde_json::from_slice(restored).map_err(payload_decoding_failed)
         } else {
             serde_json::from_slice::<PersistedFileGenerationArtifactsV2>(restored)
-                .map_err(payload_decoding_failed)?
-                .expand()?
-        };
-    file.artifacts
-        .symbols
-        .sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
-    file.artifacts.edges.sort_by(|left, right| {
-        crate::chunks::canonical_edge_key(left).cmp(&crate::chunks::canonical_edge_key(right))
+                .map_err(payload_decoding_failed)
+                .and_then(PersistedFileGenerationArtifactsV2::expand)
+        }
+    )?;
+    hotpath::measure_block!("code_index.restore.segment_artifact_sorts", {
+        file.artifacts
+            .symbols
+            .sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+        file.artifacts.edges.sort_by(|left, right| {
+            crate::chunks::canonical_edge_key(left).cmp(&crate::chunks::canonical_edge_key(right))
+        });
+        file.artifacts.unresolved_references.sort();
     });
-    file.artifacts.unresolved_references.sort();
     Ok(file)
 }
 
