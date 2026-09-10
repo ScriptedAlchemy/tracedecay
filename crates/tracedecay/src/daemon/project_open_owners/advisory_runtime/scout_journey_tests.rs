@@ -5,7 +5,7 @@ use super::*;
 
 use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutEvidenceEnvelopeExt, context_scout_delivery_receipt_id,
+    ContextScoutDurableStoreV1, ContextScoutEvidenceEnvelopeExt, context_scout_delivery_receipt_id,
 };
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
@@ -13,7 +13,7 @@ use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
-    ContextScoutRedactionReceiptV1,
+    ContextScoutLeaseV1, ContextScoutRedactionReceiptV1,
 };
 use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
@@ -147,14 +147,16 @@ fn configured_model_input_at(
     }
 }
 
-fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
+fn configured_model_pin_with_timeout(
+    revision: &str,
+    model_timeout_secs: u64,
+) -> ContextScoutConfigurationPinV1 {
     let setting_key = tracedecay_domain::configuration::SettingKey::new(
         tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     )
     .expect("Scout setting key");
-    let revision =
-        tracedecay_domain::configuration::ConfigurationRevisionId::new("revision.scout.model")
-            .expect("configuration revision");
+    let revision = tracedecay_domain::configuration::ConfigurationRevisionId::new(revision)
+        .expect("configuration revision");
     let settings = tracedecay_domain::configuration::ContextScoutSettingsV1 {
         schema_version: tracedecay_domain::configuration::ContextScoutSettingsV1::SCHEMA_VERSION,
         state: tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
@@ -165,7 +167,7 @@ fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
             tracedecay_domain::configuration::ContextScoutConfiguredModelPathV1::CodexAppServer,
         ),
         model_id: Some("gpt-5.6-mini".to_owned()),
-        model_timeout_secs: Some(30),
+        model_timeout_secs: Some(model_timeout_secs),
     };
     settings.validate().expect("configured-model settings");
     let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
@@ -193,6 +195,10 @@ fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
         },
     )
     .expect("configured-model pin")
+}
+
+fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
+    configured_model_pin_with_timeout("revision.scout.model", 30)
 }
 
 async fn test_scout_owner(
@@ -475,6 +481,82 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
             .pending
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn claim_refuses_work_from_a_displaced_configuration_revision() {
+    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let model_config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        ..AutomationConfig::default()
+    };
+    let first_pin = configured_model_pin_with_timeout("revision.scout.claim.first", 30);
+    let first_control = first_pin.control();
+    let owner = test_scout_owner(&temporary).await;
+    install_project_open_context_scout_configuration(owner.as_ref(), first_pin, &model_config)
+        .await
+        .expect("install first Scout configuration");
+    let now = UtcMicros(1_000_000);
+    let input = configured_model_input_at(
+        first_control.configuration_revision,
+        31,
+        now,
+        ContextScoutDeliveryWindowV1::IdleWindow,
+    );
+    let ContextScoutRuntimeOutcomeV1::Enqueued {
+        entry,
+        store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+    } = owner
+        .prepare_configured(
+            &input,
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first-revision guidance")
+    else {
+        panic!("first-revision guidance must enqueue");
+    };
+    install_project_open_context_scout_configuration(
+        owner.as_ref(),
+        configured_model_pin_with_timeout("revision.scout.claim.second", 31),
+        &model_config,
+    )
+    .await
+    .expect("install replacement Scout configuration");
+
+    let request = ContextScoutClaimRequestV1 {
+        address: input.address,
+        window: ContextScoutClaimWindowV1::IdleWindow,
+        idempotency_key: IdempotencyKey::new("context-scout.claim.displaced").expect("claim key"),
+    };
+    assert_eq!(
+        owner
+            .claim_delivery_request(
+                &request,
+                UtcMicros(now.0 + 1),
+                UtcMicros(now.0 + 30_000_000)
+            )
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Empty
+    );
+    assert!(matches!(
+        owner
+            .store()
+            .claim(
+                input.address,
+                UtcMicros(now.0 + 2),
+                ContextScoutLeaseV1 {
+                    lease_id: [32; 16],
+                    expires_at: UtcMicros(now.0 + 30_000_000),
+                },
+            )
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Claimed(claim) if claim.entry == *entry
+    ));
 }
 
 /// Disabled is the only stock state: the registry default renders the flag
