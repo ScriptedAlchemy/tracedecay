@@ -33,6 +33,7 @@ use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_application::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
 };
+use tracedecay_application::semantic_runtime::SavedGenerationScheduleOutcomeV1;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CodeGenerationSourceCommitmentsV1, ComponentRevision,
     ContentDigest, ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -6333,30 +6334,49 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Schedule semantics only after the registry has activated and published
     /// this exact generation as serving state.
+    ///
+    /// Every outcome is typed and recorded. This is the one boundary a sealed
+    /// generation crosses on its way to projection, and a bare `false` here
+    /// left an operator with a runtime parked at `installed` and no evidence
+    /// of why later generations never re-triggered projection (#753).
     pub fn schedule_semantic_generation(
         &self,
         generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> bool {
-        let Some(schedule) = self.semantic_schedule.as_ref() else {
-            return false;
-        };
+    ) -> SavedGenerationScheduleOutcomeV1 {
         let generation_id = generation.manifest().generation_id.clone();
-        match catch_unwind(AssertUnwindSafe(|| {
+        let Some(schedule) = self.semantic_schedule.as_ref() else {
+            return Self::record_semantic_schedule_outcome(
+                &generation_id,
+                SavedGenerationScheduleOutcomeV1::RuntimeNotMounted,
+            );
+        };
+        let outcome = match catch_unwind(AssertUnwindSafe(|| {
             hotpath::measure_block!(
                 "code_index.semantic_generation_handoff",
                 schedule(generation)
             )
         })) {
-            Ok(scheduled) => scheduled,
-            Err(_) => {
-                tracing::warn!(
-                    event = "code_index_semantic_schedule_panicked",
-                    generation = %generation_id,
-                    "code-index semantic scheduling panicked; the generation remains serving"
-                );
-                false
-            }
+            Ok(outcome) => outcome,
+            Err(_) => SavedGenerationScheduleOutcomeV1::HookPanicked,
+        };
+        Self::record_semantic_schedule_outcome(&generation_id, outcome)
+    }
+
+    /// Name every non-scheduled handoff so silence never stands in for a
+    /// reason. A scheduled handoff is reported by the runtime itself.
+    fn record_semantic_schedule_outcome(
+        generation_id: &CodeGenerationId,
+        outcome: SavedGenerationScheduleOutcomeV1,
+    ) -> SavedGenerationScheduleOutcomeV1 {
+        if !outcome.is_scheduled() {
+            tracing::warn!(
+                event = "code_index_semantic_schedule_declined",
+                outcome = outcome.as_str(),
+                generation = %generation_id,
+                "code-index did not hand this generation to semantic projection"
+            );
         }
+        outcome
     }
 
     #[cfg(test)]
