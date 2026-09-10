@@ -753,6 +753,8 @@ async fn assert_application_transport_parity(
     );
     let expected_contract = if operation == ApplicationSurfaceOperation::TestResults {
         "schema.application.feedback.test-results.result".to_owned()
+    } else if operation == ApplicationSurfaceOperation::CodeExactOccurrence {
+        "schema.application.code-query.exact-occurrence.result".to_owned()
     } else {
         format!(
             "schema.application.primitive.{}.result",
