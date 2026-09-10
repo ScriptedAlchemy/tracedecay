@@ -200,7 +200,9 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     ));
     assert_eq!(admitted.feedback_notice, Some(notice.clone()));
 
-    let rendered = render_host_delivery(None, None, Some(&notice), false).unwrap();
+    let rendered = render_host_delivery(None, None, Some(&notice), false)
+        .expect("feedback notice serializes")
+        .expect("feedback notice renders");
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
@@ -225,6 +227,7 @@ fn context_scout_address_is_rendered_for_the_admitted_host() {
         project_id: [8; 16],
     };
     let rendered = render_host_delivery(None, Some(&address), None, false)
+        .expect("authorized Scout address serializes")
         .expect("authorized Scout address renders");
     let encoded = rendered
         .strip_prefix("TraceDecay Context Scout address for authorized operations: ")
@@ -250,7 +253,9 @@ fn github_stack_wakeup_is_content_free() {
     let admitted = daemon_admission_response(&response);
     assert!(admitted.github_stack_signal_available);
 
-    let rendered = render_host_delivery(None, None, None, true).expect("stack wakeup renders");
+    let rendered = render_host_delivery(None, None, None, true)
+        .expect("stack wakeup serialization succeeds")
+        .expect("stack wakeup renders");
 
     assert_eq!(
         rendered,
