@@ -43,8 +43,20 @@ pub(super) async fn reconcile_configuration_runtime(
             return;
         }
     };
-    let observed = match registered.runtime.activated_configuration() {
-        Ok(observed) => observed,
+    let observed = match hotpath::future!(
+        registered.runtime.observed_runtime_configuration(),
+        label = "daemon.service.configuration.reconcile_observed"
+    )
+    .await
+    {
+        Ok(Some(observed)) => observed,
+        Ok(None) => {
+            tracing::warn!(
+                receipt_id = %receipt.receipt_id,
+                "configuration committed before runtime activation was observed"
+            );
+            return;
+        }
         Err(error) => {
             tracing::warn!(
                 receipt_id = %receipt.receipt_id,
@@ -54,28 +66,8 @@ pub(super) async fn reconcile_configuration_runtime(
             return;
         }
     };
-    match requires_daemon_restart(observed.snapshot(), current.snapshot()) {
-        Ok(true) => {
-            tracing::info!(
-                receipt_id = %receipt.receipt_id,
-                desired_revision_id = %current.revision_id(),
-                observed_revision_id = %observed.revision_id(),
-                "configuration committed; daemon restart is required before activation"
-            );
-            if let Err(error) = registered
-                .runtime
-                .record_runtime_activation(Some(observed.revision_id().clone()), None, now)
-                .await
-            {
-                tracing::warn!(
-                    receipt_id = %receipt.receipt_id,
-                    error = %error,
-                    "configuration committed; restart requirement observation remains pending"
-                );
-            }
-            return;
-        }
-        Ok(false) => {}
+    let restart_required = match requires_daemon_restart(&observed.snapshot, current.snapshot()) {
+        Ok(restart_required) => restart_required,
         Err(error) => {
             tracing::warn!(
                 receipt_id = %receipt.receipt_id,
@@ -84,14 +76,27 @@ pub(super) async fn reconcile_configuration_runtime(
             );
             return;
         }
+    };
+    if restart_required {
+        tracing::info!(
+            receipt_id = %receipt.receipt_id,
+            desired_revision_id = %current.revision_id(),
+            observed_revision_id = %observed.revision_id,
+            "configuration committed; daemon restart is required before activation"
+        );
     }
     let revision_id = current.revision_id().clone();
+    let successful_observed_revision_id = if restart_required {
+        observed.revision_id
+    } else {
+        revision_id.clone()
+    };
     let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
         tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
             .map_err(|error| error.to_string())
     });
     let (observed_revision_id, activation_error_code) = match installation {
-        Ok(()) => (Some(revision_id), None),
+        Ok(()) => (Some(successful_observed_revision_id), None),
         Err(error) => {
             tracing::warn!(
                 receipt_id = %receipt.receipt_id,
@@ -235,9 +240,23 @@ mod tests {
         key: &str,
         value: tracedecay_domain::configuration::ConfigurationValueV1,
     ) -> ConfigurationSnapshotV1 {
+        resolved_snapshot_entries(vec![(key, value)])
+    }
+
+    fn resolved_snapshot_entries(
+        entries: Vec<(&str, tracedecay_domain::configuration::ConfigurationValueV1)>,
+    ) -> ConfigurationSnapshotV1 {
         let registry = ConfigurationRegistry::core().unwrap();
-        let key = tracedecay_domain::configuration::SettingKey::new(key).unwrap();
         let project_id = ProjectId::new("project.configuration.restart.fixture").unwrap();
+        let entries = entries
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    tracedecay_domain::configuration::SettingKey::new(key).unwrap(),
+                    value,
+                )
+            })
+            .collect();
         tracedecay_global_db::configuration::resolver::resolve_configuration(
             &registry,
             &[
@@ -249,7 +268,7 @@ mod tests {
                         "configuration.revision.restart.fixture",
                     )
                     .unwrap(),
-                    entries: std::collections::BTreeMap::from([(key, value)]),
+                    entries,
                 },
             ],
         )
@@ -328,6 +347,56 @@ mod tests {
 
         assert_ne!(observed.snapshot_id, reverted.snapshot_id);
         assert!(!requires_daemon_restart(&observed, &reverted).unwrap());
+    }
+
+    #[test]
+    fn live_change_does_not_erase_pending_restart_against_durable_observation() {
+        use tracedecay_domain::WorkExecutableReference;
+        use tracedecay_domain::configuration::{
+            ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+            WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
+            WorkExecutableCapabilityV1,
+        };
+
+        let registry = ConfigurationRegistry::core().unwrap();
+        let observed =
+            tracedecay_global_db::configuration::resolver::resolve_configuration(&registry, &[])
+                .unwrap()
+                .snapshot;
+        let binding = WorkExecutableBindingV1::new(
+            WorkExecutableReference::new(
+                "provider.configuration.mixed.fixture".to_owned(),
+                digest('f'),
+            )
+            .unwrap(),
+            std::path::PathBuf::from("/tmp/provider-configuration-mixed-fixture"),
+            vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+        )
+        .unwrap();
+        let pending = resolved_snapshot_entries(vec![
+            (
+                WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+                ConfigurationValueV1::WorkExecutableBindings(vec![binding.clone()]),
+            ),
+            (
+                DIAGNOSTICS_PREWARM_SETTING_KEY,
+                ConfigurationValueV1::Boolean(false),
+            ),
+        ]);
+        let advanced = resolved_snapshot_entries(vec![
+            (
+                WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+                ConfigurationValueV1::WorkExecutableBindings(vec![binding]),
+            ),
+            (
+                DIAGNOSTICS_PREWARM_SETTING_KEY,
+                ConfigurationValueV1::Boolean(true),
+            ),
+        ]);
+
+        assert!(requires_daemon_restart(&observed, &pending).unwrap());
+        assert!(requires_daemon_restart(&observed, &advanced).unwrap());
+        assert!(!requires_daemon_restart(&pending, &advanced).unwrap());
     }
 
     fn digest(byte: char) -> ManifestDigest {

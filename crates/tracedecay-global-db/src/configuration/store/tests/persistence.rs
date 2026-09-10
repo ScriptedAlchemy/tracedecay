@@ -5,7 +5,8 @@ use super::super::mutation::{
 };
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
-    ConfigurationRevisionStore, ConfigurationStoreError, Executor, params,
+    ConfigurationRevisionStore, ConfigurationStoreError, Executor,
+    OwnedGlobalDbConfigurationControlStore, params,
 };
 use super::{
     ConfigurationAuditEventKindV1, ConfigurationSqlStore, ConfigurationValueV1,
@@ -238,6 +239,33 @@ async fn activation_failure_preserves_last_working() {
         state.activation_error_code.as_deref(),
         Some("gateway_activation_failed")
     );
+}
+
+#[tokio::test]
+async fn owned_store_resolves_component_observation_from_revision_history() {
+    let (_directory, runtime, root) = global_setup().await;
+    let lease = runtime
+        .registered_database_lease(HostAdmissionScope::Project)
+        .unwrap();
+    let owned = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(lease);
+    owned
+        .record_component_activation(
+            "configuration.runtime-cache".to_owned(),
+            Some(root.revision_id.clone()),
+            None,
+            UtcMicros(11),
+        )
+        .await
+        .unwrap();
+
+    let observed = owned
+        .observed_component_configuration("configuration.runtime-cache".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(observed.revision_id, root.revision_id);
+    assert_eq!(observed.snapshot, root.snapshot);
 }
 
 #[tokio::test]
