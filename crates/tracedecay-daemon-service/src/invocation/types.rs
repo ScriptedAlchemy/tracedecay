@@ -2,6 +2,7 @@
 
 use super::*;
 use futures_util::FutureExt;
+use tracedecay_configuration::config::work_executable_binding::PinnedWorkExecutableBindingResolver;
 use tracedecay_contracts::RegisteredRootLocatorV1;
 
 pub use tracedecay_contracts::HookOrchestrationAdmissionV1;
@@ -671,6 +672,7 @@ pub struct RegisteredWorkRuntime {
     /// Project-open-pinned proposal routing authority over the exact admitted
     /// configuration snapshot and executable bindings.
     pub(super) proposal_routing: super::work_routing::DaemonWorkProposalRoutingAuthorityV1,
+    pub(super) executable_binding_resolver: PinnedWorkExecutableBindingResolver,
     /// Canonical Work evidence retrieval adapter with per-request
     /// evaluated-profile resolution.
     pub(super) evidence_retrieval: Arc<dyn WorkEvidenceRetrievalPortV1>,

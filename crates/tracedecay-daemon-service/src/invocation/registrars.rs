@@ -1,6 +1,8 @@
 //! Per-subsystem `*RuntimeRegistrar` newtypes and their registration error enums.
 
 use super::*;
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
+use tracedecay_configuration::config::work_executable_binding::PinnedWorkExecutableBindingResolver;
 
 mod lsp;
 pub use lsp::DaemonLspOwnerRegistrar;
@@ -1151,16 +1153,24 @@ impl DaemonWorkRuntimeRegistrar {
         grant: CapabilityGrantSnapshot,
         policy_digest: ManifestDigest,
         configuration_digest: ManifestDigest,
+        runtime_configuration: &PinnedRuntimeConfiguration,
         work_topology_policy: tracedecay_domain::configuration::WorkTopologyPolicyV1,
         proposal_routing: DaemonWorkProposalRoutingAuthorityV1,
         evidence_retrieval: impl WorkEvidenceRetrievalPortV1 + 'static,
     ) -> Result<(), TraceDecayError> {
         let evidence_retrieval = evidence_retrieval.clone_arc();
+        let executable_binding_resolver =
+            PinnedWorkExecutableBindingResolver::from_configuration(runtime_configuration)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("Work executable binding resolver could not mount: {error}"),
+                })?;
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
             || authority.worktree_id() != &grant.scope.worktree_id
             || authority.actor_id() != &actor
             || authority.policy_digest() != &grant.digest
+            || runtime_configuration.revision_id() != proposal_routing.configuration_revision()
+            || &runtime_configuration.snapshot().effective_behavior_digest != &configuration_digest
             || !proposal_routing.matches_scope(&grant.scope)
             || proposal_routing.configuration_digest() != &configuration_digest
         {
@@ -1233,6 +1243,7 @@ impl DaemonWorkRuntimeRegistrar {
                         configuration_digest: configuration_digest.clone(),
                         work_topology_policy: work_topology_policy.clone(),
                         proposal_routing: proposal_routing.clone(),
+                        executable_binding_resolver: executable_binding_resolver.clone(),
                         evidence_retrieval: evidence_retrieval.clone(),
                         durable_write_signal: durable_write_signal.clone(),
                         blocked_interval_observation_recovery:
