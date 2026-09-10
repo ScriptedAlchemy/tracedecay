@@ -262,7 +262,6 @@ pub async fn handle_runtime(
                         hotpath::future!(
                             session_temporal_health_value(
                                 ctx.authorized_project_session_db()
-                                    .filter(|(_, authorization)| authorization.is_authorized())
                                     .map(|(lease, _)| lease.as_ref()),
                             ),
                             label = "mcp.health.runtime.session_temporal"
@@ -297,13 +296,6 @@ pub async fn handle_runtime(
         .unwrap_or(false)
     {
         match ctx.authorized_project_session_db() {
-            Some((_, authorization)) if !authorization.is_authorized() => {
-                value["cursor_session_ingest"] = json!({
-                    "status": "unavailable",
-                    "reason": "session_store_denied",
-                    "message": "this request is not authorized to read the admitted project session store",
-                });
-            }
             Some((lease, _)) => {
                 let db = lease.as_ref();
                 value["cursor_session_ingest"] = match hotpath::future!(
@@ -348,8 +340,8 @@ pub async fn handle_runtime(
             None => {
                 value["cursor_session_ingest"] = json!({
                     "status": "unavailable",
-                    "reason": "session_store_unavailable",
-                    "message": "daemon project session authority is unavailable",
+                    "reason": "session_store_denied",
+                    "message": "this request is not authorized to read the admitted project session store",
                 });
             }
         }

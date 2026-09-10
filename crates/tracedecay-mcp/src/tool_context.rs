@@ -16,10 +16,10 @@
 //! `Project` or `Code` shard for the same project included, since those are
 //! different stores and not project-session authority.
 //!
-//! Authorization is carried, never inferred. The root validated whether this
-//! request may read the admitted project store and hands that verdict over
-//! with the lease; the context reports it verbatim and cannot upgrade a
-//! missing or unauthorized verdict into an apparent capability.
+//! A session-store lease is admitted by presence: attached means the daemon
+//! admitted it; absent is the typed unavailable/denied state. Bind derives
+//! that typed state from the lease and does not invent a verdict the daemon
+//! does not produce.
 //!
 //! Absence stays typed. An authority the daemon never admitted is `None` here
 //! and each handler turns that into its own unavailable state. Every binding
@@ -109,13 +109,11 @@ pub struct RequestControls<'a> {
     pub cancellation: Option<&'a CancellationSignal>,
 }
 
-/// The registered project session store the daemon opened for this request,
-/// with the authorization the daemon validated for reading it.
+/// The registered project session store the daemon opened for this request.
 ///
-/// Both halves come from the root. The lease knows the logical shard it was
-/// opened for, so [`McpToolContext::bind`] can check it against the admitted
-/// checkout instead of trusting how it was presented; the authorization is the
-/// root's own verdict and is carried through untouched.
+/// Presence of the lease *is* admission. [`McpToolContext::bind`] derives
+/// [`ValidatedAuthorization::Authorized`] from that presence; an absent lease
+/// is the typed unavailable/denied state, not a second verdict.
 #[derive(Clone, Copy)]
 pub struct AdmittedProjectStore<'a> {
     lease: &'a RegisteredGlobalDbLeaseV1,
@@ -123,11 +121,9 @@ pub struct AdmittedProjectStore<'a> {
 }
 
 impl<'a> AdmittedProjectStore<'a> {
-    /// Pairs the lease the root opened with the verdict the root reached.
-    ///
-    /// `authorization` must be the authorization the daemon validated for this
-    /// request. Passing [`ValidatedAuthorization::Unauthorized`] keeps every
-    /// store-backed handler denied; there is no value that means "decide later".
+    /// Pairs the admitted lease with the authorization bind derived from its
+    /// presence. A lease is always [`ValidatedAuthorization::Authorized`];
+    /// absence of a lease never reaches this type.
     #[must_use]
     pub fn new(
         lease: &'a RegisteredGlobalDbLeaseV1,
@@ -211,11 +207,6 @@ pub struct McpAdmittedProjectV1 {
     pub store_runtime: Option<Arc<DaemonSessionRuntimeRegistryV1>>,
     pub configuration_runtime: Option<Arc<ProjectConfigurationRuntime>>,
     pub project_session_store: Option<RegisteredGlobalDbLeaseV1>,
-    /// The root's verdict for reading `project_session_store`. Bind reports
-    /// this verbatim and never upgrades it to [`ValidatedAuthorization::Authorized`].
-    /// A denied verdict stays denied; the first authorized-only store read
-    /// refuses rather than treating the lease as a capability.
-    pub project_session_authorization: ValidatedAuthorization,
 }
 
 impl McpAdmittedProjectV1 {
@@ -232,7 +223,7 @@ impl McpAdmittedProjectV1 {
         graph_db_path: PathBuf,
         store_runtime: Option<Arc<DaemonSessionRuntimeRegistryV1>>,
         configuration_runtime: Option<Arc<ProjectConfigurationRuntime>>,
-        project_session_store: Option<(RegisteredGlobalDbLeaseV1, ValidatedAuthorization)>,
+        project_session_store: Option<RegisteredGlobalDbLeaseV1>,
     ) -> std::result::Result<Self, McpToolBindingError> {
         if !identity.project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
@@ -253,16 +244,12 @@ impl McpAdmittedProjectV1 {
                 });
             }
         }
-        let (project_session_store, project_session_authorization) = match project_session_store {
-            Some((lease, authorization)) => {
-                verify_store_lease(
-                    &identity.scope,
-                    AdmittedProjectStore::new(&lease, authorization),
-                )?;
-                (Some(lease), authorization)
-            }
-            None => (None, ValidatedAuthorization::Unauthorized),
-        };
+        if let Some(lease) = &project_session_store {
+            verify_store_lease(
+                &identity.scope,
+                AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized),
+            )?;
+        }
         Ok(Self {
             identity,
             store_layout,
@@ -271,7 +258,6 @@ impl McpAdmittedProjectV1 {
             store_runtime,
             configuration_runtime,
             project_session_store,
-            project_session_authorization,
         })
     }
 
@@ -310,10 +296,6 @@ impl std::fmt::Debug for McpAdmittedProjectV1 {
             .field(
                 "has_project_session_store",
                 &self.project_session_store.is_some(),
-            )
-            .field(
-                "project_session_authorization",
-                &self.project_session_authorization,
             )
             .finish()
     }
@@ -393,8 +375,6 @@ pub struct McpToolContext<'a> {
     /// The one checkout every admitted authority in this binding belongs to.
     admitted_scope: &'a ResolvedScope,
     project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
-    /// The root's verdict for reading `project_session_db`, carried verbatim.
-    project_session_authorization: Option<ValidatedAuthorization>,
     code_index_search_executor: Option<&'a CodeIndexSearchExecutor>,
     code_index_branch_diff_executor: Option<&'a CodeIndexBranchDiffExecutor>,
     code_index_search_authority: Option<&'a CodeIndexSearchAuthorityV1>,
@@ -416,7 +396,7 @@ impl<'a> McpToolContext<'a> {
         let project_session_store = project
             .project_session_store
             .as_ref()
-            .map(|lease| AdmittedProjectStore::new(lease, project.project_session_authorization));
+            .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
         if !project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
                 root: project_root.display().to_string(),
@@ -440,7 +420,6 @@ impl<'a> McpToolContext<'a> {
             cancellation: request.controls.cancellation,
             admitted_scope,
             project_session_db: project_session_store.map(|store| store.lease),
-            project_session_authorization: project_session_store.map(|store| store.authorization),
             code_index_search_executor: request.code_index.and_then(|code_index| code_index.search),
             code_index_branch_diff_executor: request
                 .code_index
@@ -543,18 +522,17 @@ impl<'a> McpToolContext<'a> {
         self.admitted_scope
     }
 
-    /// The admitted project store together with the root's authorization.
+    /// The admitted project store, or the typed unavailable/denied absence.
     ///
-    /// The verdict is the root's, carried through [`Self::bind`] unchanged: a
-    /// handler cannot decide for itself that a store read is authorized, and
-    /// this accessor never supplies a verdict of its own. With no admitted
-    /// store the caller receives the typed absence instead.
+    /// Attached means admitted: bind derives [`ValidatedAuthorization::Authorized`]
+    /// from the lease's presence. An absent lease is the typed denied state,
+    /// not an inferred capability.
     #[must_use]
     pub fn authorized_project_session_db(
         &self,
     ) -> Option<(&'a RegisteredGlobalDbLeaseV1, ValidatedAuthorization)> {
         self.project_session_db
-            .zip(self.project_session_authorization)
+            .map(|lease| (lease, ValidatedAuthorization::Authorized))
     }
 
     #[must_use]
@@ -612,10 +590,6 @@ impl std::fmt::Debug for McpToolContext<'_> {
             .field("has_deadline", &self.deadline.is_some())
             .field("has_cancellation", &self.cancellation.is_some())
             .field("has_project_session_db", &self.project_session_db.is_some())
-            .field(
-                "project_session_authorization",
-                &self.project_session_authorization,
-            )
             .field(
                 "has_code_index_search_executor",
                 &self.code_index_search_executor.is_some(),
@@ -809,19 +783,6 @@ pub(crate) mod tests {
         admitted: &ResolvedScope,
         lease: Option<RegisteredGlobalDbLeaseV1>,
     ) -> McpAdmittedProjectV1 {
-        let authorization = if lease.is_some() {
-            ValidatedAuthorization::Authorized
-        } else {
-            ValidatedAuthorization::Unauthorized
-        };
-        project_bundle_with(root, admitted, lease.zip(Some(authorization)))
-    }
-
-    pub(crate) fn project_bundle_with(
-        root: &Path,
-        admitted: &ResolvedScope,
-        project_session_store: Option<(RegisteredGlobalDbLeaseV1, ValidatedAuthorization)>,
-    ) -> McpAdmittedProjectV1 {
         McpAdmittedProjectV1::new(
             project_identity(root, admitted),
             test_store_layout(root, admitted.project_id.as_str()),
@@ -829,7 +790,7 @@ pub(crate) mod tests {
             root.join("graph.db"),
             None,
             None,
-            project_session_store,
+            lease,
         )
         .expect("coherent project bundle")
     }
@@ -944,7 +905,7 @@ pub(crate) mod tests {
             home.path().join("graph.db"),
             None,
             None,
-            Some((foreign_lease, ValidatedAuthorization::Authorized)),
+            Some(foreign_lease),
         )
         .expect_err("another project's real lease must be refused");
         assert_eq!(
@@ -988,7 +949,7 @@ pub(crate) mod tests {
             home.path().join("graph.db"),
             None,
             None,
-            Some((lease, ValidatedAuthorization::Authorized)),
+            Some(lease),
         )
         .expect_err("a non-session-family lease must be refused");
         assert_eq!(
@@ -1056,48 +1017,34 @@ pub(crate) mod tests {
         );
     }
 
-    /// The root's verdict is carried, not re-derived: a context bound with an
-    /// unauthorized store reports exactly that, so every store-backed handler
-    /// denies instead of reading it.
-    #[tokio::test]
-    async fn an_unauthorized_verdict_survives_binding() {
-        let home = tempfile::tempdir().expect("temp home");
-        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
+    /// An absent lease is the typed denied state: bind must not invent an
+    /// authorized store read from nothing.
+    #[test]
+    fn an_unauthorized_verdict_survives_binding() {
+        let temp = tempfile::tempdir().expect("temp root");
         let admitted = scope("admitted");
-        let project = project_bundle_with(
-            home.path(),
-            &admitted,
-            Some((lease, ValidatedAuthorization::Unauthorized)),
-        );
+        let project = project_bundle(temp.path(), &admitted, None);
         let bound = fixture_context(&project);
 
-        let (_, authorization) = bound
-            .authorized_project_session_db()
-            .expect("the store is reported with its verdict");
-        assert_eq!(authorization, ValidatedAuthorization::Unauthorized);
+        assert!(
+            bound.authorized_project_session_db().is_none(),
+            "an absent lease is the typed unavailable/denied state"
+        );
     }
 
-    /// An admitted snapshot that carries a denied verdict must not become an
-    /// authorized store read. Bind used to stamp `Authorized` and hide this.
-    #[tokio::test]
-    async fn an_admitted_denied_verdict_refuses_the_first_authorized_store_read() {
-        let home = tempfile::tempdir().expect("temp home");
-        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
+    /// An admitted snapshot without a session-store lease must not become an
+    /// authorized store read. Presence of the lease is admission; absence is
+    /// the typed denied state the first authorized-only read refuses.
+    #[test]
+    fn an_admitted_denied_verdict_refuses_the_first_authorized_store_read() {
+        let temp = tempfile::tempdir().expect("temp root");
         let admitted = scope("admitted");
-        let project = project_bundle_with(
-            home.path(),
-            &admitted,
-            Some((lease, ValidatedAuthorization::Unauthorized)),
-        );
+        let project = project_bundle(temp.path(), &admitted, None);
         let bound = fixture_context(&project);
 
-        let Some((_, authorization)) = bound.authorized_project_session_db() else {
-            panic!("the denied store is present; absence would hide the verdict");
-        };
-        assert_eq!(authorization, ValidatedAuthorization::Unauthorized);
         assert!(
-            !authorization.is_authorized(),
-            "bind must not upgrade a denied snapshot verdict to Authorized"
+            bound.authorized_project_session_db().is_none(),
+            "bind must not invent an authorized store from an absent lease"
         );
     }
 
@@ -1191,7 +1138,7 @@ pub(crate) mod tests {
             home.path().join("graph.db"),
             None,
             None,
-            Some((lease, ValidatedAuthorization::Authorized)),
+            Some(lease),
         )
         .expect_err("a non-session-family lease must be refused");
         assert_eq!(

@@ -29,7 +29,6 @@ use tracedecay_mcp::{
     ToolResult,
 };
 use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
-use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 use super::ToolCallRegistryOptions;
 use super::support::{effective_path, generic_tool_result, unique_file_paths};
@@ -1084,9 +1083,8 @@ fn dispatch_git_tools_inner<'a>(
 /// Every served route publishes a checkout at project-open. Absence is a
 /// typed root failure, not a second binding shape. The session store is the
 /// canonical `registered_project_session_db` lease only — never a silent
-/// fallback to `session_authorities.project`. The authorization is the
-/// root's verdict for that lease: attached means admitted, absent means
-/// unauthorized.
+/// fallback to `session_authorities.project`. Attached means admitted;
+/// absent is the typed unavailable/denied state.
 fn admitted_project_authorities(
     cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
@@ -1111,10 +1109,7 @@ fn admitted_project_authorities(
         cg.db_path(),
         Some(cg.store_runtime_registry.clone()),
         Some(cg.configuration_runtime().clone()),
-        options
-            .registered_project_session_db
-            .clone()
-            .map(|lease| (lease, ValidatedAuthorization::Authorized)),
+        options.registered_project_session_db.clone(),
     )
     .map_err(Into::into)
 }

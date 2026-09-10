@@ -314,15 +314,9 @@ pub async fn handle_status(
         if session_db_path.exists() {
             match ctx.authorized_project_session_db() {
                 None => {
-                    // The store exists but the daemon did not retain its authority;
-                    // fail closed instead of opening a second connection here.
-                    output["session_ingest"] = json!({
-                        "status": "unavailable",
-                        "reason": "session_store_unavailable",
-                        "message": "daemon project session authority is unavailable",
-                    });
-                }
-                Some((_, authorization)) if !authorization.is_authorized() => {
+                    // Attached means admitted; absent is the typed
+                    // unavailable/denied state. Fail closed instead of
+                    // opening a second connection here.
                     output["session_ingest"] = json!({
                         "status": "unavailable",
                         "reason": "session_store_denied",
