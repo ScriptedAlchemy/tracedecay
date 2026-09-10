@@ -3249,3 +3249,119 @@ async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
         "safe code should produce no findings: {text}"
     );
 }
+
+#[tokio::test]
+async fn field_sites_applies_the_qualified_field_owner() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub struct Target { pub value: u32, pub enabled: bool }
+pub struct Other { pub value: u32 }
+
+impl Target {
+    pub fn read_both(&self, other: &Other) -> u32 {
+        let target_value = self.value;
+        let other_value = other.value;
+        target_value + other_value
+    }
+}
+pub fn read_both(target: &Target, other: &Other) -> u32 {
+    let target_value = target.value;
+    let other_value = other.value;
+    target_value + other_value
+}
+pub fn read_when_enabled(target: &Target) -> u32 {
+    if target.enabled { target.value } else { 0 }
+}
+pub fn write_both(target: &mut Target, other: &mut Other) {
+    target.value = 7;
+    other.value = 9;
+}
+"#,
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_field_sites",
+        json!({"field": "Target::value", "limit": 20, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(output["qualifier_applied"], true, "payload: {output}");
+    assert_eq!(output["read_count"], 3, "payload: {output}");
+    assert_eq!(output["write_count"], 1, "payload: {output}");
+    assert!(
+        output["read_sites"]
+            .as_array()
+            .is_some_and(|sites| sites.iter().all(|site| site["snippet"]
+                .as_str()
+                .is_some_and(|snippet| !snippet.contains("other.value")))),
+        "payload: {output}"
+    );
+    assert!(
+        output["write_sites"][0]["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains("target.value")),
+        "payload: {output}"
+    );
+
+    for shadow_source in [
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn closure_then_sibling(target: &Target) -> u32 {
+    let read_other = |target: Other| target.value;
+    read_other(Other { value: 3 }) + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn if_let_then_sibling(target: &Target, other: Option<Other>) -> u32 {
+    let read_other = if let Some(target) = other { target.value } else { 0 };
+    read_other + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 {
+    let mut read_other = 0;
+    while let Some(target) = other.take() { read_other += target.value; }
+    read_other + target.value
+}
+"#,
+    ] {
+        let shadow_dir = test_temp_dir();
+        let shadow_root = shadow_dir.path().join("project");
+        fs::create_dir_all(shadow_root.join("src")).unwrap();
+        fs::write(shadow_root.join("src/lib.rs"), shadow_source).unwrap();
+        let (shadow_host, _shadow_env) = init_test_project(&shadow_root).await;
+        let error = expect_tool_error(
+            handle_tool_call(
+                &shadow_host,
+                "tracedecay_field_sites",
+                json!({"field": "Target::value", "format": "json"}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            error.contains("verified-field-qualifier-unavailable"),
+            "shadowed receiver must not be attributed to the parameter owner: {error}"
+        );
+    }
+}
