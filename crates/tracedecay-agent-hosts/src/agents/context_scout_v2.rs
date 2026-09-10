@@ -25,7 +25,8 @@ use tracedecay_contracts::context_scout::{
     ContextScoutModelReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
     ContextScoutWorkV1,
 };
-use tracedecay_domain::{RetrievalAnchorId, UtcMicros};
+use tracedecay_contracts::{IdempotencyKey, ResolvedScope};
+use tracedecay_domain::{ActorId, ManifestDigest, RetrievalAnchorId, UtcMicros};
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
@@ -256,6 +257,89 @@ pub enum ContextScoutErrorV1 {
     StaleWork,
     #[error("Context Scout bounded work or delivery channel is full")]
     CapacityExceeded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutMutationOperationV1 {
+    Cancel,
+    Claim,
+    Delivery,
+    Feedback,
+}
+
+impl ContextScoutMutationOperationV1 {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "context_scout_cancel",
+            Self::Claim => "context_scout_claim",
+            Self::Delivery => "context_scout_delivery",
+            Self::Feedback => "context_scout_feedback",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutMutationBindingV1 {
+    pub effect_identity: ManifestDigest,
+    pub actor: ActorId,
+    pub scope: ResolvedScope,
+    pub operation: ContextScoutMutationOperationV1,
+    pub idempotency_key: IdempotencyKey,
+    pub input_digest: ManifestDigest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "result")]
+pub enum ContextScoutMutationResultV1 {
+    Cancel(ContextScoutDurableStoreOutcomeV1),
+    Claim(ContextScoutDurableClaimOutcomeV1),
+    Delivery {
+        outcome: ContextScoutDurableStoreOutcomeV1,
+        receipt: ContextScoutDeliveryReceiptV1,
+    },
+    Feedback(ContextScoutDurableStoreOutcomeV1),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutMutationSettlementV1 {
+    pub binding: ContextScoutMutationBindingV1,
+    pub expected_state: ManifestDigest,
+    pub committed_state: ManifestDigest,
+    pub result: ContextScoutMutationResultV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextScoutMutationSettlementOutcomeV1 {
+    Reconciled(ContextScoutMutationSettlementV1),
+    IdempotencyConflict,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub enum ContextScoutPublicMutationV1 {
+    Cancel {
+        work: ContextScoutWorkV1,
+    },
+    Claim {
+        address: ContextScoutAddressV1,
+        window: ContextScoutDeliveryWindowV1,
+        configuration_revision: [u8; 32],
+        now: UtcMicros,
+        lease: ContextScoutLeaseV1,
+    },
+    Delivery {
+        work: ContextScoutWorkV1,
+        envelope_id: [u8; 16],
+        lease: ContextScoutLeaseV1,
+        configuration_revision: [u8; 32],
+        receipt: ContextScoutDeliveryReceiptV1,
+    },
+    Feedback {
+        address: ContextScoutAddressV1,
+        receipt: ContextScoutDeliveryReceiptV1,
+        feedback: ContextScoutFeedbackV1,
+    },
 }
 
 /// Deterministically choose at most one candidate without invoking a model,
@@ -1197,7 +1281,7 @@ impl ContextScoutDurableQueueEntryExt for ContextScoutDurableQueueEntryV1 {
 
 /// Result of one daemon/store serialized Scout mutation. `Duplicate` and
 /// `Superseded` are convergent outcomes, while `Unavailable` commits nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextScoutDurableStoreOutcomeV1 {
     Stored,
     Duplicate,
@@ -1218,7 +1302,7 @@ impl ContextScoutLeaseExt for ContextScoutLeaseV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 // Boxing the large variant would ripple through in-flight construction/match
 // sites; the size gap is accepted here.
 #[allow(clippy::large_enum_variant)]

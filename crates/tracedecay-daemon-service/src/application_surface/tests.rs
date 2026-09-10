@@ -890,6 +890,7 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
         serde_json::json!({
             "address": address,
             "work": work.clone(),
+            "idempotency_key": "context-scout.cancel.surface",
         }),
     )
     .expect("canonical cancel request");
@@ -915,7 +916,9 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
                 "lease_id": vec![13_u8; 16],
                 "lease_expires_at": 14,
             },
-            "receipt": receipt.clone(),
+            "delivered_at": 12,
+            "outcome": "displayed",
+            "idempotency_key": "context-scout.delivery.surface",
         }),
     )
     .expect("canonical public claim-handle delivery request");
@@ -934,6 +937,7 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
                 "receipt_id": vec![10_u8; 16],
                 "kind": "explicitly_accepted",
             },
+            "idempotency_key": "context-scout.feedback.surface",
         }),
     )
     .expect("canonical feedback request");

@@ -2,24 +2,32 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::UtcMicros;
+use tracedecay_contracts::request_identity::{
+    LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+};
+use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 use super::{
     ContextScoutAddressExt, ContextScoutAddressV1, ContextScoutDeliveryReceiptV1,
-    ContextScoutDurableClaimOutcomeV1, ContextScoutDurableClaimV1,
+    ContextScoutDeliveryWindowV1, ContextScoutDurableClaimOutcomeV1, ContextScoutDurableClaimV1,
     ContextScoutDurableQueueEntryExt, ContextScoutDurableQueueEntryV1,
     ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
     ContextScoutDurableStoreV1, ContextScoutFeedbackV1, ContextScoutLeaseExt, ContextScoutLeaseV1,
-    ContextScoutRecentDeliveryV1, ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1,
-    ContextScoutStoreFuture, ContextScoutWorkV1, MAX_SCOUT_ACTIVE_ADDRESSES,
-    MAX_SCOUT_RECENT_DELIVERIES, validate_context_scout_delivery_receipt,
-    validate_context_scout_feedback, validate_receipt_shape,
+    ContextScoutMutationBindingV1, ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
+    ContextScoutMutationSettlementOutcomeV1, ContextScoutMutationSettlementV1,
+    ContextScoutPublicMutationV1, ContextScoutRecentDeliveryV1, ContextScoutRecentReadOutcomeV1,
+    ContextScoutRecentStateV1, ContextScoutStoreFuture, ContextScoutWorkV1,
+    MAX_SCOUT_ACTIVE_ADDRESSES, MAX_SCOUT_RECENT_DELIVERIES,
+    validate_context_scout_delivery_receipt, validate_context_scout_feedback,
+    validate_receipt_shape,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
 
 const STORE_KEY_V1: &str = "agents.context-scout.durable.v1";
 const MAX_STORED_STATE_BYTES_V1: usize = 512 * 1024;
+const MUTATION_RECEIPT_KEY_PREFIX_V1: &str = "agents.context-scout.mutation-receipt.v1.";
+const MAX_MUTATION_RECEIPT_BYTES_V1: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredQueueEntryV1 {
@@ -48,6 +56,268 @@ struct StoredContextScoutStateV1 {
     delivery_addresses: Vec<StoredDeliveryAddressV1>,
     #[serde(default)]
     delivery_provenance_complete: bool,
+}
+
+impl ContextScoutPublicMutationV1 {
+    pub(crate) fn operation(&self) -> ContextScoutMutationOperationV1 {
+        match self {
+            Self::Cancel { .. } => ContextScoutMutationOperationV1::Cancel,
+            Self::Claim { .. } => ContextScoutMutationOperationV1::Claim,
+            Self::Delivery { .. } => ContextScoutMutationOperationV1::Delivery,
+            Self::Feedback { .. } => ContextScoutMutationOperationV1::Feedback,
+        }
+    }
+
+    pub fn input_digest(&self) -> Option<ManifestDigest> {
+        match self {
+            Self::Cancel { work } => {
+                canonical_sha256(&("tracedecay.context-scout.cancel-input.v1", work))
+            }
+            Self::Claim {
+                address, window, ..
+            } => canonical_sha256(&("tracedecay.context-scout.claim-input.v1", address, window)),
+            Self::Delivery {
+                work,
+                envelope_id,
+                lease,
+                receipt,
+                ..
+            } => canonical_sha256(&(
+                "tracedecay.context-scout.delivery-input.v1",
+                work,
+                envelope_id,
+                lease,
+                receipt.envelope_id,
+                receipt.delivered_at,
+                receipt.outcome,
+            )),
+            Self::Feedback {
+                address,
+                receipt,
+                feedback,
+            } => canonical_sha256(&(
+                "tracedecay.context-scout.feedback-input.v1",
+                address,
+                receipt,
+                feedback,
+            )),
+        }
+        .ok()
+    }
+
+    fn valid_for(&self, store: &ProjectContextScoutDurableStoreV1) -> bool {
+        match self {
+            Self::Cancel { work } => {
+                work.generation > 0
+                    && work.input_watermark != [0; 32]
+                    && store.in_scope(work.address)
+            }
+            Self::Claim {
+                address,
+                window,
+                configuration_revision,
+                now,
+                lease,
+            } => {
+                store.in_scope(*address)
+                    && matches!(
+                        window,
+                        ContextScoutDeliveryWindowV1::IdleWindow
+                            | ContextScoutDeliveryWindowV1::OnRequest
+                    )
+                    && *configuration_revision != [0; 32]
+                    && lease.validate(*now).is_ok()
+            }
+            Self::Delivery {
+                work,
+                envelope_id,
+                lease,
+                configuration_revision,
+                receipt,
+            } => {
+                work.generation > 0
+                    && work.input_watermark != [0; 32]
+                    && store.in_scope(work.address)
+                    && *envelope_id != [0; 16]
+                    && *configuration_revision != [0; 32]
+                    && receipt.envelope_id == *envelope_id
+                    && validate_receipt_shape(receipt).is_ok()
+                    && lease.validate(receipt.delivered_at).is_ok()
+            }
+            Self::Feedback {
+                address,
+                receipt,
+                feedback,
+            } => {
+                store.in_scope(*address)
+                    && validate_context_scout_feedback(receipt, *feedback).is_ok()
+            }
+        }
+    }
+
+    fn target_state_digest(&self, state: &StoredContextScoutStateV1) -> Option<ManifestDigest> {
+        match self {
+            Self::Cancel { work } => canonical_sha256(&(
+                "tracedecay.context-scout.cancel-target.v1",
+                work,
+                state
+                    .entries
+                    .iter()
+                    .find(|stored| stored.entry.work.address == work.address),
+                state.tombstones.contains(work),
+            )),
+            Self::Claim {
+                address,
+                window,
+                configuration_revision,
+                ..
+            } => canonical_sha256(&(
+                "tracedecay.context-scout.claim-target.v1",
+                address,
+                window,
+                configuration_revision,
+                state.entries.iter().find(|stored| {
+                    stored.entry.work.address == *address
+                        && stored.entry.envelope.delivery_window == *window
+                        && stored.entry.envelope.configuration_revision == *configuration_revision
+                }),
+            )),
+            Self::Delivery { envelope_id, .. } => canonical_sha256(&(
+                "tracedecay.context-scout.delivery-target.v1",
+                envelope_id,
+                state
+                    .entries
+                    .iter()
+                    .find(|stored| stored.entry.envelope.envelope_id == *envelope_id),
+                state
+                    .delivery_addresses
+                    .iter()
+                    .find(|binding| binding.envelope_id == *envelope_id),
+                state
+                    .receipts
+                    .iter()
+                    .find(|receipt| receipt.envelope_id == *envelope_id),
+            )),
+            Self::Feedback {
+                address, receipt, ..
+            } => canonical_sha256(&(
+                "tracedecay.context-scout.feedback-target.v1",
+                address,
+                receipt.receipt_id,
+                state.delivery_addresses.iter().find(|binding| {
+                    binding.address == *address && binding.envelope_id == receipt.envelope_id
+                }),
+                state
+                    .receipts
+                    .iter()
+                    .find(|stored| stored.receipt_id == receipt.receipt_id),
+                state
+                    .feedback
+                    .iter()
+                    .filter(|feedback| feedback.receipt_id == receipt.receipt_id)
+                    .collect::<Vec<_>>(),
+            )),
+        }
+        .ok()
+    }
+
+    fn apply(self, state: &mut StoredContextScoutStateV1) -> Option<ContextScoutMutationResultV1> {
+        match self {
+            Self::Cancel { work } => Some(ContextScoutMutationResultV1::Cancel(state.cancel(work))),
+            Self::Claim {
+                address,
+                window,
+                configuration_revision,
+                now,
+                lease,
+            } => Some(ContextScoutMutationResultV1::Claim(state.claim(
+                address,
+                Some(window),
+                Some(configuration_revision),
+                now,
+                lease,
+            ))),
+            Self::Delivery {
+                work,
+                envelope_id,
+                lease,
+                configuration_revision,
+                receipt,
+            } => {
+                let outcome = state.record_delivery_by_lease(
+                    work,
+                    envelope_id,
+                    lease,
+                    configuration_revision,
+                    &receipt,
+                );
+                (outcome != ContextScoutDurableStoreOutcomeV1::Unavailable)
+                    .then_some(ContextScoutMutationResultV1::Delivery { outcome, receipt })
+            }
+            Self::Feedback {
+                address,
+                receipt,
+                feedback,
+            } => {
+                let outcome = state.record_feedback(Some(address), &receipt, feedback);
+                (outcome != ContextScoutDurableStoreOutcomeV1::Unavailable)
+                    .then_some(ContextScoutMutationResultV1::Feedback(outcome))
+            }
+        }
+    }
+}
+
+fn valid_mutation_binding(binding: &ContextScoutMutationBindingV1) -> bool {
+    binding.actor.validate().is_ok()
+        && binding.scope.validate().is_ok()
+        && binding.effect_identity.validate().is_ok()
+        && binding.input_digest.validate().is_ok()
+        && derive_logical_effect_idempotency(
+            LogicalEffectIdempotencyDomain::ContextScoutEffect,
+            &(
+                &binding.actor,
+                &binding.scope,
+                binding.operation.as_str(),
+                &binding.idempotency_key,
+            ),
+        )
+        .is_ok_and(|identity| identity == binding.effect_identity)
+}
+
+fn valid_mutation_settlement(settlement: &ContextScoutMutationSettlementV1) -> bool {
+    valid_mutation_binding(&settlement.binding)
+        && settlement.expected_state.validate().is_ok()
+        && settlement.committed_state.validate().is_ok()
+        && matches!(
+            (settlement.binding.operation, &settlement.result),
+            (
+                ContextScoutMutationOperationV1::Cancel,
+                ContextScoutMutationResultV1::Cancel(_)
+            ) | (
+                ContextScoutMutationOperationV1::Claim,
+                ContextScoutMutationResultV1::Claim(_)
+            ) | (
+                ContextScoutMutationOperationV1::Delivery,
+                ContextScoutMutationResultV1::Delivery { .. }
+            ) | (
+                ContextScoutMutationOperationV1::Feedback,
+                ContextScoutMutationResultV1::Feedback(_)
+            )
+        )
+}
+
+fn mutation_receipt_key(effect_identity: &ManifestDigest) -> Option<String> {
+    effect_identity.validate().ok()?;
+    let suffix = effect_identity.as_str().strip_prefix("sha256:")?;
+    Some(format!("{MUTATION_RECEIPT_KEY_PREFIX_V1}{suffix}"))
+}
+
+fn decode_mutation_settlement(encoded: &str) -> Option<ContextScoutMutationSettlementV1> {
+    if encoded.len() > MAX_MUTATION_RECEIPT_BYTES_V1 {
+        return None;
+    }
+    let settlement = serde_json::from_str::<ContextScoutMutationSettlementV1>(encoded).ok()?;
+    valid_mutation_settlement(&settlement).then_some(settlement)
 }
 
 impl StoredContextScoutStateV1 {
@@ -267,6 +537,143 @@ impl StoredContextScoutStateV1 {
         });
         self.trim_receipts();
         self.refresh_delivery_provenance();
+        ContextScoutDurableStoreOutcomeV1::Stored
+    }
+
+    fn claim(
+        &mut self,
+        address: ContextScoutAddressV1,
+        window: Option<ContextScoutDeliveryWindowV1>,
+        configuration_revision: Option<[u8; 32]>,
+        now: UtcMicros,
+        lease: ContextScoutLeaseV1,
+    ) -> ContextScoutDurableClaimOutcomeV1 {
+        self.recover_expired_claims(now);
+        let Some(stored) = self.entries.iter_mut().find(|stored| {
+            stored.entry.work.address == address
+                && window.is_none_or(|window| stored.entry.envelope.delivery_window == window)
+                && configuration_revision
+                    .is_none_or(|revision| stored.entry.envelope.configuration_revision == revision)
+        }) else {
+            return ContextScoutDurableClaimOutcomeV1::Empty;
+        };
+        match stored.lease {
+            Some(existing) if existing.lease_id == lease.lease_id => {
+                ContextScoutDurableClaimOutcomeV1::Claimed(ContextScoutDurableClaimV1 {
+                    entry: stored.entry.clone(),
+                    lease: existing,
+                })
+            }
+            Some(_) => ContextScoutDurableClaimOutcomeV1::Empty,
+            None => {
+                stored.lease = Some(lease);
+                ContextScoutDurableClaimOutcomeV1::Claimed(ContextScoutDurableClaimV1 {
+                    entry: stored.entry.clone(),
+                    lease,
+                })
+            }
+        }
+    }
+
+    fn cancel(&mut self, work: ContextScoutWorkV1) -> ContextScoutDurableStoreOutcomeV1 {
+        if self.tombstones.contains(&work) {
+            return ContextScoutDurableStoreOutcomeV1::Duplicate;
+        }
+        let matching = self
+            .entries
+            .iter()
+            .position(|stored| stored.entry.work == work);
+        let newer_exists = matching.is_none()
+            && self
+                .entries
+                .iter()
+                .any(|stored| stored.entry.work.address == work.address);
+        if let Some(index) = matching {
+            self.entries.remove(index);
+        }
+        self.add_tombstone(work);
+        if newer_exists {
+            ContextScoutDurableStoreOutcomeV1::Superseded
+        } else {
+            ContextScoutDurableStoreOutcomeV1::Stored
+        }
+    }
+
+    fn record_delivery_by_lease(
+        &mut self,
+        work: ContextScoutWorkV1,
+        envelope_id: [u8; 16],
+        lease: ContextScoutLeaseV1,
+        configuration_revision: [u8; 32],
+        receipt: &ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutDurableStoreOutcomeV1 {
+        let entry = self
+            .entries
+            .iter()
+            .map(|stored| &stored.entry)
+            .chain(
+                self.delivery_addresses
+                    .iter()
+                    .filter(|binding| binding.lease == Some(lease))
+                    .filter_map(|binding| binding.entry.as_ref()),
+            )
+            .find(|entry| {
+                entry.work == work
+                    && entry.envelope.envelope_id == envelope_id
+                    && entry.envelope.configuration_revision == configuration_revision
+            })
+            .cloned();
+        let Some(entry) = entry else {
+            return if self
+                .entries
+                .iter()
+                .any(|stored| stored.entry.work.address == work.address)
+                || self
+                    .delivery_addresses
+                    .iter()
+                    .any(|binding| binding.address == work.address)
+            {
+                ContextScoutDurableStoreOutcomeV1::Superseded
+            } else {
+                ContextScoutDurableStoreOutcomeV1::Unavailable
+            };
+        };
+        if validate_context_scout_delivery_receipt(&entry.envelope, receipt).is_err() {
+            return ContextScoutDurableStoreOutcomeV1::Unavailable;
+        }
+        self.record_delivery(&ContextScoutDurableClaimV1 { entry, lease }, receipt)
+    }
+
+    fn record_feedback(
+        &mut self,
+        address: Option<ContextScoutAddressV1>,
+        receipt: &ContextScoutDeliveryReceiptV1,
+        feedback: ContextScoutFeedbackV1,
+    ) -> ContextScoutDurableStoreOutcomeV1 {
+        if address.is_some_and(|address| {
+            !self.delivery_addresses.iter().any(|binding| {
+                binding.address == address && binding.envelope_id == receipt.envelope_id
+            })
+        }) {
+            return ContextScoutDurableStoreOutcomeV1::Unavailable;
+        }
+        let Some(stored_receipt) = self
+            .receipts
+            .iter()
+            .find(|stored| stored.receipt_id == receipt.receipt_id)
+        else {
+            return ContextScoutDurableStoreOutcomeV1::Unavailable;
+        };
+        if stored_receipt != receipt {
+            return ContextScoutDurableStoreOutcomeV1::Superseded;
+        }
+        if self.feedback.contains(&feedback) {
+            return ContextScoutDurableStoreOutcomeV1::Duplicate;
+        }
+        if self.feedback.len() == MAX_SCOUT_RECENT_DELIVERIES {
+            self.feedback.remove(0);
+        }
+        self.feedback.push(feedback);
         ContextScoutDurableStoreOutcomeV1::Stored
     }
 }
@@ -589,6 +996,156 @@ impl ProjectContextScoutDurableStoreV1 {
         state.validate(self.project_id).then_some(state)
     }
 
+    pub async fn commit_public_mutation(
+        &self,
+        binding: ContextScoutMutationBindingV1,
+        mutation: ContextScoutPublicMutationV1,
+    ) -> ContextScoutMutationSettlementOutcomeV1 {
+        let mutation_input_digest = mutation.input_digest();
+        if !valid_mutation_binding(&binding)
+            || mutation_input_digest.as_ref() != Some(&binding.input_digest)
+            || binding.operation != mutation.operation()
+            || !mutation.valid_for(self)
+        {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        }
+        let Some(receipt_key) = mutation_receipt_key(&binding.effect_identity) else {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        };
+        let transaction = match self
+            .database
+            .begin_write_transaction("commit Context Scout public mutation")
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(_) => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+        };
+        let mut receipt_rows = match transaction
+            .query_engine(
+                "SELECT value FROM metadata WHERE key = ?1",
+                params![&receipt_key],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+        };
+        let retained = match receipt_rows.next().await {
+            Ok(row) => row
+                .map(|row| row.get::<String>(0))
+                .transpose()
+                .ok()
+                .flatten(),
+            Err(_) => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+        };
+        drop(receipt_rows);
+        if let Some(encoded) = retained {
+            let _ = transaction.rollback().await;
+            let Some(settlement) = decode_mutation_settlement(&encoded) else {
+                return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+            };
+            if settlement.binding != binding {
+                return ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict;
+            }
+            return self
+                .reconcile_mutation_settlement(&receipt_key, settlement)
+                .await;
+        }
+        let mut state_rows = match transaction
+            .query_engine(
+                "SELECT value FROM metadata WHERE key = ?1",
+                params![STORE_KEY_V1],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+        };
+        let encoded_state = match state_rows.next().await {
+            Ok(row) => row
+                .map(|row| row.get::<String>(0))
+                .transpose()
+                .ok()
+                .flatten(),
+            Err(_) => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+        };
+        drop(state_rows);
+        let mut state = match encoded_state {
+            Some(encoded) if encoded.len() <= MAX_STORED_STATE_BYTES_V1 => {
+                match serde_json::from_str::<StoredContextScoutStateV1>(&encoded) {
+                    Ok(state) => state,
+                    Err(_) => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+                }
+            }
+            Some(_) => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+            None => StoredContextScoutStateV1::new(self.project_id),
+        };
+        if !state.validate(self.project_id) {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        }
+        state.refresh_delivery_provenance();
+        let Some(expected_state) = mutation.target_state_digest(&state) else {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        };
+        let Some(result) = mutation.clone().apply(&mut state) else {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        };
+        let Some(committed_state) = mutation.target_state_digest(&state) else {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        };
+        let settlement = ContextScoutMutationSettlementV1 {
+            binding,
+            expected_state,
+            committed_state,
+            result,
+        };
+        if !state.validate(self.project_id) || !valid_mutation_settlement(&settlement) {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        }
+        let encoded_state = match serde_json::to_string(&state) {
+            Ok(encoded) if encoded.len() <= MAX_STORED_STATE_BYTES_V1 => encoded,
+            _ => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+        };
+        let encoded_receipt = match serde_json::to_string(&settlement) {
+            Ok(encoded) if encoded.len() <= MAX_MUTATION_RECEIPT_BYTES_V1 => encoded,
+            _ => return ContextScoutMutationSettlementOutcomeV1::Unavailable,
+        };
+        if self
+            .database
+            .set_metadata_unguarded(&transaction, STORE_KEY_V1, &encoded_state)
+            .await
+            .is_err()
+            || self
+                .database
+                .set_metadata_unguarded(&transaction, &receipt_key, &encoded_receipt)
+                .await
+                .is_err()
+            || transaction.commit().await.is_err()
+        {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        }
+        self.reconcile_mutation_settlement(&receipt_key, settlement)
+            .await
+    }
+
+    async fn reconcile_mutation_settlement(
+        &self,
+        receipt_key: &str,
+        settlement: ContextScoutMutationSettlementV1,
+    ) -> ContextScoutMutationSettlementOutcomeV1 {
+        let observed = self
+            .database
+            .get_metadata(receipt_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|encoded| decode_mutation_settlement(&encoded));
+        if observed.as_ref() != Some(&settlement) {
+            return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+        }
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement)
+    }
+
     #[hotpath::measure(
         label = "context_scout_work_snapshot",
         impl_type = "ProjectContextScoutDurableStoreV1"
@@ -682,30 +1239,7 @@ impl ProjectContextScoutDurableStoreV1 {
             return ContextScoutDurableClaimOutcomeV1::Unavailable;
         }
         self.update_state("claim Context Scout suggestion", move |state| {
-            state.recover_expired_claims(now);
-            let Some(stored) = state
-                .entries
-                .iter_mut()
-                .find(|stored| stored.entry.work.address == address)
-            else {
-                return ContextScoutDurableClaimOutcomeV1::Empty;
-            };
-            match stored.lease {
-                Some(existing) if existing.lease_id == lease.lease_id => {
-                    ContextScoutDurableClaimOutcomeV1::Claimed(ContextScoutDurableClaimV1 {
-                        entry: stored.entry.clone(),
-                        lease: existing,
-                    })
-                }
-                Some(_) => ContextScoutDurableClaimOutcomeV1::Empty,
-                None => {
-                    stored.lease = Some(lease);
-                    ContextScoutDurableClaimOutcomeV1::Claimed(ContextScoutDurableClaimV1 {
-                        entry: stored.entry.clone(),
-                        lease,
-                    })
-                }
-            }
+            state.claim(address, None, None, now, lease)
         })
         .await
         .unwrap_or(ContextScoutDurableClaimOutcomeV1::Unavailable)
@@ -753,27 +1287,7 @@ impl ProjectContextScoutDurableStoreV1 {
             return ContextScoutDurableStoreOutcomeV1::Unavailable;
         }
         self.update_state("cancel Context Scout suggestion", move |state| {
-            if state.tombstones.contains(&work) {
-                return ContextScoutDurableStoreOutcomeV1::Duplicate;
-            }
-            let matching = state
-                .entries
-                .iter()
-                .position(|stored| stored.entry.work == work);
-            let newer_exists = matching.is_none()
-                && state
-                    .entries
-                    .iter()
-                    .any(|stored| stored.entry.work.address == work.address);
-            if let Some(index) = matching {
-                state.entries.remove(index);
-            }
-            state.add_tombstone(work);
-            if newer_exists {
-                ContextScoutDurableStoreOutcomeV1::Superseded
-            } else {
-                ContextScoutDurableStoreOutcomeV1::Stored
-            }
+            state.cancel(work)
         })
         .await
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
@@ -821,42 +1335,13 @@ impl ProjectContextScoutDurableStoreV1 {
         }
         let receipt = receipt.clone();
         self.update_state("record Context Scout delivery by lease", move |state| {
-            let entry = state
-                .entries
-                .iter()
-                .map(|stored| &stored.entry)
-                .chain(
-                    state
-                        .delivery_addresses
-                        .iter()
-                        .filter(|binding| binding.lease == Some(lease))
-                        .filter_map(|binding| binding.entry.as_ref()),
-                )
-                .find(|entry| {
-                    entry.work == work
-                        && entry.envelope.envelope_id == envelope_id
-                        && entry.envelope.configuration_revision == configuration_revision
-                })
-                .cloned();
-            let Some(entry) = entry else {
-                return if state
-                    .entries
-                    .iter()
-                    .any(|stored| stored.entry.work.address == work.address)
-                    || state
-                        .delivery_addresses
-                        .iter()
-                        .any(|binding| binding.address == work.address)
-                {
-                    ContextScoutDurableStoreOutcomeV1::Superseded
-                } else {
-                    ContextScoutDurableStoreOutcomeV1::Unavailable
-                };
-            };
-            if validate_context_scout_delivery_receipt(&entry.envelope, &receipt).is_err() {
-                return ContextScoutDurableStoreOutcomeV1::Unavailable;
-            }
-            state.record_delivery(&ContextScoutDurableClaimV1 { entry, lease }, &receipt)
+            state.record_delivery_by_lease(
+                work,
+                envelope_id,
+                lease,
+                configuration_revision,
+                &receipt,
+            )
         })
         .await
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
@@ -872,24 +1357,7 @@ impl ProjectContextScoutDurableStoreV1 {
         }
         let receipt = receipt.clone();
         self.update_state("record Context Scout feedback", move |state| {
-            let Some(stored_receipt) = state
-                .receipts
-                .iter()
-                .find(|stored| stored.receipt_id == receipt.receipt_id)
-            else {
-                return ContextScoutDurableStoreOutcomeV1::Unavailable;
-            };
-            if stored_receipt != &receipt {
-                return ContextScoutDurableStoreOutcomeV1::Superseded;
-            }
-            if state.feedback.contains(&feedback) {
-                return ContextScoutDurableStoreOutcomeV1::Duplicate;
-            }
-            if state.feedback.len() == MAX_SCOUT_RECENT_DELIVERIES {
-                state.feedback.remove(0);
-            }
-            state.feedback.push(feedback);
-            ContextScoutDurableStoreOutcomeV1::Stored
+            state.record_feedback(None, &receipt, feedback)
         })
         .await
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
