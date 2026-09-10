@@ -6708,10 +6708,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 )
                 .await;
             }
-            hotpath::measure_block!(
-                "daemon.code_index.shutdown.owner_release",
-                drop(retiring.remove(&root))
-            );
+            if let Some(worktree) = retiring.remove(&root) {
+                // A joined owner still holds whatever its last pass built: a
+                // cancelled seal retains its unpublished candidate, and a
+                // generation-sized candidate is seconds of deallocation.
+                // Freeing it inline would block this runtime worker for that
+                // long and hide it inside the owner's join budget, so the
+                // release runs on the blocking pool and shutdown moves on.
+                drop(tokio::task::spawn_blocking(move || {
+                    hotpath::measure_block!(
+                        "daemon.code_index.shutdown.owner_release",
+                        drop(worktree)
+                    );
+                }));
+            }
         }
         // Cold mounts take `retiring` at their final admission fence.
         drop(retiring);

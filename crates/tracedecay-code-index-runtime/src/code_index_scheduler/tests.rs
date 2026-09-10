@@ -1497,6 +1497,97 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
 }
 
 #[test]
+fn retired_fence_cancels_a_generation_seal_between_segments() {
+    // One segment per file: shutdown is signalled after the first durable
+    // segment, exactly where a TERM lands on a large worktree's first build.
+    let sources = (0..8)
+        .map(|file| {
+            (
+                format!("src/module_{file}.rs"),
+                format!("pub fn sealed_{file}() -> u32 {{ {file} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(
+        &sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    let source_store = TempDir::new().expect("source store root");
+    let generation = {
+        let mut scheduler = scheduler(
+            &fixture,
+            source_store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(
+            scheduler
+                .reconcile_now()
+                .expect("build multi-file generation"),
+        );
+        Arc::clone(
+            &scheduler
+                .latest_complete_already_decoded()
+                .expect("multi-file generation remains decoded")
+                .generation,
+        )
+    };
+    assert!(
+        generation.snapshot().files.len() >= 8,
+        "fixture must seal one segment per file"
+    );
+
+    let target_store = TempDir::new().expect("target publication store root");
+    let shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let published_segments = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observer_segments = Arc::clone(&published_segments);
+    let observer_shutting_down = Arc::clone(&shutting_down);
+    let mut publication = super::DaemonCodeIndexPublicationStoreV1::new(
+        target_store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open target publication store")
+    .with_shutdown_signal(Arc::clone(&shutting_down))
+    .with_seal_segment_observer_for_test(Arc::new(move || {
+        observer_segments.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        observer_shutting_down.store(true, std::sync::atomic::Ordering::Release);
+    }));
+
+    let error = publication
+        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .expect_err("shutdown signalled mid-seal must stop the publication");
+    assert!(
+        matches!(
+            error,
+            super::CodeIndexPublicationStoreErrorV1::CompareAndSwap
+        ),
+        "a cancelled seal is the same typed outcome as a retired fence: {error}"
+    );
+    assert_eq!(
+        published_segments.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "the seal must stop at the first checkpoint after shutdown was signalled"
+    );
+    assert!(
+        !target_store
+            .path()
+            .join("active-code-generation-v1.json")
+            .exists(),
+        "a cancelled seal must not publish a pointer"
+    );
+    let generations_root = target_store.path().join("code-generations-v1");
+    let leftover = std::fs::read_dir(&generations_root)
+        .map_or(0, |entries| entries.filter_map(Result::ok).count());
+    assert_eq!(
+        leftover, 0,
+        "a cancelled seal must leave no manifest behind"
+    );
+}
+
+#[test]
 fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let source = (0..1_600).fold(String::new(), |mut source, index| {
         writeln!(
