@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 use super::*;
 
 use tracedecay_agent_hosts::agents::context_scout_v2::{
-    ContextScoutDurableStoreOutcomeV1, ContextScoutEvidenceEnvelopeExt,
-    context_scout_delivery_receipt_id,
+    ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
+    ContextScoutEvidenceEnvelopeExt, context_scout_delivery_receipt_id,
 };
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutClaimHandleV1, ContextScoutClaimRequestV1, ContextScoutClaimWindowV1,
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
@@ -16,8 +17,8 @@ use tracedecay_contracts::context_scout::{
 };
 use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
-    EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
-    TemporalState,
+    EvidenceDomain, FreshnessState, IdempotencyKey, PolicyDecisionRef, ResolvedScope,
+    RetrieverContributionState, TemporalState,
 };
 use tracedecay_domain::configuration::ConfigurationValueV1;
 use tracedecay_domain::feedback::FeedbackContentIdentityV1;
@@ -316,34 +317,73 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
     };
     assert_ne!(second.work, stopped.work);
 
-    let hook = tracedecay_hooks::HookEventEnvelopeV2 {
-        schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
-        event_id: [60; 16],
-        producer: tracedecay_hooks::HookHostV1::Codex,
-        protected_session_id: stop.address.protected_session_id,
-        project_id: stop.address.project_id,
-        repository_id: [61; 16],
-        worktree_id: [62; 16],
-        worktree_epoch: 1,
-        binding_token: [63; 32],
-        ordering: tracedecay_hooks::HookOrderingV1::Unknown,
-        observed_at: UtcMicros(now.0 + 3),
-        event: tracedecay_hooks::HookEventV2::SessionBoundary {
-            boundary: tracedecay_hooks::HookBoundaryV1::TurnComplete,
-        },
-    };
-    let (guidance, claim) = owner
-        .claim_ready_guidance_exact(
-            &hook,
-            stop.address,
-            stop.input_watermark,
-            1,
-            UtcMicros(now.0 + 3),
+    let claimable_input = configured_model_input_at(
+        control.configuration_revision,
+        23,
+        UtcMicros(now.0 + 3),
+        ContextScoutDeliveryWindowV1::IdleWindow,
+    );
+    let ContextScoutRuntimeOutcomeV1::Enqueued {
+        entry: claimable,
+        store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+    } = owner
+        .prepare_configured(
+            &claimable_input,
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            CancellationToken::new(),
         )
         .await
-        .expect("exact stop guidance claim");
-    assert_eq!(claim.entry, *stopped);
-    assert_eq!(guidance.text, "Use the admitted evidence.");
+        .expect("claimable idle guidance")
+    else {
+        panic!("idle guidance must enqueue before claim");
+    };
+    let delivery_event_id = [60; 16];
+    let claim_request = ContextScoutClaimRequestV1 {
+        address: stop.address,
+        window: ContextScoutClaimWindowV1::IdleWindow,
+        idempotency_key: IdempotencyKey::new("context-scout.claim.stop").expect("claim key"),
+    };
+    let claim = match owner
+        .claim_delivery_request(
+            &claim_request,
+            UtcMicros(now.0 + 3),
+            UtcMicros(now.0 + 30_000_000),
+        )
+        .await
+    {
+        ContextScoutDurableClaimOutcomeV1::Claimed(claim) => claim,
+        other => panic!("exact stop guidance must claim, got {other:?}"),
+    };
+    assert_eq!(
+        owner
+            .claim_delivery_request(
+                &claim_request,
+                UtcMicros(now.0 + 4),
+                UtcMicros(now.0 + 31_000_000),
+            )
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Claimed(claim.clone())
+    );
+    let competing_request = ContextScoutClaimRequestV1 {
+        idempotency_key: IdempotencyKey::new("context-scout.claim.competing")
+            .expect("competing claim key"),
+        ..claim_request.clone()
+    };
+    assert_eq!(
+        owner
+            .claim_delivery_request(
+                &competing_request,
+                UtcMicros(now.0 + 4),
+                UtcMicros(now.0 + 31_000_000),
+            )
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Empty
+    );
+    assert_eq!(claim.entry, *claimable);
+    assert_eq!(
+        claim.entry.envelope.candidate.suggestion_text,
+        "Use the admitted evidence."
+    );
     assert_eq!(
         claim.entry.envelope.candidate.evidence.redaction,
         ContextScoutRedactionReceiptV1::MetadataOnly {
@@ -353,15 +393,23 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
 
     let receipt = ContextScoutDeliveryReceiptV1 {
         receipt_id: context_scout_delivery_receipt_id(
-            hook.event_id,
+            delivery_event_id,
             claim.entry.envelope.envelope_id,
         ),
         envelope_id: claim.entry.envelope.envelope_id,
         delivered_at: UtcMicros(now.0 + 4),
         outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
+    let claim_handle = ContextScoutClaimHandleV1 {
+        work: claim.entry.work,
+        envelope_id: claim.entry.envelope.envelope_id,
+        lease_id: claim.lease.lease_id,
+        lease_expires_at: claim.lease.expires_at,
+    };
     assert_eq!(
-        owner.record_delivery(&claim, &receipt).await,
+        owner
+            .record_delivery_by_handle(&claim_handle, &receipt)
+            .await,
         ContextScoutDurableStoreOutcomeV1::Stored
     );
     let before_feedback = owner
@@ -391,6 +439,42 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
     assert!(!serialized.contains("raw source"));
     assert!(!serialized.contains("prompt"));
     assert!(!serialized.contains("secret-token"));
+
+    let cancelled_input = configured_model_input_at(
+        control.configuration_revision,
+        24,
+        UtcMicros(now.0 + 5),
+        ContextScoutDeliveryWindowV1::OnRequest,
+    );
+    let ContextScoutRuntimeOutcomeV1::Enqueued {
+        entry: cancelled,
+        store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+    } = owner
+        .prepare_configured(
+            &cancelled_input,
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("cancellable request guidance")
+    else {
+        panic!("request guidance must enqueue before cancellation");
+    };
+    assert_eq!(
+        owner
+            .cancel(cancelled.work)
+            .await
+            .expect("cancel current work"),
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    assert!(
+        owner
+            .recent_exact(cancelled_input.address, 8)
+            .await
+            .expect("recent state after cancellation")
+            .pending
+            .is_empty()
+    );
 }
 
 /// Disabled is the only stock state: the registry default renders the flag

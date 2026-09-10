@@ -102,7 +102,7 @@ use tracedecay_configuration::{
 };
 use tracedecay_contracts::ConfigurationWireRequestV1;
 use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
+use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 
 use tracedecay_application::advisory::{
     AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,

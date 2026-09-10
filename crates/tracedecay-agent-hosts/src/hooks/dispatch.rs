@@ -7,7 +7,7 @@ use tracedecay_contracts::ResolvedScope;
 #[cfg(test)]
 use tracedecay_contracts::context_scout::ContextScoutFeedbackV1;
 use tracedecay_contracts::context_scout::{
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
+    ContextScoutAddressV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
 use tracedecay_hooks::{
@@ -733,6 +733,7 @@ async fn dispatch_decoded(
         now_utc(),
         elapsed_us(started),
     );
+    let context_scout_address = admission.take_context_scout_address();
     let feedback_notice = admission.take_feedback_notice();
     let github_stack_signal_available = admission.take_github_stack_signal_available();
     match completed {
@@ -785,6 +786,7 @@ async fn dispatch_decoded(
             HookDispatch::Handled {
                 guidance: render_host_delivery(
                     result.rendered_guidance,
+                    context_scout_address.as_ref(),
                     delivered.feedback.as_ref(),
                     github_stack_signal_available,
                 ),
@@ -838,22 +840,33 @@ pub(crate) async fn commit_context_scout_feedback(
 
 fn render_host_delivery(
     guidance: Option<String>,
+    context_scout_address: Option<&ContextScoutAddressV1>,
     feedback_notice: Option<&tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: bool,
 ) -> Option<String> {
+    let scout_address = context_scout_address
+        .and_then(|address| serde_json::to_string(address).ok())
+        .map(|address| {
+            format!("TraceDecay Context Scout address for authorized operations: {address}")
+        });
     let notice = feedback_notice
         .and_then(|notice| serde_json::to_string(notice).ok())
         .map(|notice| format!("TraceDecay feedback ready for authorized lookup: {notice}"));
     let stack_wakeup = github_stack_signal_available
         .then_some("TraceDecay GitHub stack update available for authenticated expansion.");
-    [guidance, notice, stack_wakeup.map(str::to_owned)]
-        .into_iter()
-        .flatten()
-        .reduce(|mut rendered, next| {
-            rendered.push_str("\n\n");
-            rendered.push_str(&next);
-            rendered
-        })
+    [
+        guidance,
+        scout_address,
+        notice,
+        stack_wakeup.map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|mut rendered, next| {
+        rendered.push_str("\n\n");
+        rendered.push_str(&next);
+        rendered
+    })
 }
 
 fn append_for_replay(

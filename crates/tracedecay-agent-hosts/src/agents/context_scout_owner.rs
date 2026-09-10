@@ -8,12 +8,13 @@ use tokio::sync::{Mutex, RwLock};
 use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::context_scout::{
-    ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
+    ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimRequestV1,
+    ContextScoutClaimWindowV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1,
     ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
     ContextScoutWorkV1,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookReadyGuidanceV1,
 };
@@ -447,6 +448,32 @@ impl ProjectContextScoutOwnerV1 {
             .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
+    pub async fn record_delivery_by_handle(
+        &self,
+        claim: &ContextScoutClaimHandleV1,
+        receipt: &ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutDurableStoreOutcomeV1 {
+        let configuration = self.configuration.read().await;
+        let Some(control) = configuration
+            .as_ref()
+            .map(ContextScoutConfigurationPinV1::control)
+        else {
+            return ContextScoutDurableStoreOutcomeV1::Unavailable;
+        };
+        self.store
+            .record_delivery_by_lease(
+                claim.work,
+                claim.envelope_id,
+                ContextScoutLeaseV1 {
+                    lease_id: claim.lease_id,
+                    expires_at: claim.lease_expires_at,
+                },
+                control.configuration_revision,
+                receipt,
+            )
+            .await
+    }
+
     #[hotpath::measure(
         future = true,
         label = "hosts.agent.context_scout.record_feedback",
@@ -826,6 +853,57 @@ impl ProjectContextScoutOwnerV1 {
         }
         let _ = self.store.requeue(claim).await;
         ContextScoutDurableClaimOutcomeV1::Empty
+    }
+
+    pub async fn claim_delivery_request(
+        &self,
+        request: &ContextScoutClaimRequestV1,
+        now: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> ContextScoutDurableClaimOutcomeV1 {
+        let configuration = self.configuration.read().await;
+        let Some(control) = configuration
+            .as_ref()
+            .map(ContextScoutConfigurationPinV1::control)
+        else {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        };
+        let window = match request.window {
+            ContextScoutClaimWindowV1::IdleWindow => ContextScoutDeliveryWindowV1::IdleWindow,
+            ContextScoutClaimWindowV1::OnRequest => ContextScoutDeliveryWindowV1::OnRequest,
+        };
+        let Some(digest) = canonical_sha256(&(
+            "tracedecay.context-scout.delivery-lease.v1",
+            &request.idempotency_key,
+            request.address,
+            request.window,
+            control.configuration_revision,
+        ))
+        .ok() else {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        };
+        let Some(encoded) = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .and_then(|encoded| encoded.get(..32))
+        else {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        };
+        let mut lease_id = [0; 16];
+        if hex::decode_to_slice(encoded, &mut lease_id).is_err() {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        }
+        drop(configuration);
+        self.claim_delivery_exact(
+            request.address,
+            window,
+            now,
+            ContextScoutLeaseV1 {
+                lease_id,
+                expires_at,
+            },
+        )
+        .await
     }
 }
 
