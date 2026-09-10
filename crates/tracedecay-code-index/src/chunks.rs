@@ -1941,14 +1941,11 @@ fn resolve_file_references(
     let mut resolved = Vec::new();
     let mut retained = Vec::new();
     for reference in unresolved {
-        let simple_name = reference
-            .reference_name
-            .rsplit("::")
-            .next()
-            .unwrap_or(reference.reference_name.as_str());
-        let candidates = by_file_relative_name
-            .get(reference.reference_name.as_str())
-            .or_else(|| by_name.get(simple_name));
+        let candidates = if reference.reference_name.contains("::") {
+            by_file_relative_name.get(reference.reference_name.as_str())
+        } else {
+            by_name.get(reference.reference_name.as_str())
+        };
         let compatible = candidates
             .map(|candidates| {
                 candidates
@@ -3710,6 +3707,17 @@ pub fn real_symbol() {}
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].target, "node.right.base");
         assert!(retained.is_empty());
+
+        let missing_namespace = UnresolvedRef {
+            reference_name: "other::Base".to_owned(),
+            ..reference.clone()
+        };
+        let (resolved, _) =
+            resolve_file_references(&[missing_namespace], std::slice::from_ref(&symbols[0]));
+        assert!(
+            resolved.is_empty(),
+            "an explicit missing namespace must not bind a unique local short name"
+        );
 
         let ambiguous = UnresolvedRef {
             reference_name: "Base".to_owned(),
