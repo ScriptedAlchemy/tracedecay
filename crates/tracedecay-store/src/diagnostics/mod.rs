@@ -217,3 +217,16 @@ pub enum DiagnosticStoreError {
 }
 
 pub type DiagnosticStoreResult<T> = Result<T, DiagnosticStoreError>;
+
+/// Exact diagnostic observation equality for an ordered snapshot, excluding
+/// only the server ingestion clock carried by each record.
+pub fn diagnostic_snapshot_observation_eq(
+    stored: &[GenerationDiagnosticV1],
+    incoming: &[GenerationDiagnosticV1],
+) -> bool {
+    stored.len() == incoming.len()
+        && stored
+            .iter()
+            .zip(incoming)
+            .all(|(left, right)| left.same_observation_as(right))
+}

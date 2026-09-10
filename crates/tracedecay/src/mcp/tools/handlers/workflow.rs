@@ -140,6 +140,9 @@ pub(super) async fn handle_diagnose(
             .ok_or(TraceDecayError::Config {
                 message: "missing required parameter: cargo_output".to_string(),
             })?;
+    // The upstream text carries no trustworthy capture timestamp. Record the
+    // one temporal fact this server owns, once, before parse and enrichment.
+    let diagnostic_observed_at = now_micros();
 
     let severity_filter = args
         .get("severity")
@@ -244,8 +247,13 @@ pub(super) async fn handle_diagnose(
 
     // Populate the durable managed-diagnostics store so the LSP Problems
     // projection and every diagnostic read surface see these findings.
-    let publication =
-        publish_parsed_compiler_diagnostics(cg, code_index_identity, &diagnostics).await;
+    let publication = publish_parsed_compiler_diagnostics(
+        cg,
+        code_index_identity,
+        &diagnostics,
+        diagnostic_observed_at,
+    )
+    .await;
 
     let mapped = items.iter().filter(|i| !i["node"].is_null()).count();
     let body = hotpath::measure_block!(
@@ -388,6 +396,7 @@ async fn publish_parsed_compiler_diagnostics(
     cg: &TraceDecay,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
     parsed: &[tracedecay_application::diagnose::Diagnostic],
+    observed_at: UtcMicros,
 ) -> Value {
     use tracedecay_domain::ComponentVersion;
 
@@ -414,6 +423,7 @@ async fn publish_parsed_compiler_diagnostics(
             parsed,
             analyzer_revision,
             configuration_revision,
+            observed_at,
         )
         .await;
     compiler_publication_report(&outcome)
