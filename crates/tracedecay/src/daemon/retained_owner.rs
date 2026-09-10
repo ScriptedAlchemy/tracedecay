@@ -9,7 +9,9 @@ use tracedecay_contracts::retained_surfaces::{
     FactStoreCurateRequestV1, MemoryScopeV1, RetainedAutomationExecutionPortV1,
     RetainedProjectSelectorV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionFutureV1,
 };
-use tracedecay_contracts::{RetainedSurfaceExecutionErrorV1, RetainedSurfacePortsV1};
+use tracedecay_contracts::{
+    RetainedMemoryExecutionPortV1, RetainedSurfaceExecutionErrorV1, RetainedSurfacePortsV1,
+};
 use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProjectId};
 use tracedecay_session_runtime::retained::{
@@ -33,9 +35,6 @@ mod session_retained_effect_tests;
 #[derive(Clone)]
 pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
-    pub(crate) store_runtime_registry:
-        Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
-    pub(crate) profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     pub(crate) project_root: PathBuf,
     pub(crate) project_id: tracedecay_domain::ProjectId,
     pub(crate) mounted_profile_id: Option<tracedecay_domain::UserProfileId>,
@@ -53,14 +52,66 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) invocation_service: Option<DaemonInvocationService>,
 }
 
-fn served_store_identity(cg: &TraceDecay) -> Option<(PathBuf, ProjectId, bool)> {
+fn served_store_identity(
+    cg: &TraceDecay,
+) -> Result<(PathBuf, ProjectId, bool), RetainedSurfaceExecutionErrorV1> {
     match cg.project_memory_owner() {
-        Ok(FactOwnerV1::Project { project_id }) => Some((
+        Ok(FactOwnerV1::Project { project_id }) => Ok((
             cg.project_root().to_path_buf(),
             project_id,
             cg.is_read_only(),
         )),
-        Ok(FactOwnerV1::Profile) | Err(_) => None,
+        Ok(FactOwnerV1::Profile) => Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized),
+        Err(error) => Err(map_execution_error(error)),
+    }
+}
+
+pub(crate) async fn live_retained_memory_authority(
+    cg: &tokio::sync::RwLock<Arc<TraceDecay>>,
+    mounted_project_id: &ProjectId,
+    mounted_project_root: &Path,
+) -> Result<RetainedMemoryTargetAuthorityV1, RetainedSurfaceExecutionErrorV1> {
+    let graph = cg.read().await;
+    let (served_project_root, store_layout_project_id, graph_read_only) =
+        served_store_identity(graph.as_ref())?;
+    Ok(RetainedMemoryTargetAuthorityV1 {
+        registry: graph.retained_store_runtime_registry(),
+        profile_database: graph.profile_database().clone(),
+        project_root: mounted_project_root.to_path_buf(),
+        project_id: mounted_project_id.clone(),
+        store_layout_project_id,
+        served_project_root,
+        graph_read_only,
+    })
+}
+
+struct AssembledRetainedMemory {
+    cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
+    mounted_project_id: ProjectId,
+    mounted_project_root: PathBuf,
+    configuration_digest: ManifestDigest,
+}
+
+impl RetainedMemoryExecutionPortV1 for AssembledRetainedMemory {
+    fn execute_memory<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: tracedecay_contracts::RetainedMemoryRequestV1<'a>,
+    ) -> RetainedSurfaceExecutionFutureV1<'a> {
+        Box::pin(async move {
+            let authority = live_retained_memory_authority(
+                self.cg.as_ref(),
+                &self.mounted_project_id,
+                &self.mounted_project_root,
+            )
+            .await?;
+            tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::project(
+                authority,
+                self.configuration_digest.clone(),
+            )
+            .execute_request(context, request)
+            .await
+        })
     }
 }
 
@@ -68,28 +119,12 @@ pub(crate) fn retained_surface_ports(
     authorities: ProductionRetainedAuthoritiesV1,
 ) -> Arc<RetainedSurfacePortsV1<'static>> {
     let mut ports = RetainedSurfacePortsV1::default();
-    if let Some((served_project_root, store_layout_project_id, graph_read_only)) = authorities
-        .cg
-        .try_read()
-        .ok()
-        .as_deref()
-        .and_then(|graph| served_store_identity(graph.as_ref()))
-    {
-        ports = ports.with_memory(Arc::new(
-            tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::project(
-                RetainedMemoryTargetAuthorityV1 {
-                    registry: Arc::clone(&authorities.store_runtime_registry),
-                    profile_database: authorities.profile_database.clone(),
-                    project_root: authorities.project_root.clone(),
-                    project_id: authorities.project_id.clone(),
-                    store_layout_project_id,
-                    served_project_root,
-                    graph_read_only,
-                },
-                authorities.configuration_digest.clone(),
-            ),
-        ));
-    }
+    ports = ports.with_memory(Arc::new(AssembledRetainedMemory {
+        cg: Arc::clone(&authorities.cg),
+        mounted_project_id: authorities.project_id.clone(),
+        mounted_project_root: authorities.project_root.clone(),
+        configuration_digest: authorities.configuration_digest.clone(),
+    }));
     if let Some(invocation_service) = authorities.invocation_service.clone() {
         ports = ports.with_automation(Arc::new(AssembledRetainedAutomation {
             cg: Arc::clone(&authorities.cg),
@@ -182,13 +217,8 @@ pub(crate) async fn open_project_retained_memory_target(
     selector: Option<&RetainedProjectSelectorV1>,
     access: MemoryTargetAccessV1,
 ) -> Result<RetainedMemoryTargetV1<'static>, RetainedSurfaceExecutionErrorV1> {
-    let (served_project_root, store_layout_project_id) = match cg.project_memory_owner() {
-        Ok(FactOwnerV1::Project { project_id }) => (cg.project_root().to_path_buf(), project_id),
-        Ok(FactOwnerV1::Profile) => {
-            return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
-        }
-        Err(error) => return Err(map_execution_error(error)),
-    };
+    let (served_project_root, store_layout_project_id, graph_read_only) =
+        served_store_identity(cg)?;
     let authority = RetainedMemoryTargetAuthorityV1 {
         registry: cg.retained_store_runtime_registry(),
         profile_database: cg.profile_database().clone(),
@@ -196,7 +226,7 @@ pub(crate) async fn open_project_retained_memory_target(
         project_id: admitted_project_id.clone(),
         store_layout_project_id,
         served_project_root,
-        graph_read_only: cg.is_read_only(),
+        graph_read_only,
     };
     tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(
         &authority,

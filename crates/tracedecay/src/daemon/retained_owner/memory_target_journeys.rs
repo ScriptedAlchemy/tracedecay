@@ -157,6 +157,39 @@ async fn missing_unenrolled_and_write_selected_targets_share_one_denial() {
 }
 
 #[tokio::test]
+async fn assembled_memory_authority_tracks_swapped_graph_identity() {
+    let (_tmp, active, selected, _sibling) = project_pair().await;
+    let active_id = project_id(&active);
+    let active_root = active.project_root().to_path_buf();
+    let selected_root = selected.project_root().to_path_buf();
+    let lock = Arc::new(tokio::sync::RwLock::new(Arc::new(active)));
+    let before = super::live_retained_memory_authority(&lock, &active_id, &active_root)
+        .await
+        .expect("active graph must resolve a served identity");
+    assert_eq!(before.served_project_root, active_root);
+    *lock.write().await = Arc::new(selected);
+    let after = super::live_retained_memory_authority(&lock, &active_id, &active_root)
+        .await
+        .expect("swapped graph must resolve a served identity");
+    assert_eq!(after.served_project_root, selected_root);
+    let error = tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(
+        &after,
+        &active_root,
+        &active_id,
+        Some(MemoryScopeV1::Project),
+        None,
+        MemoryTargetAccessV1::Read,
+    )
+    .await
+    .err()
+    .expect("open must deny against the swapped served identity");
+    assert!(matches!(
+        error,
+        RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
+    ));
+}
+
+#[tokio::test]
 async fn same_project_open_denies_when_store_identity_disagrees() {
     let (_tmp, active, selected, _sibling) = project_pair().await;
     let active_id = project_id(&active);

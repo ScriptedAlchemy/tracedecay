@@ -450,6 +450,74 @@ async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
 }
 
 #[tokio::test]
+async fn read_only_open_does_not_publish_a_project_memory_owner() {
+    let temp = TempDir::new().expect("read-only owner isolation root");
+    let profile_root = temp.path().join("profile");
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let project_id = project_id("ro-open-no-publish");
+    let project_root = temp.path().join("served");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+
+    let seed_scope =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 41, "ro-seed")
+            .expect("seed database scope");
+    let seed = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("seed registry");
+    let _seeded = seed
+        .project_memory(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("seed writable memory");
+    seed.shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join seed graph reconciliation");
+    drop((seed, seed_scope));
+
+    let reopen_scope =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 42, "ro-reopen")
+            .expect("reopened database scope");
+    let reopened = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("reopened registry");
+    let read_only = reopened
+        .project_memory_read_only(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("cross-project read-only open");
+    assert!(!read_only.is_writable());
+    assert!(
+        !reopened.project_has_ready_memory_owner(&project_id),
+        "read-only open must not publish a registry owner"
+    );
+    assert!(
+        reopened
+            .mounted_project_memory(&project_id, DatabaseAccessMode::ReadOnly)
+            .is_err(),
+        "read-only open must not install a mounted memory owner"
+    );
+    drop((read_only, reopened, reopen_scope));
+
+    let _later_scope =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 43, "ro-later")
+            .expect("later database scope");
+    let later = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("later registry");
+    let writable = later
+        .project_memory(project_id, [project_root])
+        .await
+        .expect("subsequent writable mount");
+    assert!(
+        writable.is_writable(),
+        "project_memory must not inherit a read-only owner from a prior read-only open"
+    );
+}
+
+#[tokio::test]
 async fn bound_verified_port_does_not_retain_the_database_facade() {
     let fixture = ContractFixture::new("no-database-cycle").await;
     let project_id = project_id("no-database-cycle");

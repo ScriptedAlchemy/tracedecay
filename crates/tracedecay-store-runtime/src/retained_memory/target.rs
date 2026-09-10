@@ -35,9 +35,9 @@ pub struct RetainedMemoryTargetAuthorityV1 {
 pub enum MemoryTargetAccessV1 {
     Read,
     Write,
-    /// Search, probe, reason, and related record a retrieval projection.
-    /// Writable graphs take a write lease; a read-only graph degrades to a
-    /// read-only lease and reports `ReadOnly` telemetry instead of refusing.
+    /// Search records a retrieval projection. Writable graphs take a write
+    /// lease; a read-only graph or owner degrades to a read-only lease and
+    /// reports `ReadOnly` telemetry instead of refusing.
     RecordRetrieval,
 }
 
@@ -122,45 +122,40 @@ pub async fn open_project_retained_memory_target(
     }
     let selected_project_id = selector.map_or(admitted_project_id, |value| &value.project_id);
     if selected_project_id == admitted_project_id {
+        if authority.project_id != *admitted_project_id {
+            return denied();
+        }
         if authority.served_project_root != registered_root {
             return denied();
         }
-        let owner = FactOwnerV1::Project {
-            project_id: authority.store_layout_project_id.clone(),
-        };
-        if owner
-            != (FactOwnerV1::Project {
-                project_id: admitted_project_id.clone(),
-            })
-        {
+        if authority.store_layout_project_id != *admitted_project_id {
             return denied();
         }
         if access == MemoryTargetAccessV1::Write && authority.graph_read_only {
             return denied();
         }
-        let database = authority
-            .registry
-            .mounted_project_memory(
-                admitted_project_id,
-                match access {
-                    MemoryTargetAccessV1::Read => DatabaseAccessMode::ReadOnly,
-                    MemoryTargetAccessV1::Write => DatabaseAccessMode::ReadWrite,
-                    MemoryTargetAccessV1::RecordRetrieval => {
-                        if authority.graph_read_only {
-                            DatabaseAccessMode::ReadOnly
-                        } else {
-                            DatabaseAccessMode::ReadWrite
-                        }
-                    }
-                },
-            )
-            .map_err(map_execution_error)?;
+        let database = match access {
+            MemoryTargetAccessV1::RecordRetrieval => authority
+                .registry
+                .mounted_project_memory_recording(admitted_project_id, authority.graph_read_only)
+                .map_err(map_execution_error)?,
+            MemoryTargetAccessV1::Read => authority
+                .registry
+                .mounted_project_memory(admitted_project_id, DatabaseAccessMode::ReadOnly)
+                .map_err(map_execution_error)?,
+            MemoryTargetAccessV1::Write => authority
+                .registry
+                .mounted_project_memory(admitted_project_id, DatabaseAccessMode::ReadWrite)
+                .map_err(map_execution_error)?,
+        };
         if access == MemoryTargetAccessV1::Write && !database.is_writable() {
             return denied();
         }
         return Ok(RetainedMemoryTargetV1::new(
             ProjectMemoryDbHandle::Owned(Box::new(database)),
-            owner,
+            FactOwnerV1::Project {
+                project_id: authority.store_layout_project_id.clone(),
+            },
         ));
     }
     if access == MemoryTargetAccessV1::Write {
@@ -251,6 +246,7 @@ mod tests {
         profile_database: RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
         project_root: PathBuf,
+        profile_root: PathBuf,
         _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
         _temp: TempDir,
     }
@@ -288,6 +284,46 @@ mod tests {
                 profile_database,
                 project_id,
                 project_root,
+                profile_root,
+                _database_scope: database_scope,
+                _temp: temp,
+            }
+        }
+
+        async fn reopen_read_only_owner(self) -> Self {
+            let identity =
+                profile_identity::load_or_create(&self.profile_root).expect("profile identity");
+            let project_id = self.project_id.clone();
+            let project_root = self.project_root.clone();
+            let profile_root = self.profile_root.clone();
+            let temp = self._temp;
+            self.registry
+                .shutdown_memory_graph_reconciliation_tasks()
+                .await
+                .expect("join seed graph reconciliation");
+            drop((self.registry, self.profile_database, self._database_scope));
+            let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+                &profile_root,
+                30,
+                "read-only-reopen",
+            )
+            .expect("reopened daemon database scope");
+            let registry = Arc::new(
+                DaemonSessionRuntimeRegistryV1::open(identity)
+                    .await
+                    .expect("reopened session runtime registry"),
+            );
+            let _mounted = registry
+                .publish_read_only_memory_owner_for_test(project_id.clone(), [project_root.clone()])
+                .await
+                .expect("mounted read-only project memory");
+            let profile_database = registry.profile_database().await.expect("profile database");
+            Self {
+                registry,
+                profile_database,
+                project_id,
+                project_root,
+                profile_root,
                 _database_scope: database_scope,
                 _temp: temp,
             }
@@ -340,6 +376,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_project_open_denies_when_mounted_scope_disagrees() {
+        let fixture = MemoryTargetFixture::new("mounted-scope-drift").await;
+        let foreign = ProjectId::new("project.retained-memory.foreign-mount").expect("foreign id");
+        let mut authority =
+            fixture.authority(fixture.project_id.clone(), fixture.project_root.clone());
+        authority.project_id = foreign;
+        let error = open_same_project(&authority, &fixture.project_root, &fixture.project_id)
+            .await
+            .err()
+            .expect("mounted scope drift must deny");
+        assert!(matches!(
+            error,
+            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
+        ));
+    }
+
+    #[tokio::test]
     async fn same_project_read_open_issues_a_read_only_lease() {
         let fixture = MemoryTargetFixture::new("read-lease").await;
         let authority = fixture.authority(fixture.project_id.clone(), fixture.project_root.clone());
@@ -384,6 +437,28 @@ mod tests {
         assert!(
             target.database().is_writable(),
             "RecordRetrieval on a writable graph must issue a write lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_project_record_retrieval_degrades_when_owner_is_not_writable() {
+        let fixture = MemoryTargetFixture::new("retrieval-owner-ro")
+            .await
+            .reopen_read_only_owner()
+            .await;
+        let authority = fixture.authority(fixture.project_id.clone(), fixture.project_root.clone());
+        assert!(!authority.graph_read_only);
+        let target = open_same_project_with(
+            &authority,
+            &fixture.project_root,
+            &fixture.project_id,
+            MemoryTargetAccessV1::RecordRetrieval,
+        )
+        .await
+        .expect("owner-not-writable search must degrade, not fail");
+        assert!(
+            !target.database().is_writable(),
+            "RecordRetrieval must fall back to a read-only lease when the owner refuses writability"
         );
     }
 
