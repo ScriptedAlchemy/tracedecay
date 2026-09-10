@@ -99,11 +99,19 @@ impl ProjectConfigurationRuntime {
         ))
     }
 
-    /// Immutable routing identity only. Effective values and revisions must be
-    /// read from [`Self::client`] so the retained store remains the sole
-    /// runtime configuration authority.
+    /// Immutable routing identity only. Desired values and revisions are read
+    /// from [`Self::client`]; runtime consumers use
+    /// [`Self::activated_configuration`] so restart-gated revisions cannot be
+    /// mistaken for installed state.
     pub fn configuration_target(&self) -> &RuntimeConfigurationTarget {
         &self.target
+    }
+
+    /// Returns the exact configuration snapshot currently installed for
+    /// runtime consumers. It may trail [`Self::client`] after a committed
+    /// change whose registry definition requires a daemon restart.
+    pub fn activated_configuration(&self) -> Result<PinnedRuntimeConfiguration> {
+        crate::config::cached_pinned_runtime_configuration(&self.target.project_root)
     }
 
     pub fn registered_database(&self) -> RegisteredGlobalDbLeaseV1 {
