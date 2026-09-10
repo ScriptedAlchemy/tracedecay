@@ -49,23 +49,19 @@ const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;
 mod serving_status;
 const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Byte ceiling every admitted application retrieval request is bound by.
-///
-/// `SessionRetrievalService::retrieve` refuses — terminally, as
-/// `BudgetExhausted` — any query whose context budget or execution limits
-/// exceed the binding's budgets, so every query built for the admitted path
-/// must be sized against this constant rather than the multi-MiB
-/// `ExecutionLimits::default()` or [`MESSAGE_SEARCH_MAX_BYTES`].
+/// Byte ceiling for an admitted application's returned context and hydrated
+/// payload. Candidate and temporal-record workspaces retain their separate,
+/// finite kernel bounds.
 pub const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 
 /// Execution limits an admitted application retrieval of `limit` items may ask
 /// for.
 ///
-/// The admitted binding checks exactly four things: the three *total* byte
-/// limits against [`APPLICATION_RETRIEVAL_MAX_BYTES`], and that the hydration
-/// item count covers the requested page. The defaults are multi-MiB and are
-/// rejected outright as a non-retryable structural refusal rather than a
-/// smaller answer, so those four are the ones this sizes.
+/// The admitted binding checks the response context and hydrated payload
+/// against [`APPLICATION_RETRIEVAL_MAX_BYTES`]. Candidate and temporal-record
+/// bytes are bounded kernel workspaces; charging them to the response budget
+/// makes a one-item request fail solely because its session has enough retained
+/// records to fill the ranker's input pages.
 ///
 /// Nothing else is narrowed. Candidate and record item counts are the pool the
 /// ranker draws from, not the page it returns: clamping them to `limit` would
@@ -75,8 +71,6 @@ pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES).unwrap_or(usize::MAX);
     let defaults = ExecutionLimits::default();
     ExecutionLimits {
-        candidate_total_bytes: bytes.min(defaults.candidate_total_bytes),
-        record_total_bytes: bytes.min(defaults.record_total_bytes),
         hydration_total_bytes: bytes.min(defaults.hydration_total_bytes),
         hydration_limit: defaults.hydration_limit.max(limit),
         ..defaults
