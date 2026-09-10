@@ -12638,6 +12638,146 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     registry.shutdown().await;
 }
 
+#[test]
+fn current_pinned_relation_pages_do_not_wait_for_the_blocking_pool() {
+    #[cfg(feature = "hotpath")]
+    let _measurement = hotpath::HotpathGuardBuilder::new("current-pinned-relation-pages").build();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("isolated blocking-pool runtime");
+    runtime.block_on(async {
+        let fixture = GitFixture::new(&[(
+            "src/lib.rs",
+            "pub fn producer() { consumer_a(); consumer_b(); }\n\
+             pub fn consumer_a() {}\n\
+             pub fn consumer_b() {}\n",
+        )]);
+        let store = TempDir::new().expect("store root");
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount daemon-owned scheduler");
+        let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+        let generation = latest.generation.manifest().generation_id.clone();
+        let operation =
+            callable_code_operation(CallableCodeOperationKind::Callees).expect("operation");
+        let context = application_context(
+            &operation,
+            latest.generation.snapshot().repository.clone(),
+            latest
+                .generation
+                .snapshot()
+                .worktree
+                .clone()
+                .expect("worktree"),
+        );
+        mount_query_authority(
+            &registry,
+            fixture.path(),
+            &context,
+            latest.generation.manifest().privacy_domain.clone(),
+        )
+        .await;
+        let producer = latest
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|record| record.qualified_name.ends_with("producer"))
+            .expect("producer symbol")
+            .occurrence
+            .as_str()
+            .to_owned();
+        let scope = CodeQueryScope::new(generation.clone(), None).expect("query scope");
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).expect("announce blocking task");
+            let _ = release_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking task started");
+
+        let first = tokio::time::timeout(
+            Duration::from_secs(1),
+            registry.callees(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &CodeRelationRequest {
+                    node_id: producer.clone(),
+                    maximum_depth: 1,
+                    resolve_trait_dispatch: false,
+                    scope: scope.clone(),
+                    meta: RetrievalRequestMeta::current(
+                        PageRequest::first(1).expect("first page"),
+                        ResultProjection::Evidence,
+                        RetrievalOrder::Relevance,
+                    ),
+                },
+            ),
+        )
+        .await
+        .expect("current relation query must bypass unrelated blocking work");
+        let first_page = first
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("first relation page");
+        assert_eq!(first_page.generation, generation);
+        assert_eq!(first_page.items.len(), 1);
+        let cursor = first_page.next_cursor.clone().expect("second page cursor");
+        let first_consumer = first_page.items[0].symbol.node_id.clone();
+
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            registry.callees(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &CodeRelationRequest {
+                    node_id: producer,
+                    maximum_depth: 1,
+                    resolve_trait_dispatch: false,
+                    scope,
+                    meta: RetrievalRequestMeta::current(
+                        PageRequest::new(1, Some(cursor)).expect("cursor page"),
+                        ResultProjection::Evidence,
+                        RetrievalOrder::Relevance,
+                    ),
+                },
+            ),
+        )
+        .await
+        .expect("cursor relation query must bypass unrelated blocking work");
+        let second_page = second
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("second relation page");
+        assert_eq!(second_page.generation, generation);
+        assert_eq!(second_page.items.len(), 1);
+        assert_ne!(second_page.items[0].symbol.node_id, first_consumer);
+
+        release_tx.send(()).expect("release blocking task");
+        blocker.await.expect("blocking task joined");
+        registry.shutdown().await;
+    });
+}
+
 const CALLER_STAR: usize = 2_000;
 const CALLER_STAR_FILES: usize = 8;
 const CALLER_PAGE: u32 = 10;
