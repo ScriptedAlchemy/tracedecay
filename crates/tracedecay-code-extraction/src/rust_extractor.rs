@@ -1463,6 +1463,24 @@ impl RustExtractor {
         kind: EdgeKind,
     ) {
         let n = cursor.node();
+        // A scoped type carries its own namespace (`fmt::Result`). Emitting it
+        // whole, and not descending into its `path`/`name` children, is what
+        // keeps resolution honest: the bare `Result` child would bind a
+        // same-named local type through the simple-name index, inventing an
+        // edge to a type the source never named. Resolution narrows a
+        // qualified name to its simple form itself when it looks cross-file,
+        // so nothing is lost by naming the reference exactly.
+        if n.kind() == "scoped_type_identifier" {
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: from_id.to_string(),
+                reference_name: state.node_text(n).to_string(),
+                reference_kind: kind,
+                line: n.start_position().row as u32,
+                column: n.start_position().column as u32,
+                file_path: state.file_path.clone(),
+            });
+            return;
+        }
         if n.kind() == "type_identifier" || n.kind() == "primitive_type" {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: from_id.to_string(),
