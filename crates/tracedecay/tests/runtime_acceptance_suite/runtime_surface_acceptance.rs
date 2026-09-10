@@ -1566,9 +1566,42 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     .await;
     let occurrence = &exact["items"][0]["occurrence"];
     assert_eq!(occurrence["path"], "src/auth/login.rs");
+    let source_lines_arguments = serde_json::json!({
+        "file": occurrence["file"],
+        "span": occurrence["span"],
+        "meta": {
+            "temporal": { "kind": "current" },
+            "page": { "page_size": 10, "cursor": null },
+            "projection": "evidence",
+            "order": "source_position",
+        },
+    });
     let source_lines = assert_application_transport_parity(
         &fixture,
         "source-lines",
+        ApplicationSurfaceOperation::SourceLines,
+        source_lines_arguments,
+    )
+    .await;
+    assert_eq!(source_lines["file"], "src/auth/login.rs");
+    let source = std::fs::read(fixture.project.join("src/auth/login.rs"))
+        .expect("read source-lines fixture");
+    let start = occurrence["span"]["start_byte"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("source-lines start byte");
+    let end = occurrence["span"]["end_byte"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("source-lines end byte");
+    assert_eq!(
+        source_lines["body"],
+        std::str::from_utf8(&source[start..end]).expect("UTF-8 fixture span")
+    );
+    assert_eq!(source_lines["references"][0]["span"], occurrence["span"]);
+    let references_only = assert_application_transport_parity(
+        &fixture,
+        "source-lines-references-only",
         ApplicationSurfaceOperation::SourceLines,
         serde_json::json!({
             "file": occurrence["file"],
@@ -1582,7 +1615,9 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         }),
     )
     .await;
-    assert_eq!(source_lines["references"][0]["span"], occurrence["span"]);
+    assert!(references_only.get("file").is_none());
+    assert!(references_only.get("body").is_none());
+    assert_eq!(references_only["references"][0]["span"], occurrence["span"]);
 
     let source_body_arguments = serde_json::json!({ "node_id": authenticate_id });
     let source_body = assert_application_transport_parity(
