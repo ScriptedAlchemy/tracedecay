@@ -208,7 +208,6 @@ pub fn tool_allows_identical_read_coalescing(
             | "tracedecay_dead_code"
             | "tracedecay_circular"
             | "tracedecay_affected"
-            | "tracedecay_simplify_scan"
             | "tracedecay_dependency_depth"
             | "tracedecay_health"
             | "tracedecay_dsm"
@@ -436,7 +435,6 @@ mod tests {
             "tracedecay_dead_code",
             "tracedecay_circular",
             "tracedecay_affected",
-            "tracedecay_simplify_scan",
             "tracedecay_dependency_depth",
             "tracedecay_health",
             "tracedecay_dsm",

@@ -3,14 +3,12 @@
 //! Focused MCP renderer/default-format tests through the production daemon
 //! composition and its mounted MCP server.
 
-use std::fs;
-
 use serde_json::{Value, json};
 use tracedecay_mcp::ToolResult;
 
 use super::support::{
     ProductionCompositionFixture, extract_json, extract_text, production_composition_fixture,
-    production_composition_fixture_with_sources, wait_for_current_graph,
+    wait_for_current_graph,
 };
 
 async fn call_tool(
@@ -130,44 +128,6 @@ async fn read_lines_includes_overlapping_symbol_context() {
     );
     assert!(cached_text.contains("### Context"), "got: {cached_text}");
     assert!(cached_text.contains("fn main()"), "got: {cached_text}");
-    fixture.harness.shutdown().await;
-}
-
-#[tokio::test]
-async fn simplify_scan_fails_closed_without_verified_similarity_authority() {
-    let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::write(
-            project.join("src/dead.rs"),
-            r#"
-fn abandoned_helper() -> usize {
-    7
-}
-"#,
-        )
-        .unwrap();
-    })
-    .await;
-
-    let response = fixture
-        .harness
-        .call_tool(
-            &fixture.project_root,
-            "tracedecay_simplify_scan",
-            json!({"files": ["src/dead.rs"], "format": "markdown"}),
-        )
-        .await
-        .unwrap();
-    let error = response
-        .error
-        .expect("simplify scan must fail closed without verified similarity authority");
-    assert_eq!(
-        error
-            .data
-            .as_ref()
-            .and_then(|data| data["reason_code"].as_str()),
-        Some("verified-simplify-similarity-unavailable")
-    );
     fixture.harness.shutdown().await;
 }
 
