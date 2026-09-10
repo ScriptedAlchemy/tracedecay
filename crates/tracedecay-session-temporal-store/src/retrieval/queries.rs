@@ -233,20 +233,24 @@ macro_rules! root_direct_user_prefilter {
 macro_rules! direct_user_message_candidates {
     ($query:literal, $start:literal, $end:literal) => {
         concat!(
-            "WITH direct_user_messages(provider, session_id, message_id) AS MATERIALIZED (
+            "WITH direct_user_message_fts(rowid) AS MATERIALIZED (
+          SELECT rowid
+          FROM session_messages_fts
+          WHERE session_messages_fts MATCH ",
+            $query,
+            "
+      ),
+      direct_user_messages(provider, session_id, message_id) AS MATERIALIZED (
           SELECT message.provider, message.session_id, message.message_id
           FROM session_messages AS message INDEXED BY idx_session_messages_timestamp
-          CROSS JOIN session_messages_fts
+          CROSS JOIN direct_user_message_fts
           WHERE ",
             $start,
             " IS NOT NULL
             AND message.timestamp >= ",
             $start,
             "
-            AND session_messages_fts.rowid = message.rowid
-            AND session_messages_fts MATCH ",
-            $query,
-            "
+            AND direct_user_message_fts.rowid = message.rowid
             AND (",
             $end,
             " IS NULL OR message.timestamp <= ",
@@ -254,15 +258,12 @@ macro_rules! direct_user_message_candidates {
             ")
           UNION ALL
           SELECT message.provider, message.session_id, message.message_id
-          FROM session_messages_fts
+          FROM direct_user_message_fts
           JOIN session_messages AS message
-            ON message.rowid = session_messages_fts.rowid
+            ON message.rowid = direct_user_message_fts.rowid
           WHERE ",
             $start,
             " IS NULL
-            AND session_messages_fts MATCH ",
-            $query,
-            "
             AND (",
             $end,
             " IS NULL OR message.timestamp <= ",

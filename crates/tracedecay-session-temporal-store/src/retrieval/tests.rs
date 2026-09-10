@@ -1354,6 +1354,12 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
     assert!(
         direct_plan
             .iter()
+            .any(|line| line.contains("MATERIALIZE DIRECT_USER_MESSAGE_FTS")),
+        "direct-user retrieval must materialize its FTS matches once: {direct_plan:?}"
+    );
+    assert!(
+        direct_plan
+            .iter()
             .any(|line| line.contains("MATERIALIZE DIRECT_USER_MESSAGES")),
         "direct-user retrieval must bound occurrence FTS from matching messages: {direct_plan:?}"
     );
