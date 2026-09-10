@@ -213,6 +213,8 @@ pub struct McpAdmittedProjectV1 {
     pub project_session_store: Option<RegisteredGlobalDbLeaseV1>,
     /// The root's verdict for reading `project_session_store`. Bind reports
     /// this verbatim and never upgrades it to [`ValidatedAuthorization::Authorized`].
+    /// A denied verdict stays denied; the first authorized-only store read
+    /// refuses rather than treating the lease as a capability.
     pub project_session_authorization: ValidatedAuthorization,
 }
 
