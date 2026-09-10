@@ -1,6 +1,8 @@
 use crate::support::*;
+#[cfg(feature = "test-transport")]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::SessionId;
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 #[path = "session_reflector/automatic_fact_receipts.rs"]
