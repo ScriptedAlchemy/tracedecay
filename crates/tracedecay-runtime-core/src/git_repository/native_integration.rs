@@ -152,8 +152,8 @@ impl GitRepositoryAuthority {
     }
 
     /// Recreate and commit an exact eligible preflight with one destination
-    /// ref CAS. Checked-out destination materialization remains ineligible at
-    /// the adapter boundary until a native checkout transaction is supplied.
+    /// ref CAS. Checked-out destinations remain ineligible until a native
+    /// checkout transaction is supplied.
     #[hotpath::measure(label = "runtime_core.git.native_apply")]
     pub fn apply_native_integration(
         &self,
@@ -179,6 +179,12 @@ impl GitRepositoryAuthority {
             return Err(GitRepositoryError::Operation {
                 operation: "native integration apply",
                 detail: "preflight compare-and-set failed".to_owned(),
+            });
+        }
+        if self.reference_is_checked_out(destination_ref)? {
+            return Err(GitRepositoryError::Operation {
+                operation: "native integration apply",
+                detail: "destination ref is checked out".to_owned(),
             });
         }
         if cancellation.is_cancelled() {

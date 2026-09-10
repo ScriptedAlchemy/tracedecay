@@ -969,6 +969,52 @@ impl RegisteredGlobalDb {
         Ok(deliveries)
     }
 
+    /// Selects the oldest host-pending signal for one exact recipient and
+    /// scope. Authorization predicates are applied before the deterministic
+    /// limit so another recipient's backlog cannot hide an eligible signal.
+    #[hotpath::skip]
+    pub async fn oldest_host_pending_github_stack_delivery(
+        &self,
+        project_id: &str,
+        scope_digest: &str,
+        recipient: &str,
+    ) -> Result<Option<GitHubStackDeliveryRecordV1>, String> {
+        validate_text(project_id, "project id")?;
+        validate_text(scope_digest, "scope digest")?;
+        validate_recipient(recipient)?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("begin GitHub stack recipient-pending snapshot: {error}"))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT s.project_id, s.signal_id, s.scope_digest, s.repository_id,
+                        s.watermark_id, s.observed_at_micros, s.signal_json, r.recipient
+                 FROM github_stack_delivery_recipients AS r
+                 JOIN github_stack_delivery_signals AS s
+                   ON s.project_id = r.project_id AND s.signal_id = r.signal_id
+                 WHERE r.project_id = ?1 AND s.scope_digest = ?2
+                   AND r.recipient = ?3 AND r.state = 'host_pending'
+                 ORDER BY s.observed_at_micros ASC, r.signal_id ASC
+                 LIMIT 1",
+                params![project_id, scope_digest, recipient],
+            )
+            .await
+            .map_err(|error| format!("query GitHub stack recipient-pending delivery: {error}"))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("read GitHub stack recipient-pending delivery: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let signal = decode_signal_row(&row)?;
+        let recipient = row
+            .get::<String>(7)
+            .map_err(|error| format!("decode GitHub stack recipient-pending recipient: {error}"))?;
+        Ok(Some(GitHubStackDeliveryRecordV1 { signal, recipient }))
+    }
+
     /// Returns one recipient's durable binding state.
     #[hotpath::skip]
     pub async fn github_stack_recipient_state(

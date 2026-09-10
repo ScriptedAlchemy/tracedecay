@@ -9,25 +9,30 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::registry::DaemonNativeIntegrationServiceRegistry;
 use super::stack_signals::signal_from_preflight;
 use tracedecay_application::native_integration::{
-    GixNativeIntegrationAdapter, NativeIntegrationMechanics,
+    GixNativeIntegrationAdapter, NativeApplyEffectV1, NativeIntegrationMechanics,
 };
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, StackSignalKindV1, StackSignalV1,
+    DaemonGitHubStackCoordinatorV1, StackSignalDraftV1, StackSignalV1,
+};
+use tracedecay_contracts::git::{
+    GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalExpandPort,
+    GitHubStackSignalExpandPortError, GitHubStackSignalExpandSurfaceRequest,
+    GitHubStackSignalExpandSurfaceResultV1,
 };
 use tracedecay_contracts::{
-    AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
-    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
+    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     NativeIntegrationApplyRequestV1, NativeIntegrationEvidenceRevisionsV1,
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
     NativeIntegrationSelectionBindingV1, NativeIntegrationStackResolutionOutcomeV1,
-    NativeIntegrationStackResolutionRequestV1, RequestContext, RequestId, ResolvedScope,
-    native_integration_surface_operation,
+    NativeIntegrationStackResolutionRequestV1, RegisteredRootLocatorV1, RequestContext, RequestId,
+    ResolvedScope, SharedProfileStoreLocatorV1, native_integration_surface_operation,
 };
 use tracedecay_domain::{
     ActorId, AuthorityRef, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1,
@@ -37,14 +42,15 @@ use tracedecay_domain::{
     NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewId, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
     NativeIntegrationTransactionId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    ScopeSourceBinding, SourceBindingId, SourceKindV1, StackNodeId, UtcMicros, WorktreeId,
-    WorktreeInventoryEpoch, WorktreeInventorySnapshotId, canonical_sha256,
+    ScopeSourceBinding, SourceBindingId, SourceKindV1, StackNodeId, StackSignalKindV1, UtcMicros,
+    WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId, canonical_sha256,
 };
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::{GitHubStackDeliveryStateV1, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git::try_git_program;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_store::NativeIntegrationStore;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
 const EXPIRES_AT: UtcMicros = UtcMicros(10_000);
@@ -247,6 +253,118 @@ fn preflight_request(
         preview_expires_at: EXPIRES_AT,
         observed_at: OBSERVED_AT,
     }
+}
+
+fn declared_preflight_request(
+    repository_root: &Path,
+    database: &RegisteredGlobalDbLeaseV1,
+    mode: MechanicalIntegrationModeV1,
+    request_id: &str,
+) -> NativeIntegrationPreflightRequestV1 {
+    let project_id = ProjectId::new("project.native.journey").expect("project id");
+    let repository_id = RepositoryId::new("repository.native.journey").expect("repository id");
+    let source = ResolvedScope::new(
+        project_id.clone(),
+        repository_id.clone(),
+        WorktreeId::new("worktree.native.source").expect("source worktree id"),
+        Some(RefId::new("refs/heads/source").expect("source ref")),
+    )
+    .expect("source scope");
+    let destination = ResolvedScope::new(
+        project_id.clone(),
+        repository_id.clone(),
+        WorktreeId::new("worktree.native.destination").expect("destination worktree id"),
+        Some(RefId::new("refs/heads/destination").expect("destination ref")),
+    )
+    .expect("destination scope");
+    let source_node_id = StackNodeId::new("node.native.source").expect("source node");
+    let destination_node_id =
+        StackNodeId::new("node.native.destination").expect("destination node");
+    let inventory_snapshot_id =
+        WorktreeInventorySnapshotId::new("inventory.native.journey").expect("inventory snapshot");
+    let inventory_epoch = WorktreeInventoryEpoch::new(1).expect("inventory epoch");
+    let revision = BranchStackRevisionV1::new(
+        BranchStackId::new("stack.native.journey").expect("stack id"),
+        BranchStackRevisionId::new("revision.native.journey").expect("revision id"),
+        inventory_snapshot_id.clone(),
+        inventory_epoch,
+        BranchStackSourceV1::ExplicitDeclaration,
+        vec![
+            BranchStackNodeV1 {
+                node_id: source_node_id.clone(),
+                project_id: project_id.clone(),
+                repository_id: repository_id.clone(),
+                reference: RefId::new("refs/heads/source").expect("source ref"),
+                tip: CommitId::new(git(repository_root, &["rev-parse", "refs/heads/source"]))
+                    .expect("source tip"),
+                worktree_id: None,
+            },
+            BranchStackNodeV1 {
+                node_id: destination_node_id.clone(),
+                project_id: project_id.clone(),
+                repository_id,
+                reference: RefId::new("refs/heads/destination").expect("destination ref"),
+                tip: CommitId::new(git(
+                    repository_root,
+                    &["rev-parse", "refs/heads/destination"],
+                ))
+                .expect("destination tip"),
+                worktree_id: None,
+            },
+        ],
+        vec![BranchStackEdgeV1 {
+            dependency: source_node_id.clone(),
+            dependent: destination_node_id.clone(),
+        }],
+    )
+    .expect("declared revision");
+    let shard = &database.binding().shard_id;
+    let profile = SharedProfileStoreLocatorV1::new(
+        shard.brain_id.clone(),
+        shard.profile_id.clone(),
+        database.db_path().display().to_string(),
+    )
+    .expect("registered profile store");
+    let (capability, use_case) =
+        operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
+    let admissions = [source.clone(), destination.clone()]
+        .into_iter()
+        .enumerate()
+        .map(|(index, scope)| {
+            AuthorizedRootAdmission::new(
+                context(scope, &format!("{request_id}.root.{index}")),
+                RegisteredRootLocatorV1::new(project_id.clone(), profile.clone(), repository_root)
+                    .expect("registered repository root"),
+            )
+            .expect("registered root admission")
+        })
+        .collect();
+    let scope_set = AuthorizedScopeSetAuthority::authorize_registered(
+        ScopeSetId::new(format!("scope-set.native.journey.{request_id}")).expect("scope set id"),
+        ScopeSetRevision::new(1).expect("scope set revision"),
+        admissions,
+        &capability,
+        &use_case,
+        OBSERVED_AT,
+    )
+    .expect("registered authorized scope set");
+    let mut request = preflight_request(mode, request_id);
+    request.context = context(destination.clone(), request_id);
+    request.topology.source = source;
+    request.topology.destination = destination;
+    request.topology.authorized_scope_set = scope_set;
+    request.topology.inventory_snapshot_id = inventory_snapshot_id;
+    request.topology.inventory_epoch = inventory_epoch;
+    request.topology.selection = NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
+        stack_id: revision.stack_id.clone(),
+        revision_id: revision.revision_id.clone(),
+        revision_digest: revision.digest.clone(),
+        declared_revision: Box::new(revision),
+        source_node_id,
+        destination_node_id,
+        direction: NativeIntegrationDirectionV1::PropagateDependencyToDependent,
+    };
+    request
 }
 
 fn approval_for(
@@ -490,6 +608,12 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     let expires_at = UtcMicros(now.0.saturating_add(60_000_000));
     let (preflight_capability, preflight_use_case) =
         operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
+    let expand_operation =
+        tracedecay_contracts::git::git_surface_operation(GITHUB_STACK_SIGNAL_EXPAND_OPERATION)
+            .expect("canonical Git operation")
+            .expect("declared Git operation");
+    let expand_capability = expand_operation.capability_id().clone();
+    let expand_use_case = expand_operation.use_case_id().clone();
     let live_grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.native.declared-conflict").expect("grant id"),
         1,
@@ -498,8 +622,8 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         now,
         expires_at,
         destination_scope.clone(),
-        BTreeSet::from([preflight_capability.clone()]),
-        BTreeSet::from([preflight_use_case]),
+        BTreeSet::from([preflight_capability.clone(), expand_capability.clone()]),
+        BTreeSet::from([preflight_use_case, expand_use_case]),
         DisclosureClass::Sensitive,
     )
     .expect("live grant");
@@ -507,7 +631,7 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     let live_context = RequestContext::new(
         requester.clone(),
         destination_scope.clone(),
-        live_grant,
+        live_grant.clone(),
         RequestId::new("request.native.journey.declared-conflict.live").expect("request id"),
         Deadline::new(expires_at).expect("deadline"),
         CancellationContext::active("cancel.native.journey.declared-conflict.live")
@@ -516,7 +640,7 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     .expect("live context");
     let access = ProjectSourceAccessSnapshot {
         scope: destination_scope.clone(),
-        requester,
+        requester: requester.clone(),
         binding: ScopeSourceBinding::new(
             SourceBindingId::new("binding.native.declared-conflict").expect("binding id"),
             SourceKindV1::GitHub,
@@ -530,20 +654,132 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         .expect("configuration revision"),
         configuration_digest: digest('4'),
         configuration_provenance_digest: digest('5'),
-        effective_capabilities: BTreeSet::from([preflight_capability]),
+        effective_capabilities: BTreeSet::from([preflight_capability, expand_capability]),
         grant_expires_at: expires_at,
     };
+    owner
+        .store()
+        .save_preview(preview.clone())
+        .expect("save canonical conflict preview");
     let stack_runtime = owner
         .mount_github_stack_runtime(
             database.clone(),
-            destination_scope,
+            destination_scope.clone(),
             access,
             Arc::new(DaemonGitHubStackCoordinatorV1::default()),
         )
         .expect("stack runtime");
+    let other_recipient = ActorId::new("actor.native.other").expect("other recipient");
+    let other_context = RequestContext::new(
+        other_recipient.clone(),
+        destination_scope.clone(),
+        live_grant,
+        RequestId::new("request.native.journey.declared-conflict.other").expect("request id"),
+        Deadline::new(expires_at).expect("deadline"),
+        CancellationContext::active("cancel.native.journey.declared-conflict.other")
+            .expect("cancellation"),
+    )
+    .expect("other context");
+    let other_signal = StackSignalV1::seal(
+        &destination_scope,
+        StackSignalDraftV1 {
+            stack_revision_id: signal.stack_revision_id.clone(),
+            stack_revision_digest: signal.stack_revision_digest.clone(),
+            kind: StackSignalKindV1::ActualConflict,
+            state_digest: digest('6'),
+            github_stack_digest: None,
+            observed_at: UtcMicros(signal.observed_at.0 - 1),
+        },
+    )
+    .expect("other recipient signal");
+    stack_runtime
+        .enqueue_from_preflight(other_signal.clone(), &other_context)
+        .expect("enqueue older other-recipient signal");
     stack_runtime
         .enqueue_from_preflight(signal.clone(), &live_context)
         .expect("enqueue actual conflict");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if stack_runtime
+                .pending_host_deliveries()
+                .is_ok_and(|pending| pending.len() == 2)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("publish stack signals to host");
+
+    let cancellation = CancellationSignal::active("cancel.native.journey.declared-conflict.expand")
+        .expect("expand cancellation");
+    let denied = stack_runtime.expand(
+        GitHubStackSignalExpandSurfaceRequest {
+            signal_id: Some(signal.signal_id.clone()),
+            expected_watermark_id: Some(signal.watermark_id.clone()),
+        }
+        .into_application_request(other_context),
+        &cancellation,
+    );
+    assert_eq!(denied, Err(GitHubStackSignalExpandPortError::Concealed));
+    let expanded = stack_runtime
+        .expand(
+            GitHubStackSignalExpandSurfaceRequest {
+                signal_id: None,
+                expected_watermark_id: Some(signal.watermark_id.clone()),
+            }
+            .into_application_request(live_context),
+            &cancellation,
+        )
+        .expect("expand oldest authorized signal");
+    let GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence } = expanded else {
+        panic!("expected expanded stack conflict evidence");
+    };
+    assert_eq!(evidence.signal_id, signal.signal_id);
+    assert_eq!(evidence.kind, StackSignalKindV1::ActualConflict);
+    assert_eq!(evidence.stack_revision_id, signal.stack_revision_id);
+    let tracedecay_contracts::git::GitHubStackSignalNativeSourceV1::Preflight {
+        preview: expanded_preview,
+    } = &evidence.native_source
+    else {
+        panic!("expected preflight-backed conflict evidence");
+    };
+    assert_eq!(expanded_preview.preview_id, preview.preview_id);
+    assert_eq!(
+        expanded_preview.source_ref,
+        preview.repository_snapshot.source_ref
+    );
+    assert_eq!(
+        expanded_preview.destination_ref,
+        preview.repository_snapshot.destination_ref
+    );
+    assert!(matches!(
+        expanded_preview.disposition,
+        NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
+    ));
+    assert_eq!(
+        database
+            .github_stack_recipient_state(
+                project_id.as_str(),
+                evidence.signal_id.as_str(),
+                requester.as_str(),
+            )
+            .await
+            .expect("recipient state"),
+        Some(GitHubStackDeliveryStateV1::Settled)
+    );
+    assert_eq!(
+        database
+            .github_stack_recipient_state(
+                project_id.as_str(),
+                other_signal.signal_id.as_str(),
+                other_recipient.as_str(),
+            )
+            .await
+            .expect("other recipient state"),
+        Some(GitHubStackDeliveryStateV1::HostPending)
+    );
     let stored = database
         .github_stack_signal(project_id.as_str(), signal.signal_id.as_str())
         .await
@@ -593,10 +829,55 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
 
         let (registry, owner) = mount(database.clone(), repository_root.clone()).await;
         let request_id = format!("request.native.journey.{index}");
-        let request = preflight_request(mode, &request_id);
+        let request = if index == 0 {
+            declared_preflight_request(&repository_root, &database, mode, &request_id)
+        } else {
+            preflight_request(mode, &request_id)
+        };
         let context = request.context.clone();
-        let frozen_selection = stack_snapshot(owner.clone(), request.topology.clone()).await;
-        let preview = preflight(owner.clone(), request).await;
+        let destination_scope = request.context.scope().clone();
+        let (frozen_selection, preview) = if index == 0 {
+            request.validate().expect("declared preflight request");
+            let NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
+                declared_revision,
+                source_node_id,
+                destination_node_id,
+                direction,
+                ..
+            } = &request.topology.selection
+            else {
+                panic!("expected declared stack binding");
+            };
+            let selection = NativeIntegrationSelectionV1::DeclaredStackEdge(
+                FrozenBranchStackSnapshotV1::new(
+                    declared_revision.as_ref().clone(),
+                    source_node_id.clone(),
+                    destination_node_id.clone(),
+                    *direction,
+                    OBSERVED_AT,
+                )
+                .expect("declared selection"),
+            );
+            let adapter = GixNativeIntegrationAdapter::open(
+                destination_scope.project_id.clone(),
+                destination_scope.repository_id.clone(),
+                &repository_root,
+            )
+            .expect("native adapter");
+            let preview = adapter
+                .preflight(
+                    &selection,
+                    &request,
+                    &CancellationToken::for_application_request("declared-terminal"),
+                )
+                .expect("declared eligible preview");
+            (selection, preview)
+        } else {
+            let selection = stack_snapshot(owner.clone(), request.topology.clone()).await;
+            let preview = preflight(owner.clone(), request).await;
+            (selection, preview)
+        };
+        let preview_for_signal = preview.clone();
         assert_eq!(preview.selection, frozen_selection);
         assert_eq!(
             preview.disposition,
@@ -617,6 +898,57 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         let source_tip = preview.repository_snapshot.source_tip.clone();
         let destination_tip = preview.repository_snapshot.destination_tip.clone();
         let ordered_commit_count = preview.ordered_commits.len();
+        if index == 0 {
+            let late_destination = directory.path().join("late-destination");
+            git(
+                &repository_root,
+                &[
+                    "worktree",
+                    "add",
+                    late_destination.to_str().expect("linked worktree path"),
+                    "destination",
+                ],
+            );
+            let linked_authority =
+                tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(
+                    &late_destination,
+                )
+                .expect("linked worktree authority");
+            assert!(
+                linked_authority
+                    .reference_is_checked_out("refs/heads/main")
+                    .expect("complete worktree inventory"),
+                "a linked authority must retain the primary checkout"
+            );
+            let adapter = GixNativeIntegrationAdapter::open(
+                destination_scope.project_id.clone(),
+                destination_scope.repository_id.clone(),
+                &repository_root,
+            )
+            .expect("native adapter");
+            let refused = adapter.apply(
+                &preview,
+                &CancellationToken::for_application_request("late-destination-refusal"),
+            );
+            assert_eq!(
+                refused,
+                Ok(NativeApplyEffectV1::FailedNoChange),
+                "a newly checked-out destination must terminate without changing Git state"
+            );
+            assert_eq!(
+                git(&repository_root, &["rev-parse", "refs/heads/destination"]),
+                destination_tip.as_str()
+            );
+            git(
+                &repository_root,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    late_destination.to_str().expect("linked worktree path"),
+                ],
+            );
+        }
         let approval = approval_for(&context, &preview, &request_id);
         owner
             .store()
@@ -679,6 +1011,141 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
                 assert_eq!(materialized_count, ordered_commit_count);
                 assert_ne!(receipt.final_ref_tip, source_tip);
             }
+        }
+
+        if index == 0 {
+            let stack_signal = super::stack_signals::signal_from_receipt(
+                &destination_scope,
+                &preview_for_signal,
+                &receipt,
+            )
+            .expect("terminal stack signal")
+            .expect("committed stack signal");
+            let now = UtcMicros(
+                i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("wall clock")
+                        .as_micros(),
+                )
+                .expect("wall clock micros"),
+            );
+            let expires_at = UtcMicros(now.0.saturating_add(60_000_000));
+            let expand_operation = tracedecay_contracts::git::git_surface_operation(
+                GITHUB_STACK_SIGNAL_EXPAND_OPERATION,
+            )
+            .expect("canonical Git operation")
+            .expect("declared Git operation");
+            let requester = ActorId::new("actor.native.terminal").expect("requester");
+            let grant = CapabilityGrantSnapshot::new(
+                CapabilityGrantId::new("grant.native.terminal").expect("grant id"),
+                1,
+                digest('7'),
+                ActorId::new("actor.native.issuer").expect("issuer"),
+                now,
+                expires_at,
+                destination_scope.clone(),
+                BTreeSet::from([expand_operation.capability_id().clone()]),
+                BTreeSet::from([expand_operation.use_case_id().clone()]),
+                DisclosureClass::Sensitive,
+            )
+            .expect("grant");
+            let live_context = RequestContext::new(
+                requester.clone(),
+                destination_scope.clone(),
+                grant,
+                RequestId::new("request.native.journey.terminal-expand").expect("request id"),
+                Deadline::new(expires_at).expect("deadline"),
+                CancellationContext::active("cancel.native.journey.terminal-expand")
+                    .expect("cancellation"),
+            )
+            .expect("live context");
+            let access = ProjectSourceAccessSnapshot {
+                scope: destination_scope.clone(),
+                requester: requester.clone(),
+                binding: ScopeSourceBinding::new(
+                    SourceBindingId::new("binding.native.terminal").expect("binding id"),
+                    SourceKindV1::GitHub,
+                    LocatorDigest::new(format!("sha256:{}", "8".repeat(64)))
+                        .expect("locator digest"),
+                    AuthorityRef::Project(destination_scope.project_id.clone()),
+                )
+                .expect("source binding"),
+                configuration_revision: ConfigurationRevisionId::new(
+                    "configuration.native.terminal",
+                )
+                .expect("configuration revision"),
+                configuration_digest: digest('9'),
+                configuration_provenance_digest: digest('a'),
+                effective_capabilities: BTreeSet::from([expand_operation.capability_id().clone()]),
+                grant_expires_at: expires_at,
+            };
+            let stack_runtime = owner
+                .mount_github_stack_runtime(
+                    database.clone(),
+                    destination_scope.clone(),
+                    access,
+                    Arc::new(DaemonGitHubStackCoordinatorV1::default()),
+                )
+                .expect("stack runtime");
+            stack_runtime
+                .enqueue_from_preflight(stack_signal.clone(), &live_context)
+                .expect("enqueue terminal signal");
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if stack_runtime
+                        .pending_host_deliveries()
+                        .is_ok_and(|pending| pending.len() == 1)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("publish terminal signal");
+            let expanded = stack_runtime
+                .expand(
+                    GitHubStackSignalExpandSurfaceRequest {
+                        signal_id: None,
+                        expected_watermark_id: Some(stack_signal.watermark_id),
+                    }
+                    .into_application_request(live_context),
+                    &CancellationSignal::active("cancel.native.journey.terminal-consumer")
+                        .expect("cancellation"),
+                )
+                .expect("expand terminal signal");
+            let GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence } = expanded else {
+                panic!("expected terminal stack evidence");
+            };
+            let tracedecay_contracts::git::GitHubStackSignalNativeSourceV1::Terminal {
+                preview,
+                terminal,
+            } = evidence.native_source
+            else {
+                panic!("expected receipt-backed terminal evidence");
+            };
+            assert_eq!(evidence.kind, StackSignalKindV1::IntegrationCommitted);
+            assert_eq!(preview.preview_id, preview_for_signal.preview_id);
+            assert_eq!(terminal.receipt_digest, receipt.receipt_digest);
+            assert_eq!(terminal.final_ref_tip, receipt.final_ref_tip);
+            assert_eq!(terminal.completed_at, receipt.completed_at);
+            assert_eq!(
+                terminal.outcome,
+                NativeIntegrationTerminalOutcomeV1::Committed
+            );
+            assert_eq!(
+                database
+                    .github_stack_recipient_state(
+                        destination_scope.project_id.as_str(),
+                        evidence.signal_id.as_str(),
+                        requester.as_str(),
+                    )
+                    .await
+                    .expect("terminal recipient state"),
+                Some(GitHubStackDeliveryStateV1::Settled)
+            );
+            drop(stack_runtime);
         }
 
         registry.shutdown().await.expect("shutdown owner registry");

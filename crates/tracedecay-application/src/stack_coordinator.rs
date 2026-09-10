@@ -13,8 +13,8 @@ use tracedecay_domain::{
     GitHubStackCapabilityStateV1, GitHubStackLayerSnapshotV1, GitHubStackSnapshotV1,
     GitTopologyAnchorTargetV1, ManifestDigest, ObservationScopeV1, PrivacyDomainBoundLocatorDigest,
     ProjectionGenerationId, ProviderId, PullRequestSnapshotAnchorRefV1, RefId, RepositoryId,
-    RetrievalAnchorId, StackSignalId, UtcMicros, WorkStackDriftObservedV1, canonical_sha256,
-    derive_git_topology_anchor_id,
+    RetrievalAnchorId, StackSignalId, StackSignalKindV1, UtcMicros, WorkStackDriftObservedV1,
+    canonical_sha256, derive_git_topology_anchor_id,
 };
 
 mod transition;

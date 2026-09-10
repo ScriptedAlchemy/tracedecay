@@ -365,7 +365,10 @@ impl ExactPairNativeIntegrationTopology {
                 root.scope().project_id == node.project_id
                     && root.scope().repository_id == node.repository_id
                     && root.scope().reference.as_ref() == Some(&node.reference)
-                    && node.worktree_id.as_ref() == Some(&root.scope().worktree_id)
+                    && node
+                        .worktree_id
+                        .as_ref()
+                        .is_none_or(|worktree_id| worktree_id == &root.scope().worktree_id)
             });
             let Some(root) = root else {
                 return Err(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
@@ -380,6 +383,13 @@ impl ExactPairNativeIntegrationTopology {
             let actual = occupied.get(&node.reference).cloned().unwrap_or_default();
             let expected = node.worktree_id.iter().cloned().collect::<BTreeSet<_>>();
             if actual != expected {
+                return Err(NativeIntegrationStackResolutionOutcomeV1::Stale);
+            }
+            let checked_out = self
+                .repository
+                .reference_is_checked_out(node.reference.as_str())
+                .map_err(|_| NativeIntegrationStackResolutionOutcomeV1::Unavailable)?;
+            if checked_out != node.worktree_id.is_some() {
                 return Err(NativeIntegrationStackResolutionOutcomeV1::Stale);
             }
         }

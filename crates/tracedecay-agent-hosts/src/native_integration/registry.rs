@@ -312,6 +312,7 @@ impl DaemonNativeIntegrationOwner {
             database,
             coordinator,
             self.service_arc(),
+            self.store.clone(),
         )?;
         runtimes.insert(scope.scope_digest.clone(), Arc::clone(&runtime));
         Ok(runtime)

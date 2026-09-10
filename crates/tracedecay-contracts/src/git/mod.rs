@@ -53,6 +53,8 @@ pub use stack_signal_expand::{
     GitHubStackSignalExpandPort, GitHubStackSignalExpandPortError,
     GitHubStackSignalExpandRequestV1, GitHubStackSignalExpandSurfaceRequest,
     GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandUnavailableV1,
+    GitHubStackSignalNativePreviewV1, GitHubStackSignalNativeSourceV1,
+    GitHubStackSignalNativeTerminalV1,
 };
 pub use surface_catalog::{
     git_surface_catalog_contribution, git_surface_handler_descriptors, git_surface_operation,

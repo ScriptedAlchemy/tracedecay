@@ -6,13 +6,13 @@
 //! identity from that canonical evidence.
 
 use tracedecay_application::stack_coordinator::{
-    StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalKindV1, StackSignalV1,
+    StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalV1,
 };
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     BranchStackRevisionV1, ManifestDigest, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
-    NativeIntegrationTerminalOutcomeV1, UtcMicros,
+    NativeIntegrationTerminalOutcomeV1, StackSignalKindV1, UtcMicros,
 };
 
 /// Produces the one truthful transition represented by a sealed preflight.
@@ -74,9 +74,6 @@ pub fn signal_from_receipt(
     }
     let kind = match receipt.status.terminal_outcome {
         Some(NativeIntegrationTerminalOutcomeV1::Committed) => {
-            if receipt.status.candidate_tip.as_ref() != Some(&receipt.final_ref_tip) {
-                return Err(StackCoordinatorErrorV1::Stale);
-            }
             StackSignalKindV1::IntegrationCommitted
         }
         Some(NativeIntegrationTerminalOutcomeV1::NeedsInspection) => {
@@ -111,21 +108,19 @@ fn declared_revision_for_scope<'a>(
         return Ok(None);
     };
     let destination = selection.destination().map_err(invalid)?;
+    let destination_occupancy = destination.worktree_id.as_ref();
     if destination.project_id != scope.project_id
         || destination.repository_id != scope.repository_id
         || scope.reference.as_ref() != Some(&destination.reference)
         || preview.repository_snapshot.project_id != scope.project_id
         || preview.repository_snapshot.repository_id != scope.repository_id
         || preview.repository_snapshot.destination_ref != destination.reference
-        || preview.repository_snapshot.destination_worktree_id.as_ref() != Some(&scope.worktree_id)
+        || preview.repository_snapshot.destination_worktree_id.as_ref() != destination_occupancy
         || preview.selection.source_tip().map_err(invalid)?
             != preview.repository_snapshot.source_tip
         || preview.selection.destination_tip().map_err(invalid)?
             != preview.repository_snapshot.destination_tip
-        || destination
-            .worktree_id
-            .as_ref()
-            .is_some_and(|worktree| worktree != &scope.worktree_id)
+        || destination_occupancy.is_some_and(|worktree| worktree != &scope.worktree_id)
     {
         return Err(StackCoordinatorErrorV1::Stale);
     }
@@ -374,7 +369,7 @@ mod tests {
         assert_eq!(signal.state_digest, committed.receipt_digest);
 
         let mut mismatched_commit = committed.clone();
-        mismatched_commit.final_ref_tip = oid('9');
+        mismatched_commit.status.preview_digest = digest('9');
         mismatched_commit = mismatched_commit.seal().expect("mismatched receipt");
         assert_eq!(
             signal_from_receipt(&scope, &preview, &mismatched_commit),
