@@ -347,11 +347,17 @@ pub struct ResumeWorkAttemptsCommand {
     pub occurred_at: UtcMicros,
 }
 
-/// What resume-after-restart did to each open attempt.
+/// What restart recovery did to each open attempt.
+///
+/// This report never claims that a provider resumed. An attempt in
+/// `recovery_required` remains fenced under its original identity; launching
+/// more work requires an explicit `retry_attempt` request with a new identity
+/// and the retry service's effect-safety checks.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkAttemptRecoveryReportV1 {
-    /// Attempts fenced onto a new epoch and now awaiting recovery execution.
+    /// Attempts fenced onto a new epoch and awaiting an explicit recovery
+    /// decision.
     pub recovery_required: Vec<WorkAttemptV1>,
     /// Attempts whose in-flight cancellation was completed during recovery.
     pub cancelled: Vec<WorkAttemptV1>,

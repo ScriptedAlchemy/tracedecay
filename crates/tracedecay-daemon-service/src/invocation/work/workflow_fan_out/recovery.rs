@@ -122,13 +122,7 @@ fn reconcile_active_workflow_fan_out_page(
 
 fn resume_work_attempts_for_workflow_recovery(
     registered: &RegisteredWorkRuntime,
-    workflows: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
-    attempt_processes: &Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
-    project_root: &Path,
-    observability_producer: Option<
-        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
-    >,
 ) -> Result<(), DaemonInvocationProblem> {
     let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
@@ -141,8 +135,9 @@ fn resume_work_attempts_for_workflow_recovery(
         );
         DaemonInvocationProblem::Unavailable
     })?;
-    let recovery = work
-        .attempts()
+    // Restart recovery fences open attempts and retains their uncertain
+    // outcome. It does not authorize dispatching an existing identity again.
+    work.attempts()
         .resume(
             context,
             &tracedecay_contracts::ResumeWorkAttemptsCommand {
@@ -157,57 +152,12 @@ fn resume_work_attempts_for_workflow_recovery(
             );
             DaemonInvocationProblem::Unavailable
         })?;
-    for attempt in recovery.recovery_required {
-        let binding = tracedecay_contracts::WorkflowRunStoragePort::fan_out_binding(
-            workflows.effects(),
-            attempt.identity(),
-        )
-        .map_err(workflow_run_storage_problem)?;
-        let paused = match binding {
-            Some(binding) => {
-                tracedecay_contracts::WorkflowRunStoragePort::projection(
-                    workflows.effects(),
-                    &binding.run_id,
-                )
-                .map_err(workflow_run_storage_problem)?
-                .status()
-                    == tracedecay_domain::WorkflowRunStatus::Paused
-            }
-            None => false,
-        };
-        if paused {
-            continue;
-        }
-        super::super::super::work_attempt_exec::spawn_attempt_execution(
-            registered.clone(),
-            Arc::clone(attempt_processes),
-            project_root.to_path_buf(),
-            attempt,
-            observability_producer.clone(),
-        );
-    }
     Ok(())
 }
 
 fn recover_workflow_fan_out_startup(
     registered: &RegisteredWorkRuntime,
-    attempt_processes: &Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
-    project_root: &Path,
-    observability_producer: Option<
-        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
-    >,
 ) -> Result<(), DaemonInvocationProblem> {
-    let workflows = tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
-        &registered.database,
-    )
-    .map_err(|error| {
-        tracing::error!(
-            ?error,
-            stage = "workflow_application_services",
-            "workflow fan-out startup recovery authority failed"
-        );
-        DaemonInvocationProblem::Unavailable
-    })?;
     let context = workflow_fan_out_recovery_context(registered).map_err(|error| {
         tracing::error!(
             ?error,
@@ -216,14 +166,7 @@ fn recover_workflow_fan_out_startup(
         );
         DaemonInvocationProblem::Unavailable
     })?;
-    resume_work_attempts_for_workflow_recovery(
-        registered,
-        &workflows,
-        &context,
-        attempt_processes,
-        project_root,
-        observability_producer,
-    )
+    resume_work_attempts_for_workflow_recovery(registered, &context)
 }
 
 fn workflow_fan_out_recovery_context(
@@ -300,16 +243,8 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    let resume_attempt_processes = Arc::clone(&attempt_processes);
-                    let resume_project_root = project_root.clone();
-                    let resume_producer = observability_producer.clone();
                     let mut resume = tokio::task::spawn_blocking(move || {
-                        recover_workflow_fan_out_startup(
-                            &resume_registered,
-                            &resume_attempt_processes,
-                            &resume_project_root,
-                            resume_producer,
-                        )
+                        recover_workflow_fan_out_startup(&resume_registered)
                     });
                     let resumed = tokio::select! {
                         biased;

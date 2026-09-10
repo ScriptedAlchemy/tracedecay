@@ -122,7 +122,6 @@ pub(super) fn reconcile_workflow_fan_out(
 
         let mut active = 0usize;
         let mut terminal = Vec::new();
-        let mut recovery_required = Vec::new();
         let mut known = std::collections::BTreeSet::new();
         for identity in projection.released_fan_out_attempts() {
             if !plan
@@ -148,9 +147,11 @@ pub(super) fn reconcile_workflow_fan_out(
                     if attempt.state()
                         == tracedecay_domain::WorkAttemptStateV1::RecoveryRequired =>
                 {
+                    // The prior dispatch has an unknown outcome. Keep its
+                    // workflow slot active without launching the same child
+                    // identity again.
                     known.insert(identity.clone());
                     active += 1;
-                    recovery_required.push(attempt);
                 }
                 Ok(_) => {
                     known.insert(identity.clone());
@@ -177,15 +178,6 @@ pub(super) fn reconcile_workflow_fan_out(
                 &plan.plan_digest,
                 observed_at,
             )?;
-        }
-        for attempt in recovery_required {
-            super::super::work_attempt_exec::spawn_attempt_execution(
-                registered.clone(),
-                Arc::clone(&attempt_processes),
-                project_root.to_path_buf(),
-                attempt,
-                observability_producer.clone(),
-            );
         }
         let failed_fast = plan.failure_policy
             == tracedecay_domain::WorkflowFanOutFailurePolicyV1::FailFast
