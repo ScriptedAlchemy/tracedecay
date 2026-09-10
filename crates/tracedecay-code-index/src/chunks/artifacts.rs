@@ -5,6 +5,7 @@ use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
+    import_module_kind,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1, SourceSpan,
@@ -104,18 +105,6 @@ impl CodeIndexImportEvidenceV1 {
             ));
         }
 
-        let is_project_relative = self.module_specifier.starts_with("./")
-            || self.module_specifier.starts_with("../")
-            || self.module_specifier.starts_with("crate::");
-        let module_kind_is_valid = matches!(
-            (self.module_kind, is_project_relative),
-            (ImportModuleKindV1::ProjectRelative, true) | (ImportModuleKindV1::BareModule, false)
-        );
-        if !module_kind_is_valid {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "import module kind does not match its module specifier".to_owned(),
-            ));
-        }
         Ok(())
     }
 }
@@ -336,6 +325,14 @@ impl CodeFileIndexArtifactsV1 {
         &self,
         extraction: &ExtractionBatchV1,
     ) -> Result<(), ChunkingFailureV1> {
+        if self.imports.iter().any(|row| {
+            import_module_kind(extraction.language.as_str(), &row.module_specifier)
+                != Some(row.module_kind)
+        }) {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "import module kind does not match its language and module specifier".to_owned(),
+            ));
+        }
         extraction
             .parser_import_rows_digest
             .validate()

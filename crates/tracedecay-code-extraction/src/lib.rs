@@ -129,6 +129,7 @@ pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
 pub use extraction_artifact::{
     ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
+    import_module_kind,
 };
 pub use go_extractor::GoExtractor;
 pub use java_extractor::JavaExtractor;

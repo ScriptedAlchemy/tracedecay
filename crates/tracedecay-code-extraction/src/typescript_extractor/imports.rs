@@ -3,7 +3,7 @@ use tree_sitter::Node as TsNode;
 
 use crate::common::local_node_id;
 use crate::extraction_artifact::{
-    ExtractedImportEvidenceV1, ImportModuleKindV1, ImportNamespaceV1,
+    ExtractedImportEvidenceV1, ImportModuleKindV1, ImportNamespaceV1, import_module_kind,
 };
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -76,7 +76,9 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
     let Some(module_specifier) = module_specifier else {
         return;
     };
-    let module_kind = classify_module(&module_specifier);
+    let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
+        return;
+    };
     let statement_namespace =
         if has_unnamed_child_kind(node, "type") || has_unnamed_child_kind(node, "typeof") {
             ImportNamespaceV1::Type
@@ -312,13 +314,5 @@ fn has_unnamed_child_kind(node: TsNode<'_>, kind: &str) -> bool {
         if !cursor.goto_next_sibling() {
             return false;
         }
-    }
-}
-
-fn classify_module(module_specifier: &str) -> ImportModuleKindV1 {
-    if module_specifier.starts_with("./") || module_specifier.starts_with("../") {
-        ImportModuleKindV1::ProjectRelative
-    } else {
-        ImportModuleKindV1::BareModule
     }
 }

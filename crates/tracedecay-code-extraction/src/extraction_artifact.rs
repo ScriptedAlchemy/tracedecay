@@ -22,6 +22,40 @@ pub enum ImportModuleKindV1 {
     ProjectRelative,
 }
 
+/// Classify a module specifier using the importing language's syntax.
+pub fn import_module_kind(language: &str, module_specifier: &str) -> Option<ImportModuleKindV1> {
+    match language {
+        "rust" => Some(rust_import_module_kind(module_specifier)),
+        "typescript" | "tsx" | "javascript" | "astro" | "svelte" => {
+            Some(typescript_import_module_kind(module_specifier))
+        }
+        _ => return None,
+    }
+}
+
+pub(crate) fn rust_import_module_kind(module_specifier: &str) -> ImportModuleKindV1 {
+    let project_relative = matches!(module_specifier, "crate" | "self" | "super")
+        || module_specifier.starts_with("crate::")
+        || module_specifier.starts_with("self::")
+        || module_specifier.starts_with("super::");
+    if project_relative {
+        ImportModuleKindV1::ProjectRelative
+    } else {
+        ImportModuleKindV1::BareModule
+    }
+}
+
+pub(crate) fn typescript_import_module_kind(module_specifier: &str) -> ImportModuleKindV1 {
+    if matches!(module_specifier, "." | "..")
+        || module_specifier.starts_with("./")
+        || module_specifier.starts_with("../")
+    {
+        ImportModuleKindV1::ProjectRelative
+    } else {
+        ImportModuleKindV1::BareModule
+    }
+}
+
 /// One parser-backed import binding or side-effect statement.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(deny_unknown_fields)]
@@ -77,5 +111,35 @@ impl ExtractionArtifactV1 {
     pub(crate) fn canonicalize_order(&mut self) {
         self.result.canonicalize_order();
         self.imports.sort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ImportModuleKindV1, import_module_kind};
+
+    #[test]
+    fn module_kind_uses_the_importing_language_syntax() {
+        for specifier in [
+            "crate",
+            "crate::target",
+            "self",
+            "self::target",
+            "super",
+            "super::target",
+        ] {
+            assert_eq!(
+                import_module_kind("rust", specifier),
+                Some(ImportModuleKindV1::ProjectRelative)
+            );
+        }
+        assert_eq!(
+            import_module_kind("typescript", "crate"),
+            Some(ImportModuleKindV1::BareModule)
+        );
+        assert_eq!(
+            import_module_kind("typescript", "../target"),
+            Some(ImportModuleKindV1::ProjectRelative)
+        );
     }
 }
