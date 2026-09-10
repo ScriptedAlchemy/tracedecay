@@ -102,6 +102,27 @@ fn temporal_relation_error(
     }
 }
 
+fn root_query_enforces_observation_filter(
+    scope: &TemporalRetrievalScope,
+    channel: CandidateChannel,
+    filter: &TemporalCandidateFilterV1,
+) -> bool {
+    matches!(scope, TemporalRetrievalScope::AllSessionsInAuthorizedRoot)
+        && filter.message_type == TemporalMessageTypeFilterV1::DirectUser
+        && filter.source.is_none()
+        && filter.roles.is_empty()
+        && !filter.goals
+        && matches!(
+            channel,
+            CandidateChannel::ExactMessage
+                | CandidateChannel::Phrase
+                | CandidateChannel::Entity
+                | CandidateChannel::Lexical
+                | CandidateChannel::Span
+                | CandidateChannel::Burst
+        )
+}
+
 fn observation_matches_filter(
     encoded: &str,
     occurrence_role: &str,
@@ -346,6 +367,13 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         {
             return Ok(true);
         }
+        if root_query_enforces_observation_filter(
+            request.retrieval_scope(),
+            candidate.channel,
+            filter,
+        ) {
+            return Ok(true);
+        }
         self.candidate_observations_match(candidate, filter, request)
             .await
     }
@@ -557,6 +585,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         {
             count += 1;
             if count > MAX_SUMMARY_SOURCES_PER_RECORD {
+                hotpath::gauge!("session_temporal.query.budget.semantic_filter_sources").inc(1.0);
                 return Err(TemporalPortError::BudgetExceeded {
                     resource: "semantic filter source count",
                 });
@@ -647,6 +676,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         {
             count += 1;
             if count > MAX_SUMMARY_SOURCES_PER_RECORD {
+                hotpath::gauge!("session_temporal.query.budget.semantic_filter_sources").inc(1.0);
                 return Err(TemporalPortError::BudgetExceeded {
                     resource: "semantic filter source count",
                 });
