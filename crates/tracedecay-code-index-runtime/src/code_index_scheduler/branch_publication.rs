@@ -18,7 +18,7 @@ use tracedecay_runtime_core::branch_meta::{
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-use super::registry::ServingGenerationInstallationV1;
+use super::registry::{CodeIndexServingScopeV1, ServingGenerationInstallationV1};
 use super::{
     CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
@@ -480,6 +480,7 @@ impl BranchPublicationContextV1 {
                 .await;
             if let Some(generation) = scope
                 .serving_generation
+                .as_ref()
                 .filter(|generation| generation_matches_branch_source(generation, source))
                 && freshness.as_ref().is_some_and(|freshness| {
                     freshness.latest_generation_id.as_deref()
@@ -490,7 +491,7 @@ impl BranchPublicationContextV1 {
                         )
                 })
                 && let ServingGenerationInstallationOutcomeV1::Installed(installation) = schedulers
-                    .install_exact_serving_generation(canonical_worktree_root, &generation)
+                    .install_exact_serving_generation(canonical_worktree_root, generation)
                     .await
             {
                 return Ok(installation);
@@ -500,6 +501,8 @@ impl BranchPublicationContextV1 {
                 return Err(branch_generation_timeout_error(
                     canonical_worktree_root,
                     source,
+                    &scope,
+                    freshness.as_ref(),
                 ));
             }
             if freshness
@@ -511,6 +514,8 @@ impl BranchPublicationContextV1 {
                 return Err(branch_generation_timeout_error(
                     canonical_worktree_root,
                     source,
+                    &scope,
+                    freshness.as_ref(),
                 ));
             }
             tokio::select! {
@@ -608,17 +613,64 @@ pub(super) fn branch_generation_work_is_active(freshness: &CodeIndexWorktreeFres
 fn branch_generation_timeout_error(
     canonical_worktree_root: &Path,
     source: &BranchGraphSourceDraftV1,
+    scope: &CodeIndexServingScopeV1,
+    freshness: Option<&CodeIndexWorktreeFreshnessV1>,
 ) -> TraceDecayError {
+    let expected = serde_json::json!({
+        "project": source.project_id,
+        "repository": source.repository_id,
+        "worktree": source.worktree_id,
+        "root": canonical_worktree_root.display().to_string(),
+        "ref": source.reference,
+        "revision": source.source_oid,
+    });
     TraceDecayError::project_route(
         CODE_INDEX_ACTIVATION_UNAVAILABLE,
         true,
         format!(
-            "code-index scheduler did not publish exact branch source '{}' at '{}' for '{}'",
-            source.reference,
-            source.source_oid,
-            canonical_worktree_root.display()
+            "code-index scheduler did not publish exact branch source: expected={expected} observed={}",
+            branch_generation_observation(scope, freshness),
         ),
     )
+}
+
+fn branch_generation_observation(
+    scope: &CodeIndexServingScopeV1,
+    freshness: Option<&CodeIndexWorktreeFreshnessV1>,
+) -> serde_json::Value {
+    let serving = scope.serving_generation.as_deref();
+    let serving_snapshot = serving.map(CodeIndexPublishedGenerationV1::snapshot);
+    let terminal_error = freshness.and_then(|freshness| {
+        freshness
+            .parked
+            .as_ref()
+            .map(|parked| parked.reason.as_str())
+            .or_else(|| match freshness.code_graph_serving.as_ref() {
+                Some(CodeGraphServingReadinessV1::Refused { reason }) => Some(reason.as_str()),
+                Some(CodeGraphServingReadinessV1::Unavailable { reason })
+                    if !freshness.rebuild_in_flight =>
+                {
+                    Some(reason.as_str())
+                }
+                _ => None,
+            })
+    });
+    serde_json::json!({
+        "mounted": {
+            "repository": scope.repository_id.as_str(),
+            "worktree": scope.worktree_id.as_str(),
+        },
+        "serving": serving.map(|generation| serde_json::json!({
+            "project": generation.manifest().project_id.as_str(),
+            "repository": serving_snapshot.map(|snapshot| snapshot.repository.as_str()),
+            "worktree": serving_snapshot.and_then(|snapshot| snapshot.worktree.as_ref()),
+            "ref": serving_snapshot.and_then(|snapshot| snapshot.reference.as_ref()),
+            "revision": serving_snapshot.and_then(|snapshot| snapshot.source_revision.as_ref()),
+            "generation": generation.manifest().generation_id.as_str(),
+        })),
+        "freshness": freshness,
+        "terminal_error": terminal_error,
+    })
 }
 
 fn generation_matches_branch_source(
