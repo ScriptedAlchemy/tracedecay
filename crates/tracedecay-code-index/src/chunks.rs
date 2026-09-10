@@ -2138,10 +2138,10 @@ fn cross_file_reference_candidate(
 /// The structural compatibility matrix between a reference's edge kind and a
 /// candidate target's node kind. Deliberately conservative where the edge
 /// kind constrains the target shape: `Implements`/`Extends`/`DerivesMacro`
-/// must bind a trait-shaped target and `Calls` a callable one — otherwise a
-/// `Calls` ref named `new` happily binds a same-file `struct new`, and an
-/// `impl Default for X` ref poisons rank/impls by binding an unrelated
-/// `Default` enum variant. Everything else stays permissive.
+/// must bind a trait-shaped target, `Calls` a callable one, and `TypeOf` an
+/// actual type declaration. Otherwise a same-named value or implementation
+/// block can make a valid declaration look ambiguous. Everything else stays
+/// permissive.
 fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &str) -> bool {
     match canonical_relation_kind(&reference_kind) {
         Some(kind) => relation_target_kind_is_compatible(kind, target_kind),
@@ -2184,6 +2184,30 @@ pub(crate) fn relation_target_kind_is_compatible(
                 | NodeKind::ArrowFunction
                 | NodeKind::Procedure
                 | NodeKind::Macro
+        ),
+        RelationEdgeKindV1::TypeOf => matches!(
+            target_kind,
+            NodeKind::Struct
+                | NodeKind::Enum
+                | NodeKind::Trait
+                | NodeKind::TypeAlias
+                | NodeKind::Class
+                | NodeKind::Interface
+                | NodeKind::InnerClass
+                | NodeKind::Annotation
+                | NodeKind::InterfaceType
+                | NodeKind::CaseClass
+                | NodeKind::GenericParam
+                | NodeKind::Union
+                | NodeKind::Typedef
+                | NodeKind::DataClass
+                | NodeKind::SealedClass
+                | NodeKind::KotlinObject
+                | NodeKind::Mixin
+                | NodeKind::Delegate
+                | NodeKind::Record
+                | NodeKind::PascalRecord
+                | NodeKind::ProtoMessage
         ),
         RelationEdgeKindV1::Annotates => matches!(
             target_kind,
@@ -3778,6 +3802,56 @@ pub fn real_symbol() {}
             ["target", "target"]
         );
         assert_ne!(calls[0].evidence_span, calls[1].evidence_span);
+    }
+
+    #[test]
+    fn field_type_resolves_to_declaration_when_an_impl_has_the_same_name() {
+        let source = concat!(
+            "pub trait Processor { fn process(&self, value: i32) -> i32; }\n",
+            "pub struct Doubler;\n",
+            "impl Processor for Doubler {\n",
+            "    fn process(&self, value: i32) -> i32 { value * 2 }\n",
+            "}\n",
+            "pub struct Holder { pub processor: Doubler }\n",
+        );
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let holder_field = artifacts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.simple_name == "processor")
+            .expect("Holder::processor field");
+        let doubler = artifacts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.simple_name == "Doubler" && symbol.kind == "struct")
+            .expect("Doubler struct");
+        assert!(
+            artifacts
+                .symbols
+                .iter()
+                .any(|symbol| symbol.simple_name == "Doubler" && symbol.kind == "impl"),
+            "fixture must reproduce the same-name implementation candidate"
+        );
+
+        let type_edges = artifacts
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == holder_field.occurrence
+                    && edge.kind == RelationEdgeKindV1::TypeOf
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(type_edges.len(), 1, "field type must resolve exactly once");
+        assert_eq!(type_edges[0].to_occurrence, doubler.occurrence);
+        assert_eq!(
+            &source[type_edges[0].evidence_span.start_byte as usize
+                ..type_edges[0].evidence_span.end_byte as usize],
+            "Doubler"
+        );
     }
 
     #[test]
