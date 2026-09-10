@@ -2717,28 +2717,36 @@ impl CodeIndexPublishedGenerationV1 {
             capability: &self.capability,
             generation_evidence: &generation_evidence,
         };
-        let generation_bytes = serde_json::to_vec(&generation).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation manifest serialization failed: {error}"
-            ))
-        })?;
-        let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        let generation =
-            RawValue::from_string(String::from_utf8(generation_bytes).map_err(|error| {
+        let generation_bytes = hotpath::measure_block!(
+            "code_index.sealed_encode.manifest_serialize",
+            serde_json::to_vec(&generation).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation manifest is not UTF-8: {error}"
+                    "sealed generation manifest serialization failed: {error}"
                 ))
-            })?)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        serde_json::to_vec(&PartitionedEnvelopeRefV1 {
-            state_digest: &state_digest,
-            generation: &generation,
-        })
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation manifest serialization failed: {error}"
-            ))
+            })
+        )?;
+        let state_digest = hotpath::measure_block!(
+            "code_index.sealed_encode.manifest_digest",
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+        )?;
+        hotpath::measure_block!("code_index.sealed_encode.manifest_envelope", {
+            let generation =
+                RawValue::from_string(String::from_utf8(generation_bytes).map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "sealed generation manifest is not UTF-8: {error}"
+                    ))
+                })?)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+            serde_json::to_vec(&PartitionedEnvelopeRefV1 {
+                state_digest: &state_digest,
+                generation: &generation,
+            })
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation manifest serialization failed: {error}"
+                ))
+            })
         })
     }
 

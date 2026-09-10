@@ -2349,10 +2349,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                                     "sealed segment length exceeds u64".to_owned(),
                                 )
                             })?;
-                            self.publish_segment_durable(digest, bytes)
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(error.to_string())
-                                })?;
+                            hotpath::measure_block!(
+                                "code_index.generation.publish.segment_durable",
+                                self.publish_segment_durable(digest, bytes)
+                            )
+                            .map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(error.to_string())
+                            })?;
                             #[cfg(test)]
                             if let Some(observer) = self.seal_segment_observer.as_ref() {
                                 observer();
@@ -2367,11 +2370,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             page_digest,
                             bytes,
                         } => {
-                            evidence_pack
-                                .append_page(page_ordinal, page_digest, bytes)
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(error.to_string())
-                                })?;
+                            hotpath::measure_block!(
+                                "code_index.generation.publish.evidence_page_append",
+                                evidence_pack.append_page(page_ordinal, page_digest, bytes)
+                            )
+                            .map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(error.to_string())
+                            })?;
                             self.seal_evidence_page_count
                                 .fetch_add(1, Ordering::Relaxed);
                         }
@@ -2380,17 +2385,18 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             segment_size_bytes,
                             page_count,
                         } => {
-                            if evidence_pack
-                                .commit(
+                            if hotpath::measure_block!(
+                                "code_index.generation.publish.evidence_commit",
+                                evidence_pack.commit(
                                     &self.segments_root,
                                     segment_digest,
                                     segment_size_bytes,
                                     page_count,
                                 )
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(error.to_string())
-                                })?
-                            {
+                            )
+                            .map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(error.to_string())
+                            })? {
                                 self.seal_evidence_durable_transaction_count
                                     .fetch_add(1, Ordering::Relaxed);
                             }
