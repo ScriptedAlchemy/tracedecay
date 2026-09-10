@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-use super::{VerifiedAnalysisSymbol, path_is_rust, verified_analysis_symbols};
+use super::{
+    VerifiedAnalysisSymbol, path_is_rust, verified_analysis_symbols, verified_analysis_unavailable,
+};
 use crate::ToolResult;
 use crate::handlers::support::{effective_path, rendered_tool_result};
 use crate::tools::render;
@@ -159,7 +161,7 @@ pub async fn handle_unsafe_patterns(
     // it belongs on a blocking worker like the sibling analysis scans.
     let scan_project_root = project_root.to_path_buf();
     let (matches, by_kind, touched) = hotpath::future!(
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<_> {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
             let mut matches: Vec<Value> = Vec::new();
@@ -167,8 +169,8 @@ pub async fn handle_unsafe_patterns(
             let mut touched: Vec<String> = Vec::new();
 
             'outer: for file in &files {
-                let in_test = path_looks_like_test(file);
-                if exclude_tests && in_test {
+                let test_file = path_looks_like_test(file);
+                if exclude_tests && test_file {
                     continue;
                 }
                 let abs_path = scan_project_root.join(file);
@@ -200,18 +202,37 @@ pub async fn handle_unsafe_patterns(
                 } else {
                     source.clone()
                 };
+                let test_lines = if path_is_rust(file) {
+                    tracedecay_code_extraction::source_mask::rust_test_lines(&source).map_err(
+                        |error| {
+                            verified_analysis_unavailable(
+                                "unsafe-pattern-test-scope",
+                                &format!("failed to classify Rust test scopes in {file}: {error}"),
+                            )
+                        },
+                    )?
+                } else {
+                    Vec::new()
+                };
                 // Masking can erase every raw hit (all of them in comments or
                 // string literals), so the file's nodes are fetched only once a
                 // real match survives.
                 for (idx, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
                     let line_no = (idx as u32) + 1;
+                    // A mixed test/production line is not wholly test scope,
+                    // so keep its production risk visible.
+                    let in_test = test_file || test_lines.get(idx).copied().unwrap_or(false);
+                    if exclude_tests && in_test {
+                        continue;
+                    }
                     for kind in &kinds {
                         if line_matches_unsafe_kind(masked_line, kind) {
                             let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
                             let enclosing = nodes
                                 .iter()
                                 .filter(|n| {
-                                    n.metadata.start_line <= line_no && line_no <= n.end_line()
+                                    n.metadata.start_line.saturating_add(1) <= line_no
+                                        && line_no <= n.end_line().saturating_add(1)
                                 })
                                 .min_by_key(|n| n.metadata.line_span)
                                 .map(|n| n.metadata.qualified_name.clone());
@@ -234,14 +255,14 @@ pub async fn handle_unsafe_patterns(
                     }
                 }
             }
-            (matches, by_kind, touched)
+            Ok((matches, by_kind, touched))
         }),
         label = "mcp.analysis.unsafe_patterns.scan"
     )
     .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_unsafe_patterns scan failed to join: {join_error}"),
-    })?;
+    })??;
 
     let payload = hotpath::measure_block!("mcp.analysis.unsafe_patterns.assemble", {
         let counts = serde_json::to_value(&by_kind).map_err(|error| TraceDecayError::Config {

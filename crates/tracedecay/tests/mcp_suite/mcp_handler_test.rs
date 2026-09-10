@@ -30,6 +30,7 @@ mod schema_test;
 mod session_search_test;
 mod skills_automation_test;
 mod status_runtime_test;
+mod unsafe_patterns_test;
 
 // Shared lock used by sibling transport suites.
 #[cfg(feature = "test-transport")]
