@@ -7052,7 +7052,6 @@ impl CodeIndexSchedulerRegistryV1 {
         Some(
             tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
                 metadata.manifest().generation_id.clone(),
-                metadata.manifest().seal.sealed_at,
                 snapshot.repository.clone(),
                 snapshot.worktree.clone(),
                 snapshot.reference.clone(),
