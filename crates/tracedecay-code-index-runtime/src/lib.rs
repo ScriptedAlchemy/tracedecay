@@ -54,7 +54,6 @@ pub mod git_index_transactions;
 pub mod git_transactions;
 #[cfg(unix)]
 pub mod git_watch;
-pub(crate) mod logging;
 pub mod mcp_admission;
 pub(crate) mod ports;
 pub mod project_reads;
