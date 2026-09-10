@@ -1,8 +1,13 @@
 //! `tracedecay_runtime` — daemon, store, and session-observation health, including the optional doctor report.
 
-use tracedecay_application::semantic_runtime::project_lifecycle_status;
+use std::time::Duration;
 
-use super::*;
+use serde_json::{Value, json};
+use tracedecay_application::semantic_runtime::project_lifecycle_status;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
+
+use crate::{McpDoctorReportV1, McpToolContext, ToolResult, generic_tool_result};
 
 /// Bound for the session-temporal doctor probe so a wedged sessions DB cannot
 /// monopolize a `tracedecay_runtime` request indefinitely.
@@ -118,84 +123,74 @@ async fn literal_workspace_placeholder_transcript_paths(
     paths
 }
 
-async fn attach_doctor_report(
-    value: &mut Value,
-    reader: Option<&tracedecay_dashboard_api::DoctorReportReader>,
-) {
-    value["doctor_report"] = match reader {
-        Some(reader) => match reader().await {
-            Ok(admitted) => json!({
-                "kind": "observed",
-                "report": admitted.report,
-                "table_growth_evidence": admitted.table_growth_evidence,
-            }),
-            Err(_) => json!({
-                "kind": "unknown",
-                "table_growth_evidence": [],
-            }),
-        },
-        None => json!({
+fn attach_doctor_report(value: &mut Value, report: McpDoctorReportV1<'_>) {
+    value["doctor_report"] = match report {
+        McpDoctorReportV1::Read(admitted) => json!({
+            "kind": "observed",
+            "report": admitted.report,
+            "table_growth_evidence": admitted.table_growth_evidence,
+        }),
+        McpDoctorReportV1::ReadFailed => json!({
+            "kind": "unknown",
+            "table_growth_evidence": [],
+        }),
+        McpDoctorReportV1::NotAttached => json!({
             "kind": "unsupported",
             "table_growth_evidence": [],
         }),
     };
 }
 
-pub(crate) async fn collect_database_snapshot(
-    cg: &TraceDecay,
+pub async fn collect_database_snapshot(
+    ctx: &McpToolContext<'_>,
     include_integrity: bool,
-    generation_census_reader: Option<
-        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    generation_census: Option<
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot,
     >,
 ) -> Result<tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot> {
-    let db_path = cg.db_path();
+    let database = ctx.graph_database();
+    let db_path = ctx.graph_db_path();
+    let store_runtime = ctx.store_runtime();
     let collected = tracedecay_runtime_core::store_telemetry::collect_store_telemetry(
-        cg.db(),
-        cg.project_root().to_path_buf(),
-        db_path.clone(),
+        database,
+        ctx.project_root().to_path_buf(),
+        db_path.to_path_buf(),
         include_integrity,
     )
     .await?;
-    let generation_census = match generation_census_reader {
-        Some(reader) => {
-            hotpath::future!(reader(), label = "runtime_ports.generation_census").await
-        }
-        None => {
-            tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
-            }
-        }
-    };
+    let generation_census = generation_census.cloned().unwrap_or(
+        tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+            reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+        },
+    );
     Ok(
         tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot::from_collected(
             collected,
             tracedecay_session_memory::runtime_telemetry::read_dirty_marker(
-                &tracedecay_session_memory::runtime_telemetry::with_suffix(&db_path, ".dirty"),
+                &tracedecay_session_memory::runtime_telemetry::with_suffix(db_path, ".dirty"),
             ),
             generation_census,
             tracedecay_session_memory::runtime_telemetry::RuntimeRegistrySnapshot::from_projection(
-                cg.store_runtime_registry().runtime_telemetry(),
+                store_runtime.runtime_telemetry(),
             ),
         ),
     )
 }
 
 async fn collect_runtime_snapshot(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     include_integrity: bool,
-    generation_census_reader: Option<
-        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
-    >,
+    tracedecay_version: &str,
 ) -> Result<tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot> {
     tracedecay_session_memory::runtime_telemetry::read_cached_process_sample();
     let database =
-        collect_database_snapshot(cg, include_integrity, generation_census_reader).await?;
+        collect_database_snapshot(ctx, include_integrity, ctx.generation_census()).await?;
     let process = tracedecay_session_memory::runtime_telemetry::read_cached_process_sample_at_response_boundary()
         .await;
     Ok(
         tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot {
             captured_at: tracedecay_session_memory::runtime_telemetry::unix_epoch_secs()?,
-            tracedecay_version: crate::version::build_version()?.to_owned(),
+            tracedecay_version: tracedecay_version.to_owned(),
             host_os: std::env::consts::OS.to_owned(),
             process,
             database,
@@ -206,22 +201,18 @@ async fn collect_runtime_snapshot(
 /// Surfaces process and database telemetry so users hitting unexpected
 /// CPU/RAM pressure can attach a structured snapshot to a bug report.
 #[hotpath::measure(label = "mcp.health.runtime.total")]
-pub(crate) async fn handle_runtime(
-    cg: &TraceDecay,
+pub async fn handle_runtime(
+    ctx: &McpToolContext<'_>,
     args: Value,
-    registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
-    project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
-    doctor_report_reader: Option<&tracedecay_dashboard_api::DoctorReportReader>,
-    generation_census_reader: Option<
-        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
-    >,
+    registry: Option<&RegisteredGlobalDb>,
+    tracedecay_version: &str,
 ) -> Result<ToolResult> {
     let authority_audit = args
         .get("authority_audit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let snap = hotpath::future!(
-        collect_runtime_snapshot(cg, authority_audit, generation_census_reader),
+        collect_runtime_snapshot(ctx, authority_audit, tracedecay_version),
         label = "mcp.health.runtime.telemetry"
     )
     .await?;
@@ -257,7 +248,10 @@ pub(crate) async fn handle_runtime(
                 if include_session_temporal_health {
                     Some(
                         hotpath::future!(
-                            session_temporal_health_value(project_session_db),
+                            session_temporal_health_value(
+                                ctx.authorized_project_session_db()
+                                    .map(|(lease, _)| lease.as_ref()),
+                            ),
                             label = "mcp.health.runtime.session_temporal"
                         )
                         .await,
@@ -289,8 +283,9 @@ pub(crate) async fn handle_runtime(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        match project_session_db {
-            Some(db) => {
+        match ctx.authorized_project_session_db() {
+            Some((lease, _)) => {
+                let db = lease.as_ref();
                 value["cursor_session_ingest"] = match hotpath::future!(
                     db.cursor_session_ingest_health(),
                     label = "mcp.health.runtime.session_ingest"
@@ -333,8 +328,8 @@ pub(crate) async fn handle_runtime(
             None => {
                 value["cursor_session_ingest"] = json!({
                     "status": "unavailable",
-                    "reason": "session_store_unavailable",
-                    "message": "daemon project session authority is unavailable",
+                    "reason": "session_store_denied",
+                    "message": "this request is not authorized to read the admitted project session store",
                 });
             }
         }
@@ -344,14 +339,10 @@ pub(crate) async fn handle_runtime(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        hotpath::future!(
-            attach_doctor_report(&mut value, doctor_report_reader),
-            label = "mcp.health.runtime.doctor_report"
-        )
-        .await;
+        attach_doctor_report(&mut value, ctx.doctor_report());
     }
     let semantic_configuration = hotpath::future!(
-        cg.configuration_runtime().client().current(),
+        ctx.configuration_runtime().client().current(),
         label = "mcp.health.runtime.semantic"
     )
     .await
@@ -364,14 +355,14 @@ pub(crate) async fn handle_runtime(
     });
     value["semantic_runtime"] = serde_json::to_value(
         tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
-            Some(cg.project_root()),
+            Some(ctx.project_root()),
             semantic_configuration,
         ),
     )
     .unwrap_or_else(|_| json!({}));
-    value["semantic_model"] = json!(project_lifecycle_status(cg.project_root()));
+    value["semantic_model"] = json!(project_lifecycle_status(ctx.project_root()));
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(ctx.project_root()),
         &args,
         &value,
         vec![],
@@ -386,7 +377,7 @@ mod tests {
     async fn requested_doctor_report_is_typed_unavailable_without_reader() {
         let mut value = json!({});
 
-        attach_doctor_report(&mut value, None).await;
+        attach_doctor_report(&mut value, McpDoctorReportV1::NotAttached);
 
         assert_eq!(
             value["doctor_report"],

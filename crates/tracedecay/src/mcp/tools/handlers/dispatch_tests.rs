@@ -525,10 +525,15 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         )
         .await
         .unwrap();
-    let options = || ToolCallRegistryOptions {
-        registered_project_session_db: runtime
-            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project),
-        ..Default::default()
+    let options = || {
+        ToolCallRegistryOptions {
+            registered_project_session_db: runtime.registered_database_arc(
+                tracedecay_sessions::admission::HostAdmissionScope::Project,
+            ),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits")
     };
     let status = handle_tool_call_with_registry_options(
         &cg,
@@ -662,7 +667,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(None, Some("indexing"), true)),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while nothing serves");
@@ -691,7 +698,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 false,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while serving");
@@ -719,7 +728,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 true,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while a stale seat is rebuilding");
@@ -763,7 +774,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(aged_reader),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers for an aged seat");
@@ -1167,7 +1180,9 @@ async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_ha
                 tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
             ),
             ..ToolCallRegistryOptions::default()
-        };
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits");
         let started = std::time::Instant::now();
         let result = dispatch_git_tools(
             tool_name,

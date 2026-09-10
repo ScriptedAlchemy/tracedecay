@@ -1,48 +1,48 @@
 //! Typed wire projections shared by the primitive graph handlers.
 
+use super::{graph_symbol_end_line, required_graph_file_path, required_graph_metadata};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
     PrimitiveSearchCoverageV1, PrimitiveSemanticModeV1, PrimitiveSymbolLocationV1,
 };
 use tracedecay_domain::errors::Result;
-use tracedecay_mcp::handlers::graph::{
-    graph_symbol_end_line, required_graph_file_path, required_graph_metadata,
-};
 
 pub(super) fn semantic_search_mode(
     mode: Option<PrimitiveSemanticModeV1>,
-) -> crate::mcp::server::CodeIndexSearchModeV1 {
+) -> tracedecay_query::code_search::CodeIndexSearchModeV1 {
     match mode.unwrap_or(PrimitiveSemanticModeV1::FallbackAllowed) {
         PrimitiveSemanticModeV1::FallbackAllowed => {
-            crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed
+            tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed
         }
         PrimitiveSemanticModeV1::StrictSemantic => {
-            crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic
+            tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic
         }
     }
 }
 
-fn lane_status(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> PrimitiveLaneStatusV1 {
+fn lane_status(
+    status: &tracedecay_query::code_search::CodeIndexLaneStatusV1,
+) -> PrimitiveLaneStatusV1 {
     match status {
-        crate::mcp::server::CodeIndexLaneStatusV1::Complete => {
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Complete => {
             PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete)
         }
-        crate::mcp::server::CodeIndexLaneStatusV1::Stale { generation } => {
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Stale { generation } => {
             PrimitiveLaneStatusV1::State {
                 status: PrimitiveLaneStateV1::Stale,
                 generation: Some(generation.clone()),
                 reason: None,
             }
         }
-        crate::mcp::server::CodeIndexLaneStatusV1::Partial { generation } => {
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial { generation } => {
             PrimitiveLaneStatusV1::State {
                 status: PrimitiveLaneStateV1::Partial,
                 generation: generation.clone(),
                 reason: None,
             }
         }
-        crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => {
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable { reason } => {
             PrimitiveLaneStatusV1::State {
                 status: PrimitiveLaneStateV1::Unavailable,
                 generation: None,
@@ -53,7 +53,7 @@ fn lane_status(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> PrimitiveL
 }
 
 pub(super) fn search_coverage(
-    coverage: &crate::mcp::server::CodeIndexSearchCoverageV1,
+    coverage: &tracedecay_query::code_search::CodeIndexSearchCoverageV1,
 ) -> PrimitiveSearchCoverageV1 {
     PrimitiveSearchCoverageV1 {
         exact: lane_status(&coverage.exact),

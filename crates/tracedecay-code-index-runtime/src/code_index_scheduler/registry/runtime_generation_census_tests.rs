@@ -71,7 +71,9 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
         ToolCallRegistryOptions {
             generation_census_reader: Some(generation_census_reader),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("mounted runtime census dispatch");

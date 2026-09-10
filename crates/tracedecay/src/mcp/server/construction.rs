@@ -247,8 +247,14 @@ impl McpServerWriters {
 impl McpServerConstructionContext {
     #[hotpath::measure(label = "mcp.server.construction.direct")]
     pub(crate) fn direct(cg: impl Into<Arc<TraceDecay>>, scope_prefix: Option<String>) -> Self {
+        let cg = cg.into();
+        // A direct context serves the checkout its opened project already
+        // holds, the same scope daemon project-open publishes. An unregistered
+        // graph has no scope; dispatch then fails closed with the typed
+        // `admitted_project_scope_unresolved` refusal.
+        let admitted_project_scope = crate::mcp::tools::handlers::opened_project_scope(&cg).ok();
         Self {
-            cg: cg.into(),
+            cg,
             scope_prefix,
             profile_root: None,
             profile_identity: None,
@@ -289,7 +295,7 @@ impl McpServerConstructionContext {
             verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
-            admitted_project_scope: None,
+            admitted_project_scope,
             retained_project_server_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,

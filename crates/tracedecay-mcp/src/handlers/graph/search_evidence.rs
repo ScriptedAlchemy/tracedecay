@@ -2,13 +2,13 @@ use std::future::Future;
 
 use serde_json::Value;
 
-use crate::mcp::server::CodeIndexSearchDisplayV1;
+use crate::tools::render::Md;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
-use tracedecay_mcp::tools::render::Md;
+use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
 
-use tracedecay_mcp::McpToolContext;
-use tracedecay_mcp::handlers::dependency_hints;
+use crate::McpToolContext;
+use crate::handlers::dependency_hints;
 
 #[hotpath::measure(future = true, label = "mcp.graph.search_race")]
 pub(super) async fn race_primary_search_with_graph<S, G>(
@@ -18,11 +18,11 @@ pub(super) async fn race_primary_search_with_graph<S, G>(
     sparse_result_limit: Option<usize>,
     scoped_search: bool,
 ) -> (
-    crate::mcp::server::CodeIndexSearchOutcomeV1,
+    tracedecay_query::code_search::CodeIndexSearchOutcomeV1,
     Result<VerifiedGraphQuery>,
 )
 where
-    S: Future<Output = crate::mcp::server::CodeIndexSearchOutcomeV1>,
+    S: Future<Output = tracedecay_query::code_search::CodeIndexSearchOutcomeV1>,
     G: Future<Output = Result<VerifiedGraphQuery>>,
 {
     tokio::pin!(graph);
@@ -33,7 +33,7 @@ where
         outcome = &mut search => {
             let wait_for_graph = matches!(
                 &outcome,
-                crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
+                tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
                     if scoped_search
                         || sparse_result_limit.is_some_and(|limit| {
                             dependency_hints::should_check_external_import_hint(

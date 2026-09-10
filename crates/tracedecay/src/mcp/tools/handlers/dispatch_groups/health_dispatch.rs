@@ -7,8 +7,8 @@ use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::super::ToolCallRegistryOptions;
-use super::super::health;
 use super::admitted_graph_query;
+use super::{admitted_project_authorities, admitted_runtime_snapshots, admitted_tool_context};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::health as portable_health;
 use tracedecay_mcp::handlers::redundancy as portable_redundancy;
@@ -21,7 +21,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
-    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
+    _active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
@@ -46,13 +46,18 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
             portable_redundancy::handle_redundancy(&graph, args, scope_prefix).await
         }
         "tracedecay_runtime" => {
-            health::handle_runtime(
-                cg,
+            let project = admitted_project_authorities(cg, &options)?;
+            let include_doctor = args
+                .get("doctor_report")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let snapshots = admitted_runtime_snapshots(&options, include_doctor).await;
+            let ctx = admitted_tool_context(&options, &project, &snapshots, None)?;
+            portable_health::handle_runtime(
+                &ctx,
                 args,
                 options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                options.doctor_report_reader.as_ref(),
-                options.generation_census_reader.as_ref(),
+                crate::version::build_version()?,
             )
             .await
         }

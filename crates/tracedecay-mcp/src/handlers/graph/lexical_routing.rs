@@ -5,9 +5,9 @@
 //! this module only turns raw tool arguments into that typed value and turns
 //! the executor's route receipt into response evidence.
 
+use crate::tools::render::Md;
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::tools::render::Md;
 use tracedecay_query::retrieval::lexical::{
     LexicalRouteKindV1, LexicalRouteReceiptV1, LexicalRoutingV1,
 };

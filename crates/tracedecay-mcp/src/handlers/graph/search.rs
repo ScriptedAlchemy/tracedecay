@@ -1,6 +1,5 @@
-//! Root-owned graph handlers that still require search, memory, or extra
-//! admission ports: `search`, `context`, `similar`, `find_exact_symbol`,
-//! `rename_preview`.
+//! Graph leftover handlers that read the admitted project/request authorities:
+//! `search`, `context`, `similar`, `find_exact_symbol`, `rename_preview`.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -16,61 +15,56 @@ use tracedecay_contracts::retrieval::{
     SimilarSurfaceRequestV1, SimilarSymbolV1,
 };
 use tracedecay_domain::ExactClass;
-
-use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
+use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
-use super::support::{
-    self, CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request,
+use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
+use crate::handlers::dependency_hints;
+use crate::handlers::support::{
+    CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result as support_generic,
+    rendered_tool_result as support_rendered, retrieval_cursor,
     take_internal_context_memory_analytics, text_tool_result, unique_file_paths,
 };
-use tracedecay_mcp::handlers::dependency_hints;
-use tracedecay_mcp::handlers::support::retrieval_cursor;
-use tracedecay_mcp::tools::render::{self, Md};
-use tracedecay_mcp::{McpToolContext, ToolResult};
+use crate::tools::render::{self, Md};
+use crate::{McpToolContext, ToolResult};
 
-mod context_support;
-mod lexical_routing;
-mod primitive_surface;
-mod search_evidence;
-mod search_freshness;
-mod verified;
-
-#[cfg(test)]
-use context_support::context_memory_section;
-use context_support::{
+use super::context_markdown::{append_verified_plan_context, verified_context_markdown};
+use super::context_support::{
     ContextMemoryOutcome, context_markdown_lane_preview, context_memory_analytics_value,
     context_memory_options, context_memory_outcome, context_memory_read_control,
     insert_context_memory_section,
 };
-use primitive_surface::{
+use super::primitive_surface::{
     search_coverage as primitive_search_coverage,
     semantic_search_mode as primitive_semantic_search_mode,
     symbol_location as primitive_symbol_location,
 };
-use search_evidence::{
+use super::search_evidence::{
     SearchGraphEvidence, bind_verified_graph_to_search, race_primary_search_with_graph,
 };
-use search_freshness::{
-    ServedGenerationV1, freshness_lines, read_worktree_freshness, search_freshness,
+use super::search_freshness::{
+    ServedGenerationV1, freshness_lines, search_freshness, worktree_freshness_from_payload,
 };
-use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader;
-use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
-
-use tracedecay_mcp::handlers::graph::{
+use super::{
     graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
     line_for_byte_offset, node_not_found as node_not_found_result, required_graph_file_path,
     required_graph_metadata, single_graph_adjacency_batch,
 };
-use verified::{append_verified_plan_context, verified_context_markdown};
+use super::{lexical_routing, search_evidence};
 
-fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSearchModeV1> {
+#[cfg(test)]
+use super::context_support::context_memory_section;
+
+fn semantic_search_mode(
+    args: &Value,
+) -> Result<tracedecay_query::code_search::CodeIndexSearchModeV1> {
     match args.get("semantic_mode").and_then(Value::as_str) {
         None | Some("fallback_allowed") => {
-            Ok(crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed)
+            Ok(tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed)
         }
-        Some("strict_semantic") => Ok(crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic),
+        Some("strict_semantic") => {
+            Ok(tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic)
+        }
         Some(_) => Err(TraceDecayError::Config {
             message: "semantic_mode must be one of fallback_allowed, strict_semantic".to_owned(),
         }),
@@ -78,20 +72,20 @@ fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSea
 }
 
 async fn execute_code_index_search(
-    executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    request: crate::mcp::server::CodeIndexSearchRequestV1,
-) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+    executor: Option<&tracedecay_query::code_search::CodeIndexSearchExecutor>,
+    request: tracedecay_query::code_search::CodeIndexSearchRequestV1,
+) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     match executor {
         Some(executor) => executor(request).await,
-        None => crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-            crate::mcp::server::CodeIndexSearchUnavailableV1 {
+        None => tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+            tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                 code_generation: None,
                 reason:
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+                semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
                     reason: "code_index_unavailable",
                 },
-                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
                     "code_index_unavailable",
                 ),
             },
@@ -118,19 +112,19 @@ fn preserve_complete_search_after_lazy_admission(result: Result<()>) -> Result<(
 }
 
 fn semantic_status_value(
-    mode: crate::mcp::server::CodeIndexSearchModeV1,
-    status: &crate::mcp::server::CodeIndexSemanticStatusV1,
+    mode: tracedecay_query::code_search::CodeIndexSearchModeV1,
+    status: &tracedecay_query::code_search::CodeIndexSemanticStatusV1,
 ) -> Value {
     let mode = match mode {
-        crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed => "fallback_allowed",
-        crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic => "strict_semantic",
+        tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed => "fallback_allowed",
+        tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic => "strict_semantic",
     };
     match status {
-        crate::mcp::server::CodeIndexSemanticStatusV1::Complete => json!({
+        tracedecay_query::code_search::CodeIndexSemanticStatusV1::Complete => json!({
             "status": "complete",
             "mode": mode,
         }),
-        crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable { reason } => json!({
+        tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable { reason } => json!({
             "status": "unavailable",
             "mode": mode,
             "reason": reason,
@@ -142,19 +136,19 @@ fn semantic_status_value(
 /// answer from one produced while a lane was down. Emitted on every search
 /// response, including the successful ones, because "no matches" and "the
 /// matching lane was not running" are otherwise indistinguishable.
-fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> Value {
-    fn lane(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> Value {
+fn coverage_value(coverage: &tracedecay_query::code_search::CodeIndexSearchCoverageV1) -> Value {
+    fn lane(status: &tracedecay_query::code_search::CodeIndexLaneStatusV1) -> Value {
         match status {
-            crate::mcp::server::CodeIndexLaneStatusV1::Complete => json!("complete"),
-            crate::mcp::server::CodeIndexLaneStatusV1::Stale { generation } => json!({
+            tracedecay_query::code_search::CodeIndexLaneStatusV1::Complete => json!("complete"),
+            tracedecay_query::code_search::CodeIndexLaneStatusV1::Stale { generation } => json!({
                 "status": "stale",
                 "generation": generation,
             }),
-            crate::mcp::server::CodeIndexLaneStatusV1::Partial { generation } => json!({
+            tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial { generation } => json!({
                 "status": "partial",
                 "generation": generation,
             }),
-            crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => json!({
+            tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable { reason } => json!({
                 "status": "unavailable",
                 "reason": reason,
             }),
@@ -175,7 +169,7 @@ fn user_line(line: u32) -> u32 {
 }
 
 fn rendered_tool_result<F>(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     args: &Value,
     value: &Value,
     touched_files: Vec<String>,
@@ -184,21 +178,21 @@ fn rendered_tool_result<F>(
 where
     F: FnOnce() -> String,
 {
-    support::rendered_tool_result(Some(cg.project_root()), args, value, touched_files, md)
+    support_rendered(Some(ctx.project_root()), args, value, touched_files, md)
 }
 
 /// [`rendered_tool_result`] with the default [`render::generic_md`] body.
 fn generic_tool_result(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     args: &Value,
     value: &Value,
     touched_files: Vec<String>,
 ) -> ToolResult {
-    support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
+    support_generic(Some(ctx.project_root()), args, value, touched_files)
 }
 
 fn rendered_context_tool_result(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     args: &Value,
     mut value: Value,
     touched_files: Vec<String>,
@@ -207,10 +201,10 @@ fn rendered_context_tool_result(
 ) -> ToolResult {
     let internal_analytics = take_internal_context_memory_analytics(&mut value);
     let text = if render::wants_json(args) {
-        render::finalize(Some(cg.project_root()), args, &value, || full_markdown)
+        render::finalize(Some(ctx.project_root()), args, &value, || full_markdown)
     } else {
         render::markdown_preview_with_handle(
-            Some(cg.project_root()),
+            Some(ctx.project_root()),
             &full_markdown,
             preview_markdown.unwrap_or(&full_markdown),
         )
@@ -224,16 +218,14 @@ fn rendered_context_tool_result(
 }
 
 #[hotpath::measure(label = "mcp.graph.search.total")]
-pub(super) async fn handle_search<F>(
-    cg: &TraceDecay,
+pub async fn handle_search<F>(
+    ctx: &McpToolContext<'_>,
     graph: F,
     args: Value,
     scope_prefix: Option<&str>,
     ignored_dependency_admission: Option<
         &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
-    freshness_reader: Option<&CodeIndexFreshnessReader>,
-    ctx: &McpToolContext<'_>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
@@ -264,8 +256,8 @@ where
     // the tool return nothing for the whole session (any serve launched from a
     // subdirectory sets a scope), so run the search and report below that the
     // scope was not honored rather than silently implying it was.
-    let search_request = crate::mcp::server::CodeIndexSearchRequestV1 {
-        project_root: cg.project_root().to_path_buf(),
+    let search_request = tracedecay_query::code_search::CodeIndexSearchRequestV1 {
+        project_root: ctx.project_root().to_path_buf(),
         query: query.to_owned(),
         source_revision: None,
         source_tree: None,
@@ -290,7 +282,7 @@ where
     let refresh_after_generation_mismatch = matches!(
         (&outcome, &graph),
         (
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete),
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete),
             Ok(graph),
         ) if graph.generation().as_str() != complete.code_generation
             && (scope_prefix.is_some()
@@ -303,16 +295,17 @@ where
         let refreshed = execute_code_index_search(search_executor, search_request).await;
         if matches!(
             refreshed,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(_)
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(_)
         ) {
             outcome = refreshed;
         }
     }
     // Read after the search settles: the verdict must describe the scheduler
     // state at serve time, not a snapshot taken before the lanes ran.
-    let worktree_freshness = read_worktree_freshness(freshness_reader, cg.project_root()).await;
+    let freshness_payload = ctx.freshness().await;
+    let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
     match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
             let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
                 // Explicit ignored-dependency admission is generation-checked
                 // by the canonical admission port against the graph's own
@@ -413,7 +406,7 @@ where
             }
             let output = output;
             Ok(rendered_tool_result(
-                cg,
+                ctx,
                 &args,
                 &output,
                 touched_files,
@@ -426,7 +419,7 @@ where
                 },
             ))
         }
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
             let graph_evidence = SearchGraphEvidence::new(graph.as_ref());
             let freshness = search_freshness(
@@ -451,7 +444,7 @@ where
                 output["verified_graph_evidence"] = unavailable_graph.clone();
             }
             let failure = format!("code-index search unavailable: {reason}");
-            let mut result = rendered_tool_result(cg, &args, &output, Vec::new(), || {
+            let mut result = rendered_tool_result(ctx, &args, &output, Vec::new(), || {
                 format!(
                     "{}{}",
                     freshness_lines(&freshness),
@@ -459,7 +452,8 @@ where
                 )
             })
             .with_failure_message(failure);
-            if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic {
+            if semantic_mode == tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic
+            {
                 result = result.with_semantic_error(true);
             }
             Ok(result)
@@ -619,7 +613,7 @@ struct ContextGraphProjection {
 }
 
 fn context_search_matches(
-    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
+    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
 ) -> Vec<ContextSearchMatchV1> {
     complete
@@ -652,9 +646,9 @@ fn context_search_matches(
 }
 
 fn context_graph_projection(
-    cg: &TraceDecay,
+    ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
+    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
     max_nodes: usize,
     include_code: bool,
@@ -721,7 +715,7 @@ fn context_graph_projection(
                 source_by_path.insert(
                     file_path.to_owned(),
                     tracedecay_runtime_core::sync::read_source_file(
-                        &cg.project_root().join(file_path),
+                        &ctx.project_root().join(file_path),
                     )?,
                 );
             }
@@ -735,7 +729,7 @@ fn context_graph_projection(
                 file: file_path.to_owned(),
                 start_line: user_line(metadata.start_line),
                 end_line: user_line(graph_symbol_end_line(metadata)?),
-                code: tracedecay_mcp::handlers::info::extract_lines(
+                code: crate::handlers::info::extract_lines(
                     source,
                     metadata.start_line,
                     graph_symbol_end_line(metadata)?,
@@ -783,13 +777,11 @@ fn append_context_semantic_pending(output: &mut String, value: &Value) {
 }
 
 #[hotpath::measure(label = "mcp.graph.context.total")]
-pub(super) async fn handle_context<F>(
-    cg: &TraceDecay,
+pub async fn handle_context<F>(
+    ctx: &McpToolContext<'_>,
     graph: F,
     args: Value,
     scope_prefix: Option<&str>,
-    freshness_reader: Option<&CodeIndexFreshnessReader>,
-    ctx: &McpToolContext<'_>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
@@ -821,8 +813,8 @@ where
     // lexical/exact results or memory hostage.
     let search = execute_code_index_search(
         search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
+        tracedecay_query::code_search::CodeIndexSearchRequestV1 {
+            project_root: ctx.project_root().to_path_buf(),
             query: task.to_owned(),
             source_revision: None,
             source_tree: None,
@@ -836,18 +828,21 @@ where
             cancellation,
         },
     );
-    let memory = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref());
+    let memory = context_memory_outcome(ctx, task, &memory_options, memory_read_control.as_ref());
     let search_and_graph = race_primary_search_with_graph(search, graph, false, None, false);
     let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
-    let worktree_freshness = read_worktree_freshness(freshness_reader, cg.project_root()).await;
+    // Read after the search settles: the verdict must describe the scheduler
+    // state at serve time, not a snapshot taken before the lanes ran.
+    let freshness_payload = ctx.freshness().await;
+    let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
     let strict_semantic_unavailable = semantic_mode
-        == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic
+        == tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic
         && matches!(
             &outcome,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_)
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(_)
         );
     let (complete, code_generation, coverage, freshness, search_matches) = match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
             let search_matches = context_search_matches(&complete, scope_prefix);
             let code_generation = Some(complete.code_generation.clone());
             let coverage = primitive_search_coverage(&complete.coverage);
@@ -864,7 +859,7 @@ where
                 search_matches,
             )
         }
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
             None,
             unavailable.code_generation,
             primitive_search_coverage(&unavailable.coverage),
@@ -886,7 +881,7 @@ where
         (Ok(graph), Some(complete)) => match hotpath::measure_block!(
             "mcp.graph.context.graph",
             context_graph_projection(
-                cg,
+                ctx,
                 &graph,
                 complete,
                 scope_prefix,
@@ -1019,7 +1014,7 @@ where
     );
     let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
     let result =
-        rendered_context_tool_result(cg, &args, value, touched_files, output, preview.as_deref());
+        rendered_context_tool_result(ctx, &args, value, touched_files, output, preview.as_deref());
     if strict_semantic_unavailable {
         Ok(result.with_semantic_error(true))
     } else {
@@ -1033,15 +1028,14 @@ where
 /// and want the apples-to-apples cost of an index hit instead of
 /// `tracedecay_search`'s ranked query.
 #[hotpath::measure(label = "mcp.graph.find_exact_symbol.total")]
-pub(super) async fn handle_find_exact_symbol(
-    cg: &TraceDecay,
+pub async fn handle_find_exact_symbol(
+    ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
     ignored_dependency_admission: Option<
         &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
-    ctx: &McpToolContext<'_>,
 ) -> Result<ToolResult> {
     let name =
         args.get("name")
@@ -1101,18 +1095,14 @@ pub(super) async fn handle_find_exact_symbol(
             "matches": items,
         })
     );
-    Ok(generic_tool_result(cg, &args, &body, touched_files))
+    Ok(generic_tool_result(ctx, &args, &body, touched_files))
 }
 
 #[hotpath::measure(label = "mcp.graph.similar.total")]
-pub(super) async fn handle_similar(
-    cg: &TraceDecay,
+pub async fn handle_similar(
+    ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
-    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
     let limit = request.limit.map_or(10, |value| value.min(100) as usize);
@@ -1120,9 +1110,9 @@ pub(super) async fn handle_similar(
 
     let outcome = hotpath::future!(
         execute_code_index_search(
-            search_executor,
-            crate::mcp::server::CodeIndexSearchRequestV1 {
-                project_root: cg.project_root().to_path_buf(),
+            ctx.code_index_search_executor(),
+            tracedecay_query::code_search::CodeIndexSearchRequestV1 {
+                project_root: ctx.project_root().to_path_buf(),
                 query: request.symbol,
                 source_revision: None,
                 source_tree: None,
@@ -1131,17 +1121,17 @@ pub(super) async fn handle_similar(
                 cursor: None,
                 mode: semantic_mode,
                 lexical_routing: LexicalRoutingV1::query_only(),
-                authority: search_authority.cloned(),
-                deadline,
-                cancellation,
+                authority: ctx.code_index_search_authority().cloned(),
+                deadline: ctx.deadline().cloned(),
+                cancellation: ctx.cancellation().cloned(),
             }
         ),
         label = "mcp.graph.similar.query"
     )
     .await;
     let complete = match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => complete,
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_) => {
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => complete,
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(_) => {
             return Err(TraceDecayError::ProjectRoute {
                 reason_code: "verified-code-similarity-unavailable".to_owned(),
                 retryable: false,
@@ -1192,7 +1182,7 @@ pub(super) async fn handle_similar(
 
     let value =
         hotpath::measure_block!("mcp.graph.similar.serialize", serde_json::to_value(items)?);
-    Ok(generic_tool_result(cg, &args, &value, touched_files))
+    Ok(generic_tool_result(ctx, &args, &value, touched_files))
 }
 
 /// Reads a file's lines (0-based) for snippet extraction, memoizing by path so
@@ -1286,8 +1276,8 @@ struct RenameReferenceSiteInput {
 /// that are NOT backed by a graph edge ("text-only matches — review
 /// manually"). Nothing is rewritten.
 #[hotpath::measure(label = "mcp.graph.rename_preview.total")]
-pub(super) async fn handle_rename_preview(
-    cg: &TraceDecay,
+pub async fn handle_rename_preview(
+    ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
@@ -1360,7 +1350,7 @@ pub(super) async fn handle_rename_preview(
     // File-walk phase: every referenced source file is read from disk, so it
     // runs on a blocking worker like the sibling analysis scans instead of
     // holding the async dispatch thread through the reads.
-    let project_root = cg.project_root().to_path_buf();
+    let project_root = ctx.project_root().to_path_buf();
     let declaration_file = declaration.file.clone();
     let walk_symbol_name = symbol_name.clone();
     let walk_graph_counts = graph_counts;
@@ -1455,7 +1445,7 @@ pub(super) async fn handle_rename_preview(
         })?
     );
 
-    Ok(generic_tool_result(cg, &args, &output, touched_files))
+    Ok(generic_tool_result(ctx, &args, &output, touched_files))
 }
 
 #[cfg(test)]
@@ -1489,674 +1479,19 @@ mod tests {
         ));
     }
 
-    fn completed_sparse_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
-        completed_sparse_search_for_generation("generation.mcp-verified-graph-fixture.1")
-    }
-
-    fn completed_sparse_search_for_generation(
-        generation: &str,
-    ) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
-        let candidate = tracedecay_domain::RankedCandidate {
-            candidate: tracedecay_domain::FusedCandidate {
-                anchor_id: tracedecay_domain::RetrievalAnchorId::new(
-                    "code-symbol:sparse-lexical-widget",
-                )
-                .expect("sparse lexical candidate anchor"),
-                logical_evidence_id: tracedecay_domain::LogicalEvidenceId::new(
-                    "logical.sparse-lexical-widget",
-                )
-                .expect("sparse lexical candidate logical evidence"),
-                occurrences: Vec::new(),
-                exact_class: ExactClass::Approximate,
-                utility_micros: 1,
-                contributions: Vec::new(),
-                freshness: Vec::new(),
-                decisions: Vec::new(),
-            },
-            final_ordinal: 0,
-        };
-        let fallback_coverage = tracedecay_domain::RetrieverKind::QUERY_FALLBACK_LANES
-            .into_iter()
-            .map(|lane| (lane, tracedecay_domain::PublicRetrieverStatus::Complete))
-            .collect();
-        let query_fallback = tracedecay_domain::QueryFallbackSubpayload::new(
-            tracedecay_domain::FusionProfileId::new("profile.sparse-search")
-                .expect("sparse search profile"),
-            vec![candidate.clone()],
-            fallback_coverage,
-            Vec::new(),
-            None,
-        )
-        .expect("canonical sparse lexical fallback payload");
-        let anchor = candidate.candidate.anchor_id.clone();
-        let semantic = crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-            reason: "semantic_generation_warming",
-        };
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(
-            crate::mcp::server::CodeIndexSearchCompletedV1 {
-                code_generation: generation.to_owned(),
-                ordered_candidates: vec![candidate],
-                query_fallback: std::sync::Arc::new(query_fallback),
-                display_by_anchor: HashMap::from([(
-                    anchor,
-                    crate::mcp::server::CodeIndexSearchDisplayV1 {
-                        name: "SparseLexicalWidget".to_owned(),
-                        qualified_name: "crate::SparseLexicalWidget".to_owned(),
-                        kind: "function".to_owned(),
-                        path: "src/lib.rs".to_owned(),
-                    },
-                )]),
-                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::fused(&semantic),
-                semantic,
-                next_cursor: None,
-                lexical_routes: tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1 {
-                    routes: vec![tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Query],
-                    matches_by_anchor: std::collections::BTreeMap::new(),
-                },
-            },
-        )
-    }
-
-    fn unavailable_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-            crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                code_generation: Some("generation.mcp-verified-graph-fixture.1".to_owned()),
-                reason:
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                    reason: "search_attempt_repeated",
-                },
-                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
-                    "search_attempt_repeated",
-                ),
-            },
-        )
-    }
-
-    fn search_test_options<'a>(
-        cg: &TraceDecay,
-        executor: crate::mcp::server::CodeIndexSearchExecutor,
-    ) -> crate::mcp::tools::handlers::ToolCallRegistryOptions<'a> {
-        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
-            cg,
-            crate::mcp::tools::handlers::ToolCallRegistryOptions {
-                code_index_search_executor: Some(executor),
-                code_index_search_authority: Some(crate::mcp::server::CodeIndexSearchAuthorityV1 {
-                    principal: tracedecay_domain::PrincipalId::new("principal.search-attempt-test")
-                        .expect("search attempt principal"),
-                    authorization_revision: tracedecay_domain::AuthorizationRevision::new(
-                        "authorization.search-attempt-test",
-                    )
-                    .expect("search attempt authorization revision"),
-                }),
-                ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
-            },
-        )
-    }
-
-    fn run_with_locked_user_data_dir(test: impl Future<Output = ()>) {
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("locked user data test runtime")
-            .block_on(test);
-    }
-
-    #[test]
-    fn completed_primary_search_is_not_retried_after_graph_admission() {
-        run_with_locked_user_data_dir(
-            completed_primary_search_is_not_retried_after_graph_admission_case(),
-        );
-    }
-
-    async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
-        let dir = tempfile::TempDir::new().expect("single search attempt isolation");
-        let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
-        let project = dir.path().join("single-search-attempt");
-        std::fs::create_dir_all(project.join("src")).expect("create search attempt sources");
-        std::fs::write(
-            project.join("src/lib.rs"),
-            "pub fn SparseLexicalWidget() {}\n",
-        )
-        .expect("write search attempt fixture");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            &project,
-            "project.single-search-attempt",
-        )
-        .await
-        .expect("registered search attempt fixture");
-
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed = std::sync::Arc::clone(&calls);
-        let executor: crate::mcp::server::CodeIndexSearchExecutor =
-            std::sync::Arc::new(move |_| {
-                let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Box::pin(async move {
-                    if attempt == 0 {
-                        completed_sparse_search()
-                    } else {
-                        unavailable_search()
-                    }
-                })
-            });
-        let options = search_test_options(&cg, executor);
-
-        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({
-                "query": "SparseLexicalWidget",
-                "limit": 5,
-                "format": "json",
-            }),
-            None,
-            None,
-            options,
-        )
-        .await
-        .expect("first complete search outcome must remain authoritative");
-        let payload: Value = serde_json::from_str(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("single-attempt search JSON text"),
-        )
-        .expect("single-attempt search JSON payload");
-
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
-        assert_eq!(
-            payload["results"][0]["display"]["name"],
-            "SparseLexicalWidget"
-        );
-        assert!(payload["status"].is_null());
-        cg.close();
-    }
-
-    /// A strict-semantic request the runtime cannot honour is refused: the
-    /// payload stays typed (`status: "unavailable"`, the reason, the semantic
-    /// lane's own status) and the call is flagged as a tool-level error — not
-    /// a JSON-RPC failure, and not an empty page passed off as success. The
-    /// same outcome under `fallback_allowed` is a degraded answer, not a
-    /// refusal.
-    #[test]
-    fn strict_semantic_unavailability_is_a_typed_refusal() {
-        run_with_locked_user_data_dir(strict_semantic_unavailability_is_a_typed_refusal_case());
-    }
-
-    async fn strict_semantic_unavailability_is_a_typed_refusal_case() {
-        let dir = tempfile::TempDir::new().expect("strict refusal isolation");
-        let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
-        let project = dir.path().join("strict-semantic-refusal");
-        std::fs::create_dir_all(project.join("src")).expect("create strict refusal sources");
-        std::fs::write(
-            project.join("src/lib.rs"),
-            "pub fn SparseLexicalWidget() {}\n",
-        )
-        .expect("write strict refusal fixture");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            &project,
-            "project.strict-semantic-refusal",
-        )
-        .await
-        .expect("registered strict refusal fixture");
-
-        let executor: crate::mcp::server::CodeIndexSearchExecutor = std::sync::Arc::new(
-            move |_| {
-                Box::pin(async {
-                    crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(
-                                "generation.mcp-verified-graph-fixture.1".to_owned(),
-                            ),
-                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "calibration_unavailable",
-                            },
-                            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
-                                "calibration_unavailable",
-                            ),
-                        },
-                    )
-                })
-            },
-        );
-
-        for (semantic_mode, refused) in [("strict_semantic", true), ("fallback_allowed", false)] {
-            let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-                &cg,
-                "tracedecay_search",
-                json!({
-                    "query": "SparseLexicalWidget",
-                    "limit": 5,
-                    "format": "json",
-                    "semantic_mode": semantic_mode,
-                }),
-                None,
-                None,
-                search_test_options(&cg, std::sync::Arc::clone(&executor)),
-            )
-            .await
-            .expect("an unavailable search answers with a typed result, not a hard error");
-            let payload: Value = serde_json::from_str(
-                result.value["content"][0]["text"]
-                    .as_str()
-                    .expect("unavailable search JSON text"),
-            )
-            .expect("unavailable search JSON payload");
-
-            assert_eq!(
-                result.semantic_error() == Some(true),
-                refused,
-                "{semantic_mode}: refusal flag mismatch for {payload}"
-            );
-            assert_eq!(payload["status"], "unavailable", "{semantic_mode}");
-            assert_eq!(payload["reason"], "semantic_unavailable", "{semantic_mode}");
-            assert_eq!(payload["semantic"]["mode"], semantic_mode);
-            assert_eq!(
-                payload["semantic"]["status"], "unavailable",
-                "{semantic_mode}"
-            );
-            assert_eq!(
-                payload["semantic"]["reason"], "calibration_unavailable",
-                "{semantic_mode}"
-            );
-            assert_eq!(payload["results"], json!([]), "{semantic_mode}");
-            assert_eq!(
-                payload["query_fallback_digest"],
-                Value::Null,
-                "{semantic_mode}"
-            );
-            assert_eq!(
-                result.failure_message(),
-                Some("code-index search unavailable: semantic_unavailable"),
-                "{semantic_mode}"
-            );
-        }
-        cg.close();
-    }
-
-    #[test]
-    fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search() {
-        run_with_locked_user_data_dir(
-            generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case(),
-        );
-    }
-
-    async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() {
-        let dir = tempfile::TempDir::new().expect("generation mismatch isolation");
-        let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
-        let project = dir.path().join("generation-mismatch-search");
-        std::fs::create_dir_all(project.join("src")).expect("create mismatch search sources");
-        std::fs::write(
-            project.join("src/lib.rs"),
-            "pub fn SparseLexicalWidget() {}\n",
-        )
-        .expect("write mismatch search fixture");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            &project,
-            "project.generation-mismatch-search",
-        )
-        .await
-        .expect("registered mismatch search fixture");
-
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed = std::sync::Arc::clone(&calls);
-        let executor: crate::mcp::server::CodeIndexSearchExecutor =
-            std::sync::Arc::new(move |_| {
-                let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Box::pin(async move {
-                    if attempt == 0 {
-                        completed_sparse_search_for_generation("generation.search-before-graph")
-                    } else {
-                        unavailable_search()
-                    }
-                })
-            });
-        let options = search_test_options(&cg, executor);
-
-        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({
-                "query": "SparseLexicalWidget",
-                "limit": 5,
-                "format": "json",
-            }),
-            None,
-            None,
-            options,
-        )
-        .await
-        .expect("failed refresh must preserve the first complete search");
-        let payload: Value = serde_json::from_str(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("generation mismatch JSON text"),
-        )
-        .expect("generation mismatch JSON payload");
-
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
-        assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
-        assert_eq!(
-            payload["results"][0]["display"]["name"],
-            "SparseLexicalWidget"
-        );
-        assert_eq!(
-            payload["verified_graph_evidence"]["reason_code"],
-            "verified-code-graph-generation-mismatch"
-        );
-        cg.close();
-    }
-
-    fn freshness_reader(
-        latest_generation_id: Option<&str>,
-        staleness_state: &str,
-        rebuild_in_flight: bool,
-    ) -> CodeIndexFreshnessReader {
-        let latest_generation_id = latest_generation_id.map(str::to_owned);
-        let staleness_state = staleness_state.to_owned();
-        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
-            let freshness =
-                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                    worktree_root: worktree_root.display().to_string(),
-                    latest_generation_id: latest_generation_id.clone(),
-                    staleness_state: Some(staleness_state.clone()),
-                    rebuild_in_flight,
-                    hook_hint_count: Some(0),
-                    coverage: "complete".to_owned(),
-                    ..Default::default()
-                };
-            Box::pin(async move { Some(freshness) })
-        })
-    }
-
-    /// A completed sparse search whose lexical lane ran the query route plus
-    /// one anchor route that ranked the single result.
-    fn completed_sparse_search_with_anchor_route(
-        anchor: &str,
-    ) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
-        let crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(mut complete) =
-            completed_sparse_search()
-        else {
-            panic!("sparse search fixture is complete");
-        };
-        let routing = LexicalRoutingV1::new(vec![anchor.to_owned()], false).expect("anchor");
-        let route = tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Anchor {
-            anchor: routing.anchors[0].clone(),
-        };
-        let candidate_anchor = complete.ordered_candidates[0].candidate.anchor_id.clone();
-        complete.lexical_routes = tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1 {
-            routes: vec![
-                tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Query,
-                route.clone(),
-            ],
-            matches_by_anchor: std::collections::BTreeMap::from([(
-                candidate_anchor,
-                vec![tracedecay_query::retrieval::lexical::LexicalRouteMatchV1 {
-                    route,
-                    score_micros: 900_000,
-                    matched_terms: vec![anchor.to_owned()],
-                }],
-            )]),
-        };
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
-    }
-
-    fn response_text(result: &ToolResult) -> String {
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("tool response text")
-            .to_owned()
-    }
-
-    #[test]
-    fn search_opens_with_a_freshness_verdict_from_typed_state() {
-        run_with_locked_user_data_dir(search_opens_with_a_freshness_verdict_from_typed_state_case());
-    }
-
-    async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
-        let dir = tempfile::TempDir::new().expect("freshness verdict isolation");
-        let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
-        let project = dir.path().join("freshness-verdict-search");
-        std::fs::create_dir_all(project.join("src")).expect("create freshness sources");
-        std::fs::write(
-            project.join("src/lib.rs"),
-            "pub fn SparseLexicalWidget() {}\n",
-        )
-        .expect("write freshness fixture");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            &project,
-            "project.freshness-verdict-search",
-        )
-        .await
-        .expect("registered freshness fixture");
-        let executor: crate::mcp::server::CodeIndexSearchExecutor =
-            std::sync::Arc::new(|_| Box::pin(async { completed_sparse_search() }));
-
-        let settled = crate::mcp::tools::handlers::ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(freshness_reader(
-                Some("generation.mcp-verified-graph-fixture.1"),
-                "fresh",
-                false,
-            )),
-            ..search_test_options(&cg, executor.clone())
-        };
-        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({"query": "SparseLexicalWidget", "limit": 5}),
-            None,
-            None,
-            settled,
-        )
-        .await
-        .expect("settled search renders");
-        let text = response_text(&result);
-        assert!(
-            text.starts_with("freshness: fresh\n## Search Results"),
-            "a settled generation opens with the fresh verdict: {text}"
-        );
-        assert!(!text.contains("indexing:"));
-
-        let rebuilding = crate::mcp::tools::handlers::ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(freshness_reader(
-                Some("generation.mcp-verified-graph-fixture.2"),
-                "refreshing",
-                true,
-            )),
-            ..search_test_options(&cg, executor.clone())
-        };
-        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({"query": "SparseLexicalWidget", "limit": 5, "format": "json"}),
-            None,
-            None,
-            rebuilding,
-        )
-        .await
-        .expect("rebuilding search renders");
-        let payload: Value = serde_json::from_str(&response_text(&result)).expect("search JSON");
-        assert_eq!(payload["freshness"]["state"], "possibly_stale");
-        assert_eq!(
-            payload["freshness"]["indexing"]["summary"],
-            "state=refreshing rebuild_in_flight=true served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.2"
-        );
-        assert_eq!(
-            payload["freshness"]["indexing"]["latest_generation"],
-            "generation.mcp-verified-graph-fixture.2"
-        );
-        assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
-
-        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({"query": "SparseLexicalWidget", "limit": 5}),
-            None,
-            None,
-            crate::mcp::tools::handlers::ToolCallRegistryOptions {
-                code_index_freshness_reader: Some(freshness_reader(
-                    Some("generation.mcp-verified-graph-fixture.1"),
-                    "stale",
-                    false,
-                )),
-                ..search_test_options(&cg, executor)
-            },
-        )
-        .await
-        .expect("stalled search renders");
-        let text = response_text(&result);
-        assert!(
-            text.starts_with(
-                "freshness: possibly_stale\nindexing: state=stale rebuild_in_flight=false served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.1\n## Search Results"
-            ),
-            "a stale seat opens with the verdict and one indexing line: {text}"
-        );
-        cg.close();
-    }
-
-    #[test]
-    fn search_forwards_lexical_routing_and_renders_route_evidence() {
-        run_with_locked_user_data_dir(
-            search_forwards_lexical_routing_and_renders_route_evidence_case(),
-        );
-    }
-
-    async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
-        let dir = tempfile::TempDir::new().expect("lexical routing isolation");
-        let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
-        let project = dir.path().join("lexical-routing-search");
-        std::fs::create_dir_all(project.join("src")).expect("create routing sources");
-        std::fs::write(
-            project.join("src/lib.rs"),
-            "pub fn SparseLexicalWidget() {}\n",
-        )
-        .expect("write routing fixture");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            &project,
-            "project.lexical-routing-search",
-        )
-        .await
-        .expect("registered routing fixture");
-
-        let observed_routing = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let sink = std::sync::Arc::clone(&observed_routing);
-        let executor: crate::mcp::server::CodeIndexSearchExecutor =
-            std::sync::Arc::new(move |request| {
-                *sink.lock().expect("routing sink") = Some(request.lexical_routing.clone());
-                Box::pin(async { completed_sparse_search_with_anchor_route("SparseLexicalWidget") })
-            });
-        let options = crate::mcp::tools::handlers::ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(freshness_reader(
-                Some("generation.mcp-verified-graph-fixture.1"),
-                "fresh",
-                false,
-            )),
-            ..search_test_options(&cg, executor.clone())
-        };
-        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({
-                "query": "sparse widget",
-                "lexical_anchors": ["SparseLexicalWidget"],
-                "prefer_symbol": true,
-                "limit": 5,
-            }),
-            None,
-            None,
-            options,
-        )
-        .await
-        .expect("routed search renders");
-        let routing = observed_routing
-            .lock()
-            .expect("routing sink")
-            .clone()
-            .expect("the executor received the request");
-        assert_eq!(routing.anchors[0].as_str(), "SparseLexicalWidget");
-        assert!(routing.prefer_symbol);
-        let text = response_text(&result);
-        assert!(
-            text.contains("**SparseLexicalWidget** (function, approximate) — rank 1 · utility 1 · via anchor:SparseLexicalWidget"),
-            "each result names the routes that ranked it: {text}"
-        );
-        assert!(
-            text.contains("Ranked routes fused into this page: query, anchor:SparseLexicalWidget"),
-            "{text}"
-        );
-
-        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({
-                "query": "sparse widget",
-                "lexical_anchors": ["SparseLexicalWidget"],
-                "format": "json",
-            }),
-            None,
-            None,
-            search_test_options(&cg, executor.clone()),
-        )
-        .await
-        .expect("routed JSON search renders");
-        let payload: Value = serde_json::from_str(&response_text(&result)).expect("search JSON");
-        assert_eq!(
-            payload["lexical_routes"][1],
-            json!({"route": "anchor", "anchor": "SparseLexicalWidget", "label": "anchor:SparseLexicalWidget"})
-        );
-        assert_eq!(
-            payload["results"][0]["lexical_routes"],
-            json!([{
-                "route": "anchor:SparseLexicalWidget",
-                "score_micros": 900_000,
-                "matched_terms": ["SparseLexicalWidget"],
-            }])
-        );
-
-        let too_many: Vec<String> = (0
-            ..=tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHORS_V1)
-            .map(|index| format!("anchor_{index}"))
-            .collect();
-        let error = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({"query": "sparse widget", "lexical_anchors": too_many}),
-            None,
-            None,
-            search_test_options(&cg, executor.clone()),
-        )
-        .await
-        .expect_err("anchor bounds are enforced before any lane runs");
-        assert!(error.to_string().contains("at most 8 anchors"), "{error}");
-        let error = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
-            &cg,
-            "tracedecay_search",
-            json!({"query": "sparse widget", "lexical_anchors": [""]}),
-            None,
-            None,
-            search_test_options(&cg, executor),
-        )
-        .await
-        .expect_err("empty anchors are rejected");
-        assert!(error.to_string().contains("anchor 0 is empty"), "{error}");
-        cg.close();
-    }
-
     #[test]
     fn schema_anchor_bound_matches_the_retrieval_kernel_bound() {
         assert_eq!(
-            tracedecay_mcp::tools::definitions::SEARCH_MAX_LEXICAL_ANCHORS,
+            crate::tools::definitions::SEARCH_MAX_LEXICAL_ANCHORS,
             tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHORS_V1
         );
         assert_eq!(
-            tracedecay_mcp::tools::definitions::SEARCH_MAX_LEXICAL_ANCHOR_BYTES,
+            crate::tools::definitions::SEARCH_MAX_LEXICAL_ANCHOR_BYTES,
             tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHOR_BYTES_V1
         );
     }
 
-    fn context_memory_hit(content: String) -> FactSearchHitV1 {
+    fn context_memory_hit(content: &str) -> FactSearchHitV1 {
         serde_json::from_value(json!({
             "fact": {
                 "owner": {"kind": "profile"},
@@ -2211,7 +1546,8 @@ mod tests {
     /// every lane complete, no coverage section, no added lines.
     #[test]
     fn warm_coverage_leaves_the_rendered_body_unchanged() {
-        let coverage = coverage_value(&crate::mcp::server::CodeIndexSearchCoverageV1::warm());
+        let coverage =
+            coverage_value(&tracedecay_query::code_search::CodeIndexSearchCoverageV1::warm());
         assert_eq!(coverage["recall"], json!("full"));
         assert_eq!(coverage["exact"], json!("complete"));
 
@@ -2238,23 +1574,104 @@ mod tests {
 
     #[test]
     fn a_rebuilding_generation_remains_typed_unavailable() {
-        let unavailable = crate::mcp::server::CodeIndexSearchUnavailableV1 {
+        let unavailable = tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
             code_generation: None,
-            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+            reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+            semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
+                reason: tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
             },
-            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
-                crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
+                tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
             ),
         };
 
         assert!(!unavailable.coverage.any_servable());
         assert_eq!(
             unavailable.coverage.exact,
-            crate::mcp::server::CodeIndexLaneStatusV1::Unavailable {
-                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+            tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable {
+                reason: tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn search_reads_freshness_after_the_search_future_resolves() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let search_order = std::sync::Arc::clone(&order);
+        let freshness_order = std::sync::Arc::clone(&order);
+        let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
+            move |_| {
+                let search_order = std::sync::Arc::clone(&search_order);
+                Box::pin(async move {
+                    search_order.lock().expect("order").push("search_start");
+                    tokio::task::yield_now().await;
+                    search_order.lock().expect("order").push("search_done");
+                    tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+                        tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "calibration_unavailable",
+                            },
+                            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
+                                "calibration_unavailable",
+                            ),
+                        },
+                    )
+                })
+            },
+        );
+        let freshness: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+            std::sync::Arc::new(move |_| {
+                let freshness_order = std::sync::Arc::clone(&freshness_order);
+                Box::pin(async move {
+                    freshness_order.lock().expect("order").push("freshness");
+                    None
+                })
+            });
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = crate::tool_context::tests::scope("freshness-order");
+        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
+        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+            principal: tracedecay_domain::PrincipalId::new("principal.freshness-order")
+                .expect("principal"),
+            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                "revision.freshness-order",
+            )
+            .expect("revision"),
+        };
+        let code_index = crate::AdmittedCodeIndex::new(&authority, Some(&executor), None)
+            .expect("search executor admits");
+        let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
+            project: &project,
+            request: crate::McpRequestAuthoritiesV1 {
+                code_index: Some(code_index),
+                freshness: Some(&freshness),
+                ..crate::McpRequestAuthoritiesV1::default()
+            },
+        })
+        .expect("admitted search binding");
+
+        handle_search(
+            &ctx,
+            async {
+                Err(TraceDecayError::project_route(
+                    "verified-code-graph-read-unavailable",
+                    true,
+                    "ordering test does not admit a graph",
+                ))
+            },
+            json!({"query": "fixture"}),
+            None,
+            None,
+        )
+        .await
+        .expect("search renders without a graph");
+
+        assert_eq!(
+            *order.lock().expect("order"),
+            ["search_start", "search_done", "freshness"],
+            "freshness must be read after the search future resolves"
         );
     }
 
@@ -2262,23 +1679,23 @@ mod tests {
     async fn installed_search_executor_owns_fallback_allowed_dispatch() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = std::sync::Arc::clone(&calls);
-        let executor: crate::mcp::server::CodeIndexSearchExecutor = std::sync::Arc::new(
+        let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
             move |request| {
                 observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 assert_eq!(
                     request.mode,
-                    crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed
+                    tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed
                 );
                 assert_eq!(request.query, "fixture");
                 Box::pin(async {
-                    crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                    tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+                        tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                             code_generation: Some("generation.fixture".to_owned()),
-                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
                                 reason: "calibration_unavailable",
                             },
-                            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
                                 "calibration_unavailable",
                             ),
                         },
@@ -2288,7 +1705,7 @@ mod tests {
         );
         let outcome = execute_code_index_search(
             Some(&executor),
-            crate::mcp::server::CodeIndexSearchRequestV1 {
+            tracedecay_query::code_search::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
                 source_revision: None,
@@ -2296,7 +1713,7 @@ mod tests {
                 source_reference: None,
                 limit: 10,
                 cursor: None,
-                mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
+                mode: tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed,
                 lexical_routing: LexicalRoutingV1::query_only(),
                 authority: None,
                 deadline: None,
@@ -2306,10 +1723,10 @@ mod tests {
         .await;
         assert!(matches!(
             outcome,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                crate::mcp::server::CodeIndexSearchUnavailableV1 {
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+                tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                     reason:
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                     ..
                 }
             )
@@ -2321,7 +1738,7 @@ mod tests {
     async fn missing_search_executor_is_typed_capability_unavailable() {
         let outcome = execute_code_index_search(
             None,
-            crate::mcp::server::CodeIndexSearchRequestV1 {
+            tracedecay_query::code_search::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
                 source_revision: None,
@@ -2329,7 +1746,7 @@ mod tests {
                 source_reference: None,
                 limit: 10,
                 cursor: None,
-                mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,
+                mode: tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic,
                 lexical_routing: LexicalRoutingV1::query_only(),
                 authority: None,
                 deadline: None,
@@ -2339,10 +1756,10 @@ mod tests {
         .await;
         assert!(matches!(
             outcome,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                crate::mcp::server::CodeIndexSearchUnavailableV1 {
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+                tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                     reason:
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+                        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
                     ..
                 }
             )
@@ -2430,7 +1847,7 @@ mod tests {
     #[test]
     fn context_memory_section_keeps_full_content_for_retrieval_handle() {
         let content = format!("{}tail-marker", "long memory body ".repeat(100));
-        let hit = context_memory_hit(content.clone());
+        let hit = context_memory_hit(&content);
 
         let Some(section) = context_memory_section(&[hit], None) else {
             panic!("memory hit should render");
@@ -2444,7 +1861,7 @@ mod tests {
 
     #[test]
     fn context_memory_section_compacts_multiline_content() {
-        let hit = context_memory_hit("first line\n# heading\n- item".to_owned());
+        let hit = context_memory_hit("first line\n# heading\n- item");
 
         let Some(section) = context_memory_section(&[hit], None) else {
             panic!("memory hit should render");

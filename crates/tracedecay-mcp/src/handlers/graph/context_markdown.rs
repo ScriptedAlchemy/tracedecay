@@ -1,22 +1,21 @@
-//! Context markdown and plan-context enrichment that stay on the composition
-//! root because they reach root `is_test_file` and context-heading layout.
+//! Context markdown and plan-context enrichment for verified context.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
+use super::{
+    GRAPH_RELATION_READ_LIMIT, graph_symbol_corrupt, required_graph_file_path,
+    required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors,
+};
+use crate::context_headings::{
+    CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
+};
+use crate::path_tree::format_compact_path_list;
 use serde_json::Value;
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
-use tracedecay_mcp::context_headings::{
-    CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
-};
-use tracedecay_mcp::handlers::graph::{
-    GRAPH_RELATION_READ_LIMIT, graph_symbol_corrupt, required_graph_file_path,
-    required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors,
-};
-use tracedecay_mcp::path_tree::format_compact_path_list;
 
 #[hotpath::measure(label = "mcp.graph.context_markdown")]
 pub(super) fn verified_context_markdown(
@@ -120,7 +119,8 @@ pub(super) fn append_verified_plan_context(
             2,
         )? {
             let file_path = required_graph_file_path(&caller.symbol)?;
-            if crate::tracedecay::is_test_file(file_path) || annotated_files.contains(file_path) {
+            if tracedecay_code_index::is_test_file(file_path) || annotated_files.contains(file_path)
+            {
                 test_files.insert(file_path.to_owned());
             }
         }
