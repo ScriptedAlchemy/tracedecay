@@ -371,6 +371,7 @@ mod tests {
             .unwrap(),
             std::path::PathBuf::from("/tmp/provider-configuration-mixed-fixture"),
             vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+            Vec::new(),
         )
         .unwrap();
         let pending = resolved_snapshot_entries(vec![

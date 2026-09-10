@@ -29,6 +29,7 @@ pub struct DaemonWorkProposalRoutingAuthorityV1 {
     generate_proposal_capability: CapabilityId,
     generate_proposal_use_case: UseCaseId,
     eligible_routes: Vec<WorkRouteCandidateV1>,
+    pub(super) executable_binding_resolver: PinnedWorkExecutableBindingResolver,
 }
 
 impl DaemonWorkProposalRoutingAuthorityV1 {
@@ -102,6 +103,7 @@ impl DaemonWorkProposalRoutingAuthorityV1 {
             generate_proposal_capability,
             generate_proposal_use_case,
             eligible_routes,
+            executable_binding_resolver: resolver,
         })
     }
 
