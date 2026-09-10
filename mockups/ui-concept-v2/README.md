@@ -24,6 +24,8 @@ Do not use these images as `dashboard/audit-baselines/`.
   superseded/rejected concept-only assets.
 - [GALLERY.md](GALLERY.md) renders every authoritative final plate in one
   reviewable sequence.
+- [GAPS.md](GAPS.md) separates accepted concepts from standalone demonstration
+  coverage and production evidence gaps.
 - Each `<NN>-<workspace>/final/README.md` is that workspace's authoritative
   final state manifest and shared product/interaction contract.
 - Each final PNG's exact same-stem Markdown file owns that state's user job,
@@ -35,6 +37,11 @@ The more specific authority may add workspace detail but may not contradict a
 shared authority. When a proposed plate exposes behavior the shipping product
 does not, label that path unavailable or omit the control; a concept image
 cannot supply the missing integration.
+
+The external [standalone interaction reference](https://github.com/ScriptedAlchemy/td-brain-demo)
+exercises many concepts over checked-in snapshots and labeled fixtures. It is
+interaction evidence, not production availability or a replacement authority
+for the briefs in this directory.
 
 ## Layout and lifecycle
 
