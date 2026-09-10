@@ -451,16 +451,14 @@ pub(super) fn resume_attempts(
     } else {
         services.attempts().resume(context, &command)
     };
-    if let (Ok(report), Some(project_root)) = (&report, project_root) {
-        for attempt in &report.recovery_required {
-            spawn_attempt_execution(
-                registered.clone(),
-                Arc::clone(attempt_processes),
-                project_root.clone(),
-                attempt.clone(),
-                observability_producer.cloned(),
-            );
-        }
+    if report.is_ok()
+        && let Some(project_root) = project_root
+    {
+        // Recovery fences the lost provider and reports the retained attempt;
+        // it cannot authorize another dispatch under the same identity. A
+        // caller that wants another execution must use retry_attempt, whose
+        // new attempt identity and effect-safety checks make that choice
+        // explicit.
         if let Err(problem) = reconcile_active_workflow_fan_out(
             registered,
             Arc::clone(attempt_processes),
