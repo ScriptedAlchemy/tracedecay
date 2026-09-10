@@ -10,6 +10,12 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use super::*;
 
 const PHASE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Wall-clock bound for the dedicated-runtime drain. Isolation `--exact`
+/// hangs sat in `Runtime::drop` after the two servers were already down;
+/// a join timeout well under the 360s harness kill turns that wedge into
+/// a typed red instead of a SIGKILL.
+#[cfg(unix)]
+const FIXTURE_DRAIN_BOUND: Duration = Duration::from_mins(2);
 const AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 struct RmcpRouteFixture {
@@ -935,8 +941,43 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_rmcp_cancels_concurrent_requests_before_or_after_registration() {
+#[test]
+fn production_rmcp_cancels_concurrent_requests_before_or_after_registration() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("rmcp-cancel-route".into())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("cancellation test runtime");
+                runtime.block_on(
+                    production_rmcp_cancels_concurrent_requests_before_or_after_registration_inner(
+                    ),
+                );
+                // Production non-foreground shape (`main.rs`): bound leftover
+                // blocking work. `shutdown_background()` is timeout 0.
+                runtime.shutdown_timeout(Duration::from_secs(2));
+            }));
+            let _ = done_tx.send(outcome);
+        })
+        .expect("spawn cancellation test thread");
+    match done_rx.recv_timeout(FIXTURE_DRAIN_BOUND) {
+        Ok(Ok(())) => {}
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("rmcp cancellation fixture: dedicated-runtime drain exceeded the test bound");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("rmcp cancellation fixture: dedicated-runtime thread disconnected");
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn production_rmcp_cancels_concurrent_requests_before_or_after_registration_inner() {
     let fixture = rmcp_route_fixture("rmcp-live-cancellation").await;
     let executor = Arc::new(ControlledCancellationExecutor::new());
     let project_path = fixture
@@ -965,7 +1006,7 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
             .project_servers()
             .lock()
             .await;
-        owners.insert_route(route, key.clone(), controlled_server);
+        owners.insert_route(route, key.clone(), Arc::clone(&controlled_server));
         assert!(owners.mark_ready(&key));
     }
 
@@ -1050,8 +1091,20 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     assert_eq!(cancellation_observed, started);
     assert_eq!(completed, started);
 
-    // The replacement route leaves the original server owned by the fixture.
-    // Drain both owners before Tokio drops its runtime and the profile is removed.
+    // The replacement route leaves the original fixture server and the
+    // controlled replacement both live. Shut those two servers down
+    // first so ownership is explicit, then drain the remaining engine
+    // owners (`shutdown_all` is the production-bounded canceller).
+    {
+        let mut owners = fixture
+            .engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        owners.remove(&key);
+    }
+    controlled_server.shutdown().await;
     fixture.server.shutdown().await;
     let shutdown = fixture.engine.shutdown_all().await;
     assert!(
