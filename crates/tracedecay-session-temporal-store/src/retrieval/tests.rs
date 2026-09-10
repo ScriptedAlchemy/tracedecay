@@ -1333,6 +1333,12 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
             .any(|line| line.contains("IDX_SESSION_OCCURRENCES_MESSAGE")),
         "direct-user retrieval must join occurrences by message identity: {direct_plan:?}"
     );
+    assert!(
+        direct_plan
+            .iter()
+            .any(|line| line.contains("IDX_SESSION_MESSAGES_TIMESTAMP")),
+        "bounded direct-user retrieval must start from the message time range: {direct_plan:?}"
+    );
 
     let direct_exact_params = vec![
         SqlValue::Text("user".to_string()),
