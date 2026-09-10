@@ -944,6 +944,7 @@ mod complexity_rendering_tests {
                 line_span: 40,
                 start_line: 4,
                 signature: None,
+                docstring: None,
                 skip_test_coverage: false,
                 file_identity: FileIdentityDigest::new(format!("sha256:{:064x}", 2))
                     .expect("file identity"),

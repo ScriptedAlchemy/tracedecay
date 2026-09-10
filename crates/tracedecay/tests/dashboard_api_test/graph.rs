@@ -459,6 +459,7 @@ fn compose_graph_authority(
                         .saturating_add(1),
                     start_line: node.start_line,
                     signature: node.signature.clone(),
+                    docstring: node.docstring.clone(),
                     skip_test_coverage: false,
                     file_identity: FileIdentityDigest::new(fixture_digest(
                         "dashboard-file-identity",

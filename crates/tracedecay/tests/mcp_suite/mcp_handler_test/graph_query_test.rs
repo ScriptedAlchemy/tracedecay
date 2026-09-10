@@ -1430,21 +1430,32 @@ async fn test_complexity_response_fields() {
 }
 
 #[tokio::test]
-async fn test_doc_coverage_response_structure() {
+async fn doc_coverage_distinguishes_documented_and_undocumented_enum_variants() {
     let (cg, _dir) = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/lib.rs"),
-            "/// This public function is documented.\n\
-             pub fn documented() {}\n\
-             pub fn undocumented() {}\n",
+            "/// A documented public enum.\n\
+             pub enum Mode {\n\
+                 /// A documented variant.\n\
+                 Documented,\n\
+                 Undocumented,\n\
+                 ///   \n\
+                 WhitespaceOnly,\n\
+             }\n",
         )
         .unwrap();
     })
     .await;
-    let result = call_production_tool(&cg, "tracedecay_doc_coverage", json!({}), None, None)
-        .await
-        .unwrap();
+    let result = call_production_tool(
+        &cg,
+        "tracedecay_doc_coverage",
+        json!({"limit": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let text = extract_text(&result.value);
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert!(
@@ -1455,9 +1466,12 @@ async fn test_doc_coverage_response_structure() {
     assert!(parsed.get("files").is_some(), "should have files array");
     assert_eq!(
         parsed["total_undocumented"].as_u64(),
-        Some(1),
-        "only the public symbol without a doc comment should be reported: {parsed}"
+        Some(2),
+        "missing and whitespace-only documentation should be counted: {parsed}"
     );
+    assert_eq!(parsed["returned_count"].as_u64(), Some(1), "{parsed}");
+    assert_eq!(parsed["omitted_count"].as_u64(), Some(1), "{parsed}");
+    assert_eq!(parsed["complete"].as_bool(), Some(false), "{parsed}");
     assert_eq!(parsed["file_count"].as_u64(), Some(1), "{parsed}");
     let first = parsed["files"]
         .as_array()
@@ -1465,10 +1479,11 @@ async fn test_doc_coverage_response_structure() {
         .unwrap_or_else(|| panic!("doc coverage should report src/lib.rs: {parsed}"));
     assert_eq!(first["file"].as_str(), Some("src/lib.rs"), "{parsed}");
     assert_eq!(first["count"].as_u64(), Some(1), "{parsed}");
+    assert_eq!(first["symbols"][0]["line"].as_u64(), Some(5), "{parsed}");
     assert_eq!(
         first["symbols"][0]["name"].as_str(),
-        Some("undocumented"),
-        "documented public symbols must be excluded: {parsed}"
+        Some("Undocumented"),
+        "documented enum variants must be excluded: {parsed}"
     );
 }
 

@@ -789,6 +789,7 @@ struct SymbolRow {
     line_span: u32,
     start_line: u32,
     signature: Option<String>,
+    docstring: Option<String>,
     skip_test_coverage: bool,
     parent: Option<usize>,
     identity: SymbolIdentityDigest,
@@ -1324,6 +1325,7 @@ impl DeterministicCodeChunker {
             line_span: u32,
             start_line: u32,
             signature: Option<String>,
+            docstring: Option<String>,
             skip_test_coverage: bool,
         }
 
@@ -1353,6 +1355,7 @@ impl DeterministicCodeChunker {
                         .saturating_add(1),
                     start_line: node.start_line,
                     signature: node.signature.clone(),
+                    docstring: node.docstring.clone(),
                     skip_test_coverage: node
                         .docstring
                         .as_deref()
@@ -1429,6 +1432,7 @@ impl DeterministicCodeChunker {
                 line_span: node.line_span,
                 start_line: node.start_line,
                 signature: node.signature.clone(),
+                docstring: node.docstring.clone(),
                 skip_test_coverage: node.skip_test_coverage,
                 parent,
                 identity,
@@ -1475,6 +1479,7 @@ impl DeterministicCodeChunker {
                 line_span: row.line_span,
                 start_line: row.start_line,
                 signature: row.signature.clone(),
+                docstring: row.docstring.clone(),
                 skip_test_coverage: row.skip_test_coverage,
                 file_identity: file_identity.clone(),
                 content_digest: content_digest(text.as_bytes()),
@@ -2441,6 +2446,7 @@ mod tests {
             line_span: source[start..end].lines().count() as u32,
             start_line: source[..start].matches('\n').count() as u32,
             signature: None,
+            docstring: None,
             skip_test_coverage: false,
             parent: None,
             identity: id(&digest(identity_byte)),

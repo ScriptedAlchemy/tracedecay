@@ -147,9 +147,21 @@ pub struct LineageSymbolRecordV1 {
     pub line_span: u32,
     pub start_line: u32,
     pub signature: Option<String>,
+    /// Extracted documentation. The key is required even when absent so an
+    /// older sealed generation cannot be mistaken for negative evidence.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub docstring: Option<String>,
     pub skip_test_coverage: bool,
     pub file_identity: FileIdentityDigest,
     pub content_digest: ContentDigest,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 /// The complexity counters of a symbol whose bounded walk covered its whole
@@ -662,6 +674,7 @@ mod tests {
             line_span: 1,
             start_line: 0,
             signature: None,
+            docstring: None,
             skip_test_coverage: false,
             file_identity: file_identity(file_byte),
             content_digest: digest(content_byte),
@@ -678,6 +691,21 @@ mod tests {
 
     fn resolver() -> SymbolLineageResolver {
         SymbolLineageResolver::new()
+    }
+
+    #[test]
+    fn lineage_record_requires_documentation_evidence() {
+        let record = record("sym.c1", 'a', "crate::alpha", "function", 'f', '0');
+        let mut value = serde_json::to_value(record).expect("serialize lineage record");
+        assert_eq!(value["docstring"], serde_json::Value::Null);
+        value
+            .as_object_mut()
+            .expect("lineage record object")
+            .remove("docstring");
+
+        let error = serde_json::from_value::<LineageSymbolRecordV1>(value)
+            .expect_err("records without documentation evidence must require reindexing");
+        assert!(error.to_string().contains("missing field `docstring`"));
     }
 
     #[test]

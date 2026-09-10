@@ -1561,6 +1561,7 @@ mod document_composition_tests {
             line_span: 1,
             start_line: 0,
             signature: None,
+            docstring: None,
             skip_test_coverage: false,
             file_identity: FileIdentityDigest::new(digest('f')).expect("file identity fixture"),
             content_digest: ContentDigest::new(digest('d')).expect("content fixture"),

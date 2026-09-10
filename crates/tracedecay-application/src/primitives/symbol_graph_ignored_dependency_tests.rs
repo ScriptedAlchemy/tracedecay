@@ -831,6 +831,7 @@ fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
             line_span: 1,
             start_line: 0,
             signature: None,
+            docstring: None,
             skip_test_coverage: false,
             file_identity: digest::<FileIdentityDigest>('f'),
             content_digest: digest::<ContentDigest>('1'),
