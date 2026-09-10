@@ -6773,6 +6773,7 @@ dependencies = [
  "tracedecay-code-index-runtime",
  "tracedecay-configuration",
  "tracedecay-contracts",
+ "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
