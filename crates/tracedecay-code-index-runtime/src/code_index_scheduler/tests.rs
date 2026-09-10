@@ -10963,9 +10963,13 @@ async fn shutdown_releases_indexed_generation_and_scheduler_owners() {
     let _measurement = hotpath::HotpathGuardBuilder::new("indexed-registry-shutdown").build();
     let sources = (0..128)
         .map(|file| {
-            let source = (0..16)
-                .map(|symbol| format!("pub fn item_{file}_{symbol}() -> u32 {{ {symbol} }}\n"))
-                .collect::<String>();
+            let source = (0..16).fold(String::new(), |mut source, symbol| {
+                let _ = writeln!(
+                    source,
+                    "pub fn item_{file}_{symbol}() -> u32 {{ {symbol} }}"
+                );
+                source
+            });
             (format!("src/module_{file}.rs"), source)
         })
         .collect::<Vec<_>>();

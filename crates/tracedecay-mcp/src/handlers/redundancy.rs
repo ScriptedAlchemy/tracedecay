@@ -5,32 +5,31 @@
 //! handler supplies the admitted verified graph and renders the resulting payload.
 
 use serde_json::{Value, json};
-use tracedecay_contracts::retrieval::RedundancySurfaceRequestV1;
-use tracedecay_contracts::retrieval::grep_analysis::RedundancyResultV1;
-
-use crate::tracedecay::TraceDecay;
 use tracedecay_application::semantic_runtime::project_semantic_redundancy_generation;
 use tracedecay_code_extraction::redundancy::round4;
+use tracedecay_contracts::retrieval::RedundancySurfaceRequestV1;
+use tracedecay_contracts::retrieval::grep_analysis::RedundancyResultV1;
 use tracedecay_domain::errors::Result;
+use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_graph_query::redundancy_scan::{
     RedundancyOptions, RedundancyPairViewV1, RedundancyScanV1, redundancy_scan,
 };
 
-use super::support::decode_primitive_request;
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::tools::render::{self, Md};
+use crate::ToolResult;
+use crate::decode_primitive_request;
+use crate::tools::render::{self, Md};
 
 #[hotpath::measure(label = "mcp.health.redundancy.total")]
-pub(crate) async fn handle_redundancy(
-    cg: &TraceDecay,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+pub async fn handle_redundancy(
+    graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let request: RedundancySurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_redundancy")?;
     let options = redundancy_options(&request, scope_prefix);
-    let semantic = project_semantic_redundancy_generation(cg.project_root()).await;
+    let project_root = graph.project_root()?;
+    let semantic = project_semantic_redundancy_generation(project_root).await;
     let scan = hotpath::future!(
         redundancy_scan(graph, &options, semantic.as_ref()),
         label = "mcp.health.redundancy.scan"
@@ -38,7 +37,7 @@ pub(crate) async fn handle_redundancy(
     .await?;
     let result = serde_json::from_value::<RedundancyResultV1>(scan.output.clone())?;
     let output = serde_json::to_value(result)?;
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+    let text = render::finalize(Some(project_root), &args, &output, || {
         if scan.semantic_active {
             render::generic_md(&output)
         } else {
