@@ -216,6 +216,11 @@ pub(super) fn spawn(
         log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
         return false;
     }
+    // Project-open schedules this owner before code-index activation. Capture
+    // the registry-wide seat cursor now so a retained generation seated before
+    // the background task's first poll remains observable. The exact project
+    // and scope are still revalidated by `try_mount` after every wake.
+    let mut serving_seats = invocation.code_index_schedulers.subscribe_serving_seats();
     owner.spawn_background_task(hotpath::future!(
         async move {
             let mut publications = invocation
@@ -254,6 +259,7 @@ pub(super) fn spawn(
                     &project_root,
                     &mut publications,
                     &mut serving_changes,
+                    &mut serving_seats,
                 )
                 .await
                 {
@@ -270,6 +276,7 @@ async fn wait_for_generation_change(
     project_root: &Path,
     publications: &mut broadcast::Receiver<CodeIndexGenerationPublishedV1>,
     serving_changes: &mut Option<watch::Receiver<()>>,
+    serving_seats: &mut watch::Receiver<u64>,
 ) -> bool {
     loop {
         tokio::select! {
@@ -285,6 +292,7 @@ async fn wait_for_generation_change(
                     None => std::future::pending().await,
                 }
             } => return serving.is_ok(),
+            seat = serving_seats.changed() => return seat.is_ok(),
         }
     }
 }
@@ -528,6 +536,7 @@ mod tests {
         let (publication_sender, mut publications) = broadcast::channel(4);
         let (serving_sender, serving_receiver) = watch::channel(());
         let mut serving_changes = Some(serving_receiver);
+        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
         let publication = CodeIndexGenerationPublishedV1 {
             project_root: root.path().to_path_buf(),
             repository_id: RepositoryId::new("repository.deferred").expect("repository"),
@@ -540,13 +549,20 @@ mod tests {
             .send(publication.clone())
             .expect("sealed publication");
         assert!(
-            wait_for_generation_change(root.path(), &mut publications, &mut serving_changes).await
+            wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut serving_changes,
+                &mut serving_seats,
+            )
+            .await
         );
 
         let mut waiting = Box::pin(wait_for_generation_change(
             root.path(),
             &mut publications,
             &mut serving_changes,
+            &mut serving_seats,
         ));
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
@@ -566,15 +582,51 @@ mod tests {
         drop(waiting);
         drop(serving_sender);
         assert!(
-            !wait_for_generation_change(root.path(), &mut publications, &mut serving_changes).await
+            !wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut serving_changes,
+                &mut serving_seats,
+            )
+            .await
         );
+    }
+
+    #[tokio::test]
+    async fn retained_seat_wakes_after_subscription_precedes_scheduler_enrollment() {
+        let root = tempfile::tempdir().expect("project root");
+        let (publication_sender, mut publications) = broadcast::channel(1);
+        let (seat_sender, mut serving_seats) = watch::channel(0_u64);
+
+        // The deferred owner subscribes while no per-project scheduler exists.
+        // A retained generation then seats without a new-generation broadcast.
+        seat_sender.send_modify(|seats| *seats += 1);
+        assert!(
+            wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut None,
+                &mut serving_seats,
+            )
+            .await
+        );
+        drop(publication_sender);
     }
 
     #[tokio::test]
     async fn publication_channel_closure_stops_a_wait_before_scheduler_mount() {
         let root = tempfile::tempdir().expect("project root");
         let (sender, mut publications) = broadcast::channel(1);
+        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
         drop(sender);
-        assert!(!wait_for_generation_change(root.path(), &mut publications, &mut None).await);
+        assert!(
+            !wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut None,
+                &mut serving_seats,
+            )
+            .await
+        );
     }
 }
