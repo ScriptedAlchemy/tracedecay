@@ -314,7 +314,9 @@ impl DaemonInvocationState {
             // At this tip `unregister_project_semantic_runtime` already drops
             // the project's retained generation, redundancy state, and
             // activation gate, so one call is the whole teardown.
-            tracedecay_application::semantic_runtime::unregister_project_semantic_runtime(root);
+            drop(
+                tracedecay_application::semantic_runtime::unregister_project_semantic_runtime(root),
+            );
         }
         Ok(runtime_quiescence)
     }
