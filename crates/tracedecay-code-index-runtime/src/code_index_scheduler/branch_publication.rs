@@ -1,7 +1,6 @@
 //! Exact branch-generation publication through the retained code-index owner.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -19,6 +18,7 @@ use tracedecay_runtime_core::branch_meta::{
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
+use super::registry::ServingGenerationInstallationV1;
 use super::{
     CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
@@ -175,8 +175,8 @@ impl BranchPublicationContextV1 {
                 .get(branch)
                 .and_then(|entry| entry.graph_source.clone())
         });
-        let generation = match self
-            .await_exact_branch_generation(
+        let installation = match self
+            .await_exact_branch_generation_installation(
                 schedulers,
                 &canonical_worktree_root,
                 &source,
@@ -184,28 +184,12 @@ impl BranchPublicationContextV1 {
             )
             .await
         {
-            Ok(generation) => generation,
+            Ok(installation) => installation,
             Err(error) => {
                 self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)
                     .await?;
                 return Err(error);
             }
-        };
-        let ServingGenerationInstallationOutcomeV1::Installed(installation) = schedulers
-            .install_exact_serving_generation(&canonical_worktree_root, &generation)
-            .await
-        else {
-            let error = TraceDecayError::project_route(
-                CODE_INDEX_ACTIVATION_UNAVAILABLE,
-                true,
-                format!(
-                    "exact branch generation was replaced before publication for '{}'",
-                    canonical_worktree_root.display()
-                ),
-            );
-            self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)
-                .await?;
-            return Err(error);
         };
         let publication = tracedecay_runtime_core::branch_meta::publish_graph_source(
             &self.data_root,
@@ -426,13 +410,13 @@ impl BranchPublicationContextV1 {
         })
     }
 
-    async fn await_exact_branch_generation(
+    async fn await_exact_branch_generation_installation(
         &self,
         schedulers: &CodeIndexSchedulerRegistryV1,
         canonical_worktree_root: &Path,
         source: &BranchGraphSourceDraftV1,
         cancellation: &CancellationToken,
-    ) -> Result<Arc<CodeIndexPublishedGenerationV1>, TraceDecayError> {
+    ) -> Result<ServingGenerationInstallationV1, TraceDecayError> {
         let mut serving_changes = schedulers
             .subscribe_serving_generation_changes(canonical_worktree_root)
             .await
@@ -491,11 +475,25 @@ impl BranchPublicationContextV1 {
                     ),
                 ));
             }
+            let freshness = schedulers
+                .dashboard_freshness(canonical_worktree_root)
+                .await;
             if let Some(generation) = scope
                 .serving_generation
                 .filter(|generation| generation_matches_branch_source(generation, source))
+                && freshness.as_ref().is_some_and(|freshness| {
+                    freshness.latest_generation_id.as_deref()
+                        == Some(generation.manifest().generation_id.as_str())
+                        && matches!(
+                            freshness.code_graph_serving.as_ref(),
+                            Some(CodeGraphServingReadinessV1::Ready)
+                        )
+                })
+                && let ServingGenerationInstallationOutcomeV1::Installed(installation) = schedulers
+                    .install_exact_serving_generation(canonical_worktree_root, &generation)
+                    .await
             {
-                return Ok(generation);
+                return Ok(installation);
             }
             let now = Instant::now();
             if now >= hard_deadline {
@@ -504,9 +502,7 @@ impl BranchPublicationContextV1 {
                     source,
                 ));
             }
-            if schedulers
-                .dashboard_freshness(canonical_worktree_root)
-                .await
+            if freshness
                 .as_ref()
                 .is_some_and(branch_generation_work_is_active)
             {
