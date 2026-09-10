@@ -115,7 +115,6 @@ pub use requests::{
     AnchorExpandResult, CallChainPrimitiveRequest, CallChainPrimitiveResult,
     DiagnosticPrimitiveRecord, DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult,
     DiagnosticsPrimitiveScope, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
-    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, FileMetadataRecord,
     GraphImpactResult, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
     HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1,
     HealthDimensionPointV1, HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE,

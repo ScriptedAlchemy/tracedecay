@@ -2400,7 +2400,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::SourceBody
         | ApplicationSurfaceOperation::SourceOutline
         | ApplicationSurfaceOperation::ModuleApi
-        | ApplicationSurfaceOperation::FileMetadata
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
@@ -2450,7 +2449,6 @@ fn feedback_surface_is_observable(operation: ApplicationSurfaceOperation) -> boo
             | ApplicationSurfaceOperation::SourceBody
             | ApplicationSurfaceOperation::SourceOutline
             | ApplicationSurfaceOperation::ModuleApi
-            | ApplicationSurfaceOperation::FileMetadata
             | ApplicationSurfaceOperation::HealthRead
             | ApplicationSurfaceOperation::HealthDelta
             | ApplicationSurfaceOperation::StorageStatus
