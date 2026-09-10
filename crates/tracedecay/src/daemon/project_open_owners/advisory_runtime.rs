@@ -180,13 +180,9 @@ impl Drop for ScoutHookRegistrationV1 {
 }
 
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
-    /// Resolves the cycle input from the current configuration revision and
-    /// the current sealed code-index generation on every invocation. A
-    /// settings PATCH landing after project open (for example enabling the
-    /// Context Scout checkbox) therefore remounts the producer path on the
-    /// next cycle instead of rejecting every cycle as
-    /// `feedback-cycle-configuration-drift` until the project is reopened, and
-    /// files sealed by later generations stay eligible without a reopen.
+    /// Builds the request through the input authority selected with this
+    /// runtime's admitted providers. That authority resolves the requested
+    /// document against the current sealed generation on every invocation.
     #[hotpath::skip]
     async fn run_cycle(
         &self,
@@ -194,10 +190,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
-        let indexed_files = current_indexed_files(&self.producer)
-            .await
-            .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-census"))?;
-        let lsp_input = current_feedback_lsp_input(&self.producer, &indexed_files).await?;
+        let lsp_input = Arc::clone(&self.producer.feedback_lsp_input);
         self.run_cycle_with_lsp_input(lsp_input, request, deadline, agent_stop_gate)
             .await
     }
@@ -526,14 +519,11 @@ struct ProjectOpenScoutProducerV1 {
     scout_owner: Arc<ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     feedback_runtime: Arc<FeedbackRuntime>,
+    feedback_lsp_input: FeedbackCycleLspInput,
     project_root: std::path::PathBuf,
     scope: tracedecay_contracts::ResolvedScope,
     code_index_schedulers:
         tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
-    requester: tracedecay_domain::ActorId,
-    diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
 }
 
 /// Sorted logical paths from the current sealed code-index generation,
@@ -554,64 +544,6 @@ async fn current_indexed_files(producer: &ProjectOpenScoutProducerV1) -> Option<
         .collect::<Vec<_>>();
     indexed_files.sort();
     Some(indexed_files)
-}
-
-async fn current_feedback_lsp_input(
-    producer: &ProjectOpenScoutProducerV1,
-    indexed_files: &[String],
-) -> std::result::Result<FeedbackCycleLspInput, LspRuntimeFailure> {
-    let pinned_configuration = producer
-        .graph
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-configuration"))?;
-    let current_configuration = pinned_configuration.into_current_state();
-    let configuration_digest = current_configuration
-        .snapshot
-        .effective_behavior_digest
-        .clone();
-    let policy_digest = canonical_sha256(&(
-        "tracedecay.project-open.policy.v1",
-        &configuration_digest,
-        POLICY_REVISION_V1,
-    ))
-    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-policy"))?;
-    let runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync> =
-        Arc::new(ProductionFeedbackRuntimeStateV1::new(
-            Arc::clone(&producer.code_graph),
-            configuration_digest,
-            policy_digest,
-        ));
-    let authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort> =
-        Arc::new(ProjectOpenFeedbackCycleAuthorizationV1 {
-            project_root: producer.project_root.clone(),
-            scope: producer.scope.clone(),
-            configuration: Arc::clone(producer.graph.configuration_runtime()),
-        });
-    let mounted_providers = producer
-        .diagnostic_broker
-        .lock()
-        .await
-        .mounted_providers_for_files(indexed_files);
-    resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
-        project_root: producer.project_root.clone(),
-        scope: producer.scope.clone(),
-        access_configuration: current_configuration,
-        requester: producer.requester.clone(),
-        authorization,
-        code_graph: Arc::clone(&producer.code_graph),
-        project_runtime_db: producer.session_db.clone(),
-        runtime_state,
-        document_identity: Arc::new(producer.code_index_schedulers.clone()),
-        code_index_identity: Arc::new(producer.code_index_schedulers.clone()),
-        test_attribution: Arc::new(producer.code_index_schedulers.clone()),
-        mounted_providers,
-    })
-    .await
-    .map(|parts| parts.lsp_input)
-    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-input"))
 }
 
 /// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
@@ -645,14 +577,7 @@ async fn run_production_hook_cycle(
     ) else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    let Ok(lsp_input) = current_feedback_lsp_input(&producer, &indexed_files).await else {
-        observe_hook_feedback_cycle_terminal(
-            &cycle.registration.host_delivery.source_observations,
-            &request,
-            FeedbackOutcomeV1::Unavailable,
-        );
-        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
-    };
+    let lsp_input = Arc::clone(&producer.feedback_lsp_input);
     let diagnostic_trigger = match request.trigger {
         HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
         HookOrchestrationTriggerV1::Stop | HookOrchestrationTriggerV1::Explicit => {
@@ -1308,13 +1233,10 @@ async fn register_production_advisory_owner(
         scout_owner,
         scout_registry,
         feedback_runtime: feedback_cycle.feedback_runtime(),
+        feedback_lsp_input: feedback_cycle.lsp_input(),
         project_root: project_root.to_path_buf(),
         scope: state.scope.clone(),
         code_index_schedulers: invocation.code_index_schedulers.clone(),
-        session_db: state.session_db.clone(),
-        code_graph: Arc::clone(&state.code_graph),
-        requester: state.requester.clone(),
-        diagnostic_broker: Arc::clone(&state.diagnostic_broker),
     });
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         registration: Arc::clone(&registration),
