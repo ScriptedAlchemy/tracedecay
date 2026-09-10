@@ -159,8 +159,13 @@ fn serve_routed_rmcp_connection_inner(
         for line in pending_lines {
             transport.push_replay(line)?;
         }
-        let adapter =
-            RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)?;
+        let delivery_settlement_recorder = server.delivery_settlement_recorder.clone();
+        let adapter = RmcpConnectionAdapter::new(
+            ProductionMcpConnectionContext::new(server),
+            timings_enabled,
+            initialize_response_decorator,
+            delivery_settlement_recorder,
+        )?;
         let transport = transport
             .with_rmcp_selected_project_responses(adapter.selected_project_responses())
             .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
