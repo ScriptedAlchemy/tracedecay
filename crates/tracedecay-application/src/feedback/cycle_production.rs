@@ -82,6 +82,7 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     pub project_runtime_db: RegisteredGlobalDbLeaseV1,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
+    pub provider_seed: ProductionFeedbackDocumentIdentityV1,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     pub code_index_identity:
         Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
@@ -427,13 +428,7 @@ pub async fn resolve_production_feedback_cycle_parts(
         input.access_configuration.snapshot,
         policy_digest.clone(),
     )?;
-    let provider_seed = input
-        .document_identity
-        .resolve(input.project_root.clone(), None)
-        .await
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "project-open provider code-index identity",
-        })?;
+    let provider_seed = input.provider_seed;
     let provider_candidates = if input.mounted_providers.is_empty() {
         vec![unavailable_lsp_candidate(
             &input.scope,

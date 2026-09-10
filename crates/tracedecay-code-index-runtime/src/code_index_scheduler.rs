@@ -9061,5 +9061,8 @@ pub use ignored_dependencies::{
 };
 pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
-pub use registry::{ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1};
+pub use registry::{
+    ScopedFeedbackDocumentIdentityV1, ServingGenerationInstallationOutcomeV1,
+    ServingGenerationRollbackOutcomeV1, feedback_document_identity_from_generation,
+};
 pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
