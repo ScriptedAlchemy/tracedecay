@@ -1033,14 +1033,11 @@ async fn wait_for_production_composition_code_index(
             // Scope-aware readiness is the authenticated demand boundary that
             // starts the registered route-local activation owner. The root-only
             // probe cannot mount an idle on-demand scheduler.
-            if invocation
+            let generation_ready = invocation
                 .code_index_schedulers
                 .latest_complete_ready_for_scope(scope)
                 .await
-                .is_some()
-            {
-                return;
-            }
+                .is_some();
             // A clean restart whose retained revision-7 head recovered serves
             // every read through the text projection and deliberately leaves
             // the sealed seat empty, because replaying the partitions to seat
@@ -1055,11 +1052,17 @@ async fn wait_for_production_composition_code_index(
             // readiness here would let the first open race ahead of its own
             // seat, and every consumer that needs the decoded generation
             // would then find nothing seated.
-            if invocation
+            let recovered_text_ready = invocation
                 .code_index_schedulers
                 .latest_text_serving_for_scope(scope)
                 .await
-                .is_some_and(|text| text.interactive_graph_store().is_ok())
+                .is_some_and(|text| text.interactive_graph_store().is_ok());
+            if (generation_ready || recovered_text_ready)
+                && invocation
+                    .code_index_schedulers
+                    .query_authority_for_scope(scope)
+                    .await
+                    .is_some()
             {
                 return;
             }
@@ -1586,6 +1589,9 @@ mod generation_retention_test;
 
 #[cfg(test)]
 mod configuration_idempotency_journey_test;
+
+#[cfg(test)]
+mod read_only_project_open_journey_test;
 
 #[cfg(test)]
 mod semantic_activation_journey_test;
