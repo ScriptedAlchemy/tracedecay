@@ -725,7 +725,9 @@ async fn dispatch_decoded(
         now_utc(),
         elapsed_us(started),
     );
-    let context_scout_address = admission.take_context_scout_address();
+    let Ok(context_scout_address) = admission.take_context_scout_address() else {
+        return unavailable();
+    };
     let feedback_notice = admission.take_feedback_notice();
     let github_stack_signal_available = admission.take_github_stack_signal_available();
     match completed {
@@ -775,13 +777,17 @@ async fn dispatch_decoded(
                 feedback: None,
                 outcome: None,
             });
+            let guidance = match render_host_delivery(
+                result.rendered_guidance,
+                context_scout_address.as_ref(),
+                delivered.feedback.as_ref(),
+                github_stack_signal_available,
+            ) {
+                Ok(guidance) => guidance,
+                Err(_) => return unavailable(),
+            };
             HookDispatch::Handled {
-                guidance: render_host_delivery(
-                    result.rendered_guidance,
-                    context_scout_address.as_ref(),
-                    delivered.feedback.as_ref(),
-                    github_stack_signal_available,
-                ),
+                guidance,
                 disposition: result.receipt.disposition,
             }
         }
@@ -835,18 +841,20 @@ fn render_host_delivery(
     context_scout_address: Option<&ContextScoutAddressV1>,
     feedback_notice: Option<&tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: bool,
-) -> Option<String> {
+) -> Result<Option<String>, serde_json::Error> {
     let scout_address = context_scout_address
-        .and_then(|address| serde_json::to_string(address).ok())
+        .map(serde_json::to_string)
+        .transpose()?
         .map(|address| {
             format!("TraceDecay Context Scout address for authorized operations: {address}")
         });
     let notice = feedback_notice
-        .and_then(|notice| serde_json::to_string(notice).ok())
+        .map(serde_json::to_string)
+        .transpose()?
         .map(|notice| format!("TraceDecay feedback ready for authorized lookup: {notice}"));
     let stack_wakeup = github_stack_signal_available
         .then_some("TraceDecay GitHub stack update available for authenticated expansion.");
-    [
+    Ok([
         guidance,
         scout_address,
         notice,
@@ -858,7 +866,7 @@ fn render_host_delivery(
         rendered.push_str("\n\n");
         rendered.push_str(&next);
         rendered
-    })
+    }))
 }
 
 /// Spool writer admission waits one synchronous budget measured from the lock
