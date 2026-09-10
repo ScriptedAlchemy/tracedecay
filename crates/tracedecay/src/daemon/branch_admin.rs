@@ -34,6 +34,7 @@ use tracedecay_daemon_service::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
 };
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use tracedecay_store_runtime::StoreWriterGates;
 pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
@@ -645,7 +646,7 @@ impl StoreAdministration {
                     self.manual_branch_publications
                         .join_failed
                         .store(true, Ordering::Release);
-                    super::log_daemon_event(
+                    log_daemon_event(
                         "manual_branch_publication",
                         &[
                             ("action", "reap".to_owned()),
@@ -691,7 +692,7 @@ impl StoreAdministration {
                 self.manual_branch_publications
                     .join_failed
                     .store(true, Ordering::Release);
-                super::log_daemon_event(
+                log_daemon_event(
                     "manual_branch_publication",
                     &[
                         ("action", "shutdown".to_owned()),

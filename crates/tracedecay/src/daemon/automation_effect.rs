@@ -9,6 +9,7 @@ use std::path::Path;
 use tracedecay_automation_runtime::automation::effect_runtime::contract_error;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AdmittedAutomationEffectRequest, AutomationEffectAdmission, AutomationEffectAuthority,
+    observe_admission_decision,
 };
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunRequestV1, RetainedSurfaceOperation, retained_surface_application_operation,
@@ -68,8 +69,9 @@ pub(crate) async fn prepare(
                 problem,
             )
             .map_err(contract_error)?;
-            hotpath::gauge!("daemon.effect_admission.refused.pre_admission_total").inc(1_u64);
-            return Ok(AutomationEffectAdmission::PreAdmissionProblem(envelope));
+            let admission = AutomationEffectAdmission::PreAdmissionProblem(envelope);
+            observe_admission_decision(&admission);
+            return Ok(admission);
         }
         Err(RegisteredRetainedRequestContextError::Runtime(error)) => return Err(error),
     };

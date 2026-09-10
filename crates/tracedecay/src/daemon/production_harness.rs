@@ -24,12 +24,15 @@ use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 #[cfg(any(test, feature = "test-transport"))]
 use super::*;
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(all(unix, any(test, feature = "test-transport")))]
 use tracedecay_application::pr_tracking::try_acquire_manual_branch_lifecycle;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_daemon_identity::profile_identity;
+
+#[cfg(all(unix, any(test, feature = "test-transport")))]
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.
@@ -896,6 +899,24 @@ impl ProductionProjectCompositionHarnessV1 {
         Ok(current.revision_id().as_str().to_owned())
     }
 
+    /// Manual branch publication is unix-only in production (`branch_add`
+    /// answers with the same typed refusal elsewhere), so the harness mirrors
+    /// that boundary instead of reaching the unix-only administration path.
+    #[cfg(not(unix))]
+    pub async fn track_worktree_branch(
+        &self,
+        _project_root: impl AsRef<Path>,
+        _worktree_root: impl AsRef<Path>,
+        _branch: &str,
+    ) -> Result<tracedecay_runtime_core::branch::BranchAddOutcome> {
+        Err(TraceDecayError::project_route(
+            "code_index_scheduler_unavailable",
+            true,
+            "code-index scheduler authority is unavailable for branch activation",
+        ))
+    }
+
+    #[cfg(unix)]
     #[hotpath::measure(label = "daemon.harness.track_worktree_branch", future = true)]
     pub async fn track_worktree_branch(
         &self,
@@ -1127,7 +1148,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .shutdown_manual_branch_publications()
         .await
     {
-        super::log_daemon_event(
+        log_daemon_event(
             "manual_branch_publication",
             &[
                 ("outcome", "harness_shutdown_failed".to_owned()),
@@ -1480,6 +1501,7 @@ mod code_index_activation_test {
         harness.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     #[hotpath::skip]
     async fn branch_publication_respects_lifecycle_contention_until_owner_cancellation() {

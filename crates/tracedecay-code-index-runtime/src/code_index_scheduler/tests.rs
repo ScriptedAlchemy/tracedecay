@@ -1497,6 +1497,97 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
 }
 
 #[test]
+fn retired_fence_cancels_a_generation_seal_between_segments() {
+    // One segment per file: shutdown is signalled after the first durable
+    // segment, exactly where a TERM lands on a large worktree's first build.
+    let sources = (0..8)
+        .map(|file| {
+            (
+                format!("src/module_{file}.rs"),
+                format!("pub fn sealed_{file}() -> u32 {{ {file} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(
+        &sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    let source_store = TempDir::new().expect("source store root");
+    let generation = {
+        let mut scheduler = scheduler(
+            &fixture,
+            source_store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(
+            scheduler
+                .reconcile_now()
+                .expect("build multi-file generation"),
+        );
+        Arc::clone(
+            &scheduler
+                .latest_complete_already_decoded()
+                .expect("multi-file generation remains decoded")
+                .generation,
+        )
+    };
+    assert!(
+        generation.snapshot().files.len() >= 8,
+        "fixture must seal one segment per file"
+    );
+
+    let target_store = TempDir::new().expect("target publication store root");
+    let shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let published_segments = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observer_segments = Arc::clone(&published_segments);
+    let observer_shutting_down = Arc::clone(&shutting_down);
+    let mut publication = super::DaemonCodeIndexPublicationStoreV1::new(
+        target_store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open target publication store")
+    .with_shutdown_signal(Arc::clone(&shutting_down))
+    .with_seal_segment_observer_for_test(Arc::new(move || {
+        observer_segments.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        observer_shutting_down.store(true, std::sync::atomic::Ordering::Release);
+    }));
+
+    let error = publication
+        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .expect_err("shutdown signalled mid-seal must stop the publication");
+    assert!(
+        matches!(
+            error,
+            super::CodeIndexPublicationStoreErrorV1::CompareAndSwap
+        ),
+        "a cancelled seal is the same typed outcome as a retired fence: {error}"
+    );
+    assert_eq!(
+        published_segments.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "the seal must stop at the first checkpoint after shutdown was signalled"
+    );
+    assert!(
+        !target_store
+            .path()
+            .join("active-code-generation-v1.json")
+            .exists(),
+        "a cancelled seal must not publish a pointer"
+    );
+    let generations_root = target_store.path().join("code-generations-v1");
+    let leftover = std::fs::read_dir(&generations_root)
+        .map_or(0, |entries| entries.filter_map(Result::ok).count());
+    assert_eq!(
+        leftover, 0,
+        "a cancelled seal must leave no manifest behind"
+    );
+}
+
+#[test]
 fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let source = (0..1_600).fold(String::new(), |mut source, index| {
         writeln!(
@@ -11060,6 +11151,64 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         elapsed < Duration::from_millis(250),
         "shutdown waited {elapsed:?} for a synchronous scheduler lock instead of signalling its cooperative cancellation token"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_timeout_retains_blocked_worker_owner_until_retry_joins_it() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn busy() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    struct ResumeOnDrop(Arc<super::reconcile_panic_guard::ReconcileFaultInjectionV1>);
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            self.0.resume();
+        }
+    }
+
+    let admitted = Arc::new(super::reconcile_panic_guard::ReconcileFaultInjectionV1::paused());
+    let release = ResumeOnDrop(Arc::clone(&admitted));
+    let wake = {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        scheduler.install_reconcile_fault_for_test(Arc::clone(&admitted));
+        Arc::clone(&scheduler.wake)
+    };
+    fixture.edit("src/lib.rs", "pub fn busy() -> u32 { 2 }\n");
+    wake.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while admitted.attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker admits a reconcile pass before retirement");
+    let drained = tokio::time::timeout(Duration::from_millis(25), registry.shutdown()).await;
+    let retained = registry.retiring_owner_count().await;
+    drop(release);
+    assert!(drained.is_err(), "blocked writer must report settling");
+    assert_eq!(retained, 1);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), registry.shutdown())
+            .await
+            .is_ok(),
+        "retry must join the retained owner"
+    );
+    assert_eq!(registry.retiring_owner_count().await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -187,12 +187,21 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         request: Read<'_>,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let (memory_scope, selector) = request.scope();
+        let access = match request {
+            Read::Search(_) => MemoryTargetAccessV1::RecordRetrieval,
+            Read::Probe(_)
+            | Read::Related(_)
+            | Read::Reason(_)
+            | Read::Contradict(_)
+            | Read::Get(_)
+            | Read::List(_) => MemoryTargetAccessV1::Read,
+        };
         execute_scoped_memory!(
             self,
             context,
             memory_scope,
             selector,
-            MemoryTargetAccessV1::Read,
+            access,
             execute_read_on_db(request)
         )
     }
@@ -278,55 +287,63 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
     }
 }
 
+impl DirectRetainedMemoryPortV1<'_> {
+    pub async fn execute_request(
+        &self,
+        context: RetainedSurfaceExecutionContextV1<'_>,
+        request: RetainedMemoryRequestV1<'_>,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match request {
+            RetainedMemoryRequestV1::FactStoreAdd(request) => {
+                self.execute_add(&context, request).await
+            }
+            RetainedMemoryRequestV1::FactStoreSearch(request) => {
+                self.execute_read(&context, Read::Search(request)).await
+            }
+            RetainedMemoryRequestV1::FactStoreProbe(request) => {
+                self.execute_read(&context, Read::Probe(request)).await
+            }
+            RetainedMemoryRequestV1::FactStoreRelated(request) => {
+                self.execute_read(&context, Read::Related(request)).await
+            }
+            RetainedMemoryRequestV1::FactStoreReason(request) => {
+                self.execute_read(&context, Read::Reason(request)).await
+            }
+            RetainedMemoryRequestV1::FactStoreContradict(request) => {
+                self.execute_read(&context, Read::Contradict(request)).await
+            }
+            RetainedMemoryRequestV1::FactStoreGet(request) => {
+                self.execute_read(&context, Read::Get(request)).await
+            }
+            RetainedMemoryRequestV1::FactStoreUpdate(request) => {
+                self.execute_update(&context, request).await
+            }
+            RetainedMemoryRequestV1::FactStoreRemove(request) => {
+                self.execute_remove(&context, request).await
+            }
+            RetainedMemoryRequestV1::FactStoreSupersede(request) => {
+                self.execute_supersede(&context, request).await
+            }
+            RetainedMemoryRequestV1::FactStoreList(request) => {
+                self.execute_read(&context, Read::List(request)).await
+            }
+            RetainedMemoryRequestV1::FactFeedback(request) => {
+                self.execute_feedback(&context, request).await
+            }
+            RetainedMemoryRequestV1::MemoryStatus(request) => {
+                self.execute_status(&context, request).await
+            }
+        }
+    }
+}
+
 impl RetainedMemoryExecutionPortV1 for DirectRetainedMemoryPortV1<'_> {
     fn execute_memory<'a>(
         &'a self,
         context: RetainedSurfaceExecutionContextV1<'a>,
         request: RetainedMemoryRequestV1<'a>,
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
-        Box::pin(async move {
-            match request {
-                RetainedMemoryRequestV1::FactStoreAdd(request) => {
-                    self.execute_add(&context, request).await
-                }
-                RetainedMemoryRequestV1::FactStoreSearch(request) => {
-                    self.execute_read(&context, Read::Search(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreProbe(request) => {
-                    self.execute_read(&context, Read::Probe(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreRelated(request) => {
-                    self.execute_read(&context, Read::Related(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreReason(request) => {
-                    self.execute_read(&context, Read::Reason(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreContradict(request) => {
-                    self.execute_read(&context, Read::Contradict(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreGet(request) => {
-                    self.execute_read(&context, Read::Get(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreUpdate(request) => {
-                    self.execute_update(&context, request).await
-                }
-                RetainedMemoryRequestV1::FactStoreRemove(request) => {
-                    self.execute_remove(&context, request).await
-                }
-                RetainedMemoryRequestV1::FactStoreSupersede(request) => {
-                    self.execute_supersede(&context, request).await
-                }
-                RetainedMemoryRequestV1::FactStoreList(request) => {
-                    self.execute_read(&context, Read::List(request)).await
-                }
-                RetainedMemoryRequestV1::FactFeedback(request) => {
-                    self.execute_feedback(&context, request).await
-                }
-                RetainedMemoryRequestV1::MemoryStatus(request) => {
-                    self.execute_status(&context, request).await
-                }
-            }
-        })
+        Box::pin(async move { self.execute_request(context, request).await })
     }
 }
 

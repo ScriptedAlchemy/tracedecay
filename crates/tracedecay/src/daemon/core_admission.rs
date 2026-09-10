@@ -12,12 +12,13 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 use super::{
     AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
     DaemonHandshake, JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError,
-    classify_mcp_method, log_daemon_event, parse_daemon_invocation_request,
-    read_line_handling_wire_oversized, write_json_rpc_response,
+    classify_mcp_method, parse_daemon_invocation_request, read_line_handling_wire_oversized,
+    write_json_rpc_response,
 };
 use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;

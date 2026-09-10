@@ -466,8 +466,11 @@ impl NativeIntegrationStackResolutionPort for ExactPairNativeIntegrationTopology
             return self.resolve_declared_stack(request, cancellation);
         }
 
-        let NativeIntegrationSelectionBindingV1::IndependentBranch { proposal_digest } =
-            &request.selection
+        let NativeIntegrationSelectionBindingV1::IndependentBranch {
+            proposal_digest,
+            source_ref,
+            destination_ref,
+        } = &request.selection
         else {
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
         };
@@ -482,15 +485,6 @@ impl NativeIntegrationStackResolutionPort for ExactPairNativeIntegrationTopology
         {
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Denied);
         }
-
-        // `validate` already proved both references are present and distinct;
-        // treat their absence as unresolvable rather than unwrapping.
-        let (Some(source_ref), Some(destination_ref)) = (
-            request.source.reference.as_ref(),
-            request.destination.reference.as_ref(),
-        ) else {
-            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
-        };
 
         let (Some(source_tip), Some(destination_tip)) =
             (self.tip(source_ref)?, self.tip(destination_ref)?)

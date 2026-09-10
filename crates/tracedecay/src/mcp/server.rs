@@ -342,7 +342,7 @@ pub struct McpServer {
     profile_root: Option<PathBuf>,
     profile_identity: Option<Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
     profile_retained_authority:
-        Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
+        Option<tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1>,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Registered project session store. Startup recovery, ingestion,
     /// retrieval, and host admission all borrow this one lease and never
@@ -1039,7 +1039,7 @@ impl McpServer {
             .zip(profile_session_db.as_ref())
             .and_then(|(profile, registered)| {
                 let serving =
-                    crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
+                    tracedecay_session_runtime::retained::profile_session_retrieval_serving_identity(
                         profile,
                         &registered.binding().shard_id,
                         registered.db_path(),
@@ -1101,7 +1101,7 @@ impl McpServer {
             .zip(profile_session_retrieval_root.as_ref())
         {
             Some((identity, root)) => {
-                match crate::daemon::retained_owner::profile_retained_connection_authority(
+                match tracedecay_session_runtime::retained::profile_retained_connection_authority(
                     identity.as_ref(),
                     root.identity(),
                 ) {
@@ -1397,8 +1397,8 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.mount_retained_surfaces", future = true)]
-    pub(crate) async fn retained_surface_ports(
+    #[hotpath::measure(label = "mcp.server.mount_retained_surfaces")]
+    pub(crate) fn retained_surface_ports(
         &self,
         project_root: &Path,
         project_id: tracedecay_domain::ProjectId,
@@ -1408,12 +1408,9 @@ impl McpServer {
             Arc::new(DaemonWorkflowIndexReadService::new(database.clone()))
                 as Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>
         });
-        let graph = self.cg.read().await;
         crate::daemon::retained_owner::retained_surface_ports(
             crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
                 cg: Arc::clone(&self.cg),
-                store_runtime_registry: graph.retained_store_runtime_registry(),
-                profile_database: graph.profile_database().clone(),
                 project_root: project_root.to_path_buf(),
                 project_id,
                 configuration_digest,

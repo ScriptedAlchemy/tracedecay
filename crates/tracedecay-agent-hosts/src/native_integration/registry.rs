@@ -821,6 +821,8 @@ mod tests {
             UtcMicros(100),
         )
         .expect("authorized scope set");
+        let source_ref = source.reference.clone().expect("source ref");
+        let destination_ref = destination.reference.clone().expect("destination ref");
         NativeIntegrationStackResolutionRequestV1 {
             source,
             destination,
@@ -830,6 +832,8 @@ mod tests {
             inventory_epoch: WorktreeInventoryEpoch::new(1).expect("inventory epoch"),
             selection: NativeIntegrationSelectionBindingV1::IndependentBranch {
                 proposal_digest: digest('c'),
+                source_ref,
+                destination_ref,
             },
             grant_digest: digest('a'),
             policy_digest: digest('d'),
