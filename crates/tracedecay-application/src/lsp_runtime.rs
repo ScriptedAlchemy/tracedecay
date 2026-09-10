@@ -57,7 +57,7 @@ use tracedecay_lsp::{
 };
 
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
-use tracedecay_runtime_core::path_safety::canonicalize_existing_prefix;
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 use url::Url;
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, FeedbackRuntime, ProjectFeedbackStore};
@@ -3058,12 +3058,16 @@ fn validated_document_path(
         .to_file_path()
         .map_err(|()| LspRuntimeFailure::new("document-uri-invalid"))?;
     // Client URIs may address the admitted root through an OS or worktree
-    // alias. Resolve that spelling, then retain the directory capability for
-    // normalization and every subsequent file open.
-    let path = canonicalize_existing_prefix(&path)
-        .ok_or_else(|| LspRuntimeFailure::new("document-outside-registered-root"))?;
+    // alias, and the admitted root itself is whatever spelling the daemon
+    // registered. Both sides go through the same identity authority so a
+    // `/var` alias, a `\\?\` verbatim root, or an overlay whose suffix does
+    // not exist yet still resolves beneath the root it belongs to; the
+    // directory capability is retained for normalization and every
+    // subsequent file open.
+    let root = canonical_root_identity(project_root);
+    let path = canonical_root_identity(&path);
     let relative = path
-        .strip_prefix(project_root)
+        .strip_prefix(&root)
         .map_err(|_| LspRuntimeFailure::new("document-outside-registered-root"))?;
     validate_relative_path(relative)?;
     let relative = normalize_overlay_relative(project_dir, relative)?;
@@ -3235,6 +3239,42 @@ mod path_tests {
                 .relative
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)))
+        );
+    }
+
+    /// The mirror of `root_alias_documents_...`: there the *client* spelled
+    /// the root through an alias, here the *daemon* did. `admitted_root`
+    /// canonicalizes its root, so on Linux nothing else in this module
+    /// exercises the spelling macOS (`/var` vs `/private/var`) and Windows
+    /// (native vs `\\?\` verbatim) actually register. An unsaved overlay is
+    /// the strict case: its suffix cannot be canonicalized at all, so it has
+    /// to be validated lexically beneath the root's identity.
+    #[cfg(unix)]
+    #[test]
+    fn unsaved_overlay_resolves_under_an_alias_spelled_admitted_root() {
+        let temp = TempDir::new().expect("temporary directory");
+        let real = temp.path().join("private").join("root");
+        std::fs::create_dir_all(&real).expect("create real root");
+        symlink(temp.path().join("private"), temp.path().join("var")).expect("host alias");
+        let admitted = temp.path().join("var").join("root");
+        let root_url = Url::from_directory_path(&admitted).expect("alias root URI");
+        let root_dir = Dir::open_ambient_dir(&admitted, ambient_authority())
+            .expect("open admitted root through its alias");
+        let uri = Url::from_directory_path(real.canonicalize().expect("canonical root"))
+            .expect("canonical root URI")
+            .join("new/nested/overlay.rs")
+            .expect("overlay URI");
+
+        let document = validated_document_path(&admitted, &root_url, &root_dir, uri.as_str())
+            .expect("an overlay beneath an alias-spelled admitted root");
+        assert_eq!(document.relative, Path::new("new/nested/overlay.rs"));
+
+        let sibling = temp.path().join("private").join("root-other");
+        std::fs::create_dir(&sibling).expect("create sibling root");
+        let outside = Url::from_file_path(sibling.join("lib.rs")).expect("sibling document URI");
+        assert!(
+            validated_document_path(&admitted, &root_url, &root_dir, outside.as_str()).is_err(),
+            "a sibling of the admitted root must still refuse"
         );
     }
 
