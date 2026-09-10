@@ -1103,13 +1103,21 @@ async fn test_module_api() {
     );
     assert_eq!(payload["outcome"]["outcome"], json!("evidence"));
     assert_eq!(payload["outcome"]["value"]["payload"]["path"], json!("src"));
+    let symbols = payload["outcome"]["value"]["payload"]["symbols"]
+        .as_array()
+        .expect("module API symbols");
     assert!(
-        payload["outcome"]["value"]["payload"]["symbols"]
-            .as_array()
-            .is_some_and(|symbols| symbols.iter().any(|symbol| {
-                symbol["display"]["name"] == json!("helper") || symbol["name"] == json!("helper")
-            })),
+        symbols.iter().any(|symbol| {
+            symbol["display"]["name"] == json!("helper") || symbol["name"] == json!("helper")
+        }),
         "production module API must return the public fixture symbol: {payload}"
+    );
+    assert!(
+        symbols.iter().all(|symbol| {
+            symbol["display"]["name"] != json!("format_greeting")
+                && symbol["name"] != json!("format_greeting")
+        }),
+        "production module API must omit the indexed private fixture symbol: {payload}"
     );
     fixture.harness.shutdown().await;
 }
