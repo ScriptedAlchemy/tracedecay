@@ -352,10 +352,6 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ConfigurationList
                 )
                 | (
-                    Self::Configuration(ConfigurationWireRequestV1::Explain(_)),
-                    ApplicationSurfaceOperation::ConfigurationExplain
-                )
-                | (
                     Self::Configuration(ConfigurationWireRequestV1::Get(_)),
                     ApplicationSurfaceOperation::ConfigurationGet
                 )
@@ -370,10 +366,6 @@ impl ApplicationSurfaceRequest {
                 | (
                     Self::Configuration(ConfigurationWireRequestV1::Batch(_)),
                     ApplicationSurfaceOperation::ConfigurationBatch
-                )
-                | (
-                    Self::Configuration(ConfigurationWireRequestV1::WriteCredential(_)),
-                    ApplicationSurfaceOperation::ConfigurationWriteCredential
                 )
                 | (
                     Self::Configuration(ConfigurationWireRequestV1::ObservedState(_)),
@@ -717,12 +709,10 @@ pub fn parse_application_surface_request(
             .map(ApplicationSurfaceRequest::ObservatoryRead)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply
