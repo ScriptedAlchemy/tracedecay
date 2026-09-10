@@ -7,7 +7,9 @@
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
+use tracedecay_daemon_service::{
+    DaemonSemanticRuntimeRegistrationError, daemon_owned_project_source_access_at,
+};
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
@@ -1194,7 +1196,7 @@ impl ProjectOpenInputs<'_> {
                 user_session_db.clone(),
             ])
             .await;
-        let delivery_access = project_open_owners::daemon_owned_project_source_access_at(
+        let delivery_access = daemon_owned_project_source_access_at(
             &code_index.scope,
             self.canonical_project_path,
             runtime_configuration,
@@ -1914,7 +1916,6 @@ fn project_code_index_authorities(
             canonical_project_path.to_path_buf(),
             scope.clone(),
             Arc::clone(cg.configuration_runtime()),
-            crate::daemon::project_open_owners::daemon_owned_project_source_access_at,
         ),
     );
     let search_admission = tracedecay_daemon_service::admit_query_mcp_read(

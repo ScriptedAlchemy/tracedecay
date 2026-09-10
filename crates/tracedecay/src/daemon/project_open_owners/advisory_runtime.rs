@@ -71,10 +71,7 @@ use tracedecay_lsp::{
 };
 use tracedecay_session_memory::context::MonotonicDeadline;
 
-use super::{
-    DaemonInvocationState, POLICY_REVISION_V1, daemon_owned_project_source_access_at,
-    register_semantic_configuration_owners,
-};
+use super::{DaemonInvocationState, POLICY_REVISION_V1, register_semantic_configuration_owners};
 use crate::daemon::context_scout_lifecycle::{
     AuthorityRegistrationV1, register_context_scout_lifecycle_authority,
     unregister_context_scout_lifecycle_authority,
@@ -96,7 +93,8 @@ use tracedecay_daemon_service::{
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
     DaemonAdvisoryCycleInvocationRequest, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
     HookOrchestrationWorkOutcomeV1, advisory_cycle_invocation_result,
-    daemon_operation_event_authority, register_hook_orchestration_runtime,
+    daemon_operation_event_authority, daemon_owned_project_source_access_at,
+    project_open_source_access_authority, register_hook_orchestration_runtime,
     unregister_hook_orchestration_runtime,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -1454,7 +1452,7 @@ async fn register_project_delivery_read_authority(
         }
     };
     let source_access =
-        super::project_open_source_access_authority().map_err(|error| TraceDecayError::Config {
+        project_open_source_access_authority().map_err(|error| TraceDecayError::Config {
             message: format!("project-open delivery source access is invalid: {error}"),
         })?;
     invocation
