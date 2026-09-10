@@ -226,6 +226,7 @@ fn symbol(
         line_span: 1,
         start_line: 0,
         signature: None,
+        docstring: None,
         skip_test_coverage: false,
         file_identity: digest::<FileIdentityDigest>('e'),
         content_digest: digest('d'),

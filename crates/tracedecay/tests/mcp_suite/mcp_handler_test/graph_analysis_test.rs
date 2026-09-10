@@ -395,6 +395,66 @@ pub mod second {
 }
 
 #[tokio::test]
+async fn unmounted_files_ignores_comment_quotes_when_reading_config_entries() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src/app")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        r#"{"name":"dashboard","private":true}"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("rsbuild.config.ts"),
+        r#"// Canonical dashboard build. build.rs embeds this build's output into the
+// binary served at `/`, including every client-routed workspace.
+export default defineConfig({
+  source: {
+    entry: { index: './src/app/main.tsx' },
+    dynamicEntry: `./src/app/${page}.ts`,
+  },
+});
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/main.tsx"),
+        "import './boot';\nexport const app = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/boot.ts"),
+        "export const boot = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/orphan.ts"),
+        "export const orphan = 1;\n",
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_unmounted_files",
+        json!({"ecosystem": "typescript"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files = payload["unmounted"]
+        .as_array()
+        .expect("unmounted file rows")
+        .iter()
+        .filter_map(|row| row["file"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(files, vec!["src/app/orphan.ts"], "{payload}");
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -2836,6 +2896,141 @@ pub trait Leaf: Middle {}
         .unwrap();
     let depth = leaf["depth"].as_u64().unwrap();
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
+}
+
+#[tokio::test]
+async fn typescript_interface_extends_drives_hierarchy_and_depth() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/settings.ts"),
+        r#"
+interface SettingsEditable { draft: string }
+interface SettingsUnderReview extends SettingsEditable { review: string }
+interface GenericEditable<T> { draft: T }
+interface GenericReview extends GenericEditable<string> { review: string }
+namespace left { export interface Base { left: string } }
+namespace right { export interface Base { right: string } }
+interface ScopedReview extends right.Base { review: string }
+interface Renderer<T> { render(value: T): void }
+class Screen implements Renderer<string> { render(value: string) {} }
+const unrelated = 1;
+function helper() { return unrelated; }
+"#,
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(&project_root).await;
+    let parent_id = find_node_id(&cg, "SettingsEditable").await;
+
+    let hierarchy = handle_tool_call(
+        &cg,
+        "tracedecay_type_hierarchy",
+        json!({"node_id": parent_id, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+    assert!(
+        hierarchy["tree"]
+            .as_str()
+            .unwrap()
+            .contains("extends SettingsUnderReview"),
+        "interface child missing from hierarchy: {hierarchy}"
+    );
+
+    let depth = handle_tool_call(
+        &cg,
+        "tracedecay_inheritance_depth",
+        json!({"path": "src", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let depth: Value = serde_json::from_str(extract_text(&depth.value)).unwrap();
+    let ranking = depth["ranking"].as_array().unwrap();
+    assert_eq!(
+        ranking
+            .iter()
+            .find(|item| item["name"] == "SettingsUnderReview")
+            .and_then(|item| item["depth"].as_u64()),
+        Some(1),
+        "unexpected interface depth ranking: {ranking:?}"
+    );
+    assert!(
+        ranking
+            .iter()
+            .all(|item| item["name"] != "helper" && item["name"] != "unrelated"),
+        "non-hierarchy symbols leaked into inheritance depth: {ranking:?}"
+    );
+
+    for (parent, relation, child) in [
+        ("GenericEditable", "extends", "GenericReview"),
+        ("Renderer", "implements", "Screen"),
+    ] {
+        let parent_id = find_node_id(&cg, parent).await;
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": parent_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        let expected = format!("{relation} {child}");
+        assert!(
+            hierarchy["tree"].as_str().unwrap().contains(&expected),
+            "{expected} missing from hierarchy: {hierarchy}"
+        );
+    }
+
+    let exact = handle_tool_call(
+        &cg,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "Base", "limit": 20}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let exact: Value = serde_json::from_str(extract_text(&exact.value)).unwrap();
+    let matches = exact["matches"].as_array().unwrap();
+    let namespace_id = |namespace: &str| {
+        matches
+            .iter()
+            .find(|item| {
+                item["qualified_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(&format!("::{namespace}::Base")))
+            })
+            .and_then(|item| item["id"].as_str())
+            .unwrap_or_else(|| panic!("{namespace}.Base missing from exact symbols: {exact}"))
+    };
+    for (namespace, contains_child) in [("left", false), ("right", true)] {
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": namespace_id(namespace), "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        assert_eq!(
+            hierarchy["tree"]
+                .as_str()
+                .unwrap()
+                .contains("extends ScopedReview"),
+            contains_child,
+            "qualified parent bound to the wrong namespace: {hierarchy}"
+        );
+    }
 }
 
 /// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear

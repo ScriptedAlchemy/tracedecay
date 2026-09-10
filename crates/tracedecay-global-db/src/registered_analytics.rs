@@ -152,6 +152,45 @@ impl RegisteredGlobalDb {
         Ok(id)
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.registered.analytics.read_observability"
+    )]
+    pub async fn read_observability_event(
+        &self,
+        project_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<AnalyticsEventRecord>, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to begin observability event snapshot: {error}"))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT id, provider, project_id, session_id, timestamp, event_kind,
+                        hook_name, tool_name, tool_category, skill_name, hint_category,
+                        hint_id, outcome, metadata_json
+                 FROM analytics_events
+                 WHERE provider = ?1 AND project_id = ?2 AND hint_id = ?3
+                 LIMIT 1",
+                tracedecay_runtime_core::db::engine::params![
+                    "tracedecay-observability",
+                    project_id,
+                    idempotency_key,
+                ],
+            )
+            .await
+            .map_err(|error| format!("failed to read observability event: {error}"))?;
+        rows.next()
+            .await
+            .map_err(|error| format!("failed to decode observability event: {error}"))?
+            .map(|row| {
+                row_to_analytics_event(&row)
+                    .ok_or_else(|| "failed to decode observability event row".to_owned())
+            })
+            .transpose()
+    }
+
     /// Claim one stable owner fact without replacing a prior delivery.
     #[hotpath::measure(future = true, label = "global_db.registered.analytics.claim")]
     pub async fn claim_observability_emission(
