@@ -6,7 +6,6 @@ mod constructors;
 mod dead_code;
 mod field_sites;
 mod hotspots;
-mod imports;
 mod metrics;
 mod recursion;
 #[cfg(feature = "source-analysis")]
@@ -21,7 +20,6 @@ pub use constructors::handle_constructors;
 pub use dead_code::handle_dead_code;
 pub use field_sites::handle_field_sites;
 pub use hotspots::handle_hotspots;
-pub use imports::handle_unused_imports;
 pub use metrics::{
     handle_coupling, handle_distribution, handle_inheritance_depth, handle_largest, handle_rank,
 };

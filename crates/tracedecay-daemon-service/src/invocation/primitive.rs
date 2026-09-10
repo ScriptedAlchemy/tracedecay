@@ -9,10 +9,9 @@ use tracedecay_application::primitives::{
 };
 use tracedecay_contracts::CallableCodeSurfaceRequest;
 use tracedecay_contracts::context_scout::{
-    ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
-};
-use tracedecay_daemon_protocol::{
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimResultV1,
+    ContextScoutControlRequestV1, ContextScoutEvidenceProjectionV1,
+    ContextScoutSuggestionProjectionV1, ContextScoutSurfaceRequestV1,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -474,7 +473,7 @@ pub(super) async fn execute_context_scout(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
     surface_operation: ApplicationSurfaceOperation,
-    request: ContextScoutSurfaceRequest,
+    request: ContextScoutSurfaceRequestV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -514,7 +513,7 @@ pub(super) async fn execute_context_scout(
     let address = request.address();
     let is_state_control = matches!(
         &request,
-        ContextScoutSurfaceRequest::Pause(_) | ContextScoutSurfaceRequest::Resume(_)
+        ContextScoutSurfaceRequestV1::Pause(_) | ContextScoutSurfaceRequestV1::Resume(_)
     );
     let address_authorized = if is_state_control {
         registry
@@ -557,14 +556,14 @@ pub(super) async fn execute_context_scout(
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
         );
     };
-    if let ContextScoutSurfaceRequest::Pause(control)
-    | ContextScoutSurfaceRequest::Resume(control) = &request
+    if let ContextScoutSurfaceRequestV1::Pause(control)
+    | ContextScoutSurfaceRequestV1::Resume(control) = &request
     {
         let target = match &request {
-            ContextScoutSurfaceRequest::Pause(_) => {
+            ContextScoutSurfaceRequestV1::Pause(_) => {
                 tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused
             }
-            ContextScoutSurfaceRequest::Resume(_) => {
+            ContextScoutSurfaceRequestV1::Resume(_) => {
                 tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active
             }
             _ => unreachable!("pause/resume matched above"),
@@ -595,32 +594,32 @@ pub(super) async fn execute_context_scout(
         Err(problem) => return application_problem(wire_request_id, problem),
     };
     let payload = match request {
-        ContextScoutSurfaceRequest::Status(_) => owner
+        ContextScoutSurfaceRequestV1::Status(_) => owner
             .configured_status()
             .await
             .ok()
             .and_then(|status| serde_json::to_value(status).ok()),
-        ContextScoutSurfaceRequest::Recent(request) => owner
+        ContextScoutSurfaceRequestV1::Recent(request) => owner
             .recent_exact(request.address, request.limit)
             .await
             .ok()
             .and_then(|recent| serde_json::to_value(recent).ok()),
-        ContextScoutSurfaceRequest::Explain(request) => owner
+        ContextScoutSurfaceRequestV1::Explain(request) => owner
             .explain_exact(request.address, request.limit)
             .await
             .ok()
             .and_then(|explanation| serde_json::to_value(explanation).ok()),
-        ContextScoutSurfaceRequest::Capability(_) => owner
+        ContextScoutSurfaceRequestV1::Capability(_) => owner
             .capability()
             .await
             .ok()
             .and_then(|capability| serde_json::to_value(capability).ok()),
-        ContextScoutSurfaceRequest::Budget(_) => owner
+        ContextScoutSurfaceRequestV1::Budget(_) => owner
             .budget()
             .await
             .ok()
             .and_then(|budget| serde_json::to_value(budget).ok()),
-        ContextScoutSurfaceRequest::Cancel(request) if request.work.address == request.address => {
+        ContextScoutSurfaceRequestV1::Cancel(request) if request.work.address == request.address => {
             owner
                 .cancel(request.work)
                 .await
@@ -633,62 +632,33 @@ pub(super) async fn execute_context_scout(
                     serde_json::json!({ "outcome": context_scout_store_outcome(outcome) })
                 })
         }
-        ContextScoutSurfaceRequest::Claim(request) => {
-            let window = match request.window {
-                ContextScoutClaimWindowSurfaceV1::IdleWindow => {
-                    ContextScoutDeliveryWindowV1::IdleWindow
+        ContextScoutSurfaceRequestV1::Claim(request) => {
+            match owner
+                .claim_delivery_request(
+                    &request,
+                    observed_at,
+                    UtcMicros(
+                        deadline
+                            .expires_at
+                            .0
+                            .min(observed_at.0.saturating_add(30_000_000)),
+                    ),
+                )
+                .await
+            {
+                ContextScoutDurableClaimOutcomeV1::Claimed(claim) => {
+                    serde_json::to_value(public_context_scout_claim(&claim)).ok()
                 }
-                ContextScoutClaimWindowSurfaceV1::OnRequest => {
-                    ContextScoutDeliveryWindowV1::OnRequest
-                }
-            };
-            let digest = canonical_sha256(&(
-                "tracedecay.context-scout.delivery-lease.v1",
-                &wire_request_id,
-                request.address,
-                request.window,
-                observed_at,
-            ))
-            .ok();
-            let lease = digest.and_then(|digest| {
-                let bytes = digest.as_str().as_bytes();
-                (bytes.len() >= 16).then(|| {
-                    let mut lease_id = [0; 16];
-                    lease_id.copy_from_slice(&bytes[..16]);
-                    ContextScoutLeaseV1 {
-                        lease_id,
-                        expires_at: UtcMicros(
-                            deadline
-                                .expires_at
-                                .0
-                                .min(observed_at.0.saturating_add(30_000_000)),
-                        ),
-                    }
-                })
-            });
-            match lease {
-                Some(lease) => match owner
-                    .claim_delivery_exact(request.address, window, observed_at, lease)
-                    .await
-                {
-                    ContextScoutDurableClaimOutcomeV1::Claimed(
-                        claim,
-                    ) => serde_json::to_value(claim).ok(),
-                    ContextScoutDurableClaimOutcomeV1::Empty => {
-                        Some(serde_json::json!({ "outcome": "empty" }))
-                    }
-                    ContextScoutDurableClaimOutcomeV1::Unavailable => {
-                        None
-                    }
-                },
-                None => None,
+                ContextScoutDurableClaimOutcomeV1::Empty =>
+                    serde_json::to_value(ContextScoutClaimResultV1::Empty).ok(),
+                ContextScoutDurableClaimOutcomeV1::Unavailable => None,
             }
         }
-        ContextScoutSurfaceRequest::Delivery(request)
-            if request.claim.entry.work.address == request.address =>
+        ContextScoutSurfaceRequestV1::Delivery(request)
+            if request.claim.work.address == request.address =>
         {
             let outcome = owner
-                .record_delivery(&request.claim, &request.receipt)
+                .record_delivery_by_handle(&request.claim, &request.receipt)
                 .await;
             (outcome
                 != ContextScoutDurableStoreOutcomeV1::Unavailable)
@@ -698,7 +668,7 @@ pub(super) async fn execute_context_scout(
                     })
                 })
         }
-        ContextScoutSurfaceRequest::Feedback(request) => {
+        ContextScoutSurfaceRequestV1::Feedback(request) => {
             let outcome = owner
                 .record_feedback_exact(request.address, &request.receipt, request.feedback)
                 .await;
@@ -710,10 +680,10 @@ pub(super) async fn execute_context_scout(
                     })
                 })
         }
-        ContextScoutSurfaceRequest::Pause(_)
-        | ContextScoutSurfaceRequest::Resume(_)
-        | ContextScoutSurfaceRequest::Cancel(_)
-        | ContextScoutSurfaceRequest::Delivery(_) => None,
+        ContextScoutSurfaceRequestV1::Pause(_)
+        | ContextScoutSurfaceRequestV1::Resume(_)
+        | ContextScoutSurfaceRequestV1::Cancel(_)
+        | ContextScoutSurfaceRequestV1::Delivery(_) => None,
     };
     let Some(payload) = payload else {
         return application_problem(
@@ -736,13 +706,54 @@ pub(super) async fn execute_context_scout(
     }
 }
 
+fn public_context_scout_claim(
+    claim: &tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+) -> ContextScoutClaimResultV1 {
+    let entry = &claim.entry;
+    let envelope = &entry.envelope;
+    let candidate = &envelope.candidate;
+    ContextScoutClaimResultV1::Claimed {
+        claim: Box::new(ContextScoutClaimHandleV1 {
+            work: entry.work,
+            envelope_id: envelope.envelope_id,
+            lease_id: claim.lease.lease_id,
+            lease_expires_at: claim.lease.expires_at,
+        }),
+        suggestion: Box::new(ContextScoutSuggestionProjectionV1 {
+            work: entry.work,
+            envelope_id: envelope.envelope_id,
+            configuration_revision: envelope.configuration_revision,
+            delivery_window: envelope.delivery_window,
+            route: entry.route,
+            model_outcome: entry.model_outcome,
+            model_receipt: entry.model_receipt.clone(),
+            dedupe_key: candidate.dedupe_key,
+            category: candidate.category,
+            relevance_score: candidate.relevance_score,
+            suggestion_text: candidate.suggestion_text.clone(),
+            evidence: ContextScoutEvidenceProjectionV1 {
+                content_generation: candidate.evidence.code_generation_id.clone(),
+                availability: candidate.evidence.availability,
+                anchor_ids: candidate
+                    .evidence
+                    .sources
+                    .iter()
+                    .flat_map(|source| source.anchors.iter().cloned())
+                    .collect(),
+                claim_digest: candidate.evidence.claim_digest.clone(),
+            },
+            expires_at: candidate.expires_at,
+        }),
+    }
+}
+
 #[hotpath::measure(label = "daemon.service.context_scout.transition", future = true)]
 async fn execute_context_scout_state_transition(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
     owner: Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    control: &ContextScoutControlSurfaceRequest,
+    control: &ContextScoutControlRequestV1,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
     current: tracedecay_configuration::ConfigurationCurrentStateV1,
     observed_at: UtcMicros,

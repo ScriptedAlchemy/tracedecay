@@ -460,6 +460,8 @@ fn compose_graph_authority(
                     start_line: node.start_line,
                     signature: node.signature.clone(),
                     docstring: node.docstring.clone(),
+                    is_async: false,
+                    derives: Vec::new(),
                     skip_test_coverage: false,
                     file_identity: FileIdentityDigest::new(fixture_digest(
                         "dashboard-file-identity",

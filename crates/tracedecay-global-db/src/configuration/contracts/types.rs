@@ -8,11 +8,9 @@ use thiserror::Error;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationGrantReceiptV1, ConfigurationRevisionId, ConfigurationValueV1,
-    CredentialKindV1, CredentialReferenceId, ProtectedChange, RedactedConfigurationChangeV1,
-    RollbackModeV1, SettingKey,
+    ProtectedChange, RedactedConfigurationChangeV1, RollbackModeV1, SettingKey,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, canonical_sha256};
-use zeroize::Zeroizing;
 
 pub use tracedecay_contracts::configuration::{
     ActivationDriftV1, ComponentConfigurationState, ConfigurationAuditPage,
@@ -156,47 +154,6 @@ pub fn configuration_layer_scope_digest(
         .map_err(ConfigurationError::validation)
 }
 
-/// Opaque write-handle returned by a secret-safe adapter. The secret material
-/// is never present in the application DTO, request logs, receipts, audit, or
-/// configuration read path.
-#[derive(Clone, PartialEq, Eq)]
-pub struct CredentialWriteHandleV1(Zeroizing<String>);
-
-impl fmt::Debug for CredentialWriteHandleV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("CredentialWriteHandleV1([redacted])")
-    }
-}
-
-impl CredentialWriteHandleV1 {
-    pub fn new(value: impl Into<String>) -> Result<Self, ConfigurationError> {
-        let value = value.into();
-        if value.is_empty()
-            || value.trim() != value
-            || value.len() > 512
-            || value.chars().any(char::is_control)
-        {
-            return Err(ConfigurationError::validation_message(
-                "credential write handle is not canonical",
-            ));
-        }
-        Ok(Self(Zeroizing::new(value)))
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-/// Write-only credential operation. The concrete secure sink resolves
-/// `write_handle`; no field can carry plaintext credential material.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WriteOnlyCredentialMutation {
-    pub expected_reference_id: Option<CredentialReferenceId>,
-    pub kind: CredentialKindV1,
-    pub write_handle: CredentialWriteHandleV1,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigurationAuditQuery {
     pub after_event_id: Option<ConfigurationAuditEventId>,
@@ -252,23 +209,5 @@ impl ConfigurationError {
 
     pub fn validation_message(message: impl Into<String>) -> Self {
         Self::Validation(message.into())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn write_only_credential_mutation_has_no_plaintext_field() {
-        let mutation = WriteOnlyCredentialMutation {
-            expected_reference_id: None,
-            kind: CredentialKindV1::ApiToken,
-            write_handle: CredentialWriteHandleV1::new("credential-write.fixture").unwrap(),
-        };
-        let debug = format!("{mutation:?}");
-        assert!(!debug.contains("plaintext"));
-        assert!(!debug.contains("secret_value"));
-        assert!(!debug.contains("credential-write.fixture"));
     }
 }

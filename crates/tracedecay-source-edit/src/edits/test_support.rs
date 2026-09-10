@@ -183,6 +183,8 @@ pub(super) fn fixture_symbol_code_graph(
             start_line,
             signature: symbol_source.lines().next().map(str::to_owned),
             docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: fixture_digest::<FileIdentityDigest>(
                 "source-edit-file-identity",

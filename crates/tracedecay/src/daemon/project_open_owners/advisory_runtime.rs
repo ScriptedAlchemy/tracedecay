@@ -10,7 +10,8 @@ use tracedecay_application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
     GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
     ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
-    discover_exact_commit_pull_request_v1, resolve_registered_github_read_only_credential_v1,
+    discover_exact_commit_pull_request_v1, public_repository_read_credential_v1,
+    resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
@@ -1510,7 +1511,7 @@ fn resolve_production_github_provider_access(
         &repository,
     ) {
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public => {
-            GitHubReadOnlyCredentialV1::anonymous()
+            public_repository_read_credential_v1(&owner, &repository)
         }
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
             return Err(ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured);

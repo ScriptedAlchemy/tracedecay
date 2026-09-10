@@ -266,7 +266,7 @@ mod tests {
             ConfigurationMutationPolicyEvaluatorV1.evaluate(
                 &snapshot,
                 ConfigurationMutationRecheckInputV1 {
-                    operation: ConfigurationMutationOperationV1::CredentialWrite,
+                    operation: ConfigurationMutationOperationV1::ProtectedApply,
                     ..input
                 },
             ),

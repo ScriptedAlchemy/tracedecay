@@ -2907,19 +2907,19 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:0bfda1651dbbd21a0bac222baeee0a7622dd479b756ce6df57a6d396490474ec";
+    "sha256:f1741f8ee5b4fec3dfc723e6de9ab9794de3a016f837ef7d1186306e09526abf";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:a6942eaf823300220a5a60fe30ed059a70e5fba09672524014000a2b95f06ba6",
-        8_443,
+        "sha256:0ae42f3ae5844c46e7fea6cfb07f91e09d6634e8f9c2f1df053d62cc7d7c1f24",
+        8_584,
     ),
     (
-        "sha256:5793ee44eb1bfc1e2b72d3d9f92955e928f36d0a1562ef7797feb29176788f2a",
-        3_808,
+        "sha256:21d54dff99989ad1b91b8254ad1a7c1310fe866755e0c3157153c2ab18951b19",
+        3_856,
     ),
     (
-        "sha256:19b5ceb506734591b9f92ebd3efcc87c0dd69ee8a1b6785d735d4a4adcf6e7e8",
-        3_916,
+        "sha256:4f03e051764f885e2eb5f3537a2f7d26741f72f936fd6e4dc5ec1fd53a0751da",
+        3_964,
     ),
     (
         "sha256:1bfa6399cd1a9f5d06ec697add39064ac1cc4f51dcfc866ba903c62ac3cad476",
@@ -2948,16 +2948,34 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         "a file or evidence segment changed bytes"
     );
 
-    let file_buffer_address = Cell::new(None);
+    // Decode at width two with three file segments: the third file read must
+    // reuse a slot from the first window, so the bound below covers cross-window
+    // buffer reuse and not just a single window. Width is sizing policy only.
+    struct ForcedDecodeWidth;
+    impl Drop for ForcedDecodeWidth {
+        fn drop(&mut self) {
+            tracedecay_code_index::parallelism::clear_forced_indexing_workers_for_test();
+        }
+    }
+    tracedecay_code_index::parallelism::force_indexing_workers_for_test(2);
+    let _forced_width = ForcedDecodeWidth;
+    let window = CodeIndexPublishedGenerationV1::partitioned_decode_window_files();
+    let file_segment_count = PARTITIONED_FORMAT_SEGMENTS.len() - 1;
+    assert!(
+        window == 2 && file_segment_count > window,
+        "the fixture must span more file segments than one decode window"
+    );
+
+    // Buffer address -> its capacity after the last read it served.
+    let mut file_buffers = BTreeMap::new();
     let evidence_buffer_address = Cell::new(None);
     let segment_reads = Cell::new(0_usize);
     let largest_file_segment = Cell::new(0_usize);
     let largest_evidence_page = Cell::new(0_usize);
-    let file_buffer_capacity = Cell::new(0_usize);
     let evidence_buffer_capacity = Cell::new(0_usize);
     let restored =
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |request, buffer| {
-            let address = buffer as *const Vec<u8>;
+            let address = buffer as *const Vec<u8> as usize;
             let (digest, offset, length, reading_file) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (digest, 0, size_bytes, true)
@@ -2969,16 +2987,6 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                     ..
                 } => (digest, offset, length, false),
             };
-            let phase_address = if reading_file {
-                &file_buffer_address
-            } else {
-                &evidence_buffer_address
-            };
-            if let Some(first_address) = phase_address.get() {
-                assert_eq!(address, first_address, "each phase must reuse one Vec");
-            } else {
-                phase_address.set(Some(address));
-            }
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
             })?;
@@ -2988,8 +2996,16 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             buffer.extend_from_slice(&bytes[start..end]);
             if reading_file {
                 largest_file_segment.set(largest_file_segment.get().max(bytes.len()));
-                file_buffer_capacity.set(buffer.capacity());
+                file_buffers.insert(address, buffer.capacity());
             } else {
+                if let Some(first_address) = evidence_buffer_address.get() {
+                    assert_eq!(
+                        address, first_address,
+                        "the evidence phase must reuse one Vec"
+                    );
+                } else {
+                    evidence_buffer_address.set(Some(address));
+                }
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
                 evidence_buffer_capacity.set(buffer.capacity());
             }
@@ -2999,10 +3015,22 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         .expect("partitioned bytes decode")
         .expect("revision seven partitioned manifest");
     assert_eq!(segment_reads.get(), PARTITIONED_FORMAT_SEGMENTS.len());
+    let largest_file_segment = largest_file_segment.get();
+    assert_eq!(
+        file_buffers.len(),
+        window,
+        "file reads must cycle through exactly one buffer per decode window slot"
+    );
     assert!(
-        file_buffer_capacity.get() >= largest_file_segment.get()
-            && file_buffer_capacity.get() <= largest_file_segment.get().next_power_of_two(),
-        "the file allocation must be bounded by the largest file segment"
+        file_buffers.values().max() >= Some(&largest_file_segment)
+            && file_buffers
+                .values()
+                .all(|&capacity| capacity <= largest_file_segment.next_power_of_two()),
+        "each file buffer must be bounded by the largest file segment"
+    );
+    assert!(
+        file_buffers.values().sum::<usize>() <= window * largest_file_segment.next_power_of_two(),
+        "the file allocation must be bounded by {window} decode slots x the largest file segment"
     );
     assert!(
         evidence_buffer_capacity.get() >= largest_evidence_page.get()
@@ -3159,8 +3187,11 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
 
 /// Bytes the unmodified pre-paging writer emitted (see the fixture README and
 /// `provenance.json`). Descriptor readers can still inventory its retained
-/// segments, but serving refuses the generation with typed rebuild-required
-/// unavailability because those bytes predate source commitments.
+/// segments, but serving refuses the generation: text metadata reports typed
+/// rebuild-required unavailability because those bytes predate source
+/// commitments, and a complete restore refuses the first file segment with
+/// the contract failure naming the symbol evidence (`docstring`) its rows
+/// predate rather than defaulting it.
 #[test]
 fn historical_writer_bytes_read_through_both_partitioned_readers() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3246,10 +3277,16 @@ fn historical_writer_bytes_read_through_both_partitioned_readers() {
         CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest),
         Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
     ));
-    assert!(matches!(
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read),
-        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
-    ));
+    let refused = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read)
+        .expect_err("historical rows without documentation evidence must be refused");
+    assert!(
+        matches!(
+            &refused,
+            CodeIndexProductionErrorV1::Contract(message)
+                if message.contains("missing field `docstring`")
+        ),
+        "unexpected error: {refused}"
+    );
 
     let corrupted = &identities[0].digest;
     let corrupt = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {

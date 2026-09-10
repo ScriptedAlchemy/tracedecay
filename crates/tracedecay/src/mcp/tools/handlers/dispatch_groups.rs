@@ -765,16 +765,6 @@ fn dispatch_analysis_tools_inner<'a>(
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
                 portable_analysis::handle_hotspots(&graph, args, scope_prefix).await
             }
-            "tracedecay_unused_imports" => {
-                let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                portable_analysis::handle_unused_imports(
-                    cg.project_root(),
-                    &graph,
-                    args,
-                    scope_prefix,
-                )
-                .await
-            }
             // The one analysis tool that opens no graph query: its whole finding is
             // that the graph and the compiler disagree, so taking the graph's file
             // set as input would answer the question with the very source that is

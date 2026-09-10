@@ -96,7 +96,6 @@ const ANALYSIS_TOOLS: &[&str] = &[
     "module_api",
     "circular",
     "hotspots",
-    "unused_imports",
     "unmounted_files",
     "rank",
     "largest",

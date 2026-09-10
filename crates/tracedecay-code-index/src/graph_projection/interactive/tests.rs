@@ -153,6 +153,8 @@ fn symbol_metadata(
         start_line: 0,
         signature: None,
         docstring: None,
+        is_async: false,
+        derives: Vec::new(),
         skip_test_coverage: false,
         file_identity: digest('e'),
         content_digest: digest('d'),

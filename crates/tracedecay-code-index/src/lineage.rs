@@ -151,6 +151,12 @@ pub struct LineageSymbolRecordV1 {
     /// older sealed generation cannot be mistaken for negative evidence.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub docstring: Option<String>,
+    /// Parser-attested async state. This field is required so an older sealed
+    /// row cannot be mistaken for synchronous evidence.
+    pub is_async: bool,
+    /// Exact derive names attached to this declaration. The list is sorted
+    /// and deduplicated during chunking; an empty list is negative evidence.
+    pub derives: Vec<String>,
     pub skip_test_coverage: bool,
     pub file_identity: FileIdentityDigest,
     pub content_digest: ContentDigest,
@@ -675,6 +681,8 @@ mod tests {
             start_line: 0,
             signature: None,
             docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: file_identity(file_byte),
             content_digest: digest(content_byte),

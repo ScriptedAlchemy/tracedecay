@@ -13,10 +13,13 @@ hashes. Only segments referenced by this successor manifest are included here;
 the archival export retains the unreferenced parent segments. No current
 manifest was modified to impersonate the historical format.
 
-The export predates sealed semantic source commitments. Current descriptor
-readers may inventory its referenced segments, but text metadata and complete
-generation restore return typed rebuild-required unavailability rather than
-fabricating commitments from those historical bytes.
+The export predates sealed semantic source commitments and the required
+per-symbol evidence fields (`docstring`, `is_async`, `derives`). Current
+descriptor readers may inventory its referenced segments, but text metadata
+returns typed rebuild-required unavailability rather than fabricating
+commitments, and complete generation restore refuses the first file segment
+with a contract failure naming the missing `docstring` field rather than
+defaulting older rows.
 
 Reproduce in a fresh owned worktree at the exact writer commit, using the
 current checkout's maintained worktree script. Save the absolute path to this

@@ -16,6 +16,24 @@ fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
 }
 
 #[test]
+fn retired_unused_import_scan_is_absent_while_diagnostic_reads_remain() {
+    let definitions = get_maximal_tool_definitions().expect("tool definitions");
+    eprintln!("maximal source catalog count: {}", definitions.len());
+
+    assert!(
+        definitions
+            .iter()
+            .all(|definition| definition.name != "tracedecay_unused_imports")
+    );
+    for name in ["tracedecay_diagnose", "tracedecay_diagnostics"] {
+        assert!(
+            definitions.iter().any(|definition| definition.name == name),
+            "{name} must remain available for compiler and published diagnostics"
+        );
+    }
+}
+
+#[test]
 fn multi_root_tools_are_discoverable() {
     let definitions = get_tool_definitions().expect("tool definitions");
     for name in [

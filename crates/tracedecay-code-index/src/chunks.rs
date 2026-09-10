@@ -790,6 +790,8 @@ struct SymbolRow {
     start_line: u32,
     signature: Option<String>,
     docstring: Option<String>,
+    is_async: bool,
+    derives: Vec<String>,
     skip_test_coverage: bool,
     parent: Option<usize>,
     identity: SymbolIdentityDigest,
@@ -1246,6 +1248,7 @@ impl DeterministicCodeChunker {
                 &file.file.file_occurrence_id,
                 &file_identity,
                 &result.nodes,
+                &result.unresolved_refs,
                 &offsets,
                 len,
             )
@@ -1308,6 +1311,7 @@ impl DeterministicCodeChunker {
         file_occurrence_id: &FileOccurrenceId,
         file_identity: &FileIdentityDigest,
         nodes: &[Node],
+        unresolved_refs: &[UnresolvedRef],
         offsets: &[u64],
         len: u64,
     ) -> Result<Vec<SymbolRow>, ChunkingFailureV1> {
@@ -1326,7 +1330,24 @@ impl DeterministicCodeChunker {
             start_line: u32,
             signature: Option<String>,
             docstring: Option<String>,
+            is_async: bool,
+            derives: Vec<String>,
             skip_test_coverage: bool,
+        }
+
+        let mut derives_by_node_id: HashMap<&str, Vec<String>> = HashMap::new();
+        for reference in unresolved_refs
+            .iter()
+            .filter(|reference| reference.reference_kind == EdgeKind::DerivesMacro)
+        {
+            derives_by_node_id
+                .entry(reference.from_node_id.as_str())
+                .or_default()
+                .push(reference.reference_name.clone());
+        }
+        for derives in derives_by_node_id.values_mut() {
+            derives.sort();
+            derives.dedup();
         }
 
         let mut raw: Vec<Raw> = nodes
@@ -1356,6 +1377,11 @@ impl DeterministicCodeChunker {
                     start_line: node.start_line,
                     signature: node.signature.clone(),
                     docstring: node.docstring.clone(),
+                    is_async: node.is_async,
+                    derives: derives_by_node_id
+                        .get(node.id.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
                     skip_test_coverage: node
                         .docstring
                         .as_deref()
@@ -1433,6 +1459,8 @@ impl DeterministicCodeChunker {
                 start_line: node.start_line,
                 signature: node.signature.clone(),
                 docstring: node.docstring.clone(),
+                is_async: node.is_async,
+                derives: node.derives.clone(),
                 skip_test_coverage: node.skip_test_coverage,
                 parent,
                 identity,
@@ -1480,6 +1508,8 @@ impl DeterministicCodeChunker {
                 start_line: row.start_line,
                 signature: row.signature.clone(),
                 docstring: row.docstring.clone(),
+                is_async: row.is_async,
+                derives: row.derives.clone(),
                 skip_test_coverage: row.skip_test_coverage,
                 file_identity: file_identity.clone(),
                 content_digest: content_digest(text.as_bytes()),
@@ -2447,6 +2477,8 @@ mod tests {
             start_line: source[..start].matches('\n').count() as u32,
             signature: None,
             docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             parent: None,
             identity: id(&digest(identity_byte)),
@@ -3919,7 +3951,7 @@ pub fn real_symbol() {}
         let (resolved, retained) = resolve_file_references(
             source,
             &line_offsets(source.as_bytes()),
-            &[reference.clone()],
+            std::slice::from_ref(&reference),
             &symbols,
         );
         assert_eq!(resolved.len(), 1);

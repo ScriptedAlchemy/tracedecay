@@ -32,13 +32,7 @@ use tracedecay_contracts::{
     OperationTermination, PageRequest, ProblemOwningLayer, RequestContext, RequestId,
     ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
 };
-pub use tracedecay_daemon_protocol::{
-    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
-    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
-    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
-};
+pub use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId,
@@ -2413,12 +2407,10 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::DiagnosticsRead
         | ApplicationSurfaceOperation::ObservatoryRead
         | ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply

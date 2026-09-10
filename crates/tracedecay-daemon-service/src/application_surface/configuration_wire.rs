@@ -6,7 +6,7 @@ use tracedecay_contracts::{
     OperationTermination, ResolvedSetting, SettingSummary,
     configuration_surface_catalog_contribution, configuration_surface_operation,
 };
-use tracedecay_domain::configuration::{CredentialReferenceMetadataV1, ProtectedChangePlan};
+use tracedecay_domain::configuration::ProtectedChangePlan;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, CancellationContract, CancellationPoint, CatalogSnapshotV1,
     ReceiptContract, ReconciliationContract, TerminalState, TerminalStateContract,
@@ -14,14 +14,12 @@ use tracedecay_tool_catalog::{
 
 use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 
-pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
+pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 11] = [
     ApplicationSurfaceOperation::ConfigurationList,
-    ApplicationSurfaceOperation::ConfigurationExplain,
     ApplicationSurfaceOperation::ConfigurationGet,
     ApplicationSurfaceOperation::ConfigurationSet,
     ApplicationSurfaceOperation::ConfigurationUnset,
     ApplicationSurfaceOperation::ConfigurationBatch,
-    ApplicationSurfaceOperation::ConfigurationWriteCredential,
     ApplicationSurfaceOperation::ConfigurationObservedState,
     ApplicationSurfaceOperation::ConfigurationProtectedPreview,
     ApplicationSurfaceOperation::ConfigurationProtectedApply,
@@ -166,11 +164,9 @@ pub(super) fn validate_configuration_outcome(
         (ApplicationSurfaceOperation::ConfigurationList, ApplicationOutcome::Evidence(packet)) => {
             payload_decodes::<Vec<SettingSummary>>(packet.payload.as_ref())
         }
-        (
-            ApplicationSurfaceOperation::ConfigurationExplain
-            | ApplicationSurfaceOperation::ConfigurationGet,
-            ApplicationOutcome::Evidence(packet),
-        ) => payload_decodes::<ResolvedSetting>(packet.payload.as_ref()),
+        (ApplicationSurfaceOperation::ConfigurationGet, ApplicationOutcome::Evidence(packet)) => {
+            payload_decodes::<ResolvedSetting>(packet.payload.as_ref())
+        }
         (
             ApplicationSurfaceOperation::ConfigurationObservedState,
             ApplicationOutcome::Evidence(packet),
@@ -183,10 +179,6 @@ pub(super) fn validate_configuration_outcome(
             | ApplicationSurfaceOperation::ConfigurationRollbackPreview,
             ApplicationOutcome::Preview(preview),
         ) => payload_decodes::<ProtectedChangePlan>(preview.payload.as_ref()),
-        (
-            ApplicationSurfaceOperation::ConfigurationWriteCredential,
-            ApplicationOutcome::Effect(effect),
-        ) => payload_decodes::<CredentialReferenceMetadataV1>(effect.payload.as_ref()),
         (
             ApplicationSurfaceOperation::ConfigurationSet
             | ApplicationSurfaceOperation::ConfigurationUnset

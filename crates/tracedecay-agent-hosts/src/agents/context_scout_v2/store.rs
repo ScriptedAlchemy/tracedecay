@@ -691,10 +691,10 @@ impl ProjectContextScoutDurableStoreV1 {
                 return ContextScoutDurableClaimOutcomeV1::Empty;
             };
             match stored.lease {
-                Some(existing) if existing == lease => {
+                Some(existing) if existing.lease_id == lease.lease_id => {
                     ContextScoutDurableClaimOutcomeV1::Claimed(ContextScoutDurableClaimV1 {
                         entry: stored.entry.clone(),
-                        lease,
+                        lease: existing,
                     })
                 }
                 Some(_) => ContextScoutDurableClaimOutcomeV1::Empty,

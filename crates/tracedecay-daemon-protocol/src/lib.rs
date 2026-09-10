@@ -108,13 +108,7 @@ pub use lsp_wire::{
     MAX_LSP_WORKSPACE_ROOTS, ProcessLocalRequestSequence, SequenceExhausted,
 };
 pub use output_format::{RequestedOutputFormat, requested_output_format};
-pub use surface::{
-    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
-    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
-    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
-};
+pub use surface::GitReadSurfaceRequest;
 pub use transport::{
     AUTH_PREFACE_PROTOCOL, BrokerListener, BrokerReadHalf, BrokerStream, BrokerWriteHalf,
     DaemonAuthPreface, DaemonEndpoint, SOCKET_ENV, default_loopback_endpoint,

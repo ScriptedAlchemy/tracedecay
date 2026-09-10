@@ -861,7 +861,7 @@ fn signature_matches(node: &CodeGraphSymbolSummaryV1, request: &SignatureSearchR
     };
     if request
         .is_async
-        .is_some_and(|want_async| signature_is_async(metadata.signature.as_deref()) != want_async)
+        .is_some_and(|want_async| metadata.is_async != want_async)
     {
         return false;
     }
@@ -894,13 +894,6 @@ fn return_region(signature: &str) -> &str {
     signature
         .split_once("->")
         .map_or("", |(_, returns)| returns.trim())
-}
-
-fn signature_is_async(signature: Option<&str>) -> bool {
-    signature.is_some_and(|signature| {
-        let signature = signature.trim_start();
-        signature.starts_with("async ") || signature.contains("async fn ")
-    })
 }
 
 fn relation_traversal(
@@ -1052,7 +1045,7 @@ pub(crate) fn symbol_record(
         end_line_zero_based: end_line,
         line: metadata.start_line.saturating_add(1),
         end_line: end_line.saturating_add(1),
-        is_async: signature_is_async(metadata.signature.as_deref()),
+        is_async: metadata.is_async,
         signature: metadata.signature,
         score,
     })

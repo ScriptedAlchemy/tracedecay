@@ -2440,9 +2440,10 @@ impl PartitionedLexicalFileSourceV1 {
                 "sealed lexical file ordinal is unavailable".to_owned(),
             )
         })?;
-        let window = read_segment_window(
+        let mut buffers = vec![Vec::new(); maximum_files.max(1)];
+        let read = read_segment_window(
             descriptors,
-            maximum_files,
+            &mut buffers,
             maximum_bytes,
             |descriptor, segment| {
                 checkpoint(control)?;
@@ -2454,48 +2455,51 @@ impl PartitionedLexicalFileSourceV1 {
                 checkpoint(control)
             },
         )?;
-        if window.is_empty() {
+        if read == 0 {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical file window is empty".to_owned(),
             ));
         }
-        restore_file_pages(decode_segment_window(&window, generation_id)?)
+        restore_file_pages(decode_segment_window(
+            &descriptors[..read],
+            &buffers[..read],
+            generation_id,
+        )?)
     }
 }
 
-/// The segment bytes of one bounded decode window, read in manifest order.
-type SegmentWindowV1<'a> = Vec<(&'a PartitionedFileSegmentDescriptorV1, Vec<u8>)>;
-
-/// Read the next window of segment bytes on the calling thread: at least one
-/// file, then as many as fit within `maximum_files` and `maximum_bytes`. The
-/// reader callback owns cancellation checkpoints and the actual store read.
-fn read_segment_window<'a>(
-    descriptors: &'a [PartitionedFileSegmentDescriptorV1],
-    maximum_files: usize,
+/// Read the next window of segment bytes on the calling thread into
+/// `buffers`, one slot per file: at least one file, then as many as fit within
+/// `buffers.len()` and `maximum_bytes`. Returns how many leading descriptors
+/// were read. Callers keep the same slots across windows, so a decode never
+/// holds more than `buffers.len()` segments and each slot grows only to the
+/// largest segment it has read (the bound
+/// `partitioned_codec_has_stable_bytes_and_round_trips` asserts). The reader
+/// callback owns cancellation checkpoints and the actual store read.
+fn read_segment_window(
+    descriptors: &[PartitionedFileSegmentDescriptorV1],
+    buffers: &mut [Vec<u8>],
     maximum_bytes: u64,
     mut read_segment: impl FnMut(
         &PartitionedFileSegmentDescriptorV1,
         &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
-) -> Result<SegmentWindowV1<'a>, CodeIndexProductionErrorV1> {
-    let mut window = Vec::new();
+) -> Result<usize, CodeIndexProductionErrorV1> {
+    let mut read = 0;
     let mut bytes = 0u64;
-    for descriptor in descriptors {
-        if !window.is_empty()
-            && (window.len() >= maximum_files
-                || bytes.saturating_add(descriptor.segment_size_bytes) > maximum_bytes)
-        {
+    for (descriptor, buffer) in descriptors.iter().zip(buffers) {
+        if read > 0 && bytes.saturating_add(descriptor.segment_size_bytes) > maximum_bytes {
             break;
         }
-        let mut segment = Vec::new();
+        buffer.clear();
         hotpath::measure_block!(
             "code_index.restore.segment_read",
-            read_segment(descriptor, &mut segment)
+            read_segment(descriptor, buffer)
         )?;
         bytes = bytes.saturating_add(descriptor.segment_size_bytes);
-        window.push((descriptor, segment));
+        read += 1;
     }
-    Ok(window)
+    Ok(read)
 }
 
 /// Verify and decode one window of segment bytes on the indexing pool.
@@ -2507,10 +2511,12 @@ fn read_segment_window<'a>(
 /// Files are independent, so the whole window is one ordered fan-out with the
 /// lowest-index failure reported, exactly as the sequential loop did.
 fn decode_segment_window(
-    window: &SegmentWindowV1<'_>,
+    descriptors: &[PartitionedFileSegmentDescriptorV1],
+    segments: &[Vec<u8>],
     generation_id: &CodeGenerationId,
 ) -> Result<Vec<PersistedFileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
-    collect_bounded_ordered(window, |(descriptor, segment), _worker| {
+    let window = descriptors.iter().zip(segments).collect::<Vec<_>>();
+    collect_bounded_ordered(&window, |(descriptor, segment), _worker| {
         let mut restored = Vec::new();
         decode_file_segment(descriptor, generation_id, segment, &mut restored)
     })
@@ -2750,6 +2756,15 @@ impl CodeIndexPublishedGenerationV1 {
         })
     }
 
+    /// File segments [`Self::decode_partitioned_sealed`] holds in memory at
+    /// once: one reusable segment buffer per indexing worker. Its file
+    /// allocation is therefore bounded by this many buffers, each no larger
+    /// than the largest file segment it read.
+    #[must_use]
+    pub fn partitioned_decode_window_files() -> usize {
+        crate::parallelism::indexing_workers().max(1)
+    }
+
     pub fn decode_partitioned_sealed(
         bytes: &[u8],
         mut read_segment: impl FnMut(
@@ -2761,11 +2776,15 @@ impl CodeIndexPublishedGenerationV1 {
             return Ok(None);
         };
         let mut files = Vec::with_capacity(generation.file_segments.len());
-        let window_files = crate::parallelism::indexing_workers().max(1);
+        // One segment buffer per window slot, reused across windows: the
+        // decode holds at most `partitioned_decode_window_files()` segments,
+        // each buffer grown only to the largest segment its slot has read.
+        let mut buffers = vec![Vec::new(); Self::partitioned_decode_window_files()];
         while files.len() < generation.file_segments.len() {
-            let window = read_segment_window(
-                &generation.file_segments[files.len()..],
-                window_files,
+            let pending = &generation.file_segments[files.len()..];
+            let read = read_segment_window(
+                pending,
+                &mut buffers,
                 LEXICAL_FILE_PREFETCH_BYTES_V1,
                 |descriptor, segment| {
                     read_segment(
@@ -2778,7 +2797,8 @@ impl CodeIndexPublishedGenerationV1 {
                 },
             )?;
             files.extend(decode_segment_window(
-                &window,
+                &pending[..read],
+                &buffers[..read],
                 &generation.manifest.generation_id,
             )?);
         }
@@ -3880,20 +3900,20 @@ mod tests {
         );
     }
 
-    /// The historical writer's revision-1 file segments (byte-array exact
-    /// terms with persisted canonical bytes, per-chunk revisions, explicit
-    /// parent ids, and the document's chunk roster) must still decode, and
-    /// re-encoding that file as a revision-2 row segment must restore the
-    /// identical file record from a strictly smaller segment.
+    /// The historical writer's revision-1 file segments predate the required
+    /// symbol evidence (`docstring`, then `is_async` and `derives`). Older
+    /// sealed rows are never defaulted: the decoder refuses them with the
+    /// typed contract failure naming the first missing field so the
+    /// generation is rebuilt instead of being served as negative evidence.
     #[test]
-    fn revision_one_file_segments_decode_and_round_trip_through_revision_two() {
+    fn revision_one_historical_segments_are_refused_without_docstring_evidence() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/partitioned_pre_paging");
         let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
         let generation = parse_partitioned_manifest(&manifest)
             .expect("historical manifest parses")
             .expect("revision seven manifest");
-        let mut decoded_segments = 0;
+        let mut refused_segments = 0;
         for descriptor in &generation.file_segments {
             let name = descriptor
                 .segment_digest
@@ -3905,82 +3925,32 @@ mod tests {
             let probe: PartitionedFormatProbeV1 =
                 serde_json::from_slice(&bytes).expect("segment format probe");
             assert_eq!(probe.format_revision, FILE_SEGMENT_FORMAT_REVISION_V1);
-            assert!(
-                bytes
-                    .windows(b"\"canonical_bytes\":[".len())
-                    .any(|window| { window == b"\"canonical_bytes\":[".as_slice() }),
-                "the historical segment must carry byte-array exact terms"
-            );
             let mut restored = Vec::new();
-            let revision_one = decode_file_segment(
+            let error = decode_file_segment(
                 descriptor,
                 &generation.manifest.generation_id,
                 &bytes,
                 &mut restored,
             )
-            .expect("revision-1 segment decodes");
-            let chunk_count = revision_one.artifacts.chunks.chunks.len();
-            assert!(chunk_count > 0, "the fixture file must carry chunks");
+            .expect_err("historical rows without documentation evidence must be refused");
             assert!(
-                revision_one
-                    .artifacts
-                    .chunks
-                    .chunks
-                    .iter()
-                    .any(|chunk| !chunk.exact_terms.is_empty()),
-                "the fixture file must carry exact terms"
-            );
-
-            let mut encoder = PartitionedSegmentEncoderV1::default();
-            encoder.payload.clear();
-            serde_json::to_writer(
-                &mut encoder.payload,
-                &PersistedFileGenerationArtifactsRefV2::new(
-                    &revision_one.authority,
-                    &revision_one.extraction,
-                    &revision_one.artifacts,
+                matches!(
+                    &error,
+                    CodeIndexProductionErrorV1::Contract(message)
+                        if message.contains("missing field `docstring`")
                 ),
-            )
-            .expect("revision-2 payload serializes");
-            let reencoded = encoder
-                .encode_serialized_file_segment(
-                    FILE_SEGMENT_FORMAT_REVISION_V2,
-                    generation.manifest.generation_id.as_str(),
-                    descriptor.file_occurrence_id.clone(),
-                    revision_one
-                        .artifacts
-                        .symbols
-                        .iter()
-                        .map(|symbol| (symbol.identity.as_str(), symbol.occurrence.as_str())),
-                    descriptor.file_key,
-                )
-                .expect("revision-2 segment encodes");
-            assert!(
-                reencoded.segment_size_bytes < descriptor.segment_size_bytes,
-                "revision 2 must be smaller than revision 1 ({} >= {})",
-                reencoded.segment_size_bytes,
-                descriptor.segment_size_bytes
+                "unexpected error: {error}"
             );
-            let revision_two = decode_file_segment(
-                &reencoded,
-                &generation.manifest.generation_id,
-                encoder.segment_bytes(),
-                &mut restored,
-            )
-            .expect("revision-2 segment decodes");
-            assert_eq!(
-                serde_json::to_value(&revision_two).expect("revision-2 record"),
-                serde_json::to_value(&revision_one).expect("revision-1 record"),
-                "both revisions must restore the same file record"
-            );
-            decoded_segments += 1;
+            refused_segments += 1;
         }
-        assert!(decoded_segments > 0);
+        assert!(refused_segments > 0);
     }
 
     /// A revision-2 row that omits a per-file constant needs the file default
     /// to carry it; a segment with neither is refused as a contract failure
-    /// rather than filled in.
+    /// rather than filled in. The historical revision-1 bytes are refused
+    /// before their chunk rows are reached (see the test above), so this test
+    /// supplies the symbol evidence those rows lack to obtain a typed record.
     #[test]
     fn revision_two_rows_without_defaults_are_refused() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3997,14 +3967,27 @@ mod tests {
             .expect("sha256 segment digest");
         let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
             .expect("historical segment bytes");
+        let segment: PartitionedRawFileSegmentV1 =
+            serde_json::from_slice(&bytes).expect("historical segment envelope");
+        let mut policy = FileSegmentDecodePolicyV1 {
+            generation_id: generation.manifest.generation_id.as_str(),
+            file_occurrence_id: descriptor.file_occurrence_id.as_str(),
+            symbol_occurrences: &descriptor.symbol_occurrences,
+        };
         let mut restored = Vec::new();
-        let file = decode_file_segment(
-            descriptor,
-            &generation.manifest.generation_id,
-            &bytes,
-            &mut restored,
-        )
-        .expect("revision-1 segment decodes");
+        canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, &mut restored)
+            .expect("historical payload canonicalizes");
+        let mut value: Value = serde_json::from_slice(&restored).expect("historical payload value");
+        for symbol in value["artifacts"]["symbols"]
+            .as_array_mut()
+            .expect("historical symbol rows")
+        {
+            symbol["docstring"] = Value::Null;
+            symbol["is_async"] = Value::Bool(false);
+            symbol["derives"] = Value::Array(Vec::new());
+        }
+        let file: PersistedFileGenerationArtifactsV1 =
+            serde_json::from_value(value).expect("payload with symbol evidence decodes");
         let mut payload = serde_json::to_value(PersistedFileGenerationArtifactsRefV2::new(
             &file.authority,
             &file.extraction,
