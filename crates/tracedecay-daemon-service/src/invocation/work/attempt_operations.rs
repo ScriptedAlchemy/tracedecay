@@ -368,6 +368,10 @@ pub(super) fn retry_attempt(
                     .and_then(|product| {
                         preparation::current_work_product_revision_pins(registered).and_then(
                             |revisions| {
+                                let workflow_rebind = workflow_retry_rebind(
+                                    registered,
+                                    &command.original_attempt,
+                                )?;
                                 product.retry().retry(
                                     context,
                                     &binding,
@@ -375,6 +379,7 @@ pub(super) fn retry_attempt(
                                     &registered.work_topology_policy,
                                     command,
                                     observed_at,
+                                    workflow_rebind,
                                 )
                             },
                         )
@@ -414,6 +419,48 @@ pub(super) fn retry_attempt(
         deadline,
         |outcome| WorkApplicationOutcomeV1::RetryAttempt(Box::new(outcome)),
     )
+}
+
+fn workflow_retry_rebind(
+    registered: &RegisteredWorkRuntime,
+    original: &tracedecay_domain::WorkAttemptIdentityV1,
+) -> Result<Option<tracedecay_contracts::WorkflowFanOutRetryRebindV1>, ApplicationProblem> {
+    let workflows = tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.work-retry.workflow-authority-unavailable".to_owned(),
+            message: "The workflow retry binding authority is unavailable.".to_owned(),
+        })
+    })?;
+    let binding = tracedecay_contracts::WorkflowRunStoragePort::fan_out_binding(
+        workflows.effects(),
+        original,
+    )
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.work-retry.workflow-binding-unavailable".to_owned(),
+            message: "The workflow retry binding could not be verified.".to_owned(),
+        })
+    })?;
+    let Some(binding) = binding else {
+        return Ok(None);
+    };
+    let projection = tracedecay_contracts::WorkflowRunStoragePort::projection(
+        workflows.effects(),
+        &binding.run_id,
+    )
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.work-retry.workflow-projection-unavailable".to_owned(),
+            message: "The workflow retry projection could not be verified.".to_owned(),
+        })
+    })?;
+    Ok(Some(tracedecay_contracts::WorkflowFanOutRetryRebindV1 {
+        projection,
+        binding,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

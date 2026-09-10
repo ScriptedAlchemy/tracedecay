@@ -14,11 +14,12 @@ use tracedecay_contracts::configuration::{
     ConfigurationGetRequestV1, ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1,
 };
 use tracedecay_contracts::{
-    AdmitWorkSynthesisCommand, PrepareWorkProductMutationRequestV1, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptStatusRequestV1,
-    WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkGraphReadRequestV1,
-    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
+    AdmitWorkSynthesisCommand, PrepareWorkProductMutationRequestV1, RetryWorkAttemptCommandV1,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffScope,
+    WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1,
+    WorkGraphReadRequestV1, WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
     WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetrySourceV1,
     WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
     WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
     WorkflowProviderRegistration, WorkflowRunCancelRequest, WorkflowRunGetRequest,
@@ -49,9 +50,9 @@ use tracedecay_sdk::client::{Client, ClientError};
 use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
     ApplicationConfigurationSet, WorkAttemptStatus, WorkMutateGraph, WorkPrepareGraphMutation,
-    WorkRetrieveEvidence, WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun,
-    WorkflowGetRun, WorkflowHandoffIssue, WorkflowHandoffRedeem, WorkflowRegisterDefinition,
-    WorkflowStartRun,
+    WorkRetrieveEvidence, WorkRetryAttempt, WorkSynthesize, WorkViews, WorkflowActivateDefinition,
+    WorkflowCancelRun, WorkflowGetRun, WorkflowHandoffIssue, WorkflowHandoffRedeem,
+    WorkflowRegisterDefinition, WorkflowStartRun,
 };
 
 use super::common;
@@ -742,7 +743,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             }
             Err(error) => panic!("mounted workflow fan-out start failed: {error}"),
         });
-    let fan_out_identities = started_run
+    let mut fan_out_identities = started_run
         .fan_out_plans()
         .values()
         .flat_map(|plan| &plan.children)
@@ -790,6 +791,49 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let client = sdk_client(&home, project_id.as_str());
     let _ = wait_for_application_mount(&client);
     wait_for_work_mount(&client);
+    let recovered_identity = fan_out_identities[1].clone();
+    let recovered = wait_until("fenced recovery-required workflow child", || {
+        attempt_status(&client, &recovered_identity)
+            .filter(|attempt| attempt.state() == WorkAttemptStateV1::RecoveryRequired)
+    });
+    let retry_request = RetryWorkAttemptCommandV1 {
+        original_attempt: recovered.identity().clone(),
+        new_attempt_id: id("attempt.workflow.crash.retry"),
+        failure: WorkRetryFailureSelectorV1 {
+            source: WorkRetrySourceV1::Runtime,
+            cause: WorkRetryCauseV1::RestartRecoveryRequired,
+            evidence_ref: "recovery-required".to_owned(),
+        },
+        command_id: id("command.workflow.crash.retry"),
+    };
+    let retry = client
+        .execute::<WorkRetryAttempt>(&retry_request)
+        .expect("explicit workflow child recovery retry")
+        .result;
+    let replacement = match retry {
+        WorkRetryAttemptOutcomeV1::Created { attempt, .. } => attempt.identity().clone(),
+        WorkRetryAttemptOutcomeV1::Replayed { .. } => panic!("first workflow retry was replayed"),
+    };
+    let replayed = client
+        .execute::<WorkRetryAttempt>(&retry_request)
+        .expect("atomic workflow child retry replay")
+        .result;
+    assert!(
+        matches!(
+            replayed,
+            WorkRetryAttemptOutcomeV1::Replayed { ref attempt, .. }
+                if attempt.identity() == &replacement
+        ),
+        "retry receipt, replacement attempt, product link, and workflow binding must replay together"
+    );
+    assert_eq!(
+        attempt_status(&client, &recovered_identity)
+            .expect("retained original recovery attempt")
+            .state(),
+        WorkAttemptStateV1::RecoveryRequired,
+        "retry must not rewrite or redispatch the uncertain original identity"
+    );
+    fan_out_identities[1] = replacement;
     wait_until("post-recovery cancellation child", || {
         cancellation_started.exists().then_some(())
     });

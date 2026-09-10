@@ -892,6 +892,7 @@ fn retry_write(original: &WorkAttemptV1) -> WorkRetryWriteV1 {
         WorkRecoveryStateV1::RecoveryRequired {
             source_attempt_id: Some(original.identity().attempt_id().clone()),
             reason: WorkRestartReasonV1::FailureObserved,
+            observed_at: UtcMicros(20),
         },
         original.requested_route().clone(),
         None,
