@@ -1642,7 +1642,7 @@ mod tests {
         };
         let code_index = crate::AdmittedCodeIndex::new(&authority, Some(&executor), None)
             .expect("search executor admits");
-        let ctx = crate::McpToolContext::bind(crate::McpToolBinding::Admitted {
+        let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
             project: &project,
             request: crate::McpRequestAuthoritiesV1 {
                 code_index: Some(code_index),

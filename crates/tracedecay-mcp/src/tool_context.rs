@@ -57,8 +57,6 @@ pub enum McpToolBindingError {
     RelativeProjectRoot { root: String },
     #[error("admitted request scope is not self-consistent: {detail}")]
     ScopeInvalid { detail: String },
-    #[error("{authority} cannot be admitted without a resolved request scope")]
-    UnscopedAuthority { authority: &'static str },
     #[error(
         "admitted project session store must be a project-sessions shard, but its lease was opened for {shard} while this request resolved {request}"
     )]
@@ -80,7 +78,6 @@ impl McpToolBindingError {
         match self {
             Self::RelativeProjectRoot { .. } => "mcp_tool_binding_root_not_absolute",
             Self::ScopeInvalid { .. } => "mcp_tool_binding_scope_invalid",
-            Self::UnscopedAuthority { .. } => "mcp_tool_binding_scope_unresolved",
             Self::ProjectStoreNotSessionScoped { .. } => "mcp_tool_binding_store_not_session_shard",
             Self::ProjectStoreProjectMismatch { .. } => "mcp_tool_binding_store_project_mismatch",
             Self::CodeIndexWithoutExecutor => "mcp_tool_binding_code_index_without_executor",
@@ -200,13 +197,13 @@ pub struct McpProjectIdentityV1 {
 /// actually read: profile-session and diagnostics-database handles are not
 /// on this snapshot because those families do not touch them.
 pub struct McpAdmittedProjectV1 {
-    pub identity: McpProjectIdentityV1,
-    pub store_layout: StoreLayout,
-    pub graph_database: Database,
-    pub graph_db_path: PathBuf,
-    pub store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
-    pub configuration_runtime: Arc<ProjectConfigurationRuntime>,
-    pub project_session_store: Option<RegisteredGlobalDbLeaseV1>,
+    identity: McpProjectIdentityV1,
+    store_layout: StoreLayout,
+    graph_database: Database,
+    graph_db_path: PathBuf,
+    store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+    configuration_runtime: Arc<ProjectConfigurationRuntime>,
+    project_session_store: Option<RegisteredGlobalDbLeaseV1>,
 }
 
 impl McpAdmittedProjectV1 {
@@ -273,6 +270,41 @@ impl McpAdmittedProjectV1 {
             self.identity.fallback_warning.clone(),
             self.graph_db_path.clone(),
         )
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &McpProjectIdentityV1 {
+        &self.identity
+    }
+
+    #[must_use]
+    pub fn store_layout(&self) -> &StoreLayout {
+        &self.store_layout
+    }
+
+    #[must_use]
+    pub fn graph_database(&self) -> &Database {
+        &self.graph_database
+    }
+
+    #[must_use]
+    pub fn graph_db_path(&self) -> &Path {
+        self.graph_db_path.as_path()
+    }
+
+    #[must_use]
+    pub fn store_runtime(&self) -> &DaemonSessionRuntimeRegistryV1 {
+        self.store_runtime.as_ref()
+    }
+
+    #[must_use]
+    pub fn configuration_runtime(&self) -> &ProjectConfigurationRuntime {
+        self.configuration_runtime.as_ref()
+    }
+
+    #[must_use]
+    pub fn project_session_store(&self) -> Option<&RegisteredGlobalDbLeaseV1> {
+        self.project_session_store.as_ref()
     }
 }
 
@@ -344,14 +376,11 @@ pub struct McpRequestAuthoritiesV1<'a> {
 /// One serving shape: the route published a project snapshot, and root,
 /// scope, branch, and session store live only on that snapshot — there is
 /// no second label a caller can set beside it. A call that never published
-/// a checkout is a typed root failure, not a second variant.
+/// a checkout is a typed root failure, not a second binding shape.
 #[derive(Clone, Copy)]
-pub enum McpToolBinding<'a> {
-    /// The serving route published a project snapshot for this call.
-    Admitted {
-        project: &'a McpAdmittedProjectV1,
-        request: McpRequestAuthoritiesV1<'a>,
-    },
+pub struct McpToolBinding<'a> {
+    pub project: &'a McpAdmittedProjectV1,
+    pub request: McpRequestAuthoritiesV1<'a>,
 }
 
 /// Admitted daemon authorities for one MCP tool call.
@@ -384,12 +413,11 @@ impl<'a> McpToolContext<'a> {
     /// it. Nothing is defaulted or repaired: a binding that does not prove one
     /// coherent request scope is refused whole.
     pub fn bind(binding: McpToolBinding<'a>) -> std::result::Result<Self, McpToolBindingError> {
-        let McpToolBinding::Admitted { project, request } = binding;
-        let project_root = project.identity.project_root.as_path();
-        let admitted_scope = &project.identity.scope;
+        let McpToolBinding { project, request } = binding;
+        let project_root = project.identity().project_root.as_path();
+        let admitted_scope = &project.identity().scope;
         let project_session_store = project
-            .project_session_store
-            .as_ref()
+            .project_session_store()
             .map(|lease| AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized));
         if !project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
@@ -409,7 +437,7 @@ impl<'a> McpToolContext<'a> {
             project,
             request,
             project_root,
-            active_branch: project.identity.active_branch.as_deref(),
+            active_branch: project.identity().active_branch.as_deref(),
             deadline: request.controls.deadline,
             cancellation: request.controls.cancellation,
             admitted_scope,
@@ -434,32 +462,32 @@ impl<'a> McpToolContext<'a> {
 
     #[must_use]
     pub fn store_layout(&self) -> &'a StoreLayout {
-        &self.project.store_layout
+        self.project.store_layout()
     }
 
     #[must_use]
     pub fn graph_database(&self) -> &'a Database {
-        &self.project.graph_database
+        self.project.graph_database()
     }
 
     #[must_use]
     pub fn graph_db_path(&self) -> &'a Path {
-        self.project.graph_db_path.as_path()
+        self.project.graph_db_path()
     }
 
     #[must_use]
     pub fn store_runtime(&self) -> &'a DaemonSessionRuntimeRegistryV1 {
-        self.project.store_runtime.as_ref()
+        self.project.store_runtime()
     }
 
     #[must_use]
     pub fn configuration_runtime(&self) -> &'a ProjectConfigurationRuntime {
-        self.project.configuration_runtime.as_ref()
+        self.project.configuration_runtime()
     }
 
     #[must_use]
     pub fn serving_branch(&self) -> Option<&'a str> {
-        self.project.identity.serving_branch.as_deref()
+        self.project.identity().serving_branch.as_deref()
     }
 
     /// Reads scheduler freshness now. Search and context must call this after
@@ -564,7 +592,7 @@ impl std::fmt::Debug for McpToolContext<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("McpToolContext")
-            .field("project_id", &self.project.identity.scope.project_id)
+            .field("project_id", &self.project.identity().scope.project_id)
             .field("has_freshness_reader", &self.request.freshness.is_some())
             .field(
                 "has_generation_census",
@@ -941,7 +969,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture_context(project: &McpAdmittedProjectV1) -> McpToolContext<'_> {
-        McpToolContext::bind(McpToolBinding::Admitted {
+        McpToolContext::bind(McpToolBinding {
             project,
             request: McpRequestAuthoritiesV1::default(),
         })
@@ -1264,7 +1292,7 @@ pub(crate) mod tests {
         let admitted = scope("admitted");
         let project = project_bundle(temp.path(), &admitted, None);
 
-        let bound = McpToolContext::bind(McpToolBinding::Admitted {
+        let bound = McpToolContext::bind(McpToolBinding {
             project: &project,
             request: McpRequestAuthoritiesV1::default(),
         })
@@ -1304,15 +1332,15 @@ pub(crate) mod tests {
     }
 
     /// An admitted snapshot is the only source of root, scope, and store.
-    /// The [`McpToolBinding::Admitted`] variant has no fields that could
-    /// supply a second label; bind reports the snapshot's identity.
+    /// [`McpToolBinding`] has no fields that could supply a second label;
+    /// bind reports the snapshot's identity.
     #[test]
     fn an_admitted_binding_cannot_carry_a_second_root_or_scope() {
         let temp = tempfile::tempdir().expect("temp root");
         let admitted = scope("admitted");
         let project = project_bundle(temp.path(), &admitted, None);
 
-        let bound = McpToolContext::bind(McpToolBinding::Admitted {
+        let bound = McpToolContext::bind(McpToolBinding {
             project: &project,
             request: McpRequestAuthoritiesV1::default(),
         })
@@ -1320,12 +1348,12 @@ pub(crate) mod tests {
 
         assert_eq!(
             bound.project_root(),
-            project.identity.project_root.as_path()
+            project.identity().project_root.as_path()
         );
-        assert_eq!(bound.admitted_scope(), &project.identity.scope);
+        assert_eq!(bound.admitted_scope(), &project.identity().scope);
         assert_eq!(
-            bound.project().identity.project_root,
-            project.identity.project_root
+            bound.project().identity().project_root,
+            project.identity().project_root
         );
     }
 }

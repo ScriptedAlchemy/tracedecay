@@ -1246,7 +1246,7 @@ fn admitted_tool_context<'a>(
     // Project open resolves one checkout per served route and publishes it
     // alongside the authorities that mount behind it, so this is the checkout
     // every scoped authority below belongs to.
-    let scope = Some(&project.identity.scope);
+    let scope = Some(&project.identity().scope);
     // Executors and their admission envelope are published together by the
     // route. Presenting executors without the envelope is a wiring fault, not
     // a capability to report: they would authenticate nothing.
@@ -1286,10 +1286,7 @@ fn admitted_tool_context<'a>(
             DoctorReportSnapshotV1::NotAttached => McpDoctorReportV1::NotAttached,
         },
     };
-    Ok(McpToolContext::bind(McpToolBinding::Admitted {
-        project,
-        request,
-    })?)
+    Ok(McpToolContext::bind(McpToolBinding { project, request })?)
 }
 
 /// Dispatch source-editing tools (`tracedecay_str_replace`,
