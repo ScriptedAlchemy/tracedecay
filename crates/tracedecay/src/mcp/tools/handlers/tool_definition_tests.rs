@@ -355,7 +355,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_configuration_set",
         "tracedecay_configuration_unset",
         "tracedecay_configuration_batch",
-        "tracedecay_configuration_write_credential",
         "tracedecay_configuration_protected_apply",
         "tracedecay_configuration_rollback_apply",
         "tracedecay_context_scout_pause",

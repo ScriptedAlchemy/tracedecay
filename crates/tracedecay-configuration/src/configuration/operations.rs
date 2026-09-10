@@ -3,8 +3,8 @@
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ChangePlanId, ConfigurationMutationEffectV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
-    ConfigurationValueV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
-    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, RollbackModeV1,
+    SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
@@ -15,14 +15,13 @@ use crate::config::scope_control::{
 
 use super::ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
-    ConfigurationOperationFuture, CredentialWritePort, ScopeResolutionPort,
-    ScopeRevalidationEvidenceV1,
+    ConfigurationOperationFuture, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 use super::types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
-    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
+    DirectConfigurationMutation, ResolvedSetting, SettingSummary,
 };
 
 /// One transport-neutral control-plane contract. CLI, MCP, HTTP, dashboard,
@@ -49,16 +48,6 @@ pub trait ConfigurationControlPlane: Sync {
         mutation: DirectConfigurationMutation,
         expected_revision: ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt>;
-
-    fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<
-        '_,
-        tracedecay_domain::configuration::CredentialReferenceMetadataV1,
-    >;
 
     fn observed_state(
         &self,
@@ -97,24 +86,21 @@ pub trait ConfigurationControlPlane: Sync {
     ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage>;
 }
 
-pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Authorization, Clock>
-{
+pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization, Clock> {
     registry: &'a ConfigurationRegistry,
     store: &'a Store,
     scopes: &'a Scopes,
-    credentials: &'a Credentials,
     authorization: &'a Authorization,
     clock: &'a Clock,
 }
 
-impl<'a, Store, Scopes, Credentials, Authorization, Clock>
-    ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Authorization, Clock>
+impl<'a, Store, Scopes, Authorization, Clock>
+    ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization, Clock>
 {
     pub fn new(
         registry: &'a ConfigurationRegistry,
         store: &'a Store,
         scopes: &'a Scopes,
-        credentials: &'a Credentials,
         authorization: &'a Authorization,
         clock: &'a Clock,
     ) -> Self {
@@ -122,19 +108,17 @@ impl<'a, Store, Scopes, Credentials, Authorization, Clock>
             registry,
             store,
             scopes,
-            credentials,
             authorization,
             clock,
         }
     }
 }
 
-impl<Store, Scopes, Credentials, Authorization, Clock> ConfigurationControlPlane
-    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Authorization, Clock>
+impl<Store, Scopes, Authorization, Clock> ConfigurationControlPlane
+    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization, Clock>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
-    Credentials: CredentialWritePort,
     Authorization: ConfigurationMutationAuthorizationPort,
     Clock: ConfigurationClock,
 {
@@ -229,35 +213,6 @@ where
             .await?;
             self.store
                 .commit_direct(&authority, &mutation, &expected_revision)
-                .await
-        })
-    }
-
-    fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<
-        '_,
-        tracedecay_domain::configuration::CredentialReferenceMetadataV1,
-    > {
-        Box::pin(async move {
-            expected_revision
-                .validate()
-                .map_err(ConfigurationError::validation)?;
-            // The credential store checks exact replay before its revision
-            // CAS, matching direct configuration mutation semantics.
-            self.authorize_mutation(
-                &authority,
-                ConfigurationMutationOperationV1::CredentialWrite,
-                &expected_revision,
-                ConfigurationMutationSinkV1::CredentialStore,
-                ConfigurationMutationEffectV1::WriteCredentialReference,
-            )
-            .await?;
-            self.credentials
-                .write_reference(&authority, &write, &expected_revision)
                 .await
         })
     }
@@ -458,12 +413,11 @@ where
     }
 }
 
-impl<Store, Scopes, Credentials, Authorization, Clock>
-    ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Authorization, Clock>
+impl<Store, Scopes, Authorization, Clock>
+    ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization, Clock>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
-    Credentials: CredentialWritePort,
     Authorization: ConfigurationMutationAuthorizationPort,
     Clock: ConfigurationClock,
 {
@@ -573,11 +527,6 @@ fn validate_direct_mutation(
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
             reject_protected_key(key)?;
-            if matches!(value.as_ref(), ConfigurationValueV1::CredentialReference(_)) {
-                return Err(ConfigurationError::validation_message(
-                    "credential references require the write-only credential operation",
-                ));
-            }
             registry
                 .validate_layer(key, layer)
                 .map_err(ConfigurationError::validation)?;
@@ -678,8 +627,8 @@ mod tests {
     use tracedecay_domain::configuration::{
         AnalyzerSettingsV1, AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
         ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1,
-        ConfigurationValueV1, CredentialReferenceMetadataV1, ProtectedChange, ScopeSourceBinding,
-        SettingKey, SourceBindingId, SourceKindV1,
+        ConfigurationValueV1, ProtectedChange, ScopeSourceBinding, SettingKey, SourceBindingId,
+        SourceKindV1,
     };
     use tracedecay_domain::{
         AccessPolicyDigest, ActorId, LocatorDigest, ManifestDigest, ProjectId,
@@ -687,7 +636,6 @@ mod tests {
 
     use super::super::ports::{
         ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
-        CredentialWritePort,
     };
 
     fn digest(byte: char) -> ManifestDigest {
@@ -854,19 +802,6 @@ mod tests {
         }
     }
 
-    struct Credentials;
-
-    impl CredentialWritePort for Credentials {
-        fn write_reference(
-            &self,
-            _authority: &ConfigurationMutationAuthority,
-            _write: &WriteOnlyCredentialMutation,
-            _expected_revision: &ConfigurationRevisionId,
-        ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-            Box::pin(async { Err(ConfigurationError::Unavailable) })
-        }
-    }
-
     struct Authorization {
         current: super::super::ports::CurrentConfigurationMutationAuthorizationV1,
     }
@@ -1024,13 +959,11 @@ mod tests {
         );
         let registry = ConfigurationRegistry::core().unwrap();
         let scope = Scope { evidence };
-        let credentials = Credentials;
         let clock = Clock;
         let operations = ConfigurationControlPlaneOperations::new(
             &registry,
             &store,
             &scope,
-            &credentials,
             &authorization,
             &clock,
         );
@@ -1155,14 +1088,12 @@ mod tests {
         };
         let registry = ConfigurationRegistry::core().unwrap();
         let scope = Scope { evidence };
-        let credentials = Credentials;
         let clock = AdvancedClock(UtcMicros(10));
 
         let restarted = ConfigurationControlPlaneOperations::new(
             &registry,
             &store,
             &scope,
-            &credentials,
             &authorization,
             &clock,
         );

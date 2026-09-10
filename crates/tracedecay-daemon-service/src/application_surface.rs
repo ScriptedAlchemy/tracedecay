@@ -2140,10 +2140,6 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ConfigurationBatch
                 )
                 | (
-                    Self::Configuration(ConfigurationWireRequestV1::WriteCredential(_)),
-                    ApplicationSurfaceOperation::ConfigurationWriteCredential
-                )
-                | (
                     Self::Configuration(ConfigurationWireRequestV1::ObservedState(_)),
                     ApplicationSurfaceOperation::ConfigurationObservedState
                 )
@@ -2490,7 +2486,6 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply
@@ -3190,7 +3185,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply

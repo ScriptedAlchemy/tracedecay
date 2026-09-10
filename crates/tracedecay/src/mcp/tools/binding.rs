@@ -114,19 +114,19 @@ fn application_surface_branch_sensitivity(
         ConfigurationAudit, ConfigurationBatch, ConfigurationExplain, ConfigurationGet,
         ConfigurationList, ConfigurationObservedState, ConfigurationProtectedApply,
         ConfigurationProtectedPreview, ConfigurationRollbackApply, ConfigurationRollbackPreview,
-        ConfigurationSet, ConfigurationUnset, ConfigurationWriteCredential, ContextScoutBudget,
-        ContextScoutCancel, ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery,
-        ContextScoutExplain, ContextScoutFeedback, ContextScoutPause, ContextScoutRecent,
-        ContextScoutResume, ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle,
-        FeedbackDiagnostics, FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList,
-        FileDependents, FileMetadata, GitApply, GitBlame, GitDiff, GitHistory,
-        GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta, HealthRead,
-        ModuleApi, NativeIntegrationApply, NativeIntegrationApprove, NativeIntegrationCancel,
-        NativeIntegrationPreflight, NativeIntegrationStackSnapshot, NativeIntegrationStatus,
-        NativeIntegrationWorktreeConfirm, NativeIntegrationWorktreeInspect,
-        NativeIntegrationWorktreeInventory, NativeIntegrationWorktreeReconcile,
-        NativeIntegrationWorktreeRemove, ObservatoryRead, QualifiedName, SessionLookup, SourceBody,
-        SourceLines, SourceOutline, StorageStatus, TestResults,
+        ConfigurationSet, ConfigurationUnset, ContextScoutBudget, ContextScoutCancel,
+        ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery, ContextScoutExplain,
+        ContextScoutFeedback, ContextScoutPause, ContextScoutRecent, ContextScoutResume,
+        ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle, FeedbackDiagnostics,
+        FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList, FileDependents, FileMetadata,
+        GitApply, GitBlame, GitDiff, GitHistory, GitHubStackSignalExpand, GitHunks, GitPreview,
+        GitStatus, HealthDelta, HealthRead, ModuleApi, NativeIntegrationApply,
+        NativeIntegrationApprove, NativeIntegrationCancel, NativeIntegrationPreflight,
+        NativeIntegrationStackSnapshot, NativeIntegrationStatus, NativeIntegrationWorktreeConfirm,
+        NativeIntegrationWorktreeInspect, NativeIntegrationWorktreeInventory,
+        NativeIntegrationWorktreeReconcile, NativeIntegrationWorktreeRemove, ObservatoryRead,
+        QualifiedName, SessionLookup, SourceBody, SourceLines, SourceOutline, StorageStatus,
+        TestResults,
     };
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
@@ -138,7 +138,6 @@ fn application_surface_branch_sensitivity(
         | ConfigurationSet
         | ConfigurationUnset
         | ConfigurationBatch
-        | ConfigurationWriteCredential
         | ConfigurationObservedState
         | ConfigurationProtectedPreview
         | ConfigurationProtectedApply
@@ -773,7 +772,6 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_configuration_set"
             | "tracedecay_configuration_unset"
             | "tracedecay_configuration_batch"
-            | "tracedecay_configuration_write_credential"
             | "tracedecay_configuration_protected_apply"
             | "tracedecay_configuration_rollback_apply"
             | "tracedecay_context_scout_pause"
@@ -1097,7 +1095,6 @@ mod tests {
             "tracedecay_configuration_set",
             "tracedecay_configuration_unset",
             "tracedecay_configuration_batch",
-            "tracedecay_configuration_write_credential",
             "tracedecay_configuration_protected_apply",
             "tracedecay_configuration_rollback_apply",
         ] {
@@ -1380,7 +1377,6 @@ mod tests {
         ("tracedecay_configuration_set", BranchSensitivity::Independent),
         ("tracedecay_configuration_unset", BranchSensitivity::Independent),
         ("tracedecay_configuration_batch", BranchSensitivity::Independent),
-        ("tracedecay_configuration_write_credential", BranchSensitivity::Independent),
         ("tracedecay_configuration_observed_state", BranchSensitivity::Independent),
         ("tracedecay_configuration_protected_preview", BranchSensitivity::Independent),
         ("tracedecay_configuration_protected_apply", BranchSensitivity::Independent),

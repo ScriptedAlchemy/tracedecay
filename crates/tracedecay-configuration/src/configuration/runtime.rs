@@ -10,9 +10,8 @@ use std::sync::{Arc, OnceLock};
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-    CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
-    SettingKey,
+    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, ProtectedApplyRequest,
+    ProtectedChange, ProtectedChangePlan, SettingKey,
 };
 
 use crate::config::{
@@ -31,7 +30,6 @@ use super::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     ConfigurationRollbackRequest, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
-    WriteOnlyCredentialMutation,
 };
 use super::user_settings::{ProductionUserSettingsDaemonClient, UserSettingsDaemonClient};
 
@@ -285,7 +283,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -304,7 +301,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -323,7 +319,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -343,31 +338,10 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
             .mutate_direct(authority, mutation, expected_revision)
-            .await
-        })
-    }
-
-    fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        Box::pin(async move {
-            ConfigurationControlPlaneOperations::new(
-                self.registry.as_ref(),
-                &self.store,
-                &self.scopes,
-                &self.store,
-                &self.authorization,
-                &self.clock,
-            )
-            .write_credential(authority, write, expected_revision)
             .await
         })
     }
@@ -381,7 +355,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -401,7 +374,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -420,7 +392,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -439,7 +410,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -458,7 +428,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -477,7 +446,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
