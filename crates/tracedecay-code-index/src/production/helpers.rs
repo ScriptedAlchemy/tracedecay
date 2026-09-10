@@ -254,17 +254,39 @@ where
                 .rsplit("::")
                 .next()
                 .unwrap_or(reference.reference_name.as_str());
-            // Retention already narrows names, but carried artifacts outlive
-            // policy revisions; the blocklist is a resolution rule, so apply
-            // it to every retained reference regardless of when it was sealed.
-            if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+            let crate_qualified = reference.reference_name.strip_prefix("crate::");
+            // Carried artifacts outlive policy revisions, so reapply the
+            // unqualified-name blocklist at every seal.
+            if simple_name.is_empty()
+                || (crate_qualified.is_none()
+                    && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
+            {
                 continue;
             }
             let Some(candidates) = by_simple_name.get(simple_name) else {
                 continue;
             };
-            let mut compatible = candidates.iter().filter(|(_, symbol)| {
+            let source_path = &file.as_ref().authority.logical_path;
+            let mut compatible = candidates.iter().filter(|(candidate_index, symbol)| {
                 relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                    && crate_qualified.map_or_else(
+                        || {
+                            !reference.reference_name.contains("::")
+                                || file_qualified_name_matches(
+                                    &reference.reference_name,
+                                    &files[*candidate_index].as_ref().authority.logical_path,
+                                    &symbol.qualified_name,
+                                )
+                        },
+                        |qualified| {
+                            rust_crate_qualified_name_matches(
+                                qualified,
+                                source_path,
+                                &files[*candidate_index].as_ref().authority.logical_path,
+                                &symbol.qualified_name,
+                            )
+                        },
+                    )
             });
             let Some((first_index, target)) = compatible.next() else {
                 continue;
@@ -284,4 +306,151 @@ where
     edges.sort_by(edge_order);
     edges.dedup();
     edges
+}
+
+fn file_qualified_name_matches(
+    reference_path: &str,
+    target_path: &str,
+    target_qualified_name: &str,
+) -> bool {
+    let Some(symbol_path) = target_qualified_name
+        .strip_prefix(target_path)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    let Some(file_stem) = target_path
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.rsplit_once('.').map(|(stem, _)| stem))
+    else {
+        return false;
+    };
+    reference_path
+        .strip_prefix(file_stem)
+        .and_then(|path| path.strip_prefix("::"))
+        == Some(symbol_path)
+}
+
+/// Map an extracted Rust symbol back to the path used by a `crate::...`
+/// reference. Standard Cargo source roots scope the match, so equal module
+/// paths in sibling workspace crates cannot cross-bind.
+fn rust_crate_qualified_name_matches(
+    reference_path: &str,
+    source_path: &str,
+    target_path: &str,
+    target_qualified_name: &str,
+) -> bool {
+    let Some(source_root) = rust_source_root(source_path) else {
+        return false;
+    };
+    if rust_source_root(target_path) != Some(source_root) {
+        return false;
+    }
+    let Some(symbol_path) = target_qualified_name
+        .strip_prefix(target_path)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    let Some(relative_file) = target_path
+        .strip_prefix(source_root)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some(source_file) = source_path
+        .strip_prefix(source_root)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        return false;
+    };
+    if source_file.starts_with("bin/") || relative_file.starts_with("bin/") {
+        return false;
+    }
+    if matches!(
+        (source_file, relative_file),
+        ("lib.rs", "main.rs") | ("main.rs", "lib.rs")
+    ) {
+        return false;
+    }
+    let module = match relative_file {
+        "lib.rs" | "main.rs" => "",
+        path if path.ends_with("/mod.rs") => path.strip_suffix("/mod.rs").unwrap_or_default(),
+        path if path.ends_with(".rs") => path.strip_suffix(".rs").unwrap_or_default(),
+        _ => return false,
+    };
+    if module.is_empty() {
+        reference_path == symbol_path
+    } else {
+        reference_path == format!("{}::{symbol_path}", module.replace('/', "::"))
+    }
+}
+
+fn rust_source_root(path: &str) -> Option<&str> {
+    if path.starts_with("src/") {
+        return Some("src");
+    }
+    let marker = path.rfind("/src/")?;
+    Some(&path[..marker + "/src".len()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_qualified_name_matches, rust_crate_qualified_name_matches};
+    use tracedecay_code_extraction::{LanguageExtractor, RustExtractor};
+
+    #[test]
+    fn rust_crate_qualified_names_stay_inside_their_cargo_source_root() {
+        let call = RustExtractor.extract(
+            "src/alpha/mod.rs",
+            "pub fn run() -> i32 { crate::beta::run() }",
+        );
+        let target = RustExtractor.extract("src/beta/mod.rs", "pub fn run() -> i32 { 1 }");
+        assert!(
+            call.unresolved_refs
+                .iter()
+                .any(|reference| reference.reference_name == "crate::beta::run")
+        );
+        assert!(
+            target
+                .nodes
+                .iter()
+                .any(|node| node.qualified_name == "src/beta/mod.rs::run")
+        );
+        assert!(rust_crate_qualified_name_matches(
+            "outer::beta::run",
+            "src/alpha/mod.rs",
+            "src/outer/beta/mod.rs",
+            "src/outer/beta/mod.rs::run",
+        ));
+        assert!(!rust_crate_qualified_name_matches(
+            "beta::run",
+            "crates/one/src/alpha/mod.rs",
+            "crates/two/src/beta/mod.rs",
+            "crates/two/src/beta/mod.rs::run",
+        ));
+        assert!(!rust_crate_qualified_name_matches(
+            "beta::run",
+            "src/bin/tool.rs",
+            "src/beta/mod.rs",
+            "src/beta/mod.rs::run",
+        ));
+        assert!(!rust_crate_qualified_name_matches(
+            "run",
+            "src/main.rs",
+            "src/lib.rs",
+            "src/lib.rs::run",
+        ));
+        assert!(file_qualified_name_matches(
+            "right::Base",
+            "src/right.ts",
+            "src/right.ts::Base",
+        ));
+        assert!(!file_qualified_name_matches(
+            "other::Base",
+            "src/right.ts",
+            "src/right.ts::Base",
+        ));
+    }
 }

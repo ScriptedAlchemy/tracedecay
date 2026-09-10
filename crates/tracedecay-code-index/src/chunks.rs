@@ -1993,7 +1993,10 @@ fn cross_file_reference_candidate(
         .rsplit("::")
         .next()
         .unwrap_or(reference.reference_name.as_str());
-    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+    if simple_name.is_empty()
+        || (!reference.reference_name.starts_with("crate::")
+            && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
+    {
         return None;
     }
     let kind = canonical_relation_kind(&reference.reference_kind)?;
@@ -3649,6 +3652,38 @@ pub fn real_symbol() {}
         assert!(
             retained.is_empty(),
             "a same-file-resolved reference must not also be retained: {retained:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_rust_crate_path_survives_the_unqualified_name_blocklist() {
+        let caller = fixture_function_row(
+            "caller",
+            "node.caller",
+            "sym.caller",
+            "src/alpha/mod.rs::caller",
+            'c',
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 6,
+            },
+        );
+        let by_node_id = BTreeMap::from([("node.caller", Some(&caller))]);
+        let reference = |reference_name: &str| UnresolvedRef {
+            from_node_id: "node.caller".to_owned(),
+            reference_name: reference_name.to_owned(),
+            reference_kind: EdgeKind::Calls,
+            line: 0,
+            column: 0,
+            file_path: "src/alpha/mod.rs".to_owned(),
+        };
+
+        assert!(cross_file_reference_candidate(&reference("run"), &by_node_id).is_none());
+        assert_eq!(
+            cross_file_reference_candidate(&reference("crate::beta::run"), &by_node_id)
+                .expect("explicit crate path remains available to qualified sealing")
+                .reference_name,
+            "crate::beta::run"
         );
     }
 
