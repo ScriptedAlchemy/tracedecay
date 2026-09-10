@@ -96,14 +96,14 @@ fn exact_pair_scopes() -> (ResolvedScope, ResolvedScope) {
         project.clone(),
         repository.clone(),
         WorktreeId::new("worktree.native.source").expect("source worktree id"),
-        Some(RefId::new("refs/heads/source").expect("source ref")),
+        Some(RefId::new("refs/heads/main").expect("source authority ref")),
     )
     .expect("source scope");
     let destination = ResolvedScope::new(
         project,
         repository,
         WorktreeId::new("worktree.native.destination").expect("destination worktree id"),
-        Some(RefId::new("refs/heads/destination").expect("destination ref")),
+        Some(RefId::new("refs/heads/source").expect("destination authority ref")),
     )
     .expect("destination scope");
     (source, destination)
@@ -193,6 +193,8 @@ fn preflight_request(
             inventory_epoch: WorktreeInventoryEpoch::new(1).expect("inventory epoch"),
             selection: NativeIntegrationSelectionBindingV1::IndependentBranch {
                 proposal_digest: digest('c'),
+                source_ref: RefId::new("refs/heads/source").expect("source ref"),
+                destination_ref: RefId::new("refs/heads/destination").expect("destination ref"),
             },
             grant_digest: digest('a'),
             policy_digest: digest('d'),
