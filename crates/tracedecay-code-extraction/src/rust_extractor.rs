@@ -1190,6 +1190,7 @@ impl RustExtractor {
     fn extract_single_variant(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
         let text = state.node_text(node);
+        let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -1215,7 +1216,7 @@ impl RustExtractor {
             start_column,
             end_column,
             signature: Some(text.trim().trim_end_matches(',').to_string()),
-            docstring: None,
+            docstring,
             visibility: Visibility::Pub,
             is_async: false,
             branches: 0,
