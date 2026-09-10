@@ -334,6 +334,13 @@ impl FeedbackCycleRuntime {
         Arc::clone(&self.source_observations)
     }
 
+    /// The request builder selected with this runtime's admitted providers.
+    /// Its document identity is resolved per invocation, while analyzer,
+    /// configuration, and policy admission remain the immutable runtime pin.
+    pub fn lsp_input(&self) -> FeedbackCycleLspInput {
+        Arc::clone(&self.lsp_input)
+    }
+
     /// Runs exactly one bounded feedback cycle and returns its terminal,
     /// canonical result. It never schedules retries or follow-up work.
     #[hotpath::measure(label = "usecases.feedback.run_once", future = true)]
