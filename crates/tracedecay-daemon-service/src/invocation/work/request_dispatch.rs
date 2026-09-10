@@ -21,7 +21,6 @@ use super::preparation;
 use super::{
     RegisteredWorkRuntime, complete_work_effect, complete_work_read, observe_placement_target,
     offer_work_blocked_interval_receipts, work_product_problem, work_request_context,
-    work_topology_problem, work_topology_unavailable_problem,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -414,27 +413,16 @@ pub(super) async fn dispatch_work_application(
                     &context,
                     canonical_request_id,
                     operation_key,
-                    use_case,
+                    use_case.clone(),
                     input_digest,
-                    services.attempts().list(&context, &request, |authority| {
-                        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        match services.topology().verified_snapshot(authority, cancelled) {
-                            Ok(topology) => {
-                                let task_count =
-                                    u32::try_from(topology.task_count()).map_err(|_| {
-                                        work_topology_unavailable_problem(
-                                            "the verified topology task count overflowed",
-                                        )
-                                    })?;
-                                Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
-                                    tracedecay_contracts::WorkAttemptTopologyBindingV1 {
-                                        generation: topology.generation().as_str().to_owned(),
-                                        task_count,
-                                    },
-                                ))
-                            }
-                            Err(error) => work_topology_problem(error),
-                        }
+                    services.attempts().list(&context, &request, |_authority| {
+                        preparation::current_work_product_attempt_topology(
+                            &registered,
+                            &context,
+                            capability,
+                            &use_case,
+                            observed_at,
+                        )
                     }),
                     observed_at,
                     deadline,
@@ -449,6 +437,7 @@ pub(super) async fn dispatch_work_application(
             &context,
             canonical_request_id,
             operation_key,
+            capability,
             use_case,
             input_digest,
             observed_at,
@@ -457,42 +446,24 @@ pub(super) async fn dispatch_work_application(
         ),
         WorkApplicationInvocationV1::HydrateArtifacts(request) => {
             hotpath::measure_block!("daemon.service.work.hydrate_artifacts", {
-                let Ok(capability) = CapabilityId::new(*capability) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                let binding =
-                    tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
-                let product_services =
-                    match tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
-                        &registered.database,
-                        binding,
-                    ) {
-                        Ok(services) => services,
-                        Err(_) => {
-                            return DaemonInvocationResponse::problem(
-                                request_id,
-                                DaemonInvocationProblem::Unavailable,
-                            );
-                        }
-                    };
                 complete_work_read(
                     &registered,
                     request_id,
                     &context,
                     canonical_request_id,
                     operation_key,
-                    use_case,
+                    use_case.clone(),
                     input_digest,
                     services
                         .artifact_hydration()
                         .hydrate(&context, &request, |_authority| {
-                            product_services
-                                .reads()
-                                .read_attempt_topology(&context, observed_at)
-                                .map_err(work_product_problem)
+                            preparation::current_work_product_attempt_topology(
+                                &registered,
+                                &context,
+                                capability,
+                                &use_case,
+                                observed_at,
+                            )
                         }),
                     observed_at,
                     deadline,
@@ -522,7 +493,7 @@ pub(super) async fn dispatch_work_application(
                     &context,
                     canonical_request_id,
                     operation_key,
-                    use_case,
+                    use_case.clone(),
                     input_digest,
                     tracedecay_contracts::execution_topology_view(
                         services.attempts(),
@@ -530,25 +501,14 @@ pub(super) async fn dispatch_work_application(
                         &registered.work_topology_policy,
                         &context,
                         &request,
-                        |authority| {
-                            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                            match services.topology().verified_snapshot(authority, cancelled) {
-                                Ok(topology) => {
-                                    let task_count =
-                                        u32::try_from(topology.task_count()).map_err(|_| {
-                                            work_topology_unavailable_problem(
-                                                "the verified topology task count overflowed",
-                                            )
-                                        })?;
-                                    Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
-                                        tracedecay_contracts::WorkAttemptTopologyBindingV1 {
-                                            generation: topology.generation().as_str().to_owned(),
-                                            task_count,
-                                        },
-                                    ))
-                                }
-                                Err(error) => work_topology_problem(error),
-                            }
+                        |_authority| {
+                            preparation::current_work_product_attempt_topology(
+                                &registered,
+                                &context,
+                                capability,
+                                &use_case,
+                                observed_at,
+                            )
                         },
                     ),
                     observed_at,

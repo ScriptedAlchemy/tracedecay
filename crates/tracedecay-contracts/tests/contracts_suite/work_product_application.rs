@@ -22,11 +22,13 @@ use tracedecay_contracts::{
     WorkProductSelectionScopeV1, WorkRelationScopeV1,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, CatalogGenerationId, ConfigurationRevisionId, ManifestDigest,
-    PolicyRevisionId, ProjectId, ProjectionGenerationId, RepositoryId, RetrievalAnchorId,
-    SourceStoreId, TaskId, UserProfileId, UtcMicros, WorkCommandId, WorkGraphChangeV1,
-    WorkGraphVersionV1, WorkProductEventEvidenceV1, WorkProductEventId, WorkProductEventInputV1,
-    WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1,
+    ActorId, BrainId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId, ManifestDigest,
+    MilestoneId, PolicyRevisionId, ProjectId, ProjectionGenerationId, RepositoryId,
+    RetrievalAnchorId, SourceStoreId, TaskId, UserProfileId, UtcMicros, WorkCommandId,
+    WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
+    WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventEvidenceV1,
+    WorkProductEventId, WorkProductEventInputV1, WorkProductEventPayloadV1,
+    WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1,
     WorkProductProjectionBundleV1, WorkProductSourceWatermarkV1, WorkProjectionSequenceV1,
     WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkTaskEvidenceCoverageV1,
     WorkTaskEvidenceV1, WorktreeId,
@@ -202,6 +204,80 @@ fn entry(
         observed_at,
         projected_at,
         verified_version(version),
+        graph,
+        runtime,
+        projections,
+    )
+    .unwrap()
+}
+
+fn entry_with_task(observed_at: UtcMicros) -> WorkGraphVersionEntryV1 {
+    let initiative_id = id::<InitiativeId>("initiative.work.topology.fixture");
+    let plan_id = id::<WorkPlanId>("plan.work.topology.fixture");
+    let milestone_id = id::<MilestoneId>("milestone.work.topology.fixture");
+    let graph = WorkProductGraphV1::new(
+        WorkGraphVersionV1::new(1).unwrap(),
+        vec![
+            WorkInitiativeV1::new(
+                initiative_id.clone(),
+                "Topology fixture".to_owned(),
+                UtcMicros(1),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkPlanV1::new(
+                plan_id.clone(),
+                initiative_id.clone(),
+                "Topology fixture".to_owned(),
+                UtcMicros(2),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkMilestoneV1::new(
+                milestone_id.clone(),
+                plan_id.clone(),
+                "Topology fixture".to_owned(),
+                UtcMicros(3),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkItemV1::new(WorkItemInputV1 {
+                task_id: id("task.work.topology.fixture"),
+                hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+                title: "Topology fixture".to_owned(),
+                dependencies: BTreeSet::new(),
+                informational_relations: BTreeSet::new(),
+                causal_candidates: BTreeSet::new(),
+                acceptance_criteria: Vec::new(),
+                effort: 1,
+                scheduled_at: None,
+                deadline: None,
+                created_at: UtcMicros(4),
+                updated_at: UtcMicros(4),
+            })
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let runtime = WorkRuntimeProjectionV1::new(
+        graph.version(),
+        ProjectionGenerationId::new("generation.work.topology.fixture").unwrap(),
+        WorkProjectionSequenceV1::new(1),
+        observed_at,
+        Vec::new(),
+        WorkRuntimeProjectionCoverageV1::Complete,
+    )
+    .unwrap();
+    let projections =
+        WorkProductProjectionBundleV1::from_graph(&graph, &runtime, observed_at).unwrap();
+    WorkGraphVersionEntryV1::new(
+        UtcMicros(4),
+        observed_at,
+        observed_at,
+        verified_version(1),
         graph,
         runtime,
         projections,
@@ -472,6 +548,7 @@ struct RecordingGraphPort {
     return_wrong_owner: AtomicBool,
     paginate: AtomicBool,
     absent: AtomicBool,
+    nonempty: AtomicBool,
 }
 
 impl WorkGraphReadPortV1 for RecordingGraphPort {
@@ -499,7 +576,11 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
             WorkGraphReadModeV1::Current => WorkGraphReadV1::Current {
                 authorized_scope: scope,
                 selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 1 },
-                snapshot: entry(1, UtcMicros(-10), UtcMicros(0), request.observed_at),
+                snapshot: if self.nonempty.load(Ordering::Relaxed) {
+                    entry_with_task(request.observed_at)
+                } else {
+                    entry(1, UtcMicros(-10), UtcMicros(0), request.observed_at)
+                },
             },
             WorkGraphReadModeV1::AsOf { valid_at } => WorkGraphReadV1::AsOf {
                 authorized_scope: scope,
@@ -556,6 +637,7 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
 #[test]
 fn attempt_topology_uses_the_current_canonical_product_graph() {
     let graph = RecordingGraphPort::default();
+    graph.nonempty.store(true, Ordering::Relaxed);
     let owner = RegisteredOwner::default();
     let service = WorkProductReadServiceV1::new(&graph, &owner, binding());
 
@@ -565,7 +647,7 @@ fn attempt_topology_uses_the_current_canonical_product_graph() {
     let WorkAttemptTopologyStateV1::Verified(topology) = topology else {
         panic!("the current canonical product graph must be a verified topology");
     };
-    assert_eq!(topology.task_count, 0);
+    assert_eq!(topology.task_count, 1);
     assert!(topology.generation.starts_with("sha256:"));
     assert_eq!(graph.calls.load(Ordering::Relaxed), 1);
     assert_eq!(
