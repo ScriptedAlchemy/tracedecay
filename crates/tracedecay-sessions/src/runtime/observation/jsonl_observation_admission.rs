@@ -83,6 +83,7 @@ pub(in crate::runtime) struct JsonlObservationAdmissionRequest<'request> {
     scope: ObservationScopeV1,
     retention_class: RetentionClass,
     max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
     required_start_cursor: Option<Option<ObservationSourceCursorV1>>,
     max_end_offset: Option<u64>,
     persisted_cursor_update: PersistedCursorUpdate,
@@ -107,6 +108,7 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
             scope,
             retention_class,
             max_new_bytes: None,
+            max_frames: None,
             required_start_cursor: None,
             max_end_offset: None,
             persisted_cursor_update: PersistedCursorUpdate::Monotonic,
@@ -117,6 +119,11 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
 
     pub(in crate::runtime) fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
         self.max_new_bytes = max_new_bytes;
+        self
+    }
+
+    pub(in crate::runtime) fn with_max_frames(mut self, max_frames: usize) -> Self {
+        self.max_frames = Some(max_frames);
         self
     }
 
@@ -314,8 +321,8 @@ impl JsonlCheckpoint {
 
 /// Bounded persist window: flush consecutive durables before this many
 /// frames so one `persist_observations` call stays a scan-sized batch.
-const MAX_CAPTURE_WINDOW: usize = 256;
-const MAX_CAPTURE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
+pub(in crate::runtime) const MAX_CAPTURE_WINDOW: usize = 256;
+pub(in crate::runtime) const MAX_CAPTURE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const SHARED_JSONL_PAGE_MAX_NEW_BYTES: u64 = MAX_JSONL_RECORD_BYTES as u64 + 1;
 // One page reads at most 16 MiB. In the adversarial dense-value shape, that
 // encoding can hold roughly eight million JSON values across many individually
@@ -487,6 +494,7 @@ struct SharedJsonlPageKey {
     position: u64,
     generation: u64,
     max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
     resume: Option<(u64, u64, u64)>,
     preparation: SharedJsonlFramePreparation,
 }
@@ -1002,10 +1010,29 @@ struct SharedJsonlBuildOptions {
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+#[cfg(test)]
 fn build_shared_jsonl_page(
     path: PathBuf,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
+    resume_state: Option<JsonlResumeState>,
+    options: SharedJsonlBuildOptions,
+) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
+    build_shared_jsonl_page_with_frame_limit(
+        path,
+        previous,
+        max_new_bytes,
+        None,
+        resume_state,
+        options,
+    )
+}
+
+fn build_shared_jsonl_page_with_frame_limit(
+    path: PathBuf,
+    previous: StoredCursor,
+    max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
     resume_state: Option<JsonlResumeState>,
     options: SharedJsonlBuildOptions,
 ) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
@@ -1042,13 +1069,24 @@ fn build_shared_jsonl_page(
         };
         hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
         let _active = SharedJsonlPreparationActiveGuard;
-        try_stream_new_jsonl_raw_strict_with_resume(
-            &path,
-            previous,
-            max_new_bytes,
-            MAX_JSONL_RECORD_BYTES,
-            resume_state,
-        )?
+        if let Some(max_frames) = max_frames {
+            crate::runtime::source::try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
+                &path,
+                previous,
+                max_new_bytes,
+                MAX_JSONL_RECORD_BYTES,
+                resume_state,
+                max_frames,
+            )?
+        } else {
+            try_stream_new_jsonl_raw_strict_with_resume(
+                &path,
+                previous,
+                max_new_bytes,
+                MAX_JSONL_RECORD_BYTES,
+                resume_state,
+            )?
+        }
     };
     #[cfg(test)]
     let preparation_file_identity = raw.file_identity;
@@ -1395,6 +1433,29 @@ async fn shared_jsonl_page_with_cancellation(
     cancellation: SharedJsonlCancellation,
     speculative: bool,
 ) -> TranscriptIngestResult<(Arc<SharedJsonlPage>, bool)> {
+    shared_jsonl_page_with_frame_limit_and_cancellation(
+        path,
+        previous,
+        max_new_bytes,
+        None,
+        resume_state,
+        preparation,
+        cancellation,
+        speculative,
+    )
+    .await
+}
+
+async fn shared_jsonl_page_with_frame_limit_and_cancellation(
+    path: &Path,
+    previous: StoredCursor,
+    max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
+    resume_state: Option<JsonlResumeState>,
+    preparation: impl Into<SharedJsonlFramePreparation>,
+    cancellation: SharedJsonlCancellation,
+    speculative: bool,
+) -> TranscriptIngestResult<(Arc<SharedJsonlPage>, bool)> {
     let preparation = preparation.into();
     let SharedJsonlCancellation {
         blocking: cancellation,
@@ -1427,6 +1488,7 @@ async fn shared_jsonl_page_with_cancellation(
         position: previous.position,
         generation: previous.file_id,
         max_new_bytes,
+        max_frames,
         resume: resume_state
             .map(|resume| (resume.generation, resume.file_identity, resume.fingerprint)),
         preparation,
@@ -1552,10 +1614,11 @@ async fn shared_jsonl_page_with_cancellation(
     };
     let scan_path = path.to_path_buf();
     let page = tokio::task::spawn_blocking(move || {
-        build_shared_jsonl_page(
+        build_shared_jsonl_page_with_frame_limit(
             scan_path,
             previous,
             max_new_bytes,
+            max_frames,
             resume_state,
             SharedJsonlBuildOptions {
                 prepare_frames: prepare_frames_eagerly,
@@ -2134,6 +2197,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         scope,
         retention_class,
         mut max_new_bytes,
+        max_frames,
         required_start_cursor,
         max_end_offset,
         persisted_cursor_update,
@@ -2191,10 +2255,11 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         })
     });
     let had_expected_cursor = expected_cursor.is_some();
-    let (raw, shared_page_hit) = shared_jsonl_page_with_cancellation(
+    let (raw, shared_page_hit) = shared_jsonl_page_with_frame_limit_and_cancellation(
         path,
         previous,
         max_new_bytes,
+        max_frames,
         resume_state,
         shared_frame_preparation,
         SharedJsonlCancellation {
