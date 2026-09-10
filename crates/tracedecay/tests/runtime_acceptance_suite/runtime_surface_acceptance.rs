@@ -658,6 +658,29 @@ fn run_application_tool(
         .expect("run application tool")
 }
 
+fn run_application_tool_markdown(
+    home: &Path,
+    project: &Path,
+    operation: ApplicationSurfaceOperation,
+    arguments: &Value,
+) -> Output {
+    let project_arg = project.to_string_lossy().into_owned();
+    let arguments = arguments.to_string();
+    common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            operation.as_str(),
+            "--args",
+            arguments.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run application tool with Markdown output")
+}
+
 #[cfg(all(unix, feature = "test-transport"))]
 async fn preview_commit_via_mcp(
     fixture: &RuntimeFixture,
@@ -1561,11 +1584,12 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     .await;
     assert_eq!(source_lines["references"][0]["span"], occurrence["span"]);
 
+    let source_body_arguments = serde_json::json!({ "node_id": authenticate_id });
     let source_body = assert_application_transport_parity(
         &fixture,
         "source-body",
         ApplicationSurfaceOperation::SourceBody,
-        serde_json::json!({ "node_id": authenticate_id }),
+        source_body_arguments.clone(),
     )
     .await;
     assert_eq!(source_body["file"], "src/auth/login.rs");
@@ -1574,6 +1598,24 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             .as_str()
             .expect("authenticate source body")
             .contains("create_session(username)")
+    );
+    let source_body_markdown = run_application_tool_markdown(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::SourceBody,
+        &source_body_arguments,
+    );
+    assert_command_success("CLI source_body Markdown", &source_body_markdown);
+    let source_body_markdown =
+        String::from_utf8(source_body_markdown.stdout).expect("CLI source_body Markdown is UTF-8");
+    assert!(
+        source_body_markdown
+            .starts_with("## source\\_body\n\n### Payload\n\n    src/auth/login.rs:"),
+        "source payload must be the first rendered field: {source_body_markdown}"
+    );
+    assert!(
+        source_body_markdown.contains("    create_session(username)"),
+        "source payload must contain the retrieved body: {source_body_markdown}"
     );
 }
 
@@ -3023,16 +3065,8 @@ async fn feedback_handle_bootstrap_reads() {
     ));
 }
 
-fn assert_exact_markdown_field(markdown: &str, label: &str, expected: &str) {
-    let expected = format!("- {label}: `{expected}`");
-    assert!(
-        markdown.lines().any(|line| line == expected),
-        "missing exact Markdown field {expected:?}\n{markdown}"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn primitive_config_markdown_json_parity() {
+async fn application_markdown_is_payload_first_and_json_stays_exact() {
     let fixture = runtime_fixture().await;
     let mounted = admitted_mcp_invocation(
         &fixture.client,
@@ -3131,116 +3165,45 @@ async fn primitive_config_markdown_json_parity() {
         Some("## storage\\_status"),
         "the operation heading uses the canonical Markdown escaping contract"
     );
-    assert_exact_markdown_field(&markdown, "Operation", "storage_status");
-    assert_exact_markdown_field(&markdown, "Binding", "binding.cli.storage_status.v1");
-    assert_exact_markdown_field(
-        &markdown,
-        "Contract",
-        "schema.application.primitive.storage-status.result@1",
-    );
-    assert_exact_markdown_field(&markdown, "Status", "success");
-    assert_exact_markdown_field(&markdown, "Outcome", "evidence");
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope project",
-        json["scope"]["project_id"]
-            .as_str()
-            .expect("JSON project scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope repository",
-        json["scope"]["repository_id"]
-            .as_str()
-            .expect("JSON repository scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope worktree",
-        json["scope"]["worktree_id"]
-            .as_str()
-            .expect("JSON worktree scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope reference",
-        json["scope"]["reference"].as_str().unwrap_or("none"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope digest",
-        json["scope"]["scope_digest"]
-            .as_str()
-            .expect("JSON scope digest"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Freshness",
-        json["outcome"]["value"]["temporal"]["freshness"]
-            .as_str()
-            .expect("JSON freshness"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Coverage",
-        json["outcome"]["value"]["coverage"]["completeness"]
-            .as_str()
-            .expect("JSON coverage"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Page returned",
-        &json["outcome"]["value"]["page"]["returned"].to_string(),
-    );
-    let page_total = json["outcome"]["value"]["page"]["total"]
-        .as_u64()
-        .map_or_else(|| "unknown".to_owned(), |total| total.to_string());
-    assert_exact_markdown_field(&markdown, "Page total", &page_total);
-    let cursor = json["outcome"]["value"]["page"]["cursor"]
-        .as_str()
-        .unwrap_or("none");
-    assert_exact_markdown_field(&markdown, "Cursor", cursor);
-    assert_exact_markdown_field(&markdown, "Termination", "completed");
-    assert_exact_markdown_field(&markdown, "Cancellation stage", "none");
-
-    // The key list is derived from the payload rather than pinned to a literal,
-    // so it tracks the contract instead of going stale the next time the
-    // payload gains a field. The human view lists the first eight sorted keys
-    // and elides the rest behind its `--json` pointer, so the expectation
-    // reproduces that rule instead of assuming the payload stays small.
-    const HUMAN_VIEW_VISIBLE_KEYS: usize = 8;
     let payload = &json["outcome"]["value"]["payload"];
-    let payload_fields = payload
-        .as_object()
-        .expect("storage_status payload is an object");
-    assert!(
-        !payload_fields.is_empty(),
-        "an empty payload would make the key parity assertion vacuous"
-    );
-    let payload_bytes = serde_json::to_vec(payload)
-        .expect("serialize JSON payload")
-        .len();
-    let mut payload_keys = payload_fields.keys().cloned().collect::<Vec<_>>();
-    payload_keys.sort_unstable();
-    let visible_keys = &payload_keys[..payload_keys.len().min(HUMAN_VIEW_VISIBLE_KEYS)];
-    let elision = if payload_keys.len() > visible_keys.len() {
-        ", …"
-    } else {
-        ""
-    };
-    let rendered_keys = visible_keys.join(",").replace('_', "\\_");
-    let payload_summary = format!(
-        "- Payload: object(keys={rendered_keys}{elision}; json\\_bytes={payload_bytes}); complete: --json"
+    let payload_markdown = format!(
+        "    {}",
+        serde_json::to_string_pretty(payload).expect("serialize storage status payload").replace('\n', "\n    ")
     );
     assert!(
-        markdown.lines().any(|line| line == payload_summary),
-        "missing exact Markdown payload summary {payload_summary:?}\n{markdown}"
+        markdown.starts_with("## storage\\_status\n\n### Payload\n\n"),
+        "the payload must be the first Markdown field: {markdown}"
     );
+    assert!(markdown.contains(&payload_markdown));
+    assert!(markdown.contains("\n- Status: `success`"));
+    assert!(markdown.contains("\n- Evidence: `freshness="));
+    assert!(markdown.contains("\n- Provenance: `binding=binding.cli.storage_status.v1;"));
+    assert!(!markdown.contains("Scope digest"));
+    assert!(!markdown.contains("\n- Receipt:"));
     assert_eq!(json["outcome"]["outcome"], "evidence");
     assert_eq!(
         &json["outcome"]["value"]["payload"],
         successful_application(&cli_result),
         "the JSON renderer must emit its own invocation's payload verbatim"
+    );
+
+    let health = run_application_tool_markdown(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::HealthRead,
+        &serde_json::json!({}),
+    );
+    assert_command_success("CLI health_read Markdown", &health);
+    let health = String::from_utf8(health.stdout).expect("CLI health_read Markdown is UTF-8");
+    assert!(
+        health.starts_with("## health\\_read\n\n### Payload\n\n    {\"status\":\""),
+        "health status must be the first rendered field: {health}"
+    );
+    assert!(health.contains("\n- Evidence: `freshness="));
+    assert!(health.contains("\n- Provenance: `binding=binding.cli.health_read.v1;"));
+    assert!(
+        health.lines().count() <= 9,
+        "health output is not compact: {health}"
     );
 }
 
