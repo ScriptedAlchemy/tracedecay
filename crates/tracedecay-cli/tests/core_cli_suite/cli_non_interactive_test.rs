@@ -2590,7 +2590,7 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     git(&project_root, &["checkout", "-b", "feature/new"]);
     let project_id = default_profile_project_id(&project_root);
     let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
-    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["branch", "add", "feature/new"]);
     let output = run_with_timeout(command, cli_timeout());
@@ -2607,7 +2607,7 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     );
     let started = Instant::now();
     let meta = loop {
-        if let Ok(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
+        if let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
             && meta
                 .branches
                 .get("feature/new")
@@ -2685,6 +2685,26 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     assert!(
         !shard_root.join("branches").exists(),
         "branch add must not create a per-branch database"
+    );
+
+    drop(daemon);
+    let _restarted_daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut list = tracedecay_command_without_daemon(home.path(), &project_root);
+    list.args(["branch", "list"]);
+    let listed = run_with_timeout(list, cli_timeout());
+    let stderr = String::from_utf8_lossy(&listed.stderr);
+    assert!(
+        listed.status.success(),
+        "branch list must reopen persisted branch tracking\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    let branch = stderr
+        .lines()
+        .find(|line| line.contains("feature/new"))
+        .expect("reopened branch list must retain feature/new");
+    assert!(
+        !branch.contains("indexing") && !branch.contains("missing-db"),
+        "reopened branch must remain exact and ready: {branch}"
     );
 
     let mut remove = tracedecay_command_without_daemon(home.path(), &project_root);
