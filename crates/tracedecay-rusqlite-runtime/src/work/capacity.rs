@@ -12,7 +12,9 @@ use tracedecay_domain::{TaskId, WorkAuthority, configuration::TopologyConcurrenc
 use crate::exact_sql::ExactSqlValue;
 use crate::exact_sql::{ExactSqlError, ExactSqlRows};
 
-use super::{RegisteredWorkQuery, exact_sql_integer, registered_work_query};
+use super::{
+    ACTIVE_ATTEMPT_PREDICATE, RegisteredWorkQuery, exact_sql_integer, registered_work_query,
+};
 
 pub(crate) fn capacity(
     source: &impl RegisteredWorkQuery,
@@ -49,23 +51,11 @@ pub(crate) fn capacities(
         ExactSqlValue::Text(authority.repository_id().as_str().to_owned()),
     ];
     let rows = coherent_capacity_query(|| {
-        registered_work_query(
-            source,
+        let sql = format!(
             "WITH active_attempts AS (
              SELECT attempt.project_id, attempt.repository_id, attempt.task_id
              FROM work_attempts_v1 AS attempt
-             WHERE attempt.terminal = 0
-               AND NOT EXISTS (
-                   SELECT 1 FROM work_retry_receipts_v1 AS retry
-                   WHERE retry.project_id = attempt.project_id
-                     AND retry.repository_id = attempt.repository_id
-                     AND retry.worktree_id = attempt.worktree_id
-                     AND retry.actor_id = attempt.actor_id
-                     AND retry.policy_digest = attempt.policy_digest
-                     AND retry.task_id = attempt.task_id
-                     AND retry.run_id = attempt.run_id
-                     AND retry.original_attempt_id = attempt.attempt_id
-               )
+             WHERE {ACTIVE_ATTEMPT_PREDICATE}
          )
          SELECT row_kind, global_active, repository_active, task_id, task_active
          FROM (
@@ -84,9 +74,9 @@ pub(crate) fn capacities(
              WHERE project_id = ?1 AND repository_id = ?2
              GROUP BY task_id
          )
-         ORDER BY row_kind, task_id",
-            params.clone(),
-        )
+         ORDER BY row_kind, task_id"
+        );
+        registered_work_query(source, &sql, params.clone())
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let header = rows

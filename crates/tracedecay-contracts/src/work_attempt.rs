@@ -135,16 +135,20 @@ pub trait WorkAttemptStoragePort: Send + Sync {
         evidence: Option<&WorkAttemptEvidenceRecordV1>,
     ) -> Result<(), WorkAttemptStorageError>;
 
-    /// Every non-terminal attempt in this authority scope, in identity order.
+    /// Every active attempt in this authority scope, in identity order.
+    /// A nonterminal recovery record leaves this census once a durable retry
+    /// receipt transfers execution authority to its replacement.
     fn open_attempts(
         &self,
         authority: &WorkAuthority,
     ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError>;
 
-    /// Whether any non-terminal attempt holds this exact registered Work
+    /// Whether any active attempt holds this exact registered Work
     /// scope, independent of the actor and policy lineage that admitted it.
     /// Cleanup is an infrastructure safety read and must see old-policy and
     /// delegated-actor rows without granting ordinary cross-authority access.
+    /// Retry-superseded recovery records remain historical and do not hold the
+    /// scope open.
     fn has_open_attempts_in_exact_scope(
         &self,
         _project_id: &ProjectId,

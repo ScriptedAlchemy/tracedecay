@@ -42,6 +42,7 @@ use tracedecay_domain::{
 };
 
 use common::fixture_abs_root;
+use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use work_registered_store::RegisteredWorkStore;
 
 fn id<T>(value: &str) -> T
@@ -413,8 +414,11 @@ fn retry_reservation_cannot_overbook_project_global_capacity() {
 }
 
 #[test]
-fn recovery_retry_atomically_replaces_the_original_capacity_slot() {
-    let store = RegisteredWorkStore::start("recovery-retry-capacity-slot");
+fn recovery_retry_replaces_the_original_across_active_attempt_census() {
+    let store =
+        RegisteredWorkStore::start_with_setup("recovery-retry-capacity-slot", |connection| {
+            install_workflow_schema(connection).unwrap()
+        });
     let authority = authority_in_scope(
         "project.retry.recovery",
         "repository.retry.recovery",
@@ -433,6 +437,7 @@ fn recovery_retry_atomically_replaces_the_original_capacity_slot() {
         .insert_retry_bounded(&authority, &retry_write(&original), &concurrency(1, 1, 1))
         .unwrap();
     assert!(matches!(outcome, WorkRetryAttemptOutcomeV1::Created { .. }));
+    let replacement = outcome.attempt().clone();
     assert_eq!(store.count("work_attempts_v1"), 2);
     assert_eq!(store.count("work_retry_receipts_v1"), 1);
     let task_id = original.identity().task_id().clone();
@@ -450,6 +455,125 @@ fn recovery_retry_atomically_replaces_the_original_capacity_slot() {
             .verdict(),
         WorkAttemptCapacityVerdictV1::Exhausted(_)
     ));
+
+    assert_eq!(
+        store.storage().open_attempts(&authority).unwrap(),
+        vec![replacement.clone()]
+    );
+    assert!(
+        store
+            .storage()
+            .has_open_attempts_in_exact_scope(
+                authority.project_id(),
+                authority.repository_id(),
+                authority.worktree_id(),
+            )
+            .unwrap()
+    );
+    let admission = store
+        .storage()
+        .run_admission(
+            &authority,
+            original.identity().task_id(),
+            original.identity().run_id(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(admission.total_attempts, 2);
+    assert_eq!(
+        admission.live_attempts,
+        vec![replacement.identity().attempt_id().clone()]
+    );
+    let workflow_live = store
+        .storage()
+        .workflow_bound_live_attempts(
+            &authority,
+            original.identity().task_id(),
+            original.identity().run_id(),
+        )
+        .unwrap();
+    assert_eq!(workflow_live.len(), 1);
+    assert_eq!(
+        workflow_live[0].attempt_id,
+        *replacement.identity().attempt_id()
+    );
+
+    let running_replacement = replacement
+        .transition(
+            WorkAttemptStateV1::Running,
+            None,
+            Vec::new(),
+            WorkCancellationStateV1::None,
+            WorkRecoveryStateV1::Restarted {
+                source_attempt_id: original.identity().attempt_id().clone(),
+                reason: WorkRestartReasonV1::ProcessLost,
+            },
+            Some(requested_route()),
+            None,
+            replacement.lease().clone(),
+        )
+        .unwrap();
+    store
+        .storage()
+        .update(
+            &authority,
+            replacement.lease(),
+            replacement.state(),
+            &running_replacement,
+            None,
+        )
+        .unwrap();
+    let finished_replacement = succeeded(&running_replacement);
+    store
+        .storage()
+        .update(
+            &authority,
+            running_replacement.lease(),
+            running_replacement.state(),
+            &finished_replacement,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .storage()
+            .open_attempts(&authority)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !store
+            .storage()
+            .has_open_attempts_in_exact_scope(
+                authority.project_id(),
+                authority.repository_id(),
+                authority.worktree_id(),
+            )
+            .unwrap()
+    );
+    let admission = store
+        .storage()
+        .run_admission(
+            &authority,
+            original.identity().task_id(),
+            original.identity().run_id(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(admission.total_attempts, 2);
+    assert!(admission.live_attempts.is_empty());
+    assert!(
+        store
+            .storage()
+            .workflow_bound_live_attempts(
+                &authority,
+                original.identity().task_id(),
+                original.identity().run_id(),
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
