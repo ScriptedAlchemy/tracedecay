@@ -229,6 +229,8 @@ fn push_fixture_symbol(
         start_line: ordinal,
         signature: None,
         docstring: None,
+        is_async: false,
+        derives: Vec::new(),
         skip_test_coverage: false,
         file_identity: fixture_digest("file-identity", path),
         content_digest: fixture_digest("symbol-content", occurrence.as_str()),

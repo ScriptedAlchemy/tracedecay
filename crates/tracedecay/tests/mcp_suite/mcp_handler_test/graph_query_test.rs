@@ -79,6 +79,31 @@ pub fn gmres(x: u32) -> u32 {
     .await
 }
 
+async fn production_signature_metadata_fixture() -> (GraphQueryFixture, GraphQueryProjectRoot) {
+    graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            r#"/// Loads the current value.
+pub async fn fetch_value() -> u32 {
+    42
+}
+
+pub fn cached_value() -> u32 {
+    42
+}
+
+#[derive(Clone, Debug)]
+pub struct DerivedValue;
+
+pub struct PlainValue;
+"#,
+        )
+        .unwrap();
+    })
+    .await
+}
+
 async fn shutdown_graph_fixture(fixture: GraphQueryFixture) {
     fixture.production.harness.shutdown().await;
 }
@@ -822,6 +847,102 @@ async fn test_node_existing() {
         text.contains("visibility"),
         "node detail should contain visibility"
     );
+}
+
+#[tokio::test]
+async fn signature_search_and_derives_use_extracted_metadata() {
+    let (fixture, _root) = production_signature_metadata_fixture().await;
+    let async_node = graph_node_id(&fixture, "fetch_value").await;
+    let sync_node = graph_node_id(&fixture, "cached_value").await;
+
+    for (node_id, expected, expected_doc) in [
+        (async_node.clone(), true, Some("Loads the current value.")),
+        (sync_node, false, None),
+    ] {
+        let result = call_production_tool(
+            &fixture,
+            "tracedecay_signature",
+            json!({"node_id": node_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .expect("signature lookup");
+        let payload: Value =
+            serde_json::from_str(extract_text(&result.value)).expect("signature response JSON");
+        assert_eq!(payload[0]["is_async"], expected);
+        assert_eq!(payload[0]["docstring"].as_str(), expected_doc);
+        assert!(
+            !payload[0]["unavailable_fields"]
+                .as_array()
+                .expect("unavailable fields")
+                .iter()
+                .any(|field| field == "is_async")
+        );
+    }
+
+    let result = call_production_tool(
+        &fixture,
+        "tracedecay_node",
+        json!({"node_id": async_node, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("node lookup");
+    let payload: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("node response JSON");
+    assert_eq!(payload["docstring"], "Loads the current value.");
+
+    for (want_async, expected_name) in [(true, "fetch_value"), (false, "cached_value")] {
+        let result = call_production_tool(
+            &fixture,
+            "tracedecay_signature_search",
+            json!({"async": want_async, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .expect("signature search");
+        let payload: Value = serde_json::from_str(extract_text(&result.value))
+            .expect("signature-search response JSON");
+        let matches = payload["matches"].as_array().expect("signature matches");
+        assert_eq!(matches.len(), 1, "unexpected matches: {payload}");
+        assert_eq!(matches[0]["name"], expected_name);
+        assert_eq!(matches[0]["is_async"], want_async);
+    }
+
+    let derived_node = graph_node_id(&fixture, "DerivedValue").await;
+    let plain_node = graph_node_id(&fixture, "PlainValue").await;
+    for (node_id, expected_names) in [
+        (derived_node, vec!["Clone", "Debug"]),
+        (plain_node, Vec::new()),
+    ] {
+        let result = call_production_tool(
+            &fixture,
+            "tracedecay_derives",
+            json!({"node_id": node_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .expect("derive lookup");
+        let payload: Value =
+            serde_json::from_str(extract_text(&result.value)).expect("derive response JSON");
+        let derives = payload[0]["derives"].as_array().expect("derive records");
+        let names = derives
+            .iter()
+            .map(|derive| derive["name"].as_str().expect("derive name"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected_names);
+        assert!(
+            derives
+                .iter()
+                .all(|derive| derive["evidence_class"] == "syntax_exact")
+        );
+    }
+
+    shutdown_graph_fixture(fixture).await;
 }
 
 #[tokio::test]
