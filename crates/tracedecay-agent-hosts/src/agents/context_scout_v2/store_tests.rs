@@ -4,6 +4,9 @@ use tempfile::TempDir;
 use tokio::sync::Barrier;
 
 use super::*;
+use tracedecay_contracts::request_identity::{
+    LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 async fn database() -> (TempDir, Database) {
@@ -67,6 +70,143 @@ fn lease(id: u8, expires_at: i64) -> ContextScoutLeaseV1 {
         lease_id: [id; 16],
         expires_at: UtcMicros(expires_at),
     }
+}
+
+fn mutation_binding(
+    mutation: &ContextScoutPublicMutationV1,
+    key: &str,
+) -> ContextScoutMutationBindingV1 {
+    let evidence = super::evidence::fixture_context_scout_evidence();
+    let idempotency_key = tracedecay_contracts::IdempotencyKey::new(key).unwrap();
+    let operation = mutation.operation();
+    let actor = tracedecay_domain::ActorId::new("actor.context-scout-test").unwrap();
+    let effect_identity = derive_logical_effect_idempotency(
+        LogicalEffectIdempotencyDomain::ContextScoutEffect,
+        &(
+            &actor,
+            &evidence.authorized_scope,
+            operation.as_str(),
+            &idempotency_key,
+        ),
+    )
+    .unwrap();
+    ContextScoutMutationBindingV1 {
+        effect_identity,
+        actor,
+        scope: evidence.authorized_scope,
+        operation,
+        idempotency_key,
+        input_digest: mutation.input_digest().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn public_claim_retains_empty_and_changed_settlements_for_exact_replay() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let empty = ContextScoutPublicMutationV1::Claim {
+        address: address(project_id),
+        window: ContextScoutDeliveryWindowV1::IdleWindow,
+        configuration_revision: [16; 32],
+        now: UtcMicros(10),
+        lease: lease(70, 40),
+    };
+    let empty_binding = mutation_binding(&empty, "scout-empty-replay");
+    let first = store
+        .commit_public_mutation(empty_binding.clone(), empty.clone())
+        .await;
+    let ContextScoutMutationSettlementOutcomeV1::Reconciled(first) = first else {
+        panic!("empty claim must retain a reconciled settlement");
+    };
+    assert!(matches!(
+        first.result,
+        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Empty)
+    ));
+    assert_eq!(
+        store
+            .commit_public_mutation(empty_binding.clone(), empty)
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(first.clone())
+    );
+
+    let mut conflicting = ContextScoutPublicMutationV1::Claim {
+        address: address(project_id),
+        window: ContextScoutDeliveryWindowV1::OnRequest,
+        configuration_revision: [16; 32],
+        now: UtcMicros(11),
+        lease: lease(71, 40),
+    };
+    let mut conflicting_binding = empty_binding.clone();
+    conflicting_binding.input_digest = conflicting.input_digest().unwrap();
+    assert_eq!(
+        store
+            .commit_public_mutation(conflicting_binding, conflicting.clone())
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict
+    );
+
+    let mut pending = entry(project_id, 1);
+    pending.envelope.delivery_window = ContextScoutDeliveryWindowV1::IdleWindow;
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let replay_after_enqueue = ContextScoutPublicMutationV1::Claim {
+        address: address(project_id),
+        window: ContextScoutDeliveryWindowV1::IdleWindow,
+        configuration_revision: [17; 32],
+        now: UtcMicros(12),
+        lease: lease(73, 40),
+    };
+    assert_eq!(
+        store
+            .commit_public_mutation(empty_binding, replay_after_enqueue)
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(first)
+    );
+    if let ContextScoutPublicMutationV1::Claim {
+        configuration_revision,
+        window,
+        now,
+        lease: claim_lease,
+        ..
+    } = &mut conflicting
+    {
+        *window = ContextScoutDeliveryWindowV1::IdleWindow;
+        *configuration_revision = [16; 32];
+        *now = UtcMicros(12);
+        *claim_lease = lease(72, 40);
+    }
+    let binding = mutation_binding(&conflicting, "scout-claim-replay");
+    let ContextScoutMutationSettlementOutcomeV1::Reconciled(claimed) = store
+        .commit_public_mutation(binding.clone(), conflicting.clone())
+        .await
+    else {
+        panic!("claim must retain a reconciled settlement");
+    };
+    assert!(matches!(
+        claimed.result,
+        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Claimed(_))
+    ));
+    assert_eq!(
+        store
+            .commit_public_mutation(binding.clone(), conflicting.clone())
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(claimed.clone())
+    );
+    if let ContextScoutPublicMutationV1::Claim {
+        configuration_revision,
+        ..
+    } = &mut conflicting
+    {
+        *configuration_revision = [17; 32];
+    }
+    assert_eq!(
+        store.commit_public_mutation(binding, conflicting).await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(claimed)
+    );
 }
 
 #[tokio::test]
@@ -380,6 +520,23 @@ async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
             )
             .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
+    );
+    let mut foreign_address = pending.work.address;
+    foreign_address.thread_id = [99; 16];
+    let foreign_feedback = ContextScoutPublicMutationV1::Feedback {
+        address: foreign_address,
+        receipt: receipt.clone(),
+        feedback: ContextScoutFeedbackV1 {
+            receipt_id: receipt.receipt_id,
+            kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+        },
+    };
+    let foreign_binding = mutation_binding(&foreign_feedback, "scout-foreign-feedback");
+    assert_eq!(
+        restarted
+            .commit_public_mutation(foreign_binding, foreign_feedback)
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Unavailable
     );
     assert_eq!(
         restarted

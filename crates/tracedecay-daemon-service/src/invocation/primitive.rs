@@ -3,6 +3,8 @@
 use super::*;
 use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
+    ContextScoutMutationBindingV1, ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
+    ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
 };
 use tracedecay_application::primitives::{
     ProductionPrimitiveOpenRequestV1, open_production_primitive_runtime,
@@ -10,8 +12,9 @@ use tracedecay_application::primitives::{
 use tracedecay_contracts::CallableCodeSurfaceRequest;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimResultV1,
-    ContextScoutControlRequestV1, ContextScoutEvidenceProjectionV1,
-    ContextScoutSuggestionProjectionV1, ContextScoutSurfaceRequestV1,
+    ContextScoutControlRequestV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryResultV1,
+    ContextScoutEvidenceProjectionV1, ContextScoutSuggestionProjectionV1,
+    ContextScoutSurfaceRequestV1,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -584,6 +587,7 @@ pub(super) async fn execute_context_scout(
     }
     let authority = match context_scout_request_authority(
         &registered,
+        &current,
         &wire_request_id,
         surface_operation,
         observed_at,
@@ -593,6 +597,25 @@ pub(super) async fn execute_context_scout(
         Ok(authority) => authority,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
+    if matches!(
+        request,
+        ContextScoutSurfaceRequestV1::Cancel(_)
+            | ContextScoutSurfaceRequestV1::Claim(_)
+            | ContextScoutSurfaceRequestV1::Delivery(_)
+            | ContextScoutSurfaceRequestV1::Feedback(_)
+    ) {
+        return execute_context_scout_mutation(
+            wire_request_id,
+            registered,
+            owner,
+            request,
+            authority,
+            configuration.control().configuration_revision,
+            observed_at,
+            deadline,
+        )
+        .await;
+    }
     let payload = match request {
         ContextScoutSurfaceRequestV1::Status(_) => owner
             .configured_status()
@@ -619,71 +642,12 @@ pub(super) async fn execute_context_scout(
             .await
             .ok()
             .and_then(|budget| serde_json::to_value(budget).ok()),
-        ContextScoutSurfaceRequestV1::Cancel(request) if request.work.address == request.address => {
-            owner
-                .cancel(request.work)
-                .await
-                .ok()
-                .filter(|outcome| {
-                    *outcome
-                        != ContextScoutDurableStoreOutcomeV1::Unavailable
-                })
-                .map(|outcome| {
-                    serde_json::json!({ "outcome": context_scout_store_outcome(outcome) })
-                })
-        }
-        ContextScoutSurfaceRequestV1::Claim(request) => {
-            match owner
-                .claim_delivery_request(
-                    &request,
-                    observed_at,
-                    UtcMicros(
-                        deadline
-                            .expires_at
-                            .0
-                            .min(observed_at.0.saturating_add(30_000_000)),
-                    ),
-                )
-                .await
-            {
-                ContextScoutDurableClaimOutcomeV1::Claimed(claim) => {
-                    serde_json::to_value(public_context_scout_claim(&claim)).ok()
-                }
-                ContextScoutDurableClaimOutcomeV1::Empty =>
-                    serde_json::to_value(ContextScoutClaimResultV1::Empty).ok(),
-                ContextScoutDurableClaimOutcomeV1::Unavailable => None,
-            }
-        }
-        ContextScoutSurfaceRequestV1::Delivery(request)
-            if request.claim.work.address == request.address =>
-        {
-            let outcome = owner
-                .record_delivery_by_handle(&request.claim, &request.receipt)
-                .await;
-            (outcome
-                != ContextScoutDurableStoreOutcomeV1::Unavailable)
-                .then(|| {
-                    serde_json::json!({
-                        "outcome": context_scout_store_outcome(outcome)
-                    })
-                })
-        }
-        ContextScoutSurfaceRequestV1::Feedback(request) => {
-            let outcome = owner
-                .record_feedback_exact(request.address, &request.receipt, request.feedback)
-                .await;
-            (outcome
-                != ContextScoutDurableStoreOutcomeV1::Unavailable)
-                .then(|| {
-                    serde_json::json!({
-                        "outcome": context_scout_store_outcome(outcome)
-                    })
-                })
-        }
         ContextScoutSurfaceRequestV1::Pause(_)
         | ContextScoutSurfaceRequestV1::Resume(_)
         | ContextScoutSurfaceRequestV1::Cancel(_)
-        | ContextScoutSurfaceRequestV1::Delivery(_) => None,
+        | ContextScoutSurfaceRequestV1::Claim(_)
+        | ContextScoutSurfaceRequestV1::Delivery(_)
+        | ContextScoutSurfaceRequestV1::Feedback(_) => None,
     };
     let Some(payload) = payload else {
         return application_problem(
@@ -694,7 +658,7 @@ pub(super) async fn execute_context_scout(
             }),
         );
     };
-    match configuration_evidence(payload, authority, observed_at, deadline) {
+    match configuration_evidence(payload, authority.receipt, observed_at, deadline) {
         Ok(outcome) => DaemonInvocationResponse::with_outcome(
             wire_request_id,
             DaemonInvocationOutcome::ContextScout {
@@ -704,6 +668,256 @@ pub(super) async fn execute_context_scout(
         ),
         Err(error) => application_problem(wire_request_id, configuration_problem(error)),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_context_scout_mutation(
+    wire_request_id: String,
+    registered: RegisteredConfigurationRuntime,
+    owner: Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    request: ContextScoutSurfaceRequestV1,
+    authority: ContextScoutRequestAuthorityV1,
+    configuration_revision: [u8; 32],
+    observed_at: UtcMicros,
+    deadline: Deadline,
+) -> DaemonInvocationResponse {
+    let (operation, idempotency_key) = match &request {
+        ContextScoutSurfaceRequestV1::Cancel(request) => (
+            ContextScoutMutationOperationV1::Cancel,
+            request.idempotency_key.clone(),
+        ),
+        ContextScoutSurfaceRequestV1::Claim(request) => (
+            ContextScoutMutationOperationV1::Claim,
+            request.idempotency_key.clone(),
+        ),
+        ContextScoutSurfaceRequestV1::Delivery(request) => (
+            ContextScoutMutationOperationV1::Delivery,
+            request.idempotency_key.clone(),
+        ),
+        ContextScoutSurfaceRequestV1::Feedback(request) => (
+            ContextScoutMutationOperationV1::Feedback,
+            request.idempotency_key.clone(),
+        ),
+        _ => return concealed_application_problem(wire_request_id),
+    };
+    let operation_name = match operation {
+        ContextScoutMutationOperationV1::Cancel => "context_scout_cancel",
+        ContextScoutMutationOperationV1::Claim => "context_scout_claim",
+        ContextScoutMutationOperationV1::Delivery => "context_scout_delivery",
+        ContextScoutMutationOperationV1::Feedback => "context_scout_feedback",
+    };
+    let effect_identity = match derive_logical_effect_idempotency(
+        LogicalEffectIdempotencyDomain::ContextScoutEffect,
+        &(
+            &registered.actor,
+            &registered.scope,
+            operation_name,
+            &idempotency_key,
+        ),
+    ) {
+        Ok(identity) => identity,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    let mutation = match request {
+        ContextScoutSurfaceRequestV1::Cancel(request)
+            if request.work.address == request.address =>
+        {
+            ContextScoutPublicMutationV1::Cancel { work: request.work }
+        }
+        ContextScoutSurfaceRequestV1::Claim(request) => {
+            let Some(mutation) = owner
+                .public_claim_mutation(
+                    &request,
+                    observed_at,
+                    UtcMicros(
+                        deadline
+                            .expires_at
+                            .0
+                            .min(observed_at.0.saturating_add(30_000_000)),
+                    ),
+                )
+                .await
+            else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            mutation
+        }
+        ContextScoutSurfaceRequestV1::Delivery(request)
+            if request.claim.work.address == request.address =>
+        {
+            let Some(receipt_id) =
+                context_scout_effect_receipt_id(&effect_identity, request.claim.envelope_id)
+            else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            ContextScoutPublicMutationV1::Delivery {
+                work: request.claim.work,
+                envelope_id: request.claim.envelope_id,
+                lease: tracedecay_contracts::context_scout::ContextScoutLeaseV1 {
+                    lease_id: request.claim.lease_id,
+                    expires_at: request.claim.lease_expires_at,
+                },
+                configuration_revision,
+                receipt: ContextScoutDeliveryReceiptV1 {
+                    receipt_id,
+                    envelope_id: request.claim.envelope_id,
+                    delivered_at: request.delivered_at,
+                    outcome: request.outcome,
+                },
+            }
+        }
+        ContextScoutSurfaceRequestV1::Feedback(request) => ContextScoutPublicMutationV1::Feedback {
+            address: request.address,
+            receipt: request.receipt,
+            feedback: request.feedback,
+        },
+        _ => return concealed_application_problem(wire_request_id),
+    };
+    let Some(input_digest) = mutation.input_digest() else {
+        return context_scout_mutation_unavailable(wire_request_id);
+    };
+    let binding = ContextScoutMutationBindingV1 {
+        effect_identity: effect_identity.clone(),
+        actor: registered.actor.clone(),
+        scope: registered.scope.clone(),
+        operation,
+        idempotency_key: idempotency_key.clone(),
+        input_digest,
+    };
+    let settlement = match owner.commit_public_mutation(binding, mutation).await {
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement) => settlement,
+        ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict => {
+            return application_problem(
+                wire_request_id,
+                ApplicationProblem::stale(SafeDiagnostic {
+                    code: "context_scout.idempotency_conflict".to_owned(),
+                    message: "The Context Scout idempotency key is bound to another input"
+                        .to_owned(),
+                }),
+            );
+        }
+        ContextScoutMutationSettlementOutcomeV1::Unavailable => {
+            return context_scout_mutation_unavailable(wire_request_id);
+        }
+    };
+    let payload = match &settlement.result {
+        ContextScoutMutationResultV1::Cancel(outcome)
+        | ContextScoutMutationResultV1::Feedback(outcome) => {
+            let Some(outcome) = context_scout_store_outcome(*outcome) else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            serde_json::to_value(
+                tracedecay_contracts::context_scout::ContextScoutMutationResultV1 { outcome },
+            )
+        }
+        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Claimed(claim)) => {
+            serde_json::to_value(public_context_scout_claim(claim))
+        }
+        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Empty) => {
+            serde_json::to_value(ContextScoutClaimResultV1::Empty)
+        }
+        ContextScoutMutationResultV1::Delivery { outcome, receipt } => {
+            let Some(outcome) = context_scout_store_outcome(*outcome) else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            serde_json::to_value(ContextScoutDeliveryResultV1 {
+                outcome,
+                receipt: receipt.clone(),
+            })
+        }
+        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Unavailable) => {
+            return context_scout_mutation_unavailable(wire_request_id);
+        }
+    };
+    let Ok(payload) = payload else {
+        return context_scout_mutation_unavailable(wire_request_id);
+    };
+    let request_id = match RequestId::new(wire_request_id.clone()) {
+        Ok(request_id) => request_id,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    let execution = match OperationReceipt::completed(
+        observed_at,
+        current_micros(),
+        deadline,
+        OperationBudgetUsage::default(),
+    ) {
+        Ok(execution) => execution,
+        Err(_) => return context_scout_mutation_unavailable(wire_request_id),
+    };
+    let receipt = EffectReceipt {
+        operation: authority.use_case,
+        request_id,
+        actor: registered.actor.clone(),
+        scope: registered.scope.clone(),
+        effect_class: EffectClass::Administrative,
+        idempotency_key: idempotency_key.clone(),
+        input_digest: settlement.binding.input_digest.clone(),
+        expected_state: settlement.expected_state.clone(),
+        policy_digest: authority.receipt.policy.digest.clone(),
+        configuration_digest: authority.configuration_digest,
+        catalog_digest: authority.catalog_digest,
+        privacy_digest: authority.privacy_digest,
+        outcome: EffectTermination::Completed,
+        committed_state: Some(settlement.committed_state.clone()),
+        external_proof: None,
+    };
+    let effect_id = match effect_identity
+        .as_str()
+        .strip_prefix("sha256:")
+        .map(|suffix| format!("effect.context-scout.{suffix}"))
+        .and_then(|identity| EffectId::new(identity).ok())
+    {
+        Some(effect_id) => effect_id,
+        None => return context_scout_mutation_unavailable(wire_request_id),
+    };
+    let outcome = match EffectResult::new(
+        effect_id,
+        EffectClass::Administrative,
+        idempotency_key,
+        authority.receipt,
+        settlement.expected_state,
+        execution,
+        ReconciliationState::Reconciled,
+        receipt,
+        Some(payload),
+    ) {
+        Ok(effect) => ApplicationOutcome::Effect(effect),
+        Err(_) => return context_scout_mutation_unavailable(wire_request_id),
+    };
+    DaemonInvocationResponse::with_outcome(
+        wire_request_id,
+        DaemonInvocationOutcome::ContextScout {
+            scope: registered.scope,
+            outcome,
+        },
+    )
+}
+
+fn context_scout_effect_receipt_id(
+    effect_identity: &ManifestDigest,
+    envelope_id: [u8; 16],
+) -> Option<[u8; 16]> {
+    let digest = canonical_sha256(&(
+        "tracedecay.context-scout.public-delivery-receipt.v1",
+        effect_identity,
+        envelope_id,
+    ))
+    .ok()?;
+    let encoded = digest.as_str().strip_prefix("sha256:")?.get(..32)?;
+    let mut receipt_id = [0; 16];
+    hex::decode_to_slice(encoded, &mut receipt_id).ok()?;
+    Some(receipt_id)
+}
+
+fn context_scout_mutation_unavailable(wire_request_id: String) -> DaemonInvocationResponse {
+    application_problem(
+        wire_request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "context_scout.unavailable".to_owned(),
+            message: "The exact-address Context Scout mutation is unavailable".to_owned(),
+        }),
+    )
 }
 
 fn public_context_scout_claim(
@@ -901,12 +1115,20 @@ async fn reconcile_context_scout_configuration(
     Ok(())
 }
 
-const fn context_scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
+const fn context_scout_store_outcome(
+    outcome: ContextScoutDurableStoreOutcomeV1,
+) -> Option<tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1> {
     match outcome {
-        ContextScoutDurableStoreOutcomeV1::Stored => "stored",
-        ContextScoutDurableStoreOutcomeV1::Duplicate => "duplicate",
-        ContextScoutDurableStoreOutcomeV1::Superseded => "superseded",
-        ContextScoutDurableStoreOutcomeV1::Unavailable => "unavailable",
+        ContextScoutDurableStoreOutcomeV1::Stored => {
+            Some(tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1::Stored)
+        }
+        ContextScoutDurableStoreOutcomeV1::Duplicate => {
+            Some(tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1::Duplicate)
+        }
+        ContextScoutDurableStoreOutcomeV1::Superseded => {
+            Some(tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1::Superseded)
+        }
+        ContextScoutDurableStoreOutcomeV1::Unavailable => None,
     }
 }
 
