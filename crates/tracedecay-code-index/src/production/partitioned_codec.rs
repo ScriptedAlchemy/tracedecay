@@ -1008,9 +1008,22 @@ where
     }
 }
 
-/// One generation's reusable segment buffers. Encoding a generation now costs
-/// two buffers sized by its largest segment instead of a `serde_json::Value`
-/// tree plus a fresh `Vec<u8>` per file.
+/// Encoded file segments per worker held in memory ahead of the ordered
+/// publish; sized so a window keeps the pool busy without a batch barrier
+/// after every file.
+const SEALED_ENCODE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
+
+/// One file's sealed-segment outcome from the parallel plan: a parent
+/// segment reused unchanged, or fresh bytes awaiting the ordered publish.
+enum FileSegmentPlanV1 {
+    Reused(PartitionedFileSegmentDescriptorV1),
+    Encoded(PartitionedFileSegmentDescriptorV1, Vec<u8>),
+}
+
+/// One file segment's encode buffers: the serde staging payload and the
+/// canonical segment. Files encode on the indexing pool, so each file owns a
+/// fresh pair and hands its `segment` to the publish phase instead of
+/// borrowing one generation-wide buffer.
 #[derive(Default)]
 struct PartitionedSegmentEncoderV1 {
     payload: Vec<u8>,
@@ -1018,6 +1031,7 @@ struct PartitionedSegmentEncoderV1 {
 }
 
 impl PartitionedSegmentEncoderV1 {
+    #[cfg(test)]
     fn segment_bytes(&self) -> &[u8] {
         &self.segment
     }
@@ -2586,8 +2600,10 @@ impl CodeIndexPublishedGenerationV1 {
                 .map(|file| &file.file_occurrence_id),
         )?;
         let mut file_segments = Vec::with_capacity(self.files.len());
-        let mut encoder = PartitionedSegmentEncoderV1::default();
-        for file in &self.files {
+        let plan_file = |file: &FileGenerationArtifactsV1| -> Result<
+            FileSegmentPlanV1,
+            CodeIndexProductionErrorV1,
+        > {
             let key = file_keys
                 .get(&file.extraction.file_occurrence_id)
                 .copied()
@@ -2649,20 +2665,46 @@ impl CodeIndexPublishedGenerationV1 {
                     })
                 });
             if let Some(descriptor) = reused {
-                file_segments.push(descriptor);
-                continue;
+                return Ok(FileSegmentPlanV1::Reused(descriptor));
             }
-            let descriptor =
-                encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
-            publish_segment(SealedGenerationSegmentPublicationV1::File {
-                digest: &descriptor.segment_digest,
-                bytes: encoder.segment_bytes(),
-            })?;
-            file_segments.push(descriptor);
+            let mut encoder = PartitionedSegmentEncoderV1::default();
+            let descriptor = encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
+            Ok(FileSegmentPlanV1::Encoded(descriptor, encoder.segment))
+        };
+        // Files are independent, so each window is one ordered fan-out on the
+        // indexing pool (lowest-index failure, panic containment, CPU
+        // admission per unit); the window then publishes serially in file
+        // order, so segment bytes, on-disk order, and every digest are the
+        // ones the sequential loop produced. Windowing bounds the encoded
+        // bytes held in memory to a few segments per worker; the serial loop
+        // held one.
+        // ponytail: the window bound is a file count, not bytes; add a byte
+        // bound like `read_segment_window` if a few huge files ever matter.
+        let window_files = crate::parallelism::indexing_workers()
+            .max(1)
+            .saturating_mul(SEALED_ENCODE_WINDOW_FILES_PER_WORKER_V1);
+        for window in self.files.chunks(window_files) {
+            let plans = hotpath::measure_block!(
+                "code_index.sealed_encode.file_window",
+                collect_bounded_ordered(window, |file, _worker| plan_file(file))
+            )?;
+            for plan in plans {
+                let descriptor = match plan {
+                    FileSegmentPlanV1::Reused(descriptor) => descriptor,
+                    FileSegmentPlanV1::Encoded(descriptor, bytes) => {
+                        publish_segment(SealedGenerationSegmentPublicationV1::File {
+                            digest: &descriptor.segment_digest,
+                            bytes: &bytes,
+                        })?;
+                        descriptor
+                    }
+                };
+                file_segments.push(descriptor);
+            }
         }
         file_segments.sort_by_key(|segment| segment.file_key);
-        let generation_evidence = encoder.encode_generation_evidence(self, &mut publish_segment)?;
-        drop(encoder);
+        let generation_evidence = PartitionedSegmentEncoderV1::default()
+            .encode_generation_evidence(self, &mut publish_segment)?;
         let generation = PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
             manifest: &self.manifest,
