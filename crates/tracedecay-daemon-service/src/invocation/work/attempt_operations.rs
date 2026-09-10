@@ -8,7 +8,7 @@ use tracedecay_contracts::{
     AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline, LegalAction,
     RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryDirective,
     RetryWorkAttemptCommandV1, SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1,
-    WorkAttemptStatusV1, WorkSynthesisAttemptV1, WorkflowArtifactStorePort,
+    WorkSynthesisAttemptV1, WorkflowArtifactStorePort,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1};
 use tracedecay_tool_catalog::UseCaseId;
