@@ -1895,9 +1895,18 @@ fn resolve_file_references(
     symbols: &[SymbolRow],
 ) -> (Vec<Edge>, Vec<CodeIndexUnresolvedReferenceV1>) {
     let mut by_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
+    let mut by_file_relative_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
     for symbol in symbols {
         by_name
             .entry(symbol.name.as_str())
+            .or_default()
+            .push(symbol);
+        let relative_name = symbol
+            .qualified_name
+            .split_once("::")
+            .map_or(symbol.qualified_name.as_str(), |(_, name)| name);
+        by_file_relative_name
+            .entry(relative_name)
             .or_default()
             .push(symbol);
     }
@@ -1932,8 +1941,15 @@ fn resolve_file_references(
     let mut resolved = Vec::new();
     let mut retained = Vec::new();
     for reference in unresolved {
-        let compatible = by_name
+        let simple_name = reference
+            .reference_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(reference.reference_name.as_str());
+        let candidates = by_file_relative_name
             .get(reference.reference_name.as_str())
+            .or_else(|| by_name.get(simple_name));
+        let compatible = candidates
             .map(|candidates| {
                 candidates
                     .iter()
@@ -3650,6 +3666,58 @@ pub fn real_symbol() {}
             retained.is_empty(),
             "a same-file-resolved reference must not also be retained: {retained:?}"
         );
+    }
+
+    #[test]
+    fn qualified_reference_selects_its_namespace_and_bare_name_stays_ambiguous() {
+        let source =
+            "namespace left { interface Base {} }\nnamespace right { interface Base {} }\n";
+        let mut left = fixture_function_row(
+            source,
+            "node.left.base",
+            "sym.left.base",
+            "src/settings.ts::left::Base",
+            'a',
+            SourceSpan {
+                start_byte: 27,
+                end_byte: 31,
+            },
+        );
+        left.kind = "interface".to_owned();
+        let mut right = fixture_function_row(
+            source,
+            "node.right.base",
+            "sym.right.base",
+            "src/settings.ts::right::Base",
+            'b',
+            SourceSpan {
+                start_byte: 65,
+                end_byte: 69,
+            },
+        );
+        right.kind = "interface".to_owned();
+        let reference = UnresolvedRef {
+            from_node_id: "node.child".to_owned(),
+            reference_name: "right::Base".to_owned(),
+            reference_kind: EdgeKind::Extends,
+            line: 3,
+            column: 31,
+            file_path: "src/settings.ts".to_owned(),
+        };
+
+        let symbols = [left, right];
+        let (resolved, retained) = resolve_file_references(&[reference.clone()], &symbols);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].target, "node.right.base");
+        assert!(retained.is_empty());
+
+        let ambiguous = UnresolvedRef {
+            reference_name: "Base".to_owned(),
+            ..reference
+        };
+        let (resolved, retained) = resolve_file_references(&[ambiguous], &symbols);
+        assert!(resolved.is_empty());
+        assert!(retained.is_empty());
     }
 
     #[test]
