@@ -110,7 +110,7 @@ pub async fn handle_rank(
                     "name": symbol.metadata.simple_name,
                     "kind": symbol.metadata.kind,
                     "file": symbol.path,
-                    "line": symbol.metadata.start_line,
+                    "line": user_line(symbol.metadata.start_line),
                     "count": counts.get(&symbol.occurrence).copied().unwrap_or(0),
                 })
             })
@@ -179,8 +179,8 @@ pub async fn handle_largest(
                     "name": symbol.metadata.simple_name,
                     "kind": symbol.metadata.kind,
                     "file": symbol.path,
-                    "start_line": symbol.metadata.start_line,
-                    "end_line": symbol.end_line(),
+                    "start_line": user_line(symbol.metadata.start_line),
+                    "end_line": user_line(symbol.end_line()),
                     "lines": symbol.metadata.line_span,
                 })
             })
@@ -348,7 +348,7 @@ pub async fn handle_inheritance_depth(
                     "name": symbol.metadata.simple_name,
                     "kind": symbol.metadata.kind,
                     "file": symbol.path,
-                    "line": symbol.metadata.start_line,
+                    "line": user_line(symbol.metadata.start_line),
                     "depth": memo.get(&symbol.occurrence).copied().unwrap_or(0),
                 })
             })

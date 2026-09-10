@@ -2716,6 +2716,119 @@ pub trait Leaf: Middle {}
 }
 
 #[tokio::test]
+async fn analysis_symbol_locations_are_one_based() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        "{\"name\":\"analysis-locations\",\"private\":true,\"type\":\"module\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/engine.ts"),
+        "export class AuditEngine {\n  private total = 0;\n  private label = \"audit\";\n  private enabled = true;\n\n  add(value: number): number {\n    this.total += value;\n    return this.total;\n  }\n\n  reset(): void {\n    this.total = 0;\n  }\n\n  describe(): string {\n    return `${this.label}:${this.total}`;\n  }\n\n  evaluate(value: number): number {\n    if (!this.enabled) {\n      return 0;\n    }\n    if (value < 0) {\n      return -1;\n    }\n    if (value === 0) {\n      return this.total;\n    }\n    if (value % 2 === 0) {\n      return this.add(value);\n    }\n    if (value > 100) {\n      return value * 2;\n    }\n    return value + 1;\n  }\n}\n\nexport function sharedScore(value: number): number {\n  return value * 3;\n}\n\nexport function firstScore(value: number): number {\n  return sharedScore(value);\n}\n\nexport function secondScore(value: number): number {\n  return sharedScore(value + 1);\n}\n\nexport function thirdScore(value: number): number {\n  return sharedScore(value + 2);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/recursion.ts"),
+        "export function factorial(value: number): number {\n  if (value <= 1) {\n    return 1;\n  }\n  return value * factorial(value - 1);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/hierarchy.ts"),
+        "export interface Base {}\nexport interface Middle extends Base {}\nexport interface Leaf extends Middle {}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/dead.ts"),
+        "function abandonedHelper(): number { return 7; }\nexport function entry(): number { return 1; }\n",
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    for (tool, arguments, collection, symbol, expected_line) in [
+        (
+            "tracedecay_hotspots",
+            json!({"limit": 100, "format": "json"}),
+            "hotspots",
+            "sharedScore",
+            39,
+        ),
+        (
+            "tracedecay_dead_code",
+            json!({"format": "json"}),
+            "symbols",
+            "abandonedHelper",
+            1,
+        ),
+        (
+            "tracedecay_inheritance_depth",
+            json!({"format": "json"}),
+            "ranking",
+            "Leaf",
+            3,
+        ),
+    ] {
+        let result = handle_tool_call(&graph, tool, arguments, None, None)
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        let item = output[collection]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == symbol)
+            .unwrap_or_else(|| panic!("{tool} omitted {symbol}: {output}"));
+        assert_eq!(item["line"], expected_line, "{tool} returned {item}");
+    }
+
+    for (tool, collection, symbol, expected_line) in [
+        ("tracedecay_complexity", "ranking", "evaluate", 19),
+        ("tracedecay_god_class", "ranking", "AuditEngine", 1),
+    ] {
+        let result = handle_tool_call(
+            &graph,
+            tool,
+            json!({"limit": 100, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        let item = output[collection]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == symbol)
+            .unwrap_or_else(|| panic!("{tool} omitted {symbol}: {output}"));
+        assert_eq!(item["line"], expected_line, "{tool} returned {item}");
+    }
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_recursion",
+        json!({"limit": 100, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let factorial = output["cycles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|cycle| cycle["chain"].as_array().unwrap())
+        .find(|item| item["name"] == "factorial")
+        .unwrap_or_else(|| panic!("tracedecay_recursion omitted factorial: {output}"));
+    assert_eq!(factorial["line"], 1, "recursion returned {factorial}");
+
+    close_test_graph(graph).await;
+}
+
+#[tokio::test]
 async fn typescript_interface_extends_drives_hierarchy_and_depth() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");

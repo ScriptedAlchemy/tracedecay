@@ -31,7 +31,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::{ToolResult, text_tool_result};
 
-pub(super) fn user_line(line: u32) -> u32 {
+pub(crate) fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }
 
