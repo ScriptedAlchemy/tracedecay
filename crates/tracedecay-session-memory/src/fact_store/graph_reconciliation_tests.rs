@@ -759,6 +759,43 @@ async fn graph_read_reconciles_on_demand_without_publishing() {
     assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
 }
 
+/// The daemon's terminal shutdown owner cancels reconciliation, joins the
+/// admitted passes, and only then closes the retained graph owner. A graph
+/// read reconciles and reads through that same owner, so a read that starts
+/// its own pass after the join hands the close a graph client lease nothing
+/// joined: the `registry.reserve_close.leased` conflict observed as
+/// `owner_attachment=false leases=1`. Coordinator admission is the ordering,
+/// so once the join has run the read must be refused instead.
+#[tokio::test]
+async fn graph_read_starts_no_reconciliation_pass_after_the_shutdown_join() {
+    let (_directory, database) = database("shutdown-joined-read").await;
+    let runtime = bind_runtime(&database);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+    owner
+        .shutdown()
+        .await
+        .expect("cancel and join reconciliation before the graph owner closes");
+
+    let query =
+        ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 8).expect("graph query");
+    let result = super::graph::project_memory_graph(
+        &database,
+        query,
+        &FactReadControl::new(Arc::new(|| false)),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(FactStoreError::GraphUnavailable)),
+        "a read after the shutdown join must be refused, not reconciled"
+    );
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn graph_read_observes_live_cancellation_before_snapshot_access() {
     let (_directory, database) = database("live-cancelled-read").await;
