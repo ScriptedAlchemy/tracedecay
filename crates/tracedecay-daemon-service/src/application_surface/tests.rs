@@ -27,22 +27,24 @@ use super::registered_http::RegisteredHttpOperation;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
     APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, ApplicationSurfaceAdapterError,
-    ApplicationSurfaceRequest, CallableCodeSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
-    HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
-    adapt_application_tool_request, application_http_context, application_negotiated_features,
-    application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    feedback_sse_stream_event, http_operation_event_router, invocation_problem,
-    parse_application_surface_request, parse_http_application_surface_request,
-    resolve_application_binding, resolve_application_surface_dispatch,
-    resolve_authenticated_http_request_context, surface_rejection_metadata,
+    ApplicationSurfaceRequest, CallableCodeSurfaceRequest, FeedbackSurfaceRequest,
+    HttpCancellationRegistry, HttpOperationEventState, NativeIntegrationSurfaceRequest,
+    PrimitiveCodeSurfaceRequest, adapt_application_tool_request, application_http_context,
+    application_negotiated_features, application_surface_dispatch_input_with_controls,
+    current_micros, execute_application_surface, feedback_sse_stream_event,
+    http_operation_event_router, invocation_problem, parse_application_surface_request,
+    parse_http_application_surface_request, resolve_application_binding,
+    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
+    surface_rejection_metadata,
 };
 use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
 };
 use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
-use tracedecay_contracts::context_scout::ContextScoutAddressV1;
+use tracedecay_contracts::context_scout::{
+    ContextScoutAddressV1, ContextScoutClaimRequestV1, ContextScoutClaimWindowV1,
+    ContextScoutControlRequestV1, ContextScoutSurfaceRequestV1,
+};
 use tracedecay_contracts::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
     FeedbackSseLifecycleV1,
@@ -829,7 +831,7 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
     };
     let pause = parse_application_surface_request(
         ApplicationSurfaceOperation::ContextScoutPause,
-        serde_json::to_value(ContextScoutControlSurfaceRequest {
+        serde_json::to_value(ContextScoutControlRequestV1 {
             address,
             expected_revision: ConfigurationRevisionId::new("revision.scout.surface")
                 .expect("revision"),
@@ -843,15 +845,17 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
     .expect("exact-address pause");
     assert!(matches!(
         pause,
-        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequest::Pause(request))
+        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequestV1::Pause(request))
             if request.address == address
                 && request.idempotency_key.as_str()
                     == "configuration.idempotency.scout.surface"
     ));
 
-    let claim_body = serde_json::to_value(ContextScoutClaimSurfaceRequest {
+    let claim_body = serde_json::to_value(ContextScoutClaimRequestV1 {
         address,
-        window: ContextScoutClaimWindowSurfaceV1::IdleWindow,
+        window: ContextScoutClaimWindowV1::IdleWindow,
+        idempotency_key: tracedecay_contracts::IdempotencyKey::new("context-scout.claim.surface")
+            .expect("claim key"),
     })
     .expect("claim request");
     let claim = parse_application_surface_request(
@@ -861,9 +865,10 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
     .expect("exact-address claim");
     assert!(matches!(
         claim,
-        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequest::Claim(request))
+        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequestV1::Claim(request))
             if request.address == address
-                && request.window == ContextScoutClaimWindowSurfaceV1::IdleWindow
+                && request.window == ContextScoutClaimWindowV1::IdleWindow
+                && request.idempotency_key.as_str() == "context-scout.claim.surface"
     ));
     assert!(matches!(
         parse_application_surface_request(
@@ -871,6 +876,69 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
             claim_body,
         ),
         Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    ));
+
+    let work = serde_json::json!({
+        "address": address,
+        "generation": 1,
+        "input_watermark": vec![9_u8; 32],
+    });
+    let cancel = parse_application_surface_request(
+        ApplicationSurfaceOperation::ContextScoutCancel,
+        serde_json::json!({
+            "address": address,
+            "work": work.clone(),
+        }),
+    )
+    .expect("canonical cancel request");
+    assert!(matches!(
+        cancel,
+        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequestV1::Cancel(request))
+            if request.address == address
+    ));
+
+    let receipt = serde_json::json!({
+        "receipt_id": vec![10_u8; 16],
+        "envelope_id": vec![11_u8; 16],
+        "delivered_at": 12,
+        "outcome": "displayed",
+    });
+    let delivery = parse_application_surface_request(
+        ApplicationSurfaceOperation::ContextScoutDelivery,
+        serde_json::json!({
+            "address": address,
+            "claim": {
+                "work": work,
+                "envelope_id": vec![11_u8; 16],
+                "lease_id": vec![13_u8; 16],
+                "lease_expires_at": 14,
+            },
+            "receipt": receipt.clone(),
+        }),
+    )
+    .expect("canonical public claim-handle delivery request");
+    assert!(matches!(
+        delivery,
+        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequestV1::Delivery(request))
+            if request.claim.lease_id == [13; 16]
+    ));
+
+    let feedback = parse_application_surface_request(
+        ApplicationSurfaceOperation::ContextScoutFeedback,
+        serde_json::json!({
+            "address": address,
+            "receipt": receipt,
+            "feedback": {
+                "receipt_id": vec![10_u8; 16],
+                "kind": "explicitly_accepted",
+            },
+        }),
+    )
+    .expect("canonical feedback request");
+    assert!(matches!(
+        feedback,
+        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequestV1::Feedback(request))
+            if request.address == address
     ));
 }
 

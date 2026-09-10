@@ -66,8 +66,9 @@ use crate::lsp_wire::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
     MAX_LSP_WORKSPACE_ROOTS,
 };
-use crate::surface::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
+use crate::surface::GitReadSurfaceRequest;
 use tracedecay_contracts::ConfigurationWireRequestV1;
+use tracedecay_contracts::context_scout::ContextScoutSurfaceRequestV1;
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
@@ -842,7 +843,7 @@ pub enum DaemonInvocationPayload {
     },
     ContextScout {
         surface_operation: ApplicationSurfaceOperation,
-        request: ContextScoutSurfaceRequest,
+        request: ContextScoutSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1306,7 +1307,7 @@ impl DaemonInvocationRequest {
     pub fn context_scout(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
-        request: ContextScoutSurfaceRequest,
+        request: ContextScoutSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -2354,8 +2355,8 @@ impl DaemonInvocationRequest {
                     || !request.matches(*surface_operation)
                     || matches!(
                         request,
-                        ContextScoutSurfaceRequest::Recent(request)
-                            | ContextScoutSurfaceRequest::Explain(request)
+                        ContextScoutSurfaceRequestV1::Recent(request)
+                            | ContextScoutSurfaceRequestV1::Explain(request)
                             if !(1..=32).contains(&request.limit)
                     )
                 {

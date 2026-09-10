@@ -24,6 +24,11 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationRequest, WorkOperation, WorkflowOperation,
     application_problem_response, is_http_application_operation_exposed, sse_response,
 };
+pub use tracedecay_contracts::context_scout::{
+    ContextScoutCancelRequestV1, ContextScoutClaimRequestV1, ContextScoutClaimWindowV1,
+    ContextScoutControlRequestV1, ContextScoutDeliveryRequestV1, ContextScoutExactAddressRequestV1,
+    ContextScoutFeedbackRequestV1, ContextScoutRecentRequestV1, ContextScoutSurfaceRequestV1,
+};
 pub use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_contracts::git::{
     GitHubStackSignalExpandSurfaceRequest, NativeWorktreeSurfaceRequest,
@@ -40,13 +45,7 @@ use tracedecay_contracts::{
     SourceLinesRequest, StreamEvent, StreamEventKind,
     configuration_wire_request_from_invocation_payload,
 };
-pub use tracedecay_daemon_protocol::{
-    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
-    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
-    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
-};
+pub use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1,
@@ -223,7 +222,7 @@ pub enum ApplicationSurfaceRequest {
     Primitive(PrimitiveRequest),
     ObservatoryRead(ObservatoryReadRequestV1),
     Configuration(ConfigurationWireRequestV1),
-    ContextScout(ContextScoutSurfaceRequest),
+    ContextScout(ContextScoutSurfaceRequestV1),
     Retained(tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1),
 }
 
@@ -2168,47 +2167,47 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ConfigurationAudit
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Status(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Status(_)),
                     ApplicationSurfaceOperation::ContextScoutStatus
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Recent(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Recent(_)),
                     ApplicationSurfaceOperation::ContextScoutRecent
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Explain(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Explain(_)),
                     ApplicationSurfaceOperation::ContextScoutExplain
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Capability(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Capability(_)),
                     ApplicationSurfaceOperation::ContextScoutCapability
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Budget(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Budget(_)),
                     ApplicationSurfaceOperation::ContextScoutBudget
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Pause(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Pause(_)),
                     ApplicationSurfaceOperation::ContextScoutPause
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Resume(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Resume(_)),
                     ApplicationSurfaceOperation::ContextScoutResume
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Cancel(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Cancel(_)),
                     ApplicationSurfaceOperation::ContextScoutCancel
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Claim(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Claim(_)),
                     ApplicationSurfaceOperation::ContextScoutClaim
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Delivery(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Delivery(_)),
                     ApplicationSurfaceOperation::ContextScoutDelivery
                 )
                 | (
-                    Self::ContextScout(ContextScoutSurfaceRequest::Feedback(_)),
+                    Self::ContextScout(ContextScoutSurfaceRequestV1::Feedback(_)),
                     ApplicationSurfaceOperation::ContextScoutFeedback
                 )
         )
@@ -2502,47 +2501,47 @@ pub fn parse_application_surface_request(
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Status)
+            .map(ContextScoutSurfaceRequestV1::Status)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutRecent => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Recent)
+            .map(ContextScoutSurfaceRequestV1::Recent)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutExplain => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Explain)
+            .map(ContextScoutSurfaceRequestV1::Explain)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutCapability => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Capability)
+            .map(ContextScoutSurfaceRequestV1::Capability)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutBudget => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Budget)
+            .map(ContextScoutSurfaceRequestV1::Budget)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutPause => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Pause)
+            .map(ContextScoutSurfaceRequestV1::Pause)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutResume => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Resume)
+            .map(ContextScoutSurfaceRequestV1::Resume)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutCancel => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Cancel)
+            .map(ContextScoutSurfaceRequestV1::Cancel)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutClaim => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Claim)
+            .map(ContextScoutSurfaceRequestV1::Claim)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutDelivery => serde_json::from_value(value)
-            .map(|request| ContextScoutSurfaceRequest::Delivery(Box::new(request)))
+            .map(ContextScoutSurfaceRequestV1::Delivery)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutFeedback => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Feedback)
+            .map(ContextScoutSurfaceRequestV1::Feedback)
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::FeedbackDiagnostics

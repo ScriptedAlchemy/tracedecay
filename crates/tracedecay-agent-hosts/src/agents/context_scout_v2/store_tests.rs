@@ -90,6 +90,14 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
         other => panic!("expected claimed entry, got {other:?}"),
     };
     assert_eq!(claimed.entry, pending);
+    let retried = match store
+        .claim(pending.work.address, UtcMicros(11), lease(21, 30))
+        .await
+    {
+        ContextScoutDurableClaimOutcomeV1::Claimed(claimed) => claimed,
+        other => panic!("expected idempotent claim retry, got {other:?}"),
+    };
+    assert_eq!(retried, claimed);
 
     drop(store);
     let (restarted, startup) = ProjectContextScoutDurableStoreV1::startup_from_project_database(

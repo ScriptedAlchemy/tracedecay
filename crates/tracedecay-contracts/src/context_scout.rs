@@ -519,7 +519,6 @@ pub struct ContextScoutControlRequestV1 {
 pub struct ContextScoutCancelRequestV1 {
     pub address: ContextScoutAddressV1,
     pub work: ContextScoutWorkV1,
-    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -536,7 +535,6 @@ pub struct ContextScoutDeliveryRequestV1 {
     pub address: ContextScoutAddressV1,
     pub claim: ContextScoutClaimHandleV1,
     pub receipt: ContextScoutDeliveryReceiptV1,
-    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -545,7 +543,6 @@ pub struct ContextScoutFeedbackRequestV1 {
     pub address: ContextScoutAddressV1,
     pub receipt: ContextScoutDeliveryReceiptV1,
     pub feedback: ContextScoutFeedbackV1,
-    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -578,6 +575,47 @@ impl ContextScoutSurfaceRequestV1 {
             Self::Delivery(request) => request.address,
             Self::Feedback(request) => request.address,
         }
+    }
+
+    #[hotpath::skip]
+    pub const fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
+        matches!(
+            (self, operation),
+            (
+                Self::Status(_),
+                ApplicationSurfaceOperation::ContextScoutStatus
+            ) | (
+                Self::Recent(_),
+                ApplicationSurfaceOperation::ContextScoutRecent
+            ) | (
+                Self::Explain(_),
+                ApplicationSurfaceOperation::ContextScoutExplain
+            ) | (
+                Self::Capability(_),
+                ApplicationSurfaceOperation::ContextScoutCapability
+            ) | (
+                Self::Budget(_),
+                ApplicationSurfaceOperation::ContextScoutBudget
+            ) | (
+                Self::Pause(_),
+                ApplicationSurfaceOperation::ContextScoutPause
+            ) | (
+                Self::Resume(_),
+                ApplicationSurfaceOperation::ContextScoutResume
+            ) | (
+                Self::Cancel(_),
+                ApplicationSurfaceOperation::ContextScoutCancel
+            ) | (
+                Self::Claim(_),
+                ApplicationSurfaceOperation::ContextScoutClaim
+            ) | (
+                Self::Delivery(_),
+                ApplicationSurfaceOperation::ContextScoutDelivery
+            ) | (
+                Self::Feedback(_),
+                ApplicationSurfaceOperation::ContextScoutFeedback
+            )
+        )
     }
 }
 
