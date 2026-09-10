@@ -14,11 +14,13 @@ use tracedecay_contracts::configuration::{
     ConfigurationGetRequestV1, ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1,
 };
 use tracedecay_contracts::{
-    AdmitWorkSynthesisCommand, PrepareWorkProductMutationRequestV1, TaskHandoffIssueRequest,
+    AdmitWorkSynthesisCommand, PauseWorkRunCommand, PrepareWorkProductMutationRequestV1,
+    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, TaskHandoffIssueRequest,
     TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptStatusRequestV1,
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkGraphReadRequestV1,
     WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
     WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetrySourceV1,
     WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
     WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
     WorkflowProviderRegistration, WorkflowRunCancelRequest, WorkflowRunGetRequest,
@@ -39,19 +41,19 @@ use tracedecay_domain::{
     WorkFilesystemPolicy, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
     WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
     WorkProposalDispositionV1, WorkProposalV1, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1, WorkSandboxPolicy,
-    WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1, WorkVersion,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef,
-    WorkflowOutputName, WorkflowRunStatus, WorkflowStep, WorkflowStepId, WorktreeId,
-    canonical_sha256,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1, WorkRunControlReasonV1,
+    WorkSandboxPolicy, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
+    WorkTerminalEvidenceV1, WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut,
+    WorkflowOperationRef, WorkflowOutputName, WorkflowRunStatus, WorkflowStep, WorkflowStepId,
+    WorktreeId, canonical_sha256,
 };
 use tracedecay_sdk::client::{Client, ClientError};
 use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
-    ApplicationConfigurationSet, WorkAttemptStatus, WorkMutateGraph, WorkPrepareGraphMutation,
-    WorkRetrieveEvidence, WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun,
-    WorkflowGetRun, WorkflowHandoffIssue, WorkflowHandoffRedeem, WorkflowRegisterDefinition,
-    WorkflowStartRun,
+    ApplicationConfigurationSet, WorkAttemptStatus, WorkMutateGraph, WorkPauseRun,
+    WorkPrepareGraphMutation, WorkResumeRun, WorkRetrieveEvidence, WorkRetryAttempt,
+    WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun, WorkflowGetRun,
+    WorkflowHandoffIssue, WorkflowHandoffRedeem, WorkflowRegisterDefinition, WorkflowStartRun,
 };
 
 use super::common;
@@ -742,7 +744,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             }
             Err(error) => panic!("mounted workflow fan-out start failed: {error}"),
         });
-    let fan_out_identities = started_run
+    let mut fan_out_identities = started_run
         .fan_out_plans()
         .values()
         .flat_map(|plan| &plan.children)
@@ -790,6 +792,79 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let client = sdk_client(&home, project_id.as_str());
     let _ = wait_for_application_mount(&client);
     wait_for_work_mount(&client);
+    let recovered_identity = fan_out_identities[1].clone();
+    let recovered = wait_until("fenced recovery-required workflow child", || {
+        attempt_status(&client, &recovered_identity)
+            .filter(|attempt| attempt.state() == WorkAttemptStateV1::RecoveryRequired)
+    });
+    let retry_request = RetryWorkAttemptCommandV1 {
+        original_attempt: recovered.identity().clone(),
+        new_attempt_id: id("attempt.workflow.crash.retry"),
+        failure: WorkRetryFailureSelectorV1 {
+            source: WorkRetrySourceV1::Runtime,
+            cause: WorkRetryCauseV1::RestartRecoveryRequired,
+            evidence_ref: "recovery-required".to_owned(),
+        },
+        command_id: id("command.workflow.crash.retry"),
+    };
+    std::fs::write(&first_hold, b"hold").expect("hold recovery retry provider");
+    let retry = client
+        .execute::<WorkRetryAttempt>(&retry_request)
+        .expect("explicit workflow child recovery retry")
+        .result;
+    let replacement = match retry {
+        WorkRetryAttemptOutcomeV1::Created { attempt, .. } => attempt.identity().clone(),
+        WorkRetryAttemptOutcomeV1::Replayed { .. } => panic!("first workflow retry was replayed"),
+    };
+    wait_until("running workflow child recovery retry", || {
+        attempt_status(&client, &replacement)
+            .filter(|attempt| attempt.state() == WorkAttemptStateV1::Running)
+    });
+    let paused = client
+        .execute::<WorkPauseRun>(&PauseWorkRunCommand {
+            task_id: replacement.task_id().clone(),
+            run_id: replacement.run_id().clone(),
+            reason: WorkRunControlReasonV1::OperatorRequest,
+            expected_authority_version: None,
+            occurred_at: now(),
+        })
+        .expect("pause recovery retry run")
+        .result;
+    assert_eq!(
+        paused.fenced_attempts(),
+        &[replacement.attempt_id().clone()],
+        "pause must fence only the active workflow child replacement"
+    );
+    let replayed = client
+        .execute::<WorkRetryAttempt>(&retry_request)
+        .expect("atomic workflow child retry replay")
+        .result;
+    assert!(
+        matches!(
+            replayed,
+            WorkRetryAttemptOutcomeV1::Replayed { ref attempt, .. }
+                if attempt.identity() == &replacement
+        ),
+        "retry receipt, replacement attempt, product link, and workflow binding must replay together"
+    );
+    client
+        .execute::<WorkResumeRun>(&ResumeWorkRunCommand {
+            task_id: replacement.task_id().clone(),
+            run_id: replacement.run_id().clone(),
+            reason: WorkRunControlReasonV1::OperatorRequest,
+            expected_authority_version: paused.authority().get(),
+            occurred_at: now(),
+        })
+        .expect("resume recovery retry run");
+    std::fs::remove_file(&first_hold).expect("release recovery retry provider");
+    assert_eq!(
+        attempt_status(&client, &recovered_identity)
+            .expect("retained original recovery attempt")
+            .state(),
+        WorkAttemptStateV1::RecoveryRequired,
+        "retry must not rewrite or redispatch the uncertain original identity"
+    );
+    fan_out_identities[1] = replacement;
     wait_until("post-recovery cancellation child", || {
         cancellation_started.exists().then_some(())
     });

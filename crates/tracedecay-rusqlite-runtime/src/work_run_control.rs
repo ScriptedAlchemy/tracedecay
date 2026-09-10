@@ -98,17 +98,28 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         };
         attempts
             .into_iter()
+            .filter(|attempt| {
+                projection.as_ref().is_none_or(|projection| {
+                    projection
+                        .planned_fan_out_attempt(attempt.identity())
+                        .is_none_or(|planned| {
+                            projection.active_fan_out_attempt(planned) == attempt.identity()
+                        })
+                })
+            })
             .map(|attempt| {
                 let step_id = match projection.as_ref() {
                     None => None,
                     Some(projection) => {
+                        let planned_attempt =
+                            projection.planned_fan_out_attempt(attempt.identity());
                         let mut matching_steps = projection
                             .fan_out_plans()
                             .values()
                             .filter(|plan| {
                                 plan.children
                                     .iter()
-                                    .any(|child| &child.attempt_identity == attempt.identity())
+                                    .any(|child| Some(&child.attempt_identity) == planned_attempt)
                             })
                             .map(|plan| plan.step_id.clone());
                         let step = matching_steps.next();

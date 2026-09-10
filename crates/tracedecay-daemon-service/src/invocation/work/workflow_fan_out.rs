@@ -122,6 +122,7 @@ pub(super) fn reconcile_workflow_fan_out(
 
         let mut active = 0usize;
         let mut terminal = Vec::new();
+        let mut terminal_planned = Vec::new();
         let mut known = std::collections::BTreeSet::new();
         for identity in projection.released_fan_out_attempts() {
             if !plan
@@ -131,16 +132,18 @@ pub(super) fn reconcile_workflow_fan_out(
             {
                 continue;
             }
+            let active_identity = projection.active_fan_out_attempt(identity);
             match work.attempts().status(
                 context,
                 &tracedecay_contracts::WorkAttemptStatusRequestV1 {
-                    task_id: identity.task_id().clone(),
-                    run_id: identity.run_id().clone(),
-                    attempt_id: identity.attempt_id().clone(),
+                    task_id: active_identity.task_id().clone(),
+                    run_id: active_identity.run_id().clone(),
+                    attempt_id: active_identity.attempt_id().clone(),
                 },
             ) {
                 Ok(attempt) if attempt.is_terminal() => {
                     known.insert(identity.clone());
+                    terminal_planned.push(identity.clone());
                     terminal.push(attempt);
                 }
                 Ok(attempt)
@@ -161,9 +164,9 @@ pub(super) fn reconcile_workflow_fan_out(
                 Err(_) => return Err(DaemonInvocationProblem::Unavailable),
             }
         }
-        let newly_settled = terminal
+        let newly_settled = terminal_planned
             .iter()
-            .map(|attempt| attempt.identity().clone())
+            .cloned()
             .filter(|identity| !projection.settled_fan_out_attempts().contains(identity))
             .collect::<Vec<_>>();
         if !newly_settled.is_empty() {
@@ -189,8 +192,9 @@ pub(super) fn reconcile_workflow_fan_out(
                 context,
                 &work,
                 &attempt_processes,
+                &projection,
                 &plan,
-                &terminal,
+                &terminal_planned,
                 observed_at,
             )?;
             let released = plan
@@ -326,6 +330,7 @@ fn reconcile_cancelled_fan_out(
             context,
             &work,
             attempt_processes,
+            &projection,
             plan,
             &[],
             observed_at,
@@ -337,12 +342,13 @@ fn reconcile_cancelled_fan_out(
             {
                 continue;
             }
+            let active_identity = projection.active_fan_out_attempt(&child.attempt_identity);
             match work.attempts().status(
                 context,
                 &tracedecay_contracts::WorkAttemptStatusRequestV1 {
-                    task_id: child.task_id.clone(),
-                    run_id: child.attempt_identity.run_id().clone(),
-                    attempt_id: child.attempt_identity.attempt_id().clone(),
+                    task_id: active_identity.task_id().clone(),
+                    run_id: active_identity.run_id().clone(),
+                    attempt_id: active_identity.attempt_id().clone(),
                 },
             ) {
                 Ok(attempt) => all_terminal &= attempt.is_terminal(),
@@ -480,24 +486,26 @@ fn request_fan_out_cancellation(
     context: &RequestContext,
     services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
+    projection: &tracedecay_domain::WorkflowRunProjection,
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
-    terminal: &[tracedecay_domain::WorkAttemptV1],
+    terminal: &[tracedecay_domain::WorkAttemptIdentityV1],
     occurred_at: UtcMicros,
 ) -> Result<bool, DaemonInvocationProblem> {
     let mut cancelled_children = false;
     for child in &plan.children {
         if terminal
             .iter()
-            .any(|attempt| attempt.identity() == &child.attempt_identity)
+            .any(|identity| identity == &child.attempt_identity)
         {
             continue;
         }
+        let identity = projection.active_fan_out_attempt(&child.attempt_identity);
         let Ok(attempt) = services.attempts().status(
             context,
             &tracedecay_contracts::WorkAttemptStatusRequestV1 {
-                task_id: child.task_id.clone(),
-                run_id: child.attempt_identity.run_id().clone(),
-                attempt_id: child.attempt_identity.attempt_id().clone(),
+                task_id: identity.task_id().clone(),
+                run_id: identity.run_id().clone(),
+                attempt_id: identity.attempt_id().clone(),
             },
         ) else {
             continue;
@@ -522,8 +530,8 @@ fn request_fan_out_cancellation(
                 context,
                 tracedecay_contracts::CancelWorkAttemptCommand {
                     task_id: child.task_id.clone(),
-                    run_id: child.attempt_identity.run_id().clone(),
-                    attempt_id: child.attempt_identity.attempt_id().clone(),
+                    run_id: identity.run_id().clone(),
+                    attempt_id: identity.attempt_id().clone(),
                     request_id,
                     occurred_at,
                 },
