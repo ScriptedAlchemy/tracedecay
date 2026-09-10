@@ -7,9 +7,8 @@ use tracedecay_contracts::{
     SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
 };
 use tracedecay_domain::UtcMicros;
-use tracedecay_domain::errors::TraceDecayError;
 
-use crate::project_owner_registration::ProjectSourceEditOwnerV1;
+use crate::project_owner_registration::{ProjectSourceEditOwnerV1, SourceEditOwnerError};
 
 use super::{
     DaemonInvocationOutcome, DaemonInvocationResponse, application_problem,
@@ -55,7 +54,7 @@ pub(super) async fn execute_source_edit(
             Err(problem) => return application_problem(request_id, problem),
         };
     match owner
-        .execute_invocation(typed_request_id, request, deadline, cancellation)
+        .execute(typed_request_id, request, deadline, cancellation)
         .await
     {
         Ok(result) => DaemonInvocationResponse::with_outcome(
@@ -109,7 +108,7 @@ pub(super) async fn execute_source_edit_reconcile(
             Err(problem) => return application_problem(request_id, problem),
         };
     match owner
-        .reconcile_invocation(typed_request_id, request, deadline, cancellation)
+        .reconcile(typed_request_id, request, deadline, cancellation)
         .await
     {
         Ok(result) => DaemonInvocationResponse::with_outcome(
@@ -163,7 +162,7 @@ pub(super) async fn execute_source_edit_rollback(
             Err(problem) => return application_problem(request_id, problem),
         };
     match owner
-        .rollback_invocation(typed_request_id, request, deadline, cancellation)
+        .rollback(typed_request_id, request, deadline, cancellation)
         .await
     {
         Ok(result) => DaemonInvocationResponse::with_outcome(
@@ -177,19 +176,15 @@ pub(super) async fn execute_source_edit_rollback(
     }
 }
 
-fn map_source_edit_error(request_id: String, error: TraceDecayError) -> DaemonInvocationResponse {
-    let message = error.to_string();
-    if message.contains("warming") {
-        return runtime_mounting_problem(request_id);
-    }
-    if message.contains("failed to publish") {
-        return runtime_publication_failed_problem(request_id);
-    }
-    if message.contains("not found or is not authorized") {
-        return concealed_application_problem(request_id);
-    }
-    if message.contains("invocation contract is invalid") {
-        return application_problem(
+fn map_source_edit_error(
+    request_id: String,
+    error: SourceEditOwnerError,
+) -> DaemonInvocationResponse {
+    match error {
+        SourceEditOwnerError::Warming => runtime_mounting_problem(request_id),
+        SourceEditOwnerError::PublicationFailed => runtime_publication_failed_problem(request_id),
+        SourceEditOwnerError::NotAuthorized => concealed_application_problem(request_id),
+        SourceEditOwnerError::InvalidContract => application_problem(
             request_id,
             ApplicationProblem::InvalidRequest {
                 diagnostic: tracedecay_contracts::SafeDiagnostic {
@@ -200,7 +195,53 @@ fn map_source_edit_error(request_id: String, error: TraceDecayError) -> DaemonIn
                 retry: RetryDirective::Never,
                 legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
             },
+        ),
+        SourceEditOwnerError::Other(_) => concealed_application_problem(request_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_contracts::ApplicationProblemKind;
+    use tracedecay_domain::errors::TraceDecayError;
+
+    fn classified_kind(error: SourceEditOwnerError) -> ApplicationProblemKind {
+        match map_source_edit_error("request.source-edit.classify".to_owned(), error).outcome {
+            DaemonInvocationOutcome::ApplicationProblem { problem } => problem.kind(),
+            outcome => {
+                panic!("source-edit refusals must stay application problems, got {outcome:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn source_edit_refusal_classification_follows_typed_state_not_message_text() {
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::Warming),
+            ApplicationProblemKind::Unavailable
+        );
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::PublicationFailed),
+            ApplicationProblemKind::ExecutionFailed
+        );
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::NotAuthorized),
+            ApplicationProblemKind::NotFoundOrNotAuthorized
+        );
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::InvalidContract),
+            ApplicationProblemKind::InvalidRequest
+        );
+
+        let reworded = SourceEditOwnerError::Other(TraceDecayError::Config {
+            message: "warming failed to publish not found or is not authorized invocation contract is invalid"
+                .to_owned(),
+        });
+        assert_eq!(
+            classified_kind(reworded),
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
+            "message text must not reclassify a typed Other refusal"
         );
     }
-    concealed_application_problem(request_id)
 }
