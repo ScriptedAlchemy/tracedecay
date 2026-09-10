@@ -255,6 +255,10 @@ impl FixtureRecords {
                 start_byte: 21,
                 end_byte: 89,
             },
+            start_line_zero_based: 6,
+            end_line_zero_based: 8,
+            line: 7,
+            end_line: 9,
             signature: Some("pub async fn run_query()".to_owned()),
             is_async: true,
         }
