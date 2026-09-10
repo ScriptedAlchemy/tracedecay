@@ -448,6 +448,7 @@ fn compiler_publication_report(
         } => json!({
             "status": "published",
             "generation": generation.as_str(),
+            "publication_revision": report.publication_revision,
             "inserted": report.inserted,
             "cleared": report.cleared,
             "unresolved": names(unresolved),

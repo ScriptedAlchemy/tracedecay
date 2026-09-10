@@ -305,7 +305,7 @@ impl<'a> DiagnosticsStore<'a> {
                 let mut rows = self
                     .conn
                     .query(
-                        "SELECT generation_id FROM diagnostic_generation_publications \
+                        "SELECT DISTINCT generation_id FROM diagnostic_generation_publications \
                  ORDER BY generation_id",
                         params![],
                     )
@@ -419,17 +419,17 @@ impl<'a> DiagnosticsStore<'a> {
         generation: &CodeGenerationId,
         records: &[GenerationDiagnosticV1],
     ) -> Result<(u64, u64)> {
-        let (inserted, cleared, _) = self
+        let (inserted, cleared, _, _) = self
             .publish_clean_generation_with_disposition(generation, records)
             .await?;
         Ok((inserted, cleared))
     }
 
-    async fn publish_clean_generation_with_disposition(
+    pub(crate) async fn publish_clean_generation_with_disposition(
         &self,
         generation: &CodeGenerationId,
         records: &[GenerationDiagnosticV1],
-    ) -> Result<(u64, u64, bool)> {
+    ) -> Result<(u64, u64, bool, u64)> {
         let operation = "diagnostics publish_clean_generation";
         for record in records {
             record.validate().map_err(|error| {
@@ -478,7 +478,10 @@ impl<'a> DiagnosticsStore<'a> {
         let generation = generation.clone();
         hotpath::future!(
             self.with_immediate_tx(operation, move |store| Box::pin(async move {
-            if let Some(state) = store.generation_publication_state(&generation).await? {
+            let publication_revision = if let Some((revision, state)) = store
+                .latest_generation_publication(&generation)
+                .await?
+            {
                 if state != STATE_CURRENT {
                     return Err(db_message(
                         operation,
@@ -489,41 +492,36 @@ impl<'a> DiagnosticsStore<'a> {
                 }
                 let existing = store.current_records(&generation).await?;
                 if existing == records {
-                    return Ok((0, 0, true));
+                    return Ok((0, 0, true, revision));
                 }
-                return Err(db_message(
-                    operation,
-                    format!(
-                        "generation {generation} already has a different immutable diagnostic snapshot"
-                    ),
-                ));
-            }
+                revision.checked_add(1).ok_or_else(|| {
+                    db_message(operation, format!("diagnostic publication revision overflow for {generation}"))
+                })?
+            } else {
+                1
+            };
 
-            if !records.is_empty() {
-                let placeholders = (1..=records.len())
-                    .map(|index| format!("?{index}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+            for record in &records {
                 let mut rows = store
                     .conn
                     .query(
-                        &format!(
-                            "SELECT diagnostic_anchor FROM generation_diagnostics \
-                             WHERE diagnostic_anchor IN ({placeholders})"
-                        ),
-                        records
-                            .iter()
-                            .map(|record| record.diagnostic_anchor.as_str().to_owned())
-                            .collect::<Vec<_>>(),
+                        "SELECT generation_id FROM generation_diagnostics
+                         WHERE diagnostic_anchor = ?1 AND generation_id != ?2 LIMIT 1",
+                        params![record.diagnostic_anchor.as_str(), generation.as_str()],
                     )
                     .await
-                    .map_err(|e| db_error(operation, e))?;
-                if let Some(row) = rows.next().await.map_err(|e| db_error(operation, e))? {
-                    let anchor = row.get::<String>(0).map_err(|e| db_error(operation, e))?;
+                    .map_err(|error| db_error(operation, error))?;
+                if rows
+                    .next()
+                    .await
+                    .map_err(|error| db_error(operation, error))?
+                    .is_some()
+                {
                     return Err(db_message(
                         operation,
                         format!(
-                            "diagnostic anchor {anchor} is already bound to an immutable record"
+                            "diagnostic anchor {} is already bound to another generation",
+                            record.diagnostic_anchor
                         ),
                     ));
                 }
@@ -534,7 +532,12 @@ impl<'a> DiagnosticsStore<'a> {
                 .execute(
                     "UPDATE generation_diagnostics
                      SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = ?3 AND generation_id != ?2",
+                     WHERE record_state = ?3 AND generation_id != ?2
+                     AND (generation_id, publication_revision) IN (
+                       SELECT generation_id, publication_revision
+                       FROM diagnostic_generation_publications
+                       WHERE record_state = ?3
+                     )",
                     params![STATE_CLEARED, generation.as_str(), STATE_CURRENT],
                 )
                 .await
@@ -544,29 +547,31 @@ impl<'a> DiagnosticsStore<'a> {
                 .execute(
                     "UPDATE diagnostic_generation_publications
                      SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = ?3 AND generation_id != ?2",
+                     WHERE record_state = ?3",
                     params![STATE_CLEARED, generation.as_str(), STATE_CURRENT],
                 )
                 .await
                 .map_err(|e| db_error(operation, e))?;
 
             for record in &records {
-                store.insert_record(record).await?;
+                store.insert_record(publication_revision, record).await?;
             }
             store.conn
                 .execute(
                     "INSERT INTO diagnostic_generation_publications (
-                        generation_id, record_state, state_generation, published_at
-                     ) VALUES (?1, ?2, NULL, ?3)",
+                        generation_id, publication_revision, record_state,
+                        state_generation, published_at
+                     ) VALUES (?1, ?2, ?3, NULL, ?4)",
                     params![
                         generation.as_str(),
+                        publication_revision,
                         STATE_CURRENT,
                         current_timestamp()
                     ],
                 )
                 .await
                 .map_err(|e| db_error(operation, e))?;
-            Ok((records.len() as u64, cleared, false))
+            Ok((records.len() as u64, cleared, false, publication_revision))
         })),
             label = "usecases.diagnostics_store.publish"
         )
@@ -598,7 +603,11 @@ impl<'a> DiagnosticsStore<'a> {
                         .execute(
                             "UPDATE generation_diagnostics
                      SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = ?3 AND generation_id = ?4",
+                     WHERE record_state = ?3 AND generation_id = ?4
+                     AND publication_revision = (
+                       SELECT publication_revision FROM diagnostic_generation_publications
+                       WHERE generation_id = ?4 AND record_state = ?3
+                     )",
                             params![
                                 STATE_SUPERSEDED,
                                 successor_generation.as_str(),
@@ -680,7 +689,7 @@ impl<'a> DiagnosticsStore<'a> {
         .await
     }
 
-    /// All records bound to `generation`, any state, ordered by anchor.
+    /// Records in the latest immutable publication for `generation`, ordered by anchor.
     pub async fn records_for_generation(
         &self,
         generation: &CodeGenerationId,
@@ -690,6 +699,39 @@ impl<'a> DiagnosticsStore<'a> {
             label = "usecases.diagnostics_store.records_for_generation"
         )
         .await
+    }
+
+    /// Records in one exact immutable publication of `generation`.
+    pub async fn records_for_publication(
+        &self,
+        generation: &CodeGenerationId,
+        publication_revision: u64,
+    ) -> Result<Vec<GenerationDiagnosticV1>> {
+        let operation = "diagnostics records_for_publication";
+        if publication_revision == 0 {
+            return Err(db_message(
+                operation,
+                "diagnostic publication revision must be positive",
+            ));
+        }
+        let revision = i64::try_from(publication_revision).map_err(|_| {
+            db_message(
+                operation,
+                "diagnostic publication revision exceeds SQLite range",
+            )
+        })?;
+        let mut rows = self
+            .conn
+            .query(
+                &format!(
+                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = ?2 \
+                     ORDER BY diagnostic_anchor"
+                ),
+                params![generation.as_str(), revision],
+            )
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        collect_rows(&mut rows, operation).await
     }
 
     /// Current records bound to `generation` — the only set eligible for
@@ -726,6 +768,9 @@ impl<'a> DiagnosticsStore<'a> {
                     (None, None) => (
                         format!(
                             "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?1 \
+                     AND record_state = 'current') \
                      ORDER BY diagnostic_anchor LIMIT ?3"
                         ),
                         params![generation.as_str(), STATE_CURRENT, fetch_limit],
@@ -733,6 +778,9 @@ impl<'a> DiagnosticsStore<'a> {
                     (None, Some(anchor)) => (
                         format!(
                             "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?1 \
+                     AND record_state = 'current') \
                      AND diagnostic_anchor > ?3 ORDER BY diagnostic_anchor LIMIT ?4"
                         ),
                         params![generation.as_str(), STATE_CURRENT, anchor, fetch_limit],
@@ -740,6 +788,9 @@ impl<'a> DiagnosticsStore<'a> {
                     (Some(file), None) => (
                         format!(
                             "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?2 \
+                     AND record_state = 'current') \
                      AND record_state = ?3 ORDER BY diagnostic_anchor LIMIT ?4"
                         ),
                         params![
@@ -752,6 +803,9 @@ impl<'a> DiagnosticsStore<'a> {
                     (Some(file), Some(anchor)) => (
                         format!(
                             "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?2 \
+                     AND record_state = 'current') \
                      AND record_state = ?3 AND diagnostic_anchor > ?4 \
                      ORDER BY diagnostic_anchor LIMIT ?5"
                         ),
@@ -776,12 +830,17 @@ impl<'a> DiagnosticsStore<'a> {
                 let (count_sql, count_params) = match file_occurrence_id {
                     None => (
                         "SELECT COUNT(*) FROM generation_diagnostics \
-                 WHERE generation_id = ?1 AND record_state = ?2",
+                 WHERE generation_id = ?1 AND record_state = ?2 AND publication_revision = (\
+                 SELECT publication_revision FROM diagnostic_generation_publications \
+                 WHERE generation_id = ?1 AND record_state = 'current')",
                         params![generation.as_str(), STATE_CURRENT],
                     ),
                     Some(file) => (
                         "SELECT COUNT(*) FROM generation_diagnostics \
-                 WHERE file_occurrence_id = ?1 AND generation_id = ?2 AND record_state = ?3",
+                 WHERE file_occurrence_id = ?1 AND generation_id = ?2 AND record_state = ?3 \
+                 AND publication_revision = (SELECT publication_revision FROM \
+                 diagnostic_generation_publications WHERE generation_id = ?2 \
+                 AND record_state = 'current')",
                         params![file.as_str(), generation.as_str(), STATE_CURRENT],
                     ),
                 };
@@ -821,7 +880,10 @@ impl<'a> DiagnosticsStore<'a> {
                     .query(
                         &format!(
                             "{SELECT_RECORDS} WHERE generation_id = ?1 AND file_occurrence_id = ?2 \
-                     AND record_state = ?3 ORDER BY diagnostic_anchor"
+                     AND record_state = ?3 AND publication_revision = (SELECT \
+                     publication_revision FROM diagnostic_generation_publications \
+                     WHERE generation_id = ?1 AND record_state = 'current') \
+                     ORDER BY diagnostic_anchor"
                         ),
                         params![
                             generation.as_str(),
@@ -852,6 +914,8 @@ impl<'a> DiagnosticsStore<'a> {
                     .query(
                         &format!(
                             "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state != ?2 \
+                     AND publication_revision = (SELECT MAX(publication_revision) FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?1) \
                      ORDER BY diagnostic_anchor"
                         ),
                         params![generation.as_str(), STATE_CURRENT],
@@ -876,7 +940,16 @@ impl<'a> DiagnosticsStore<'a> {
                 let mut rows = self
                     .conn
                     .query(
-                        &format!("{SELECT_RECORDS} WHERE diagnostic_anchor = ?1"),
+                        &format!(
+                            "{SELECT_RECORDS} WHERE diagnostic_anchor = ?1 \
+                             ORDER BY CASE WHEN EXISTS (SELECT 1 FROM \
+                             diagnostic_generation_publications AS publication WHERE \
+                             publication.generation_id = generation_diagnostics.generation_id \
+                             AND publication.publication_revision = \
+                             generation_diagnostics.publication_revision AND \
+                             publication.record_state = 'current') THEN 0 ELSE 1 END, \
+                             publication_revision DESC LIMIT 1"
+                        ),
                         params![anchor.as_str()],
                     )
                     .await
@@ -921,13 +994,18 @@ impl<'a> DiagnosticsStore<'a> {
     }
 
     #[hotpath::measure(label = "usecases.diagnostics_store.insert_record", future = true)]
-    async fn insert_record(&self, record: &GenerationDiagnosticV1) -> Result<()> {
+    async fn insert_record(
+        &self,
+        publication_revision: u64,
+        record: &GenerationDiagnosticV1,
+    ) -> Result<()> {
         let operation = "diagnostics insert_record";
         let (state, state_generation) = state_columns(&record.state);
         self.conn
             .execute(
                 "INSERT INTO generation_diagnostics (
-                    diagnostic_anchor, generation_id, repository, worktree, reference,
+                    diagnostic_anchor, generation_id, publication_revision,
+                    repository, worktree, reference,
                     source_revision, file_occurrence_id, content_digest, symbol_occurrence_id,
                     span_start, span_end, code, severity, message, message_digest,
                     producer_kind, producer, analyzer_revision, configuration_revision,
@@ -935,11 +1013,12 @@ impl<'a> DiagnosticsStore<'a> {
                     state_generation, persisted_at
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+                    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
                  )",
                 params![
                     record.diagnostic_anchor.as_str(),
                     record.generation_id.as_str(),
+                    publication_revision,
                     record.repository.as_str(),
                     record
                         .worktree
@@ -987,17 +1066,18 @@ impl<'a> DiagnosticsStore<'a> {
     }
 
     #[hotpath::measure(label = "usecases.diagnostics_store.publication_state", future = true)]
-    async fn generation_publication_state(
+    async fn latest_generation_publication(
         &self,
         generation: &CodeGenerationId,
-    ) -> Result<Option<String>> {
-        let operation = "diagnostics generation_publication_state";
+    ) -> Result<Option<(u64, String)>> {
+        let operation = "diagnostics latest_generation_publication";
         let mut rows = self
             .conn
             .query(
-                "SELECT record_state
+                "SELECT publication_revision, record_state
                  FROM diagnostic_generation_publications
-                 WHERE generation_id = ?1",
+                 WHERE generation_id = ?1
+                 ORDER BY publication_revision DESC LIMIT 1",
                 params![generation.as_str()],
             )
             .await
@@ -1005,7 +1085,14 @@ impl<'a> DiagnosticsStore<'a> {
         rows.next()
             .await
             .map_err(|e| db_error(operation, e))?
-            .map(|row| row.get::<String>(0).map_err(|e| db_error(operation, e)))
+            .map(|row| {
+                let revision = row.get::<i64>(0).map_err(|e| db_error(operation, e))?;
+                let revision = u64::try_from(revision).map_err(|_| {
+                    db_message(operation, "negative diagnostic publication revision")
+                })?;
+                let state = row.get::<String>(1).map_err(|e| db_error(operation, e))?;
+                Ok((revision, state))
+            })
             .transpose()
     }
 
@@ -1020,6 +1107,9 @@ impl<'a> DiagnosticsStore<'a> {
             Some(state) => (
                 format!(
                     "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?1 \
+                     AND record_state = 'current') \
                      ORDER BY diagnostic_anchor"
                 ),
                 vec![
@@ -1028,7 +1118,11 @@ impl<'a> DiagnosticsStore<'a> {
                 ],
             ),
             None => (
-                format!("{SELECT_RECORDS} WHERE generation_id = ?1 ORDER BY diagnostic_anchor"),
+                format!(
+                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = (\
+                     SELECT MAX(publication_revision) FROM diagnostic_generation_publications \
+                     WHERE generation_id = ?1) ORDER BY diagnostic_anchor"
+                ),
                 vec![Value::Text(generation.as_str().to_owned())],
             ),
         };
@@ -1051,7 +1145,9 @@ impl<'a> DiagnosticsStore<'a> {
             .conn
             .query(
                 &format!(
-                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND repository = ?2 \
+                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = (\
+                     SELECT MAX(publication_revision) FROM diagnostic_generation_publications \
+                     WHERE generation_id = ?1) AND repository = ?2 \
                      AND producer = ?3 AND code = ?4 AND file_occurrence_id = ?5 \
                      AND span_start = ?6 AND span_end = ?7 AND message_digest = ?8 \
                      ORDER BY diagnostic_anchor"
@@ -1089,7 +1185,7 @@ impl DiagnosticStorePort for DiagnosticsStore<'_> {
         snapshot: SanitizedCleanDiagnosticSnapshotV1,
     ) -> DiagnosticStoreResult<DiagnosticPublicationReceiptV1> {
         let (generation, records) = snapshot.into_parts();
-        let (inserted, cleared, exact_replay) = self
+        let (inserted, cleared, exact_replay, publication_revision) = self
             .publish_clean_generation_with_disposition(&generation, &records)
             .await
             .map_err(|error| port_error("publish_clean_diagnostics", error))?;
@@ -1100,6 +1196,7 @@ impl DiagnosticStorePort for DiagnosticsStore<'_> {
         };
         Ok(DiagnosticPublicationReceiptV1::new(
             generation,
+            publication_revision,
             inserted,
             cleared,
             disposition,
@@ -1121,6 +1218,16 @@ impl DiagnosticStorePort for DiagnosticsStore<'_> {
         self.records_for_generation(generation)
             .await
             .map_err(|error| port_error("diagnostics_for_generation", error))
+    }
+
+    async fn diagnostics_for_publication(
+        &self,
+        generation: &CodeGenerationId,
+        publication_revision: u64,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        self.records_for_publication(generation, publication_revision)
+            .await
+            .map_err(|error| port_error("diagnostics_for_publication", error))
     }
 
     async fn current_diagnostics(
@@ -1965,6 +2072,43 @@ mod tests {
             store.records_for_generation(&id(gen1)).await.unwrap(),
             vec![record]
         );
+    }
+
+    #[tokio::test]
+    async fn anchor_read_follows_current_publication_when_newer_observation_time_is_older() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let generation = id("generation.clean.revised");
+        let first = fixture_record("generation.clean.revised", "anchor.diagnostic.revised");
+        let mut second = first.clone();
+        second.collected_at = UtcMicros(first.collected_at.0 - 1);
+        second.provenance.configuration_revision = id("config.v2");
+
+        store
+            .publish_clean_generation(&generation, std::slice::from_ref(&first))
+            .await
+            .unwrap();
+        store
+            .publish_clean_generation(&generation, std::slice::from_ref(&second))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .record_by_anchor(&second.diagnostic_anchor)
+                .await
+                .unwrap(),
+            Some(second.clone()),
+            "anchor lookup must follow the current publication header"
+        );
+        assert_eq!(
+            store.records_for_publication(&generation, 1).await.unwrap(),
+            vec![first],
+            "the prior immutable publication must remain readable"
+        );
+        assert!(store.records_for_publication(&generation, 0).await.is_err());
     }
 
     #[tokio::test]
