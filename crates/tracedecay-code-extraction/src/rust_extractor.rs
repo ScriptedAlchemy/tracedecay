@@ -1,7 +1,10 @@
 /// Tree-sitter based Rust source code extractor.
 ///
 /// Parses Rust source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use tree_sitter::{Node as TsNode, Tree};
 
@@ -34,6 +37,7 @@ struct ExtractionState<'s> {
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     imports: Vec<ExtractedImportEvidenceV1>,
+    root_modules: BTreeMap<String, String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
@@ -53,6 +57,7 @@ impl<'s> ExtractionState<'s> {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             imports: Vec::new(),
+            root_modules: BTreeMap::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes(),
@@ -131,6 +136,7 @@ impl RustExtractor {
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        state.root_modules = Self::root_module_names(&state, tree.root_node());
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -659,34 +665,13 @@ impl RustExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
-        if node
+        let first_import = state.imports.len();
+        let top_level_argument = node
             .parent()
-            .is_some_and(|parent| parent.kind() == "source_file")
-            && let Some(argument) = node.child_by_field_name("argument")
-            && argument.kind() == "scoped_identifier"
-        {
-            let specifier = state.node_text(argument).to_owned();
-            if specifier.starts_with("crate::")
-                && let Some((module_specifier, imported_name)) = specifier.rsplit_once("::")
-                && !module_specifier.is_empty()
-                && !imported_name.is_empty()
-                && let Some(module_kind) = import_module_kind("rust", module_specifier)
-            {
-                state.imports.push(ExtractedImportEvidenceV1 {
-                    logical_path: state.file_path.clone(),
-                    module_specifier: module_specifier.to_owned(),
-                    imported_name: Some(imported_name.to_owned()),
-                    local_name: Some(imported_name.to_owned()),
-                    namespace: ImportNamespaceV1::Value,
-                    module_kind,
-                    span: SourceSpan {
-                        start_byte: argument.start_byte() as u64,
-                        end_byte: argument.end_byte() as u64,
-                    },
-                    start_line: argument.start_position().row as u32,
-                    start_column: argument.start_position().column as u32,
-                });
-            }
+            .filter(|parent| parent.kind() == "source_file")
+            .and_then(|_| node.child_by_field_name("argument"));
+        if let Some(argument) = top_level_argument {
+            Self::extract_use_bindings(state, argument, None);
         }
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
@@ -728,14 +713,178 @@ impl RustExtractor {
             });
         }
 
-        state.unresolved_refs.push(UnresolvedRef {
-            from_node_id: id,
-            reference_name: path,
-            reference_kind: EdgeKind::Uses,
-            line: start_line,
-            column: start_column,
-            file_path: state.file_path.clone(),
+        // Named bindings cannot account for wildcard members. Retain the original
+        // declaration as unresolved evidence rather than dropping those dependencies.
+        if top_level_argument.is_none() || state.imports.len() == first_import || path.contains('*')
+        {
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: id.clone(),
+                reference_name: path,
+                reference_kind: EdgeKind::Uses,
+                line: start_line,
+                column: start_column,
+                file_path: state.file_path.clone(),
+            });
+        }
+        if top_level_argument.is_some() {
+            for import in &state.imports[first_import..] {
+                if let Some(local_name) = import.local_name.as_deref() {
+                    if import.module_specifier == "self"
+                        && import.imported_name.as_deref() == Some(local_name)
+                        && state.root_modules.contains_key(local_name)
+                    {
+                        continue;
+                    }
+                    let from_node_id = Self::use_binding_anchor(state, import)
+                        .unwrap_or(id.as_str())
+                        .to_owned();
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id,
+                        reference_name: local_name.to_owned(),
+                        reference_kind: EdgeKind::Uses,
+                        line: import.start_line,
+                        column: import.start_column,
+                        file_path: state.file_path.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn extract_use_bindings(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        prefix: Option<&str>,
+    ) {
+        match node.kind() {
+            "scoped_use_list" => {
+                let path = node
+                    .child_by_field_name("path")
+                    .map(|path| state.node_text(path));
+                let combined = Self::join_use_path(prefix, path);
+                if let Some(list) = node.child_by_field_name("list") {
+                    Self::extract_use_bindings(state, list, combined.as_deref());
+                }
+            }
+            "use_list" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    Self::extract_use_bindings(state, child, prefix);
+                }
+            }
+            "use_as_clause" => {
+                let Some(path) = node.child_by_field_name("path") else {
+                    return;
+                };
+                let Some(alias) = node.child_by_field_name("alias") else {
+                    return;
+                };
+                let full_path = Self::join_use_path(prefix, Some(state.node_text(path)));
+                if let Some(full_path) = full_path {
+                    Self::push_use_binding(state, &full_path, state.node_text(alias), node);
+                }
+            }
+            "use_wildcard" => {}
+            _ => {
+                let full_path = Self::join_use_path(prefix, Some(state.node_text(node)));
+                if let Some(full_path) = full_path {
+                    let local_name = full_path.rsplit("::").next().unwrap_or(full_path.as_str());
+                    Self::push_use_binding(state, &full_path, local_name, node);
+                }
+            }
+        }
+    }
+
+    fn join_use_path(prefix: Option<&str>, path: Option<&str>) -> Option<String> {
+        match (prefix, path) {
+            (Some(prefix), Some("self")) => Some(prefix.to_owned()),
+            (Some(prefix), Some(path)) => Some(format!("{prefix}::{path}")),
+            (Some(prefix), None) => Some(prefix.to_owned()),
+            (None, Some(path)) if !path.is_empty() => Some(path.to_owned()),
+            (None, _) => None,
+        }
+    }
+
+    fn push_use_binding(
+        state: &mut ExtractionState<'_>,
+        full_path: &str,
+        local_name: &str,
+        evidence_node: TsNode<'_>,
+    ) {
+        let (module_specifier, imported_name) = match full_path.rsplit_once("::") {
+            Some(parts) => parts,
+            None if Self::declares_module(state, full_path) => ("self", full_path),
+            None => return,
+        };
+        let module_specifier = Self::canonical_rust_import_module(state, module_specifier);
+        let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
+            return;
+        };
+        state.imports.push(ExtractedImportEvidenceV1 {
+            logical_path: state.file_path.clone(),
+            module_specifier,
+            imported_name: Some(imported_name.to_owned()),
+            local_name: Some(local_name.to_owned()),
+            namespace: ImportNamespaceV1::Value,
+            module_kind,
+            span: SourceSpan {
+                start_byte: evidence_node.start_byte() as u64,
+                end_byte: evidence_node.end_byte() as u64,
+            },
+            start_line: evidence_node.start_position().row as u32,
+            start_column: evidence_node.start_position().column as u32,
         });
+    }
+
+    fn canonical_rust_import_module(state: &ExtractionState<'_>, module: &str) -> String {
+        let first = module.split("::").next().unwrap_or(module);
+        if matches!(first, "crate" | "self" | "super") || !Self::declares_module(state, first) {
+            module.to_owned()
+        } else {
+            format!("self::{module}")
+        }
+    }
+
+    fn declares_module(state: &ExtractionState<'_>, name: &str) -> bool {
+        state.root_modules.contains_key(name)
+    }
+
+    fn use_binding_anchor<'a>(
+        state: &'a ExtractionState<'_>,
+        import: &ExtractedImportEvidenceV1,
+    ) -> Option<&'a str> {
+        let module = import
+            .module_specifier
+            .strip_prefix("self::")
+            .and_then(|path| path.split("::").next())
+            .or_else(|| {
+                (import.module_specifier == "self")
+                    .then(|| import.imported_name.as_deref())
+                    .flatten()
+            })?;
+        state.root_modules.get(module).map(String::as_str)
+    }
+
+    fn root_module_names(
+        state: &ExtractionState<'_>,
+        root: TsNode<'_>,
+    ) -> BTreeMap<String, String> {
+        let mut cursor = root.walk();
+        root.named_children(&mut cursor)
+            .filter(|child| child.kind() == "mod_item")
+            .filter_map(|child| {
+                let name = child.child_by_field_name("name")?;
+                let name = state.node_text(name).to_owned();
+                let id = local_node_id(
+                    &state.file_path,
+                    state.source,
+                    &NodeKind::Module,
+                    &name,
+                    child,
+                );
+                Some((name, id))
+            })
+            .collect()
     }
 
     /// Extract a const item node.
