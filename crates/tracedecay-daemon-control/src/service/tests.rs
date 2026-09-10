@@ -656,12 +656,17 @@ fn serve_counted_authenticated_probe(
 /// `listener`, answering `versions[n]` on the n-th completed identity
 /// exchange (the last entry repeats once the list is exhausted). Every
 /// readiness connection must carry its authenticated initialize request.
-/// Returns the count of identity responses served, which lets tests prove the
-/// readiness wait actually consulted the daemon.
+/// Returns the served count plus a channel that fires after each successful
+/// write-and-increment so tests can wait on that acknowledgement instead of
+/// racing the increment that follows the identity response (f92ced4acc).
 #[cfg(target_os = "linux")]
-fn serve_identity_probes(listener: UnixListener, versions: Vec<&'static str>) -> Arc<AtomicUsize> {
+fn serve_identity_probes(
+    listener: UnixListener,
+    versions: Vec<&'static str>,
+) -> (Arc<AtomicUsize>, std::sync::mpsc::Receiver<usize>) {
     let served = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&served);
+    let (acknowledged, acknowledgements) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else {
@@ -699,11 +704,12 @@ fn serve_identity_probes(listener: UnixListener, versions: Vec<&'static str>) ->
                 }
             });
             if writeln!(stream, "{response}").is_ok() {
-                count.fetch_add(1, Ordering::SeqCst);
+                let served_count = count.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = acknowledged.send(served_count);
             }
         }
     });
-    served
+    (served, acknowledgements)
 }
 
 #[cfg(unix)]
@@ -1893,7 +1899,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     )
     .expect("refresh service");
     let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
-    let _served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
+    let (_served, _) = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
     super::restore_installed_service_after_update_with_runner(
         &runner,
         previous_state,
@@ -2025,7 +2031,7 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     );
     std::fs::write(&service_path, &original_unit).expect("existing service unit");
     let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
-    let served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
+    let (served, acknowledged) = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
 
     super::restore_installed_service_after_update_with_runner(
         &runner,
@@ -2034,6 +2040,9 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     )
     .expect("restore service");
 
+    acknowledged
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("identity probe ack");
     assert_eq!(
         std::fs::read_to_string(service_path).expect("service unit"),
         original_unit
@@ -2213,7 +2222,8 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     // The first identity answer is a stale daemon; restore must keep polling
     // until the expected version answers instead of trusting the systemctl
     // exit status.
-    let served = serve_identity_probes(listener, vec!["0.0.0-stale", TEST_BUILD_VERSION]);
+    let (served, acknowledged) =
+        serve_identity_probes(listener, vec!["0.0.0-stale", TEST_BUILD_VERSION]);
 
     super::restore_installed_service_after_update(
         DaemonServiceState::RunningEnabled,
@@ -2221,6 +2231,12 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     )
     .expect("restore must succeed once the daemon answers the expected identity");
 
+    acknowledged
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("identity probe ack");
+    acknowledged
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("identity probe ack");
     assert_eq!(
         served.load(Ordering::SeqCst),
         2,
@@ -2269,10 +2285,13 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
     )
     .expect("existing service unit");
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
-    let served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
+    let (served, acknowledged) = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
 
     super::start_service(TEST_BUILD_VERSION).expect("start service");
 
+    acknowledged
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("identity probe ack");
     let commands = std::fs::read_to_string(log).expect("systemctl log");
     assert!(
         systemctl_log_contains_sequence(
@@ -2321,7 +2340,7 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     )
     .expect("existing service unit");
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
-    let _served = serve_identity_probes(listener, vec!["0.0.0-stale"]);
+    let (_served, _) = serve_identity_probes(listener, vec!["0.0.0-stale"]);
 
     let error = super::wait_for_installed_service_state_with(
         &runner,
