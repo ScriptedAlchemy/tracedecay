@@ -21104,7 +21104,7 @@
     },
     "WorkAttemptRecoveryReportV1": {
       "additionalProperties": false,
-      "description": "What resume-after-restart did to each open attempt.",
+      "description": "What restart recovery did to each open attempt.\n\nThis report never claims that a provider resumed. An attempt in\n`recovery_required` remains fenced under its original identity. This report\ndoes not authorize another launch; an explicit `retry_attempt` must verify\nthe exact recovery fence and effect safety before it can atomically admit a\nnew identity.",
       "properties": {
         "cancelled": {
           "description": "Attempts whose in-flight cancellation was completed during recovery.",
@@ -21114,7 +21114,7 @@
           "type": "array"
         },
         "recovery_required": {
-          "description": "Attempts fenced onto a new epoch and now awaiting recovery execution.",
+          "description": "Attempts fenced onto a new epoch and awaiting an explicit recovery\ndecision.",
           "items": {
             "$ref": "#/$defs/WorkAttemptV1"
           },
@@ -26357,6 +26357,9 @@
         {
           "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
           "properties": {
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
             "reason": {
               "$ref": "#/$defs/WorkRestartReasonV1"
             },
@@ -26379,7 +26382,8 @@
           "required": [
             "state",
             "source_attempt_id",
-            "reason"
+            "reason",
+            "observed_at"
           ],
           "type": "object"
         }
@@ -26512,7 +26516,8 @@
     },
     "WorkRetryCauseV1": {
       "enum": [
-        "runtime_failure"
+        "runtime_failure",
+        "restart_recovery_required"
       ],
       "type": "string"
     },
@@ -28674,6 +28679,38 @@
         },
         {
           "properties": {
+            "planned_attempt": {
+              "$ref": "#/$defs/WorkAttemptIdentityV1"
+            },
+            "prior_attempt": {
+              "$ref": "#/$defs/WorkAttemptIdentityV1"
+            },
+            "replacement_attempt": {
+              "$ref": "#/$defs/WorkAttemptIdentityV1"
+            },
+            "retry_receipt_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "step_id": {
+              "$ref": "#/$defs/WorkflowStepId"
+            },
+            "type": {
+              "const": "fan_out_child_retry_rebound",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "step_id",
+            "planned_attempt",
+            "prior_attempt",
+            "replacement_attempt",
+            "retry_receipt_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "placement": {
               "$ref": "#/$defs/WorkflowPlacementReceipt"
             },
@@ -28811,6 +28848,12 @@
     "WorkflowRunProjection": {
       "additionalProperties": false,
       "properties": {
+        "active_fan_out_attempts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkAttemptIdentityV1"
+          },
+          "type": "object"
+        },
         "definition": {
           "$ref": "#/$defs/WorkflowDefinition"
         },
@@ -28875,6 +28918,7 @@
         "fan_out_plans",
         "released_fan_out_attempts",
         "settled_fan_out_attempts",
+        "active_fan_out_attempts",
         "history"
       ],
       "type": "object"

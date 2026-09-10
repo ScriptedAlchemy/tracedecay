@@ -5174,7 +5174,13 @@ export const WorkAttemptReceiptV1Schema = z.object({
 }).strict();
 export type WorkAttemptReceiptV1 = z.infer<typeof WorkAttemptReceiptV1Schema>;
 
-/** What resume-after-restart did to each open attempt. */
+/** What restart recovery did to each open attempt.
+
+This report never claims that a provider resumed. An attempt in
+`recovery_required` remains fenced under its original identity. This report
+does not authorize another launch; an explicit `retry_attempt` must verify
+the exact recovery fence and effect safety before it can atomically admit a
+new identity. */
 export const WorkAttemptRecoveryReportV1Schema = z.object({
   cancelled: z.array(z.lazy(() => WorkAttemptV1Schema)),
   recovery_required: z.array(z.lazy(() => WorkAttemptV1Schema)),
@@ -5886,6 +5892,13 @@ export const WorkflowRunEventKindSchema = z.discriminatedUnion("type", [z.object
 }), z.object({
   type: z.literal("cancelled"),
 }), z.object({
+  planned_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  prior_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  replacement_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  retry_receipt_digest: z.lazy(() => ManifestDigestSchema),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  type: z.literal("fan_out_child_retry_rebound"),
+}), z.object({
   attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
   step_id: z.lazy(() => WorkflowStepIdSchema),
   type: z.literal("fan_out_children_released"),
@@ -5920,6 +5933,7 @@ export const WorkflowRunGetRequestSchema = z.object({
 export type WorkflowRunGetRequest = z.infer<typeof WorkflowRunGetRequestSchema>;
 
 export const WorkflowRunProjectionSchema = z.object({
+  active_fan_out_attempts: z.record(z.lazy(() => WorkAttemptIdentityV1Schema)),
   definition: z.lazy(() => WorkflowDefinitionSchema),
   fan_out_plans: z.record(z.lazy(() => WorkflowFanOutPlanV1Schema)),
   history: z.array(z.lazy(() => WorkflowRunEventSchema)),
@@ -6798,6 +6812,7 @@ export type WorkRankedRouteV1 = z.infer<typeof WorkRankedRouteV1Schema>;
 export const WorkRecoveryStateV1Schema = z.discriminatedUnion("state", [z.object({
   state: z.literal("fresh"),
 }), z.object({
+  observed_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRestartReasonV1Schema),
   source_attempt_id: z.union([z.lazy(() => AttemptIdSchema), z.null()]),
   state: z.literal("recovery_required"),
@@ -6844,7 +6859,7 @@ export const WorkRetryAttemptOutcomeV1Schema = z.discriminatedUnion("outcome", [
 }).strict()]);
 export type WorkRetryAttemptOutcomeV1 = z.infer<typeof WorkRetryAttemptOutcomeV1Schema>;
 
-export const WorkRetryCauseV1Schema = z.literal("runtime_failure");
+export const WorkRetryCauseV1Schema = z.enum(["restart_recovery_required", "runtime_failure"]);
 export type WorkRetryCauseV1 = z.infer<typeof WorkRetryCauseV1Schema>;
 
 /** A selector into the owning runtime-terminal evidence authority.
