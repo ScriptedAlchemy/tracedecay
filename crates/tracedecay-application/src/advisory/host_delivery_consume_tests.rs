@@ -33,8 +33,8 @@ use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
     FeedbackCycleRuntimeSnapshotV1, FeedbackDiagnosticBaselineIdentityV1,
     FeedbackDiagnosticBaselineV1, FeedbackDiagnosticProducerV1, FeedbackDiagnosticV1,
-    FeedbackImpactStateV1, FeedbackImpactV1, FeedbackScopeV1, FeedbackTargetV1, FeedbackTriggerV1,
-    ProviderEvaluationStateV1,
+    FeedbackDurabilityV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackScopeV1,
+    FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ComponentVersion, ContentDigest, FileOccurrenceId,
@@ -62,7 +62,6 @@ use super::{
     new_advisory_hook_delivery_port,
 };
 use crate::advisory::{AdvisoryContributionsV1, AdvisoryCycleOutcome};
-use crate::feedback::CanonicalFeedbackResultV1;
 use crate::feedback::concrete::{FeedbackRuntime, open_feedback_runtime};
 use crate::lsp_runtime::DaemonLspSessionFactory;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
@@ -133,6 +132,9 @@ fn source_access(
     operation: &ApplicationOperation,
     now: UtcMicros,
 ) -> ProjectSourceAccessSnapshot {
+    let list = feedback_surface_operation("feedback_list")
+        .expect("feedback catalog")
+        .expect("feedback list operation");
     ProjectSourceAccessSnapshot {
         scope: scope.clone(),
         requester: ActorId::new("actor.advisory-host-delivery").expect("requester"),
@@ -149,7 +151,10 @@ fn source_access(
         .expect("configuration revision"),
         configuration_digest: digest('a'),
         configuration_provenance_digest: digest('b'),
-        effective_capabilities: BTreeSet::from([operation.capability_id().clone()]),
+        effective_capabilities: BTreeSet::from([
+            operation.capability_id().clone(),
+            list.capability_id().clone(),
+        ]),
         grant_expires_at: UtcMicros(now.0.saturating_add(60_000_000)),
     }
 }
@@ -539,10 +544,12 @@ async fn consume_fixture() -> ConsumeFixture {
         "a durable saved-content cycle must record its shared-store publication"
     );
     let completed = AdvisoryCycleOutcome::Completed {
-        cycle: CanonicalFeedbackResultV1 {
+        cycle: crate::feedback::cycle_runtime::compose_canonical_result(
+            &runtime,
             execution,
-            finding_handles: Vec::new(),
-        },
+            FeedbackDurabilityV1::Durable,
+        )
+        .expect("canonical feedback result"),
         contributions: AdvisoryContributionsV1::absent(),
         observation_input,
     };
@@ -576,6 +583,77 @@ async fn completed_publication_is_consumed_into_exactly_one_hook_notice() {
         .publication()
         .expect("recorded publication")
         .clone();
+    let AdvisoryCycleOutcome::Completed { cycle, .. } = &fixture.completed else {
+        panic!("fixture must complete");
+    };
+    let read_handles = cycle
+        .read_handles
+        .as_ref()
+        .expect("published cycle read handles");
+    assert!(cycle.finding_handles.is_empty());
+    let observed_at = now_micros();
+    let diagnostics = fixture
+        .registration
+        .feedback_owner
+        .invoke(
+            crate::feedback::owner::FeedbackReadOperationV1::Diagnostics,
+            &read_handles.diagnostics_handle,
+            observed_at,
+        )
+        .await
+        .expect("read published diagnostics");
+    assert!(matches!(
+        diagnostics,
+        crate::feedback::owner::FeedbackReadInvocationResultV1::Diagnostics(Ok(_))
+    ));
+    let deadline = Deadline::new(UtcMicros(observed_at.0.saturating_add(5_000_000)))
+        .expect("projection deadline");
+    let impact = fixture
+        .registration
+        .feedback_owner
+        .invoke_projection_with_controls(
+            crate::feedback::owner::FeedbackCanonicalProjectionKindV1::Impact,
+            &read_handles.diagnostics_handle,
+            observed_at,
+            deadline.clone(),
+            CancellationContext::active("cancel.feedback-impact").expect("cancellation"),
+        )
+        .await
+        .expect("project published impact");
+    assert!(matches!(
+        impact,
+        crate::feedback::owner::FeedbackReadInvocationResultV1::Impact(Ok(_))
+    ));
+    let affected_tests = fixture
+        .registration
+        .feedback_owner
+        .invoke_projection_with_controls(
+            crate::feedback::owner::FeedbackCanonicalProjectionKindV1::AffectedTests,
+            &read_handles.diagnostics_handle,
+            observed_at,
+            deadline,
+            CancellationContext::active("cancel.feedback-tests").expect("cancellation"),
+        )
+        .await
+        .expect("project published affected tests");
+    assert!(matches!(
+        affected_tests,
+        crate::feedback::owner::FeedbackReadInvocationResultV1::AffectedTests(Ok(_))
+    ));
+    let listed = fixture
+        .registration
+        .feedback_owner
+        .invoke(
+            crate::feedback::owner::FeedbackReadOperationV1::List,
+            &read_handles.list_handle,
+            observed_at,
+        )
+        .await
+        .expect("list published findings");
+    assert!(matches!(
+        listed,
+        crate::feedback::owner::FeedbackReadInvocationResultV1::List(Ok(_))
+    ));
 
     let first = fixture
         .registration
