@@ -345,6 +345,22 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             }
         };
+        if let Some(generation) = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|generation| {
+                generation.generation.manifest().generation_id == *generation_id
+                    && latest_matches_scope_identity(generation, scope)
+            })
+            .cloned()
+        {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
+            return finish_generation_resolution(GenerationResolutionSettlementV1::Completed(Ok(
+                Some(generation),
+            )));
+        }
         let scope = scope.clone();
         let generation_id = generation_id.clone();
         let terminal_control = control.clone();
@@ -357,20 +373,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 .and_then(super::branch_generations::BranchGenerationReadControlV1::termination)
             {
                 return Err(reason);
-            }
-            if let Some(generation) = serving_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .filter(|generation| {
-                    generation.generation.manifest().generation_id == generation_id
-                        && latest_matches_scope_identity(generation, &scope)
-                })
-                .cloned()
-            {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
-                return Ok(Some(generation));
             }
             #[cfg(feature = "hotpath")]
             hotpath::gauge!("query.generation.resolve.durable_load_total").inc(1_u64);
