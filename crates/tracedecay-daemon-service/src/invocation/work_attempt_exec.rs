@@ -17,7 +17,7 @@
 //! explicitly allows that fallback." The plan index adds that the fallback is
 //! "reported rather than hidden".
 //!
-//! [`select_provider`] is that gate. Three properties hold by construction:
+//! [`select_with_resolver`] is that gate. Three properties hold by construction:
 //!
 //! * **Preference.** A `CodexAppServer` snapshot resolves the app-server
 //!   binding first and runs the JSON-RPC transport when it resolves.
@@ -77,7 +77,7 @@ use tracedecay_sessions::runtime::codex_app_server::{
 };
 
 use tracedecay_configuration::config::work_executable_binding::{
-    PinnedWorkExecutableBindingResolver, WorkExecutableBindingError, WorkExecutableBindingResolver,
+    WorkExecutableBindingError, WorkExecutableBindingResolver,
 };
 
 use super::types::RegisteredWorkRuntime;
@@ -438,7 +438,6 @@ pub(super) fn spawn_attempt_execution(
         };
         run_attempt(
             registered.clone(),
-            project_root.clone(),
             attempt,
             admitted_environment,
             cancel,
@@ -459,7 +458,6 @@ pub(super) fn spawn_attempt_execution(
 #[hotpath::measure(label = "daemon.service.work_attempt.run", future = true)]
 async fn run_attempt(
     registered: RegisteredWorkRuntime,
-    project_root: PathBuf,
     attempt: WorkAttemptV1,
     admitted_environment: BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
@@ -504,7 +502,10 @@ async fn run_attempt(
         }
     };
 
-    match select_provider(&project_root, &attempt) {
+    match select_with_resolver(
+        &registered.proposal_routing.executable_binding_resolver,
+        &attempt,
+    ) {
         Ok(selection) => match selection.provider.protocol {
             WorkProviderProtocol::CodexAppServerJsonRpc => {
                 execute_app_server(
@@ -616,18 +617,6 @@ fn provider_arguments(
         // total without inventing a route.
         _ => None,
     }
-}
-
-fn select_provider(
-    project_root: &std::path::Path,
-    attempt: &WorkAttemptV1,
-) -> Result<ProviderSelection, ProviderDenial> {
-    let configuration =
-        tracedecay_configuration::config::cached_pinned_runtime_configuration(project_root)
-            .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
-    let resolver = PinnedWorkExecutableBindingResolver::from_configuration(&configuration)
-        .map_err(|error| ProviderDenial::preferred(availability_state(error)))?;
-    select_with_resolver(&resolver, attempt)
 }
 
 /// The preference gate proper, over an already-built binding authority.

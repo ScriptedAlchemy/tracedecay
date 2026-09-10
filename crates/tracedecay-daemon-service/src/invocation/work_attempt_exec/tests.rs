@@ -29,6 +29,7 @@ use tracedecay_domain::configuration::{
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
 };
 
+use tracedecay_configuration::config::work_executable_binding::PinnedWorkExecutableBindingResolver;
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 use tracedecay_global_db::configuration::resolver::{ConfigurationLayerV1, resolve_configuration};
@@ -1765,46 +1766,6 @@ fn every_pinned_backend_protocol_pair_maps_onto_a_transport() {
         )
         .is_none()
     );
-}
-
-/// A configuration that cannot be resolved at all denies every backend with a
-/// transport-level state, and never with `Unsupported` — `Unsupported` is
-/// reserved for a pairing the runtime genuinely does not admit.
-#[test]
-fn an_unresolvable_configuration_denies_every_backend_without_claiming_unsupported() {
-    let directory = tempfile::TempDir::new().unwrap();
-    let root = directory.path();
-    let unresolvable_root = root.join("absent-project-root");
-
-    for backend in [
-        WorkProviderBackendV1::ClaudeCodeCli,
-        WorkProviderBackendV1::CodexAppServer,
-        WorkProviderBackendV1::CodexCli,
-    ] {
-        let fixture = leased_attempt(
-            root,
-            "Unresolvable configuration.",
-            &SnapshotShape {
-                backend,
-                ..SnapshotShape::default()
-            },
-        );
-        let denial = select_provider(&unresolvable_root, &fixture.attempt)
-            .err()
-            .expect("a fixture executable binding never resolves");
-        assert_ne!(
-            denial.state,
-            WorkProviderAvailabilityV1::Unsupported,
-            "backend {backend:?} is an admitted pairing"
-        );
-        assert!(denial.fallback.is_none());
-        // Nothing was started, so the lease is untouched.
-        assert_eq!(fixture.state(), WorkAttemptStateV1::Leased);
-        assert_eq!(
-            fixture.rows.observed_states(),
-            vec![WorkAttemptStateV1::Leased]
-        );
-    }
 }
 
 /// The gate's `provider_arguments` catch-all can only ever see a crossed pair:
