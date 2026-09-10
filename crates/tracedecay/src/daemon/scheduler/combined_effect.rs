@@ -891,8 +891,6 @@ mod tests {
             let retained_ports = crate::daemon::retained_owner::retained_surface_ports(
                 crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
                     cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&memory))),
-                    store_runtime_registry: memory.retained_store_runtime_registry(),
-                    profile_database: memory.profile_database().clone(),
                     project_root: project_root.clone(),
                     project_id: project_id.clone(),
                     mounted_profile_id: None,

@@ -400,13 +400,11 @@ pub(super) async fn register_project_open_production_owners(
                 message: format!("project-open retained grant is invalid: {error}"),
             }
         })?;
-    let retained_ports = server
-        .retained_surface_ports(
-            project_root,
-            scope.project_id.clone(),
-            access.configuration_digest.clone(),
-        )
-        .await;
+    let retained_ports = server.retained_surface_ports(
+        project_root,
+        scope.project_id.clone(),
+        access.configuration_digest.clone(),
+    );
     hotpath::future!(
         invocation.retained_runtime_registrar().register(
             project_root.to_path_buf(),
