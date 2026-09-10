@@ -64,16 +64,6 @@ pub(super) async fn execute_configuration(
                 deadline,
             ),
             (
-                ApplicationSurfaceOperation::ConfigurationExplain,
-                ConfigurationWireRequestV1::Explain(request),
-            ) => configuration_evidence(
-                serde_json::to_value(Box::pin(client.explain(actor, request.key)).await?)
-                    .map_err(|_| ConfigurationError::Unavailable)?,
-                authority,
-                observed_at,
-                deadline,
-            ),
-            (
                 ApplicationSurfaceOperation::ConfigurationGet,
                 ConfigurationWireRequestV1::Get(request),
             ) => configuration_evidence(

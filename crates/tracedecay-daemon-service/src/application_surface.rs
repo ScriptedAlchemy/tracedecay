@@ -2120,10 +2120,6 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ConfigurationList
                 )
                 | (
-                    Self::Configuration(ConfigurationWireRequestV1::Explain(_)),
-                    ApplicationSurfaceOperation::ConfigurationExplain
-                )
-                | (
                     Self::Configuration(ConfigurationWireRequestV1::Get(_)),
                     ApplicationSurfaceOperation::ConfigurationGet
                 )
@@ -2481,7 +2477,6 @@ pub fn parse_application_surface_request(
             .map(ApplicationSurfaceRequest::ObservatoryRead)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
@@ -3180,7 +3175,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::DiagnosticsRead
         | ApplicationSurfaceOperation::ObservatoryRead
         | ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset

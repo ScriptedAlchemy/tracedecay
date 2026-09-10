@@ -10,15 +10,15 @@ use crate::{McpCatalogError, ToolDefinition};
 /// Guidance carried by the bounded `ConfigurationValueV1` payload on the
 /// CAS-gated direct configuration writes.
 const CONFIGURATION_VALUE_GUIDANCE: &str = "Read the setting first through \
-    tracedecay_configuration_get or tracedecay_configuration_explain: that read supplies the CAS \
+    tracedecay_configuration_get: that read supplies the CAS \
     expected_revision and shows the exact typed shape to send, and the daemon validates the \
     payload against the canonical ConfigurationValueV1 schema on admission.";
 
 /// Guidance carried by the bounded `ProtectedChange` payload on the CAS-gated
 /// protected-change preview.
 const PROTECTED_CHANGE_GUIDANCE: &str = "Read the affected setting first through \
-    tracedecay_configuration_list, tracedecay_configuration_get, or \
-    tracedecay_configuration_explain: that read supplies the CAS expected_revision and shows the \
+    tracedecay_configuration_list or tracedecay_configuration_get: that read supplies the CAS \
+    expected_revision and shows the \
     exact typed shape of the current source bindings, access rules, or work topology policy, and \
     the daemon validates the change against the canonical ProtectedChange schema before it \
     returns the redacted preview.";

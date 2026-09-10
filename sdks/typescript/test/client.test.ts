@@ -823,7 +823,6 @@ describe("TraceDecayClient generated operation bindings", () => {
   it("publishes every configuration operation with its effect lifecycle", () => {
     const expected = [
       "configuration_list",
-      "configuration_explain",
       "configuration_get",
       "configuration_set",
       "configuration_unset",

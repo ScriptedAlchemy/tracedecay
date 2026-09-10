@@ -111,18 +111,18 @@ fn application_surface_branch_sensitivity(
         AffectedTests, CallChain, CodeCallees, CodeCallers, CodeDeclaration, CodeDefinition,
         CodeExactOccurrence, CodeFacets, CodeImplementations, CodePhraseSearch, CodeReferences,
         CodeSignatureSearch, CodeSymbolSearch, CodeTimeline, CodeTypeDefinition, CodeTypeHierarchy,
-        ConfigurationAudit, ConfigurationBatch, ConfigurationExplain, ConfigurationGet,
-        ConfigurationList, ConfigurationObservedState, ConfigurationProtectedApply,
-        ConfigurationProtectedPreview, ConfigurationRollbackApply, ConfigurationRollbackPreview,
-        ConfigurationSet, ConfigurationUnset, ContextScoutBudget, ContextScoutCancel,
-        ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery, ContextScoutExplain,
-        ContextScoutFeedback, ContextScoutPause, ContextScoutRecent, ContextScoutResume,
-        ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle, FeedbackDiagnostics,
-        FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList, FileDependents, FileMetadata,
-        GitApply, GitBlame, GitDiff, GitHistory, GitHubStackSignalExpand, GitHunks, GitPreview,
-        GitStatus, HealthDelta, HealthRead, ModuleApi, NativeIntegrationApply,
-        NativeIntegrationApprove, NativeIntegrationCancel, NativeIntegrationPreflight,
-        NativeIntegrationStackSnapshot, NativeIntegrationStatus, NativeIntegrationWorktreeConfirm,
+        ConfigurationAudit, ConfigurationBatch, ConfigurationGet, ConfigurationList,
+        ConfigurationObservedState, ConfigurationProtectedApply, ConfigurationProtectedPreview,
+        ConfigurationRollbackApply, ConfigurationRollbackPreview, ConfigurationSet,
+        ConfigurationUnset, ContextScoutBudget, ContextScoutCancel, ContextScoutCapability,
+        ContextScoutClaim, ContextScoutDelivery, ContextScoutExplain, ContextScoutFeedback,
+        ContextScoutPause, ContextScoutRecent, ContextScoutResume, ContextScoutStatus,
+        DiagnosticsRead, FeedbackAdvisoryCycle, FeedbackDiagnostics, FeedbackExpand, FeedbackGet,
+        FeedbackImpact, FeedbackList, FileDependents, FileMetadata, GitApply, GitBlame, GitDiff,
+        GitHistory, GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta,
+        HealthRead, ModuleApi, NativeIntegrationApply, NativeIntegrationApprove,
+        NativeIntegrationCancel, NativeIntegrationPreflight, NativeIntegrationStackSnapshot,
+        NativeIntegrationStatus, NativeIntegrationWorktreeConfirm,
         NativeIntegrationWorktreeInspect, NativeIntegrationWorktreeInventory,
         NativeIntegrationWorktreeReconcile, NativeIntegrationWorktreeRemove, ObservatoryRead,
         QualifiedName, SessionLookup, SourceBody, SourceLines, SourceOutline, StorageStatus,
@@ -133,7 +133,6 @@ fn application_surface_branch_sensitivity(
         // host-integration lifecycle, session identity, store identity, or
         // process observability — never the checkout, code graph, or files.
         ConfigurationList
-        | ConfigurationExplain
         | ConfigurationGet
         | ConfigurationSet
         | ConfigurationUnset
@@ -1372,7 +1371,6 @@ mod tests {
         // apply. MCP render uses `cg.project_root()` only; owners do not
         // read the code graph.
         ("tracedecay_configuration_list", BranchSensitivity::Independent),
-        ("tracedecay_configuration_explain", BranchSensitivity::Independent),
         ("tracedecay_configuration_get", BranchSensitivity::Independent),
         ("tracedecay_configuration_set", BranchSensitivity::Independent),
         ("tracedecay_configuration_unset", BranchSensitivity::Independent),

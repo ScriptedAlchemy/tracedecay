@@ -291,24 +291,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
         })
     }
 
-    fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        Box::pin(async move {
-            ConfigurationControlPlaneOperations::new(
-                self.registry.as_ref(),
-                &self.store,
-                &self.scopes,
-                &self.authorization,
-                &self.clock,
-            )
-            .explain(actor, key)
-            .await
-        })
-    }
-
     fn get(
         &self,
         actor: AuthorizedActor,

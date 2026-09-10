@@ -1098,7 +1098,6 @@ impl DaemonInvocationRequest {
                 unreachable!("native worktree operations use their typed constructor")
             }
             ApplicationSurfaceOperation::ConfigurationList
-            | ApplicationSurfaceOperation::ConfigurationExplain
             | ApplicationSurfaceOperation::ConfigurationGet
             | ApplicationSurfaceOperation::ConfigurationSet
             | ApplicationSurfaceOperation::ConfigurationUnset
