@@ -64,7 +64,6 @@ def probes_for(d):
         "tracedecay_coupling":          [{}, {"path": "src/main/java"}, {"path": "src/test/java"}, {"path": "src"}, {"path": files[0]}],
         "tracedecay_dsm":               [{}, {"path": "src/main/java"}, {"path": "src/test/java"}, {"path": "src"}, {"path": "test"}],
         "tracedecay_module_api":        [{"path": f} for f in files],
-        "tracedecay_simplify_scan":     [{"files": [f]} for f in files],
         "tracedecay_test_map":          [{"file": f} for f in files],
         "tracedecay_test_risk":         [{}, {"limit": 10}, {"path": "src/main/java"}, {"path": "src/test/java"}, {"path": "src"}],
         "tracedecay_todos":             [{}, {"limit": 10}, {"path": "src/main/java"}, {"path": "src/test/java"}, {"path": "src"}],
