@@ -78,7 +78,6 @@ const NAVIGATION_TOOLS: &[&str] = &[
     "signature_search",
     "port_status",
     "port_order",
-    "simplify_scan",
     "files",
     "type_hierarchy",
     "affected",

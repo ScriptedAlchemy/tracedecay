@@ -440,7 +440,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_port_order(request_schema("port_order")?),
         def_commit_context(),
         def_pr_context(),
-        def_simplify_scan(),
         def_test_map(),
         def_type_hierarchy(),
         def_branch_search(),
@@ -661,7 +660,6 @@ const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     "tracedecay_signature_search",
     "tracedecay_port_status",
     "tracedecay_port_order",
-    "tracedecay_simplify_scan",
     // git
     "tracedecay_git_status",
     "tracedecay_git_diff",

@@ -1862,7 +1862,6 @@ mod git_read_control_tests {
             "tracedecay_dead_code",
             "tracedecay_circular",
             "tracedecay_affected",
-            "tracedecay_simplify_scan",
             "tracedecay_dependency_depth",
             "tracedecay_health",
             "tracedecay_dsm",

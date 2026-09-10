@@ -572,7 +572,6 @@ fn dispatch_info_tools_inner<'a>(
                 let graph = admitted_graph_query(cg, &options, "port_order").await?;
                 portable_info::handle_port_order(&graph, args).await
             }
-            "tracedecay_simplify_scan" => portable_info::handle_simplify_scan().await,
             "tracedecay_type_hierarchy" => {
                 let graph = admitted_graph_query(cg, &options, "code_type_hierarchy").await?;
                 portable_info::handle_type_hierarchy(&graph, args).await

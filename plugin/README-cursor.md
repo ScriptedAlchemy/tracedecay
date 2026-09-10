@@ -244,7 +244,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_signature",
     "tracedecay:tracedecay_signature_search",
     "tracedecay:tracedecay_similar",
-    "tracedecay:tracedecay_simplify_scan",
     "tracedecay:tracedecay_skill_list",
     "tracedecay:tracedecay_skill_view",
     "tracedecay:tracedecay_source_body",

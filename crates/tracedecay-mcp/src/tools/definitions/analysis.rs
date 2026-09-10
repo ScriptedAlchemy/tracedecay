@@ -292,25 +292,6 @@ pub(super) fn def_port_order(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_simplify_scan() -> ToolDefinition {
-    def(
-        "tracedecay_simplify_scan",
-        "Simplify Scan",
-        "Quality analysis of changed files: duplications, dead code, coupling, and complexity hotspots.",
-        json!({
-            "type": "object",
-            "properties": {
-                "files": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Changed file paths to analyze"
-                }
-            },
-            "required": ["files"]
-        }),
-    )
-}
-
 pub(super) fn def_gini() -> ToolDefinition {
     def_object(
         "tracedecay_gini",
