@@ -16,6 +16,7 @@ use tracedecay_runtime_core::branch::{
     prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::{DaemonHandshake, StoreAdministration};
 
@@ -215,14 +216,14 @@ async fn activate_and_track_manual_branch(
             }
             .await;
             match &result {
-                Ok(outcome) => super::log_daemon_event(
+                Ok(outcome) => log_daemon_event(
                     "manual_branch_publication",
                     &[
                         ("branch", branch.clone()),
                         ("outcome", branch_add_outcome_name(outcome).to_owned()),
                     ],
                 ),
-                Err(error) => super::log_daemon_event(
+                Err(error) => log_daemon_event(
                     "manual_branch_publication",
                     &[
                         ("branch", branch.clone()),
