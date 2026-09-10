@@ -1083,12 +1083,7 @@ fn compute_fingerprints(
                 "verified redundancy symbol has no registered extractor",
             ));
         };
-        let lang_key = extractor_to_language_key(extractor.language_name());
-        let Some(lang_key) = lang_key else {
-            return Err(redundancy_graph_problem(
-                "verified redundancy symbol has no fingerprint language mapping",
-            ));
-        };
+        let lang_key = extractor.retained_grammar_key(&file_path);
 
         // Read the on-disk file, then admit it through the same code-source
         // sanitizer the indexer used. Graph spans are byte ranges in that
@@ -1103,7 +1098,7 @@ fn compute_fingerprints(
         let source = admitted_redundancy_source(&file_path, &raw)?;
 
         let language =
-            tracedecay_code_extraction::ts_provider::language(lang_key).map_err(|error| {
+            tracedecay_code_extraction::ts_provider::language(&lang_key).map_err(|error| {
                 redundancy_graph_problem(&format!(
                     "verified redundancy grammar `{lang_key}` is unavailable: {error}"
                 ))
@@ -1164,45 +1159,6 @@ fn compute_fingerprints(
         parsed_files,
         #[cfg(test)]
         computed_fingerprints,
-    })
-}
-
-/// Map `extractor.language_name()` (e.g. "Rust", "TypeScript") to the
-/// language key used by `ts_provider::language`. Returns `None` for
-/// extractors whose grammar isn't wired up here (extending the map
-/// extends fingerprinting to that language).
-fn extractor_to_language_key(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "Rust" => "rust",
-        "Go" => "go",
-        "Java" => "java",
-        "Scala" => "scala",
-        "TypeScript" => "typescript",
-        "TSX" => "tsx",
-        "Python" => "python",
-        "C" => "c",
-        "C++" => "cpp",
-        "C#" => "c_sharp",
-        "Kotlin" => "kotlin",
-        "Swift" => "swift",
-        "JavaScript" => "javascript",
-        "Ruby" => "ruby",
-        "PHP" => "php",
-        "Lua" => "lua",
-        "Zig" => "zig",
-        "Bash" => "bash",
-        "Dart" => "dart",
-        "Haskell" => "haskell",
-        "OCaml" => "ocaml",
-        "Elixir" => "elixir",
-        "Erlang" => "erlang",
-        "Clojure" => "clojure",
-        "F#" => "fsharp",
-        "Perl" => "perl",
-        "R" => "r",
-        "Julia" => "julia",
-        "Nix" => "nix",
-        _ => return None,
     })
 }
 
@@ -1925,6 +1881,20 @@ mod tests {
 
     fn after_secret_body() -> &'static str {
         "fn after_secret(input: i32) -> i32 {\n    let mut total = input;\n    for value in 0..4 {\n        if value % 2 == 0 {\n            total += value;\n        }\n    }\n    total\n}\n"
+    }
+
+    #[test]
+    fn fingerprint_uses_the_registered_markdown_grammar() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = "# Example\n\nAn indexed documentation section.\n";
+        std::fs::write(temp.path().join("example.md"), source).unwrap();
+        let mut node = candidate_node("heading", "Example", "example.md", 1);
+        node.source_span = SourceSpan {
+            start_byte: 0,
+            end_byte: source.len() as u64,
+        };
+        let load = compute_fingerprints(temp.path(), &[node]).unwrap();
+        assert!(load.fingerprints.contains_key("heading"));
     }
 
     #[test]
