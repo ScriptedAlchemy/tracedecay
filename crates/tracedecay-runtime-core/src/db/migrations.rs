@@ -186,6 +186,12 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
     super::memory_v2::create_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
+    conn.execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create generation diagnostics schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
         .await
         .map_err(|e| TraceDecayError::Database {

@@ -66,6 +66,7 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
             .map_err(|error| format!("failed to install canonical memory schema: {error}"))?;
     }
     for schema in [
+        tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL,
         crate::db::evidence_assembly::EVIDENCE_ASSEMBLY_SCHEMA,
         crate::db::evidence_assembly::EVIDENCE_ASSEMBLY_IMMUTABILITY,
         tracedecay_rusqlite_runtime::repository::EXTERNAL_SOURCE_SCHEMA_V1,
