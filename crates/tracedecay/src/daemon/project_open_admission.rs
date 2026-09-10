@@ -703,6 +703,47 @@ impl ProjectOpenTasks {
         }
     }
 
+    async fn wait_for_route_completion(&self, route: &ProjectRouteKey) {
+        let completion = {
+            let registry = self.lock_registry();
+            registry
+                .routes
+                .get(route)
+                .or_else(|| registry.retiring.get(route))
+                .map(|entry| entry.completion.clone())
+        };
+        if let Some(completion) = completion {
+            wait_for_project_open_task(completion).await;
+        }
+        while {
+            let registry = self.lock_registry();
+            registry
+                .routes
+                .get(route)
+                .or_else(|| registry.retiring.get(route))
+                .is_some_and(|entry| !entry.task.is_finished())
+        } {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub(super) async fn admit_explicit_init_retry(
+        &self,
+        route: &ProjectRouteKey,
+        retry_available: &mut bool,
+        error: Option<&TraceDecayError>,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        if !*retry_available || !error.is_some_and(is_missing_index_error) {
+            return Ok(false);
+        }
+        *retry_available = false;
+        tokio::time::timeout_at(deadline, self.wait_for_route_completion(route))
+            .await
+            .map_err(|_| project_warming_error(&route.project_path))?;
+        Ok(true)
+    }
+
     /// Waits for the exact route's tracked project-open task to publish its
     /// full owner set. This is deliberately a route-local operation: callers
     /// must re-read the canonical route after it returns rather than carrying
