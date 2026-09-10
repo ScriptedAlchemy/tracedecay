@@ -2299,8 +2299,8 @@
           "minimum": 0,
           "type": "integer"
         },
-        "completed_lexical_bytes": {
-          "description": "Authenticated sealed lexical-byte boundary completed by committed work.",
+        "completed_lexical_units": {
+          "description": "Authenticated lexical-span boundary completed by committed work, in the\nsealed source's own advance unit.\n\nThe unit is the source's, not this surface's: a sealed-layout source\nadvances over the files-array byte span, while a published or\npartitioned source advances over file ordinals because its file records\nare not a contiguous byte range at all. Both are monotone and share the\ndenominator below, so completion and the derived estimate are truthful;\nnaming them bytes was not, and a consumer that multiplied this by an\naverage file size was wrong by orders of magnitude (issue #1205).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2364,8 +2364,8 @@
           "format": "int64",
           "type": "integer"
         },
-        "lexical_bytes_per_second": {
-          "description": "Rolling committed lexical-byte throughput, absent until it is established.",
+        "lexical_units_per_second": {
+          "description": "Rolling committed lexical-span throughput in units per second, absent\nuntil it is established. Not a byte rate; see\n[`Self::completed_lexical_units`].",
           "format": "double",
           "type": [
             "number",
@@ -2398,8 +2398,8 @@
           "minimum": 0,
           "type": "integer"
         },
-        "total_lexical_bytes": {
-          "description": "Authenticated sealed lexical-byte bound for this generation.",
+        "total_lexical_units": {
+          "description": "Authenticated lexical-span bound for this generation, in the same unit\nas [`Self::completed_lexical_units`].",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2418,14 +2418,14 @@
         "committed_payload_bytes",
         "completed_files",
         "total_files",
-        "completed_lexical_bytes",
-        "total_lexical_bytes",
+        "completed_lexical_units",
+        "total_lexical_units",
         "current_batch_pages",
         "current_batch_payload_bytes",
         "elapsed_micros",
         "last_commit_latency_micros",
         "files_per_second",
-        "lexical_bytes_per_second",
+        "lexical_units_per_second",
         "estimated_remaining_seconds",
         "last_progress_micros",
         "blocked_reason"

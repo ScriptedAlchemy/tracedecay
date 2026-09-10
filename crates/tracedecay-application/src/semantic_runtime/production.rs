@@ -4360,13 +4360,68 @@ pub fn project_lifecycle_status(project_path: &Path) -> Option<SemanticModelLife
     None
 }
 
+/// Why a published code generation did or did not enter semantic projection.
+///
+/// Every decline was previously a bare `false` that each caller discarded, so
+/// a daemon whose runtime stopped scheduling sat at `installed` with no record
+/// of why nothing was queued (#753). The runtime's own declines are already
+/// named by `semantic_projection_schedule`; these are the handoff-boundary
+/// reasons that never reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedGenerationScheduleOutcomeV1 {
+    /// Semantic projection was queued for this generation.
+    Scheduled,
+    /// No semantic runtime is mounted on this scheduler — never mounted, or
+    /// retired by a remount — so no hook observed the generation at all.
+    RuntimeNotMounted,
+    /// The generation belongs to a different worktree than the mounted runtime.
+    ForeignWorktree,
+    /// The hook was built outside a Tokio runtime, so projection has no
+    /// executor to dispatch onto.
+    NoDispatchRuntime,
+    /// The fair projection scheduler refused the batch (queue capacity,
+    /// cancellation); `semantic_projection_schedule` carries the detail.
+    QueueRefused,
+    /// The hook panicked; the generation remains serving.
+    HookPanicked,
+    /// The code-index scheduler itself could not be reached: the worktree is
+    /// not mounted, or it is shutting down.
+    SchedulerUnavailable,
+    /// The mounted worktree has not sealed a serving generation yet, so there
+    /// is nothing to offer.
+    NoServingGeneration,
+}
+
+impl SavedGenerationScheduleOutcomeV1 {
+    #[must_use]
+    pub fn is_scheduled(self) -> bool {
+        matches!(self, Self::Scheduled)
+    }
+
+    /// Fixed, privacy-safe classification for the diagnostic record.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::RuntimeNotMounted => "runtime_not_mounted",
+            Self::ForeignWorktree => "foreign_worktree",
+            Self::NoDispatchRuntime => "no_dispatch_runtime",
+            Self::QueueRefused => "queue_refused",
+            Self::HookPanicked => "hook_panicked",
+            Self::SchedulerUnavailable => "scheduler_unavailable",
+            Self::NoServingGeneration => "no_serving_generation",
+        }
+    }
+}
+
 /// Hook invoked after a code generation publishes; must not block search.
 ///
 /// The serving owner transfers a shared handle because one decoded generation
 /// can be much larger than its captured source. Semantic retention and queued
 /// projection must clone this `Arc`, never the immutable generation payload.
-pub type SavedCodeGenerationScheduleHookV1 =
-    Arc<dyn Fn(Arc<CodeIndexPublishedGenerationV1>) -> bool + Send + Sync>;
+pub type SavedCodeGenerationScheduleHookV1 = Arc<
+    dyn Fn(Arc<CodeIndexPublishedGenerationV1>) -> SavedGenerationScheduleOutcomeV1 + Send + Sync,
+>;
 
 /// Owned authorities and identities captured by a saved-generation hook.
 pub struct SavedGenerationScheduleHookParametersV1 {
@@ -4418,7 +4473,7 @@ pub fn production_saved_generation_schedule_hook(
     let dispatch_runtime = tokio::runtime::Handle::try_current().ok();
     Arc::new(move |generation| {
         if generation.snapshot().worktree.as_ref() != Some(&worktree_id) {
-            return false;
+            return SavedGenerationScheduleOutcomeV1::ForeignWorktree;
         }
         super::register_project_semantic_redundancy_generation(
             project_root.clone(),
@@ -4426,7 +4481,7 @@ pub fn production_saved_generation_schedule_hook(
         );
         let runtime = Arc::clone(&runtime);
         let Some(dispatch_runtime) = dispatch_runtime.clone() else {
-            return false;
+            return SavedGenerationScheduleOutcomeV1::NoDispatchRuntime;
         };
         let queued_bytes = generation
             .chunks()
@@ -4482,7 +4537,9 @@ pub fn production_saved_generation_schedule_hook(
                     "semantic projection could not be queued for this code generation"
                 );
             })
-            .is_ok()
+            .map_or(SavedGenerationScheduleOutcomeV1::QueueRefused, |_| {
+                SavedGenerationScheduleOutcomeV1::Scheduled
+            })
     })
 }
 

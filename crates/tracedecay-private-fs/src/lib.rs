@@ -290,64 +290,78 @@ compile_error!("TraceDecay private filesystem authority requires Unix or Windows
 /// `AccessDenied` (`ERROR_ACCESS_DENIED`, 5) are different operations — an
 /// open/ACL problem is not proof that another authority holds the lock.
 pub fn is_lock_contended(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        const ERROR_LOCK_VIOLATION: i32 = 33;
-        return error.raw_os_error() == Some(ERROR_LOCK_VIOLATION);
-    }
-    #[cfg(not(windows))]
-    false
+    classify_lock_contention(error, cfg!(windows))
+}
+
+/// `ERROR_LOCK_VIOLATION`: the Win32 code `LockFileEx` returns for a
+/// `LOCKFILE_FAIL_IMMEDIATELY` conflict.
+const WINDOWS_LOCK_VIOLATION: i32 = 33;
+
+/// The platform-independent core of [`is_lock_contended`], so the Windows
+/// mapping is provable from a test on any host. `windows_semantics` is the
+/// only platform input; everything else is the same decision everywhere.
+fn classify_lock_contention(error: &io::Error, windows_semantics: bool) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || (windows_semantics && error.raw_os_error() == Some(WINDOWS_LOCK_VIOLATION))
 }
 
 #[cfg(test)]
 mod lock_contention_tests {
-    use super::is_lock_contended;
+    use super::{classify_lock_contention, is_lock_contended};
 
-    #[test]
-    fn would_block_is_typed_contention() {
-        assert!(is_lock_contended(&std::io::Error::from(
-            std::io::ErrorKind::WouldBlock
-        )));
+    /// Windows `LockFileEx` semantics, asserted from any host.
+    fn windows(error: &std::io::Error) -> bool {
+        classify_lock_contention(error, true)
     }
 
-    #[cfg(windows)]
+    /// Unix `flock`/`fcntl` semantics, asserted from any host.
+    fn unix(error: &std::io::Error) -> bool {
+        classify_lock_contention(error, false)
+    }
+
     #[test]
-    fn windows_lock_violation_is_typed_contention() {
+    fn would_block_is_typed_contention_on_every_platform() {
+        let would_block = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(is_lock_contended(&would_block));
+        assert!(windows(&would_block));
+        assert!(unix(&would_block));
+    }
+
+    #[test]
+    fn lock_violation_33_is_contention_only_under_windows_semantics() {
+        let violation = std::io::Error::from_raw_os_error(33);
         assert!(
-            is_lock_contended(&std::io::Error::from_raw_os_error(33)),
+            windows(&violation),
             "ERROR_LOCK_VIOLATION (33) is the Windows non-blocking lock conflict"
         );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn unix_raw_error_33_is_not_lock_contention() {
         assert!(
-            !is_lock_contended(&std::io::Error::from_raw_os_error(33)),
-            "Unix errno 33 is not Windows LockFileEx contention"
+            !unix(&violation),
+            "Unix errno 33 (EPIPE) is not LockFileEx contention"
         );
+        assert_eq!(is_lock_contended(&violation), cfg!(windows));
     }
 
     #[test]
     fn access_denied_is_not_lock_contention() {
-        assert!(!is_lock_contended(&std::io::Error::from(
-            std::io::ErrorKind::PermissionDenied
-        )));
+        let kind = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_lock_contended(&kind));
+        assert!(!windows(&kind));
+        let raw = std::io::Error::from_raw_os_error(5);
         assert!(
-            !is_lock_contended(&std::io::Error::from_raw_os_error(5)),
+            !windows(&raw),
             "ERROR_ACCESS_DENIED (5) is an ACL problem, not a held lock"
         );
+        assert!(!is_lock_contended(&raw));
     }
 
     #[test]
     fn sharing_violation_is_not_lock_contention() {
+        let raw = std::io::Error::from_raw_os_error(32);
         assert!(
-            !is_lock_contended(&std::io::Error::from_raw_os_error(32)),
+            !windows(&raw),
             "ERROR_SHARING_VIOLATION (32) is an open/share conflict, not LockFileEx contention"
         );
+        assert!(!is_lock_contended(&raw));
     }
 }
 

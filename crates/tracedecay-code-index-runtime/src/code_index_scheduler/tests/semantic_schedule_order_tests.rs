@@ -7,7 +7,9 @@ use std::sync::{
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1;
+use tracedecay_application::semantic_runtime::{
+    SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleOutcomeV1,
+};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::CodeGenerationId;
 
@@ -51,7 +53,7 @@ fn recording_semantic_hook(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(generation.manifest().generation_id.clone());
-        true
+        SavedGenerationScheduleOutcomeV1::Scheduled
     })
 }
 
@@ -182,7 +184,7 @@ async fn semantic_schedule_reuses_the_serving_generation_handle() {
             *scheduled_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(generation);
-            true
+            SavedGenerationScheduleOutcomeV1::Scheduled
         }) as SavedCodeGenerationScheduleHookV1
     };
     assert!(
@@ -236,12 +238,12 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
         Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
             attempts.fetch_add(1, Ordering::AcqRel);
             if !lifecycle_ready.load(Ordering::Acquire) {
-                return false;
+                return SavedGenerationScheduleOutcomeV1::QueueRefused;
             }
             *scheduled_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(generation);
-            true
+            SavedGenerationScheduleOutcomeV1::Scheduled
         }) as SavedCodeGenerationScheduleHookV1
     };
     assert!(
@@ -263,10 +265,11 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
     );
 
     lifecycle_ready.store(true, Ordering::Release);
-    assert!(
+    assert_eq!(
         registry
             .reschedule_semantic_generation(fixture.path())
             .await,
+        SavedGenerationScheduleOutcomeV1::Scheduled,
         "selection completion must re-offer the already-serving generation"
     );
 
@@ -314,7 +317,7 @@ impl BlockingSemanticScheduleProbeV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .recv_timeout(Duration::from_secs(3))
                 .expect("release blocked semantic schedule");
-            true
+            SavedGenerationScheduleOutcomeV1::Scheduled
         }) as SavedCodeGenerationScheduleHookV1;
         Self {
             entered: Arc::new(Mutex::new(entered_rx)),
@@ -407,10 +410,12 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
     let panic_calls = Arc::new(AtomicUsize::new(0));
     let panicking_hook = {
         let calls = Arc::clone(&panic_calls);
-        Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| -> bool {
-            calls.fetch_add(1, Ordering::SeqCst);
-            panic!("semantic schedule panic fixture");
-        }) as SavedCodeGenerationScheduleHookV1
+        Arc::new(
+            move |_: Arc<CodeIndexPublishedGenerationV1>| -> SavedGenerationScheduleOutcomeV1 {
+                calls.fetch_add(1, Ordering::SeqCst);
+                panic!("semantic schedule panic fixture");
+            },
+        ) as SavedCodeGenerationScheduleHookV1
     };
     assert!(
         registry
@@ -477,4 +482,60 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
 
     assert_ne!(first_generation, second_generation);
     assert_eq!(second_publication, second_generation);
+}
+
+/// A sealed generation offered while no semantic runtime is mounted must name
+/// the reason it was not scheduled.
+///
+/// Issue #753: after an aborted projection the daemon kept sealing
+/// generations and none of them re-triggered projection, while the runtime sat
+/// at `installed`. The handoff returned a bare `false` that every caller
+/// discarded, so an operator could not tell "no runtime is mounted" from
+/// "nothing needed doing". Both the direct handoff and the reconciler's
+/// re-offer must answer with the typed decline.
+#[tokio::test]
+async fn a_generation_offered_without_a_mounted_semantic_runtime_names_the_decline() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount scheduler")
+    );
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let generation = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_complete()
+        .expect("serving generation")
+        .generation_handle();
+    let handoff = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .schedule_semantic_generation(generation);
+    assert_eq!(
+        handoff,
+        SavedGenerationScheduleOutcomeV1::RuntimeNotMounted,
+        "the handoff boundary must name an absent semantic runtime"
+    );
+
+    assert_eq!(
+        registry
+            .reschedule_semantic_generation(fixture.path())
+            .await,
+        SavedGenerationScheduleOutcomeV1::RuntimeNotMounted,
+        "the reconciler's re-offer must carry the same typed decline"
+    );
 }

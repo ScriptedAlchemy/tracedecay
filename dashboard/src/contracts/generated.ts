@@ -675,7 +675,7 @@ export const CodeIndexBuildProgressV1Schema = z.object({
   committed_pages: z.number().int().safe().min(0),
   committed_payload_bytes: z.number().int().safe().min(0),
   completed_files: z.number().int().safe().min(0),
-  completed_lexical_bytes: z.number().int().safe().min(0),
+  completed_lexical_units: z.number().int().safe().min(0),
   current_batch_pages: z.number().int().safe().min(0),
   current_batch_payload_bytes: z.number().int().safe().min(0),
   daemon_incarnation: z.number().int().safe().min(0),
@@ -685,13 +685,13 @@ export const CodeIndexBuildProgressV1Schema = z.object({
   generation_id: z.string(),
   last_commit_latency_micros: z.number().int().safe().min(0).nullable(),
   last_progress_micros: z.number().int().safe(),
-  lexical_bytes_per_second: z.number().nullable(),
+  lexical_units_per_second: z.number().nullable(),
   phase: z.lazy(() => CodeIndexBuildPhaseV1Schema),
   producer_incarnation: z.number().int().safe().min(0),
   progress_epoch: z.number().int().safe().min(0),
   sealed_source_digest: z.string(),
   total_files: z.number().int().safe().min(0),
-  total_lexical_bytes: z.number().int().safe().min(0),
+  total_lexical_units: z.number().int().safe().min(0),
 });
 export type CodeIndexBuildProgressV1 = z.infer<typeof CodeIndexBuildProgressV1Schema>;
 

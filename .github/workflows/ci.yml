@@ -875,6 +875,26 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+      # The archive already carries these (`archive.include` in
+      # .config/nextest.toml), but nothing lands on a shard until the run
+      # step extracts, so a missing evaluator can only surface as product
+      # test failures. Publishing them separately lets each shard restore and
+      # prove them *before* the suite starts. Same executables, from the
+      # workspace/test-helpers build above: an evaluator built under a
+      # narrower `-p tracedecay-search-eval` selection resolves
+      # tracedecay-code-index without its default language tiers and cannot
+      # parse Rust.
+      - name: Upload Windows evaluator executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-search-eval-bins
+          path: |
+            target/perf/tracedecay-search-eval.exe
+            target/perf/tracedecay-search-eval-direct.exe
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   windows-test-shard:
     name: Test Windows shard ${{ matrix.partition }}/5
     needs: windows-build
@@ -929,6 +949,53 @@ jobs:
         with:
           name: windows-nextest-archive
           path: ${{ runner.temp }}
+
+      - name: Download Windows evaluator executables
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-search-eval-bins
+          path: ${{ runner.temp }}/search-eval-bin
+
+      # Preflight: the evaluator subprocesses the acceptance and packaged
+      # suites launch must exist, execute, and report their bundled workload
+      # before any test runs, so a provisioning gap fails here instead of as
+      # five product-test failures elsewhere in the shard matrix. `validate`
+      # against an empty directory is the packaged-identity probe: it reads
+      # only the workload compiled into the binary, so a build missing it
+      # cannot pass. The exports are the overrides both resolvers declare
+      # (`search_eval_bin` in crates/tracedecay/tests/common/mod.rs and
+      # `search_eval_direct_bin` in the default-feature packaged suite), which
+      # bind every test to the executables proven here rather than to whatever
+      # the archive happens to extract beside the test binaries.
+      - name: Preflight the restored evaluator executables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binDir = Join-Path $env:RUNNER_TEMP "search-eval-bin"
+          $probe = Join-Path $env:RUNNER_TEMP "search-eval-preflight"
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          foreach ($name in @("tracedecay-search-eval", "tracedecay-search-eval-direct")) {
+            $path = Join-Path $binDir "$name.exe"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "restored evaluator '$name.exe' is missing at $path"
+            }
+            # stdout only: the typed report is the whole of it, and merging
+            # stderr in would make any log line unparseable JSON.
+            $stdout = & $path validate --repo-root $probe | Out-String
+            if ($LASTEXITCODE -ne 0) {
+              throw "$name validate exited with $LASTEXITCODE`n$stdout"
+            }
+            $report = $stdout | ConvertFrom-Json
+            if ($report.command -ne "validate" -or $report.status -ne "pass") {
+              throw "$name reported command=$($report.command) status=$($report.status)`n$stdout"
+            }
+            if ([int]$report.query_count -le 0 -or [int]$report.profile_count -le 0) {
+              throw "$name has no bundled workload: query_count=$($report.query_count) profile_count=$($report.profile_count)"
+            }
+            Write-Host "$name.exe ok: $($report.query_count) queries, $($report.profile_count) profiles"
+          }
+          "TRACEDECAY_SEARCH_EVAL_TEST_BIN=$binDir\tracedecay-search-eval.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN=$binDir\tracedecay-search-eval-direct.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run Windows tests
         shell: pwsh

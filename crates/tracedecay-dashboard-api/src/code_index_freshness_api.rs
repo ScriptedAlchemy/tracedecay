@@ -86,10 +86,20 @@ pub struct CodeIndexBuildProgressV1 {
     pub completed_files: u64,
     /// Authenticated sealed-source file bound for this generation.
     pub total_files: u64,
-    /// Authenticated sealed lexical-byte boundary completed by committed work.
-    pub completed_lexical_bytes: u64,
-    /// Authenticated sealed lexical-byte bound for this generation.
-    pub total_lexical_bytes: u64,
+    /// Authenticated lexical-span boundary completed by committed work, in the
+    /// sealed source's own advance unit.
+    ///
+    /// The unit is the source's, not this surface's: a sealed-layout source
+    /// advances over the files-array byte span, while a published or
+    /// partitioned source advances over file ordinals because its file records
+    /// are not a contiguous byte range at all. Both are monotone and share the
+    /// denominator below, so completion and the derived estimate are truthful;
+    /// naming them bytes was not, and a consumer that multiplied this by an
+    /// average file size was wrong by orders of magnitude (issue #1205).
+    pub completed_lexical_units: u64,
+    /// Authenticated lexical-span bound for this generation, in the same unit
+    /// as [`Self::completed_lexical_units`].
+    pub total_lexical_units: u64,
     /// Source pages in the batch currently being processed.
     pub current_batch_pages: u64,
     /// Sealed payload bytes in the batch currently being processed.
@@ -100,8 +110,10 @@ pub struct CodeIndexBuildProgressV1 {
     pub last_commit_latency_micros: Option<u64>,
     /// Rolling committed-file throughput, absent until it is established.
     pub files_per_second: Option<f64>,
-    /// Rolling committed lexical-byte throughput, absent until it is established.
-    pub lexical_bytes_per_second: Option<f64>,
+    /// Rolling committed lexical-span throughput in units per second, absent
+    /// until it is established. Not a byte rate; see
+    /// [`Self::completed_lexical_units`].
+    pub lexical_units_per_second: Option<f64>,
     /// Estimated remaining build duration, absent without a truthful rate.
     pub estimated_remaining_seconds: Option<u64>,
     /// Unix-epoch timestamp of the last durable progress publication.
@@ -586,14 +598,14 @@ mod tests {
                         committed_payload_bytes: 16 * 1024 * 1024,
                         completed_files: 250,
                         total_files: 500,
-                        completed_lexical_bytes: 32 * 1024 * 1024,
-                        total_lexical_bytes: 64 * 1024 * 1024,
+                        completed_lexical_units: 32 * 1024 * 1024,
+                        total_lexical_units: 64 * 1024 * 1024,
                         current_batch_pages: 4,
                         current_batch_payload_bytes: 4 * 1024 * 1024,
                         elapsed_micros: 120_000_000,
                         last_commit_latency_micros: Some(240_000),
                         files_per_second: Some(250.0),
-                        lexical_bytes_per_second: Some(16.0 * 1024.0 * 1024.0),
+                        lexical_units_per_second: Some(16.0 * 1024.0 * 1024.0),
                         estimated_remaining_seconds: Some(120),
                         last_progress_micros: 43,
                         blocked_reason: None,
@@ -615,8 +627,8 @@ mod tests {
         assert_eq!(progress.phase, CodeIndexBuildPhaseV1::BulkCommit);
         assert_eq!(progress.completed_files, 250);
         assert_eq!(progress.total_files, 500);
-        assert_eq!(progress.completed_lexical_bytes, 32 * 1024 * 1024);
-        assert_eq!(progress.total_lexical_bytes, 64 * 1024 * 1024);
+        assert_eq!(progress.completed_lexical_units, 32 * 1024 * 1024);
+        assert_eq!(progress.total_lexical_units, 64 * 1024 * 1024);
         assert_eq!(progress.files_per_second, Some(250.0));
         assert_eq!(progress.estimated_remaining_seconds, Some(120));
     }

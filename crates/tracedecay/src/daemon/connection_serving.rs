@@ -205,7 +205,7 @@ fn is_mcp_initialize_request(request: Option<&JsonRpcRequest>) -> bool {
 /// client as `Connection reset by peer` — a raw transport error that hides
 /// wire-revision skew. The refusal frame plus a drained receive buffer turns
 /// that into a readable typed refusal followed by a clean EOF.
-async fn refuse_unparseable_handshake(
+pub(super) async fn refuse_unparseable_handshake(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
     handshake_line: &str,
     daemon_version: &str,
