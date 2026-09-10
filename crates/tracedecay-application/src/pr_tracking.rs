@@ -185,13 +185,33 @@ struct GhPr {
     is_cross_repository: bool,
 }
 
+/// Builds the `git` invocation these PR commands run in `repo_root`.
+///
+/// The arguments carry resolved paths — the worktree `git worktree add`/`remove`
+/// operate on descends from a canonicalized data root — and Git for Windows
+/// rewrites a `\\?\` path *argument* to `//?/D:/...` and then fails with
+/// "could not create leading directories". `plain_git_args` spells those
+/// plainly for the child process, exactly as `bounded_git_output` does; every
+/// other argument passes through unchanged.
+fn pr_git_command(
+    repo_root: &Path,
+    args: &[&str],
+) -> Result<std::process::Command, GitCommandError> {
+    use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
+
+    let mut command = std::process::Command::new(tracedecay_runtime_core::git::try_git_program()?);
+    command
+        .args(plain_git_args(args))
+        .current_dir(plain_host_path(repo_root));
+    Ok(command)
+}
+
 pub fn run_git_with_control(
     repo_root: &Path,
     args: &[&str],
     control: &PrCommandControlV1,
 ) -> Result<std::process::Output, GitCommandError> {
-    let mut command = std::process::Command::new(tracedecay_runtime_core::git::try_git_program()?);
-    command.args(args).current_dir(repo_root);
+    let mut command = pr_git_command(repo_root, args)?;
     disable_git_credential_prompt(&mut command);
     tracedecay_runtime_core::git::bounded_command_output(
         command,
@@ -445,6 +465,39 @@ fn discover_via_ls_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The worktree these commands add descends from a canonicalized data
+    /// root, so on Windows it arrives here in the `\\?\` verbatim spelling
+    /// Git rejects as an argument. The rewrite is defined on the spelling, so
+    /// this runs on every host.
+    #[test]
+    fn worktree_path_arguments_are_spelled_plainly_for_git() {
+        let command = pr_git_command(
+            std::path::Path::new("/repo"),
+            &[
+                "worktree",
+                "add",
+                "-B",
+                "tracedecay/pr-8",
+                r"\\?\D:\a\_temp\tmp\.tmpF1zlYs-admission-wt",
+                "refs/tracedecay/pr/8",
+            ],
+        )
+        .expect("git executable should resolve");
+
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "worktree",
+                "add",
+                "-B",
+                "tracedecay/pr-8",
+                r"D:\a\_temp\tmp\.tmpF1zlYs-admission-wt",
+                "refs/tracedecay/pr/8",
+            ]
+            .map(std::ffi::OsStr::new)
+        );
+    }
 
     #[test]
     fn git_commands_enforce_deadline_cancellation_and_output_limits() {
