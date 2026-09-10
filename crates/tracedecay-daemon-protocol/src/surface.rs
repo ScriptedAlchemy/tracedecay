@@ -13,16 +13,6 @@ use tracedecay_contracts::git::GitReadRequestV1;
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-/// Default Git-read surface entry bound.
-///
-/// ponytail: duplicated with `tracedecay_application::git_query` so protocol
-/// parse does not depend on application. Move both to contracts if they drift.
-pub const GIT_READ_SURFACE_DEFAULT_MAX_ENTRIES: u32 = 1_000;
-
-/// Default Git-read surface byte bound. Same ponytail as
-/// [`GIT_READ_SURFACE_DEFAULT_MAX_ENTRIES`].
-pub const GIT_READ_SURFACE_DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitReadSurfaceRequest {

@@ -2,13 +2,12 @@
 
 use serde_json::Value;
 use tracedecay_contracts::git::GitReadRequestV1;
+use tracedecay_contracts::{GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES};
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::ApplicationSurfaceAdapterError;
-use crate::surface::{
-    GIT_READ_SURFACE_DEFAULT_MAX_BYTES, GIT_READ_SURFACE_DEFAULT_MAX_ENTRIES, GitReadSurfaceRequest,
-};
+use crate::surface::GitReadSurfaceRequest;
 
 #[hotpath::measure(label = "application_surface.git.parse")]
 pub(super) fn parse_git_read_surface_request(
@@ -40,13 +39,13 @@ pub(super) fn parse_git_read_surface_request(
     };
     let max_entries = bounded_u64(
         "max_entries",
-        u64::from(GIT_READ_SURFACE_DEFAULT_MAX_ENTRIES),
-        u64::from(GIT_READ_SURFACE_DEFAULT_MAX_ENTRIES),
+        u64::from(GIT_QUERY_DEFAULT_MAX_ENTRIES),
+        u64::from(GIT_QUERY_DEFAULT_MAX_ENTRIES),
     )? as u32;
     let max_bytes = bounded_u64(
         "max_bytes",
-        GIT_READ_SURFACE_DEFAULT_MAX_BYTES,
-        GIT_READ_SURFACE_DEFAULT_MAX_BYTES,
+        GIT_QUERY_DEFAULT_MAX_BYTES,
+        GIT_QUERY_DEFAULT_MAX_BYTES,
     )?;
     let string = |name: &str| {
         object

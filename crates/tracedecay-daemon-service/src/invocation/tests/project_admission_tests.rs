@@ -73,8 +73,8 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
                 surface_operation: ApplicationSurfaceOperation::GitStatus,
                 request: GitReadSurfaceRequest {
                     request: tracedecay_contracts::git::GitReadRequestV1::Status,
-                    max_entries: tracedecay_application::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES,
-                    max_bytes: tracedecay_application::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
+                    max_entries: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_ENTRIES,
+                    max_bytes: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_BYTES,
                 },
                 observed_at: now,
                 deadline,

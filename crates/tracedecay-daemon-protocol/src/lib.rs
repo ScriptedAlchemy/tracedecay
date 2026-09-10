@@ -113,8 +113,7 @@ pub use surface::{
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
     ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
-    ContextScoutSurfaceRequest, GIT_READ_SURFACE_DEFAULT_MAX_BYTES,
-    GIT_READ_SURFACE_DEFAULT_MAX_ENTRIES, GitReadSurfaceRequest,
+    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
 };
 pub use transport::{
     AUTH_PREFACE_PROTOCOL, BrokerListener, BrokerReadHalf, BrokerStream, BrokerWriteHalf,
