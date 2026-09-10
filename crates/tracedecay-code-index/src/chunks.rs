@@ -2477,6 +2477,8 @@ mod tests {
             start_line: source[..start].matches('\n').count() as u32,
             signature: None,
             docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             parent: None,
             identity: id(&digest(identity_byte)),
@@ -3949,7 +3951,7 @@ pub fn real_symbol() {}
         let (resolved, retained) = resolve_file_references(
             source,
             &line_offsets(source.as_bytes()),
-            &[reference.clone()],
+            std::slice::from_ref(&reference),
             &symbols,
         );
         assert_eq!(resolved.len(), 1);

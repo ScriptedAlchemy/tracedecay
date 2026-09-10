@@ -52,8 +52,6 @@ use tracedecay_store_runtime::{
 
 mod observability;
 
-pub use observability::remote_query_result_observation;
-
 use tracedecay_store_runtime::{DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1};
 
 struct DaemonRemoteEnrollmentProtocolPortV1 {
@@ -456,6 +454,118 @@ mod recovery_control_tests {
         assert_eq!(
             cancellation.interruption(&request_id),
             Some(RemoteRecoveryInterruptionV1::Cancelled)
+        );
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use tracedecay_contracts::remote::composition::{
+        AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalEvidenceV1,
+        PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1,
+        RemoteFreshnessV1, RemoteQueryCompositionV1, ShardCoverageStateV1,
+        ShardQueryContributionV1,
+    };
+    use tracedecay_contracts::remote::query::{
+        RemoteExactObservationResultV1, RemoteQueryResultV1,
+    };
+    use tracedecay_domain::{CoverageStateV1, ObservedTernaryV1};
+
+    use super::observability::remote_query_result_observation;
+
+    fn remote_query_result(
+        coverage: ShardCoverageStateV1,
+        pending_local: PendingLocalEvidenceV1,
+    ) -> RemoteQueryResultV1 {
+        RemoteQueryResultV1 {
+            composition: RemoteQueryCompositionV1 {
+                contributions: vec![ShardQueryContributionV1 {
+                    manifest: QueryManifestBindingV1 {
+                        brain_id: "brain.remote-coverage".to_owned(),
+                        shard_id: "shard.remote-coverage".to_owned(),
+                        generation_id: "generation.remote-coverage".to_owned(),
+                        schema_digest: [1; 32],
+                        watermark_sequence: 1,
+                        placement_revision: 1,
+                        authority_epoch: 1,
+                        cache_age_millis: 0,
+                        cache_lag_commits: 0,
+                    },
+                    integrity: IntegrityClaimV1::Verified,
+                    authenticity: AuthenticityClaimV1::Authenticated,
+                    freshness: RemoteFreshnessV1::Current,
+                    completeness: RemoteCompletenessV1::Complete,
+                    authorization: AuthorizationClaimV1::Authorized,
+                    coverage,
+                    authority_receipt: None,
+                    value: None,
+                    reason_code: (coverage != ShardCoverageStateV1::Complete)
+                        .then(|| "remote_shard_degraded".to_owned()),
+                }],
+                pending_local,
+                coverage,
+            },
+            observation: RemoteExactObservationResultV1::NotFound,
+        }
+    }
+
+    #[test]
+    fn remote_query_coverage_preserves_real_shard_and_pending_counts() {
+        let result = remote_query_result(
+            ShardCoverageStateV1::Stale,
+            PendingLocalObservationsV1 {
+                count: 3,
+                oldest_age_millis: Some(9),
+                has_sequence_gap: false,
+                has_quarantined: false,
+            }
+            .into(),
+        );
+        result.validate().expect("valid stale remote query result");
+
+        let observation = remote_query_result_observation(
+            "request.remote-coverage",
+            1,
+            &result,
+            ObservedTernaryV1::Yes,
+        );
+
+        assert_eq!(observation.expected_shards, Some(1));
+        assert_eq!(observation.observed_shards, Some(1));
+        assert_eq!(observation.pending_local_evidence, Some(3));
+        assert_eq!(observation.terminal_succeeded, ObservedTernaryV1::Yes);
+        assert_eq!(observation.coverage, CoverageStateV1::Stale);
+        assert_eq!(
+            observation.unavailable_reason.as_deref(),
+            Some("pending_local_evidence")
+        );
+    }
+
+    #[test]
+    fn remote_query_coverage_does_not_fabricate_unavailable_pending_count() {
+        let result = remote_query_result(
+            ShardCoverageStateV1::Unknown,
+            PendingLocalEvidenceV1::Unavailable {
+                reason: tracedecay_contracts::remote::composition::PendingLocalUnavailableReasonV1::AuthorityUnavailable,
+            },
+        );
+        result
+            .validate()
+            .expect("valid unavailable remote query result");
+
+        let observation = remote_query_result_observation(
+            "request.remote-coverage-unavailable",
+            1,
+            &result,
+            ObservedTernaryV1::Unknown,
+        );
+
+        assert_eq!(observation.pending_local_evidence, None);
+        assert_eq!(observation.terminal_succeeded, ObservedTernaryV1::Unknown);
+        assert_eq!(observation.coverage, CoverageStateV1::Unknown);
+        assert_eq!(
+            observation.unavailable_reason.as_deref(),
+            Some("pending_local_authority_unavailable")
         );
     }
 }
