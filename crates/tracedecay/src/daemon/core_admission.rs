@@ -12,8 +12,8 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 use super::{
     AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
     DaemonHandshake, JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError,
-    classify_mcp_method, parse_daemon_invocation_request, read_line_handling_wire_oversized,
-    write_json_rpc_response,
+    binary_version, classify_mcp_method, parse_daemon_invocation_request,
+    read_line_handling_wire_oversized, write_json_rpc_response,
 };
 use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
@@ -616,6 +616,8 @@ pub(crate) async fn reject_admitted_request(
     Ok(())
 }
 
+/// The request line a saturation rejection should answer, or `None` when this
+/// connection has already been answered or closed without one.
 async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result<Option<String>> {
     // A broker client sends a handshake before its JSON-RPC request, optionally
     // preceded by an auth preface. Consume those frames so the rejection uses
@@ -631,7 +633,20 @@ async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result
     } else {
         first_line
     };
-    DaemonHandshake::from_line(&handshake_line)?;
+    if DaemonHandshake::from_line(&handshake_line).is_err() {
+        // Saturation is not a reason to hide wire skew. Propagating the parse
+        // failure here dropped the socket with the client's pipelined request
+        // still unread, which the kernel reports as `Connection reset by peer`
+        // — indistinguishable from a daemon crash. Answer with the same typed
+        // refusal frame the served path uses (#753).
+        super::connection_serving::refuse_unparseable_handshake(
+            transport,
+            &handshake_line,
+            binary_version()?,
+        )
+        .await;
+        return Ok(None);
+    }
     read_line_handling_wire_oversized(transport).await
 }
 
@@ -642,9 +657,11 @@ pub(crate) async fn reject_saturated_daemon_client(
 ) {
     let mut transport = BrokerStreamTransport::new(stream);
     let response = async {
-        let request_line = saturated_request_line(&mut transport)
-            .await?
-            .unwrap_or_default();
+        // `None` means the connection was already answered with a typed
+        // handshake refusal, or closed before it sent a request.
+        let Some(request_line) = saturated_request_line(&mut transport).await? else {
+            return Ok(());
+        };
         if let Some(invocation) = invocation_saturation_response(&request_line, &response) {
             write_invocation_response(&mut transport, &invocation).await
         } else {
