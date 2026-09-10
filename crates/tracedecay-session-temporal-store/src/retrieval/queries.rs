@@ -1015,3 +1015,95 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
     ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
     LIMIT ?8"
 );
+
+// Derived candidates are clusters, so their message filter applies to any
+// member independently of the member that matched the text query. Materialize
+// the filtered member identities first: otherwise the correlated occurrence
+// FTS probe runs once per derived record and Rust rejects the result only after
+// that unbounded work.
+pub(super) const ROOT_DIRECT_USER_DERIVED_CANDIDATE_QUERY: &str = concat!(
+    direct_user_message_candidates!("'role : user'", "?9", "?10"),
+    ",
+    direct_user_evidence(session_id, generation, evidence_kind, evidence_id)
+    AS MATERIALIZED (
+        SELECT DISTINCT member.session_id, member.generation,
+                        member.evidence_kind, member.evidence_id
+        FROM direct_user_messages AS filter_message
+        CROSS JOIN session_temporal_generations AS filter_generation
+        CROSS JOIN session_occurrences AS filter_occurrence
+          INDEXED BY idx_session_occurrences_message
+        CROSS JOIN session_derived_evidence_members AS member
+          INDEXED BY idx_session_derived_evidence_members_occurrence
+        WHERE filter_generation.session_id = filter_message.session_id
+          AND filter_generation.state = 'active'
+          AND filter_occurrence.session_id = filter_generation.session_id
+          AND filter_occurrence.generation = filter_generation.generation
+          AND filter_occurrence.source_provider = filter_message.provider
+          AND filter_occurrence.message_id = filter_message.message_id
+          AND member.session_id = filter_occurrence.session_id
+          AND member.generation = filter_occurrence.generation
+          AND member.occurrence_id = filter_occurrence.occurrence_id
+          AND NOT EXISTS (
+              SELECT 1
+              FROM observations AS filter_observation
+              JOIN json_each(
+                  filter_observation.observation_json,
+                  '$.payload.facts'
+              ) AS filter_fact
+              WHERE filter_observation.observation_id =
+                    filter_occurrence.source_observation_id
+                AND json_extract(filter_fact.value, '$.kind') = 'tool_result'
+          )
+    )
+    SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
+           first_occurrence.knowledge_at,
+           CASE WHEN evidence.member_count = 1
+                THEN first_occurrence.message_id ELSE NULL END,
+           NULL, evidence.session_id, evidence.evidence_kind,
+           authority_session.provider, frozen.generation
+    FROM direct_user_evidence AS filter_evidence
+    CROSS JOIN sessions AS authority_session
+    CROSS JOIN session_temporal_generations AS frozen
+    CROSS JOIN session_derived_evidence AS evidence
+    CROSS JOIN session_occurrences AS first_occurrence
+    CROSS JOIN retrieval_anchors AS authority_anchor
+    WHERE authority_session.project_key = ?1
+      AND (?3 IS NULL OR authority_session.provider = ?3)
+      AND frozen.session_id = authority_session.session_id
+      AND frozen.state = 'active'
+      AND filter_evidence.session_id = frozen.session_id
+      AND filter_evidence.generation = frozen.generation
+      AND filter_evidence.evidence_kind = ?2
+      AND evidence.session_id = filter_evidence.session_id
+      AND evidence.generation = filter_evidence.generation
+      AND evidence.evidence_kind = filter_evidence.evidence_kind
+      AND evidence.evidence_id = filter_evidence.evidence_id
+      AND first_occurrence.session_id = evidence.session_id
+      AND first_occurrence.generation = evidence.generation
+      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
+      AND authority_anchor.anchor_id = evidence.retrieval_anchor_id
+      AND authority_session.provider = first_occurrence.source_provider
+      AND EXISTS (
+          SELECT 1
+          FROM session_derived_evidence_members AS member
+          JOIN session_occurrences AS member_occurrence
+            ON member_occurrence.session_id = member.session_id
+           AND member_occurrence.generation = member.generation
+           AND member_occurrence.occurrence_id = member.occurrence_id
+          JOIN session_occurrences_fts
+            ON session_occurrences_fts.rowid = member_occurrence.rowid
+          WHERE member.session_id = evidence.session_id
+            AND member.generation = evidence.generation
+            AND member.evidence_kind = evidence.evidence_kind
+            AND member.evidence_id = evidence.evidence_id
+            AND session_occurrences_fts MATCH ?4
+      )
+      AND ",
+    anchor_owner_authority_predicate!(),
+    "
+      ",
+    derived_root_keyset!("?5", "?6", "?7"),
+    "
+    ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
+    LIMIT ?8"
+);

@@ -1269,7 +1269,37 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
              '{\"kind\":\"known\",\"valid_at\":42}', '{}',
              '0000000000000000000000000000000000000000000000000000000000000000',
              6, 'common', 'common'
-         );",
+         );
+         INSERT INTO session_derived_evidence (
+             session_id, generation, evidence_kind, evidence_id,
+             retrieval_anchor_id, first_occurrence_id, last_occurrence_id,
+             algorithm_version, configuration_digest, member_count,
+             member_digest, evidence_json
+         ) VALUES
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-tool',
+                 'anchor-common-tool', 'occurrence-common-tool-001',
+                 'occurrence-common-tool-001', 'fixture', 'fixture', 1,
+                 'fixture-tool', '{}'
+             ),
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-user',
+                 'anchor-plan-inside', 'occurrence-common-user',
+                 'occurrence-common-user', 'fixture', 'fixture', 1,
+                 'fixture-user', '{}'
+             );
+         INSERT INTO session_derived_evidence_members (
+             session_id, generation, evidence_kind, evidence_id, ordinal,
+             occurrence_id, member_role
+         ) VALUES
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-tool', 0,
+                 'occurrence-common-tool-001', 'member'
+             ),
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-user', 0,
+                 'occurrence-common-user', 'member'
+             );",
     )
     .await
     .expect("common-term fixture");
@@ -1368,6 +1398,46 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
         )
         .await,
         ["occurrence-common-user"]
+    );
+
+    let direct_derived_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Null,
+        SqlValue::Text(fts_phrase("common")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(1),
+        SqlValue::Integer(40),
+        SqlValue::Integer(50),
+    ];
+    assert_eq!(
+        read.text_column(
+            ROOT_DIRECT_USER_DERIVED_CANDIDATE_QUERY,
+            direct_derived_params.clone(),
+            0,
+        )
+        .await,
+        ["span-common-user"]
+    );
+    let derived_plan = read
+        .explain_query_plan(
+            ROOT_DIRECT_USER_DERIVED_CANDIDATE_QUERY,
+            direct_derived_params,
+        )
+        .await;
+    assert!(
+        derived_plan
+            .iter()
+            .any(|line| line.contains("MATERIALIZE DIRECT_USER_EVIDENCE")),
+        "direct-user derived retrieval must filter evidence before occurrence FTS: {derived_plan:?}"
+    );
+    assert!(
+        derived_plan
+            .iter()
+            .any(|line| line.contains("IDX_SESSION_DERIVED_EVIDENCE_MEMBERS_OCCURRENCE")),
+        "direct-user evidence must join membership by occurrence: {derived_plan:?}"
     );
 }
 
