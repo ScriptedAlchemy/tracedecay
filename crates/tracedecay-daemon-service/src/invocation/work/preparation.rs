@@ -1,6 +1,6 @@
 //! Backend-owned preparation of exact Work mutation commands.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
     ApplicationProblem, RequestContext, RequestId, RetryDirective, SafeDiagnostic,
@@ -8,9 +8,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::{
-    RegisteredWorkRuntime, work_product_problem, work_projection_problem, work_topology_problem,
-};
+use super::{RegisteredWorkRuntime, work_product_problem, work_projection_problem};
 
 pub(super) fn prepare_graph_mutation(
     registered: &RegisteredWorkRuntime,
@@ -47,37 +45,26 @@ pub(super) fn prepare_graph_mutation(
 }
 
 pub(super) fn prepare_duplicate_adjudication(
+    registered: &RegisteredWorkRuntime,
     services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
     request: tracedecay_contracts::PrepareWorkDuplicateAdjudicationRequestV1,
     canonical_request_id: &RequestId,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_domain::WorkDuplicateAdjudicationCommandV1, ApplicationProblem> {
-    let authority = tracedecay_domain::WorkAuthority::new(
-        context.scope().project_id.clone(),
-        context.scope().repository_id.clone(),
-        context.scope().worktree_id.clone(),
-        context.actor().clone(),
-        context.grant().digest.clone(),
-    )
-    .map_err(|_| invalid_work_product_request())?;
     require_attempt(services, context, &request.first_attempt)?;
     require_attempt(services, context, &request.second_attempt)?;
-    let snapshot = services
+    let attempt_snapshot = services
         .projections()
         .snapshot(context, tracedecay_contracts::MAX_WORK_PROJECTION_PAGE_SIZE)
         .map_err(work_projection_problem)?;
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let topology = services
-        .topology()
-        .verified_snapshot(&authority, cancelled)
-        .map_err(|error| match work_topology_problem(error) {
-            Ok(_) => work_product_authority_unavailable(),
-            Err(problem) => problem,
-        })?;
-    let topology_generation = topology
-        .evidence_ref()
-        .map_err(|_| work_product_authority_unavailable())?;
+    let product_snapshot =
+        current_product_snapshot(registered, context, capability, use_case, observed_at)?;
+    let topology_generation = product_snapshot
+        .topology_generation_ref()
+        .map_err(work_product_problem)?;
     let command_id =
         tracedecay_domain::WorkCommandId::new(canonical_request_id.as_str().to_owned())
             .map_err(|_| work_product_authority_unavailable())?;
@@ -85,12 +72,69 @@ pub(super) fn prepare_duplicate_adjudication(
         context,
         request,
         tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1 {
-            work_generation: snapshot.generation_id().clone(),
+            work_generation: attempt_snapshot.generation_id().clone(),
             topology_generation,
         },
         command_id,
         observed_at,
     )
+}
+
+pub(super) fn current_product_topology(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_contracts::WorkAttemptTopologyStateV1, ApplicationProblem> {
+    let snapshot =
+        current_product_snapshot(registered, context, capability, use_case, observed_at)?;
+    let task_count = u32::try_from(snapshot.graph().items().len())
+        .map_err(|_| work_product_authority_unavailable())?;
+    let generation = snapshot
+        .topology_generation_ref()
+        .map_err(work_product_problem)?;
+    Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
+        tracedecay_contracts::WorkAttemptTopologyBindingV1 {
+            generation: generation.as_str().to_owned(),
+            task_count,
+        },
+    ))
+}
+
+fn current_product_snapshot(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_contracts::WorkGraphVersionEntryV1, ApplicationProblem> {
+    let capability =
+        CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
+    let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
+    let product = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
+        &registered.database,
+        binding,
+    )
+    .map_err(|_| work_product_authority_unavailable())?;
+    let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        tracedecay_domain::WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: context.scope().project_id.clone(),
+            repository_id: context.scope().repository_id.clone(),
+        },
+    ]))
+    .map_err(|_| work_product_authority_unavailable())?;
+    let graph = product
+        .reads()
+        .read_graph(
+            context,
+            tracedecay_contracts::WorkGraphReadRequestV1::current(selection, observed_at),
+        )
+        .map_err(work_product_problem)?;
+    let tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. } = graph else {
+        return Err(work_product_authority_unavailable());
+    };
+    Ok(snapshot)
 }
 
 fn require_attempt(
