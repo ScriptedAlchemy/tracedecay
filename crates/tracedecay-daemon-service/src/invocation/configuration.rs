@@ -9,7 +9,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod settlement;
 
-use settlement::{configuration_effect, reconcile_configuration_runtime};
+use settlement::{
+    configuration_effect, reconcile_configuration_runtime, refresh_live_configuration_runtime,
+};
 
 #[hotpath::measure(label = "daemon.service.configuration.execute", future = true)]
 pub(super) async fn execute_configuration(
@@ -479,6 +481,34 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     if !coordinated_semantic_transition {
         Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
     } else {
+        let refresh = match Box::pin(registered.runtime.client().current()).await {
+            Ok(current) => {
+                refresh_live_configuration_runtime(
+                    registered,
+                    tracedecay_configuration::ConfigurationCurrentStateV1 {
+                        revision_id: current.revision_id().clone(),
+                        snapshot: current.snapshot().clone(),
+                    },
+                )
+                .await
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = refresh {
+            tracing::warn!(
+                receipt_id = %receipt.receipt_id,
+                error,
+                "semantic configuration committed; live runtime refresh remains pending"
+            );
+            let _ = registered
+                .runtime
+                .record_runtime_activation(
+                    None,
+                    Some("runtime_configuration_activation_failed".to_owned()),
+                    now,
+                )
+                .await;
+        }
         notify_committed_semantic_activation(&registered.semantic_activation_committed);
     }
     Ok(receipt)

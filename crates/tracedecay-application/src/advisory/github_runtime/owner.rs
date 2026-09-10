@@ -85,6 +85,7 @@ impl GitHubStackObservabilityV1 {
     }
 }
 
+#[derive(Clone)]
 pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub database: Database,
     pub resolved_scope: ResolvedScope,
