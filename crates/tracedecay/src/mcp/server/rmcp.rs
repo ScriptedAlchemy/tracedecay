@@ -1,78 +1,36 @@
-//! Root composition for the transport-owned `rmcp` adapter.
+//! Root type aliases for the transport-owned `rmcp` adapter. Production
+//! composes `tracedecay_mcp::server::RmcpConnectionAdapter` directly over
+//! `ProductionMcpConnectionContext` in `daemon::connection_serving`.
 
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use rmcp::RoleServer;
+#[cfg(test)]
+use tracedecay_mcp::server::RmcpConnectionAdapter;
 #[cfg(test)]
 use tracedecay_mcp::transport::JsonRpcResponse;
 
+#[cfg(test)]
 use super::McpServer;
+#[cfg(test)]
 use super::connection::ProductionMcpConnectionContext;
+#[cfg(test)]
 use super::routing::SelectedProjectResponseLease;
 
 pub(crate) type RmcpInitializeResponseDecorator =
     tracedecay_mcp::server::RmcpInitializeResponseDecorator;
+#[cfg(test)]
 pub(crate) type RmcpSelectedProjectResponseAuthority =
     tracedecay_mcp::server::RmcpSelectedProjectResponseAuthority<SelectedProjectResponseLease>;
+#[cfg(test)]
 pub(crate) type RmcpWorkDeliverySettlement = tracedecay_mcp::server::RmcpWorkDeliverySettlement;
 
 #[cfg(test)]
 use tracedecay_mcp::server::{
     await_dispatch_with_cancellation, project_server_retired_error, rmcp_response_result,
 };
-
-pub(crate) struct RmcpConnectionAdapter {
-    inner: tracedecay_mcp::server::RmcpConnectionAdapter<ProductionMcpConnectionContext>,
-}
-
-impl RmcpConnectionAdapter {
-    pub(crate) fn new(
-        server: Arc<McpServer>,
-        timings_enabled: bool,
-        initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
-    ) -> tracedecay_domain::errors::Result<Self> {
-        let delivery_settlement_recorder = server.delivery_settlement_recorder.clone();
-        let context = ProductionMcpConnectionContext::new(server);
-        let inner = tracedecay_mcp::server::RmcpConnectionAdapter::new(
-            context,
-            timings_enabled,
-            initialize_response_decorator,
-            delivery_settlement_recorder,
-        )?;
-        Ok(Self { inner })
-    }
-
-    pub(crate) fn work_delivery_settlement(&self) -> RmcpWorkDeliverySettlement {
-        self.inner.work_delivery_settlement()
-    }
-
-    pub(crate) fn selected_project_responses(&self) -> RmcpSelectedProjectResponseAuthority {
-        self.inner.selected_project_responses()
-    }
-
-    pub(crate) async fn serve<T>(
-        self,
-        transport: T,
-    ) -> std::result::Result<
-        rmcp::service::RunningService<
-            RoleServer,
-            tracedecay_mcp::server::RmcpConnectionAdapter<ProductionMcpConnectionContext>,
-        >,
-        rmcp::service::ServerInitializeError,
-    >
-    where
-        T: rmcp::transport::Transport<RoleServer> + Send + 'static,
-    {
-        self.inner.serve(transport).await
-    }
-
-    #[cfg(test)]
-    fn response_result<T: serde::de::DeserializeOwned>(
-        response: JsonRpcResponse,
-    ) -> Result<T, rmcp::model::ErrorData> {
-        rmcp_response_result(response)
-    }
-}
 
 #[cfg(test)]
 use rmcp::model::{ErrorCode, InitializeResult, ListToolsResult};
@@ -96,6 +54,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The same composition `daemon::connection_serving` performs.
+    fn production_adapter(
+        server: &Arc<McpServer>,
+        initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
+    ) -> RmcpConnectionAdapter<ProductionMcpConnectionContext> {
+        RmcpConnectionAdapter::new(
+            ProductionMcpConnectionContext::new(Arc::clone(server)),
+            false,
+            initialize_response_decorator,
+            server.delivery_settlement_recorder.clone(),
+        )
+        .expect("RMCP adapter")
+    }
 
     struct RecordingTransport<R, T>
     where
@@ -179,15 +151,15 @@ mod tests {
             let server = McpServer::new_with_registered_test_context(context, Vec::new())
                 .await
                 .expect("registered RMCP wire server");
-            let adapter =
-                RmcpConnectionAdapter::new(Arc::clone(&server), false, Some(Arc::new(|response| {
-                    response.result.as_mut().expect("initialize result")["_meta"]
-                        ["tracedecayInitializeRoute"] = json!({
-                            "projectPath": "/wire/oracle",
-                            "allowInit": false,
-                        });
-                })))
-                .expect("RMCP adapter");
+            let adapter = production_adapter(
+                &server,
+                Some(Arc::new(|response| {
+                    response.result.as_mut().expect("initialize result")["_meta"]["tracedecayInitializeRoute"] = json!({
+                        "projectPath": "/wire/oracle",
+                        "allowInit": false,
+                    });
+                })),
+            );
             let (server_io, client_io) = tokio::io::duplex(2 * 1024 * 1024);
             let server_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
             let server_transport = RecordingTransport::<RoleServer, _>::new(
@@ -278,8 +250,7 @@ mod tests {
         let server = McpServer::new_with_registered_test_context(context, Vec::new())
             .await
             .expect("registered RMCP handshake server");
-        let adapter =
-            RmcpConnectionAdapter::new(Arc::clone(&server), false, None).expect("RMCP adapter");
+        let adapter = production_adapter(&server, None);
         let (server_io, client_io) = tokio::io::duplex(256 * 1024);
         let serving = tokio::spawn(async move {
             let running = adapter
@@ -647,7 +618,7 @@ mod tests {
     #[test]
     fn response_conversion_preserves_tool_content_and_rpc_errors() {
         let complete: CallToolResponse =
-            RmcpConnectionAdapter::response_result::<CallToolResult>(JsonRpcResponse::success(
+            rmcp_response_result::<CallToolResult>(JsonRpcResponse::success(
                 json!(7),
                 json!({"content": [{"type": "text", "text": "ok"}]}),
             ))
@@ -661,14 +632,12 @@ mod tests {
             Some("ok")
         );
 
-        let error = RmcpConnectionAdapter::response_result::<ListToolsResult>(
-            JsonRpcResponse::error_with_data(
-                json!("request"),
-                tracedecay_mcp::transport::ErrorCode::InvalidParams,
-                "invalid arguments".to_owned(),
-                Some(json!({"reason": "missing_query"})),
-            ),
-        )
+        let error = rmcp_response_result::<ListToolsResult>(JsonRpcResponse::error_with_data(
+            json!("request"),
+            tracedecay_mcp::transport::ErrorCode::InvalidParams,
+            "invalid arguments".to_owned(),
+            Some(json!({"reason": "missing_query"})),
+        ))
         .expect_err("error response");
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
         assert_eq!(error.message, "invalid arguments");
@@ -678,13 +647,12 @@ mod tests {
     #[test]
     fn adapter_accepts_the_legacy_initialize_response_shape() {
         crate::product_runtime::register_fixture_product_runtime();
-        let initialized: InitializeResult =
-            RmcpConnectionAdapter::response_result(JsonRpcResponse::success(
-                json!(1),
-                crate::mcp::server::initialize_result("TraceDecay instructions")
-                    .expect("fixture product runtime registered"),
-            ))
-            .expect("rmcp must preserve legacy MCP initialization compatibility");
+        let initialized: InitializeResult = rmcp_response_result(JsonRpcResponse::success(
+            json!(1),
+            crate::mcp::server::initialize_result("TraceDecay instructions")
+                .expect("fixture product runtime registered"),
+        ))
+        .expect("rmcp must preserve legacy MCP initialization compatibility");
 
         assert_eq!(
             serde_json::to_value(&initialized).expect("serialize initialized response")["protocolVersion"],

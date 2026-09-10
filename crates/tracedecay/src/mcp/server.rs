@@ -59,11 +59,12 @@ mod routing;
 mod session_refresh;
 mod status_resource;
 
+pub(crate) use connection::ProductionMcpConnectionContext;
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::VersionCheckState;
-pub(crate) use rmcp::{RmcpConnectionAdapter, RmcpInitializeResponseDecorator};
+pub(crate) use rmcp::RmcpInitializeResponseDecorator;
 #[cfg(test)]
 pub(crate) use rmcp::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
 pub(crate) use routing::*;
@@ -537,7 +538,7 @@ pub struct McpServer {
     daemon_invocation_service: Option<tracedecay_daemon_service::DaemonInvocationService>,
     delivery_settlement_authority:
         Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
-    delivery_settlement_recorder:
+    pub(crate) delivery_settlement_recorder:
         Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
     /// Daemon-owned route liveness. A failed post-open health check revokes
     /// every tool on retained transports before cache retirement can await.
