@@ -252,10 +252,18 @@ fn anchored_write(
 }
 
 fn sequential_writes(session_id: &SessionId, count: usize) -> Vec<AnchoredObservationWrite> {
+    sequential_writes_with_text(session_id, count, |ordinal| format!("frame {ordinal}"))
+}
+
+fn sequential_writes_with_text(
+    session_id: &SessionId,
+    count: usize,
+    text: impl Fn(u64) -> String,
+) -> Vec<AnchoredObservationWrite> {
     let mut writes = Vec::with_capacity(count);
     let mut expected = None;
     for ordinal in 0..u64::try_from(count).expect("batch fits u64") {
-        let observation = sequential_observation(session_id, ordinal, &format!("frame {ordinal}"));
+        let observation = sequential_observation(session_id, ordinal, &text(ordinal));
         let write = anchored_write(observation, expected);
         expected = Some(write.next_cursor().clone());
         writes.push(write);
@@ -659,6 +667,42 @@ async fn persist_observations_dispatches_one_runtime_command_independent_of_batc
         assert_eq!(after.operations - before.operations, 1);
         assert_eq!(after.scopes - before.scopes, 1);
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn persist_observations_partitions_large_windows_by_exact_admission_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    initialize_writer_authority(&runtime, &store).await;
+    let session_id = SessionId::new("session.observation-batch.byte-partition").unwrap();
+    let writes = sequential_writes_with_text(&session_id, 256, |ordinal| {
+        format!("large frame {ordinal} {}", "x".repeat(15_000))
+    });
+    let before = writer_txn_census(&runtime).await;
+
+    let (outcomes, runtime_commands, _) = persist_with_work_census(&store, writes).await;
+
+    assert_eq!(outcomes.len(), 256);
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome.outcome(), ObservationPersistOutcome::Committed(_)))
+    );
+    assert!(
+        runtime_commands > 1,
+        "the oversized source window must be split before runtime admission"
+    );
+    let after = writer_txn_census(&runtime).await;
+    assert_eq!(
+        after.operations - before.operations,
+        runtime_commands as i64
+    );
+    assert_eq!(after.scopes - before.scopes, runtime_commands as i64);
 }
 
 #[tokio::test]
