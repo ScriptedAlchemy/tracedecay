@@ -492,21 +492,29 @@ pub async fn handle_impls(graph: &VerifiedGraphQuery, args: Value) -> Result<Too
                 {
                     continue;
                 }
-                let traits = single_graph_adjacency_batch(graph.callees(
-                    std::slice::from_ref(&impl_node.occurrence),
-                    &[RelationEdgeKindV1::Implements],
-                    GRAPH_RELATION_READ_LIMIT,
-                )?)?;
-                let trait_node = traits.into_iter().next().map(|edge| edge.neighbor);
+                let trait_node = resolved_impl_trait(graph, &impl_node)?;
+                let unresolved_trait = trait_node
+                    .is_none()
+                    .then(|| impl_trait_from_signature(metadata))
+                    .flatten()
+                    .map(str::to_owned);
                 if trait_filter.is_some_and(|query| {
-                    trait_node
-                        .as_ref()
-                        .and_then(|node| node.metadata.as_ref())
-                        .is_none_or(|metadata| !graph_name_matches(metadata, query))
+                    trait_node.as_ref().map_or_else(
+                        || {
+                            unresolved_trait
+                                .as_deref()
+                                .is_none_or(|name| !impl_trait_name_matches(name, query))
+                        },
+                        |node| {
+                            node.metadata
+                                .as_ref()
+                                .is_none_or(|metadata| !graph_name_matches(metadata, query))
+                        },
+                    )
                 }) {
                     continue;
                 }
-                results.push((impl_node, trait_node));
+                results.push((impl_node, trait_node, unresolved_trait));
                 if results.len() > limit {
                     break;
                 }
@@ -522,13 +530,13 @@ pub async fn handle_impls(graph: &VerifiedGraphQuery, args: Value) -> Result<Too
 
     let result_paths = results
         .iter()
-        .map(|(impl_node, _)| required_graph_file_path(impl_node))
+        .map(|(impl_node, _, _)| required_graph_file_path(impl_node))
         .collect::<Result<Vec<_>>>()?;
     let touched_files = unique_file_paths(result_paths.into_iter());
 
     let items = results
         .iter()
-        .map(|(impl_node, trait_node)| {
+        .map(|(impl_node, trait_node, unresolved_trait)| {
             let metadata = required_graph_metadata(impl_node)?;
             let file_path = required_graph_file_path(impl_node)?;
             let trait_metadata = trait_node
@@ -539,8 +547,12 @@ pub async fn handle_impls(graph: &VerifiedGraphQuery, args: Value) -> Result<Too
                 "impl_id": impl_node.occurrence.as_str(),
                 "type": metadata.simple_name,
                 "qualified_name": metadata.qualified_name,
-                "trait": trait_metadata.map(|value| value.simple_name.as_str()),
-                "trait_qualified_name": trait_metadata.map(|value| value.qualified_name.as_str()),
+                "trait": trait_metadata
+                    .map(|value| value.simple_name.as_str())
+                    .or(unresolved_trait.as_deref()),
+                "trait_qualified_name": trait_metadata
+                    .map(|value| value.qualified_name.as_str())
+                    .or(unresolved_trait.as_deref()),
                 "trait_id": trait_node.as_ref().map(|value| value.occurrence.as_str()),
                 "file": file_path,
                 "start_line": user_line(metadata.start_line),
@@ -619,24 +631,15 @@ pub async fn handle_implementations(
     hotpath::measure_block!("mcp.graph.implementations.graph", {
         if let Some(name) = trait_name {
             let candidates = graph.resolve_simple_name(name, None, 50)?;
-            let trait_nodes: Vec<_> = candidates
-                .into_iter()
-                .filter(|node| {
-                    node.metadata.as_ref().is_some_and(|metadata| {
-                        matches!(
-                            NodeKind::from_str(&metadata.kind),
-                            Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-                        )
-                    })
+            let trait_nodes = candidates.into_iter().filter(|node| {
+                node.metadata.as_ref().is_some_and(|metadata| {
+                    matches!(
+                        NodeKind::from_str(&metadata.kind),
+                        Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+                    )
                 })
-                .collect();
-            if trait_nodes.is_empty() {
-                return Ok(text_tool_result(
-                    &format!("No trait or interface named '{name}' found."),
-                    vec![],
-                ));
-            }
-
+            });
+            let mut seen = HashSet::new();
             for trait_node in trait_nodes {
                 let trait_metadata = required_graph_metadata(&trait_node)?;
                 let implementors = single_graph_adjacency_batch(graph.callers(
@@ -651,17 +654,25 @@ pub async fn handle_implementations(
                     if scope_prefix.is_some_and(|prefix| !impl_file.starts_with(prefix)) {
                         continue;
                     }
+                    if entries.len() >= limit {
+                        break;
+                    }
+                    if !seen.insert(impl_node.occurrence.clone()) {
+                        continue;
+                    }
                     let methods = collect_method_bodies(graph, &impl_node)?;
                     if !touched.iter().any(|path| path == impl_file) {
                         touched.push(impl_file.to_owned());
                     }
                     entries.push(json!({
+                        "impl_id": impl_node.occurrence.as_str(),
                         "type": impl_metadata.simple_name,
                         "qualified_name": impl_metadata.qualified_name,
                         "kind": impl_metadata.kind,
                         "file": impl_file,
                         "line": user_line(impl_metadata.start_line),
                         "trait": trait_metadata.qualified_name,
+                        "trait_id": trait_node.occurrence.as_str(),
                         "methods": methods,
                     }));
                     if entries.len() >= limit {
@@ -670,6 +681,76 @@ pub async fn handle_implementations(
                 }
                 if entries.len() >= limit {
                     break;
+                }
+            }
+            if entries.len() < limit {
+                let mut after = None;
+                'pages: loop {
+                    let page = graph.symbols_page(after.as_ref(), 1_024)?;
+                    let has_more = page.has_more;
+                    after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
+                    let mut candidates = Vec::new();
+                    for impl_node in page.symbols {
+                        let impl_metadata = required_graph_metadata(&impl_node)?;
+                        if impl_metadata.kind != NodeKind::Impl.as_str()
+                            || seen.contains(&impl_node.occurrence)
+                        {
+                            continue;
+                        }
+                        let Some(extracted_trait) = impl_trait_from_signature(impl_metadata) else {
+                            continue;
+                        };
+                        if !impl_trait_name_matches(extracted_trait, name) {
+                            continue;
+                        }
+                        let extracted_trait = extracted_trait.to_owned();
+                        let impl_file = required_graph_file_path(&impl_node)?;
+                        if scope_prefix.is_some_and(|prefix| !impl_file.starts_with(prefix)) {
+                            continue;
+                        }
+                        candidates.push((impl_node, extracted_trait));
+                    }
+                    for candidate_batch in candidates.chunks(1_024) {
+                        let occurrences = candidate_batch
+                            .iter()
+                            .map(|(node, _)| node.occurrence.clone())
+                            .collect::<Vec<_>>();
+                        let adjacencies = graph.callees(
+                            &occurrences,
+                            &[RelationEdgeKindV1::Implements],
+                            GRAPH_RELATION_READ_LIMIT,
+                        )?;
+                        for ((impl_node, extracted_trait), implements_edges) in
+                            candidate_batch.iter().zip(adjacencies)
+                        {
+                            if !implements_edges.is_empty() {
+                                continue;
+                            }
+                            if entries.len() >= limit {
+                                break 'pages;
+                            }
+                            let impl_metadata = required_graph_metadata(impl_node)?;
+                            let impl_file = required_graph_file_path(impl_node)?;
+                            let methods = collect_method_bodies(graph, impl_node)?;
+                            if !touched.iter().any(|path| path == impl_file) {
+                                touched.push(impl_file.to_owned());
+                            }
+                            entries.push(json!({
+                                "impl_id": impl_node.occurrence.as_str(),
+                                "type": impl_metadata.simple_name,
+                                "qualified_name": impl_metadata.qualified_name,
+                                "kind": impl_metadata.kind,
+                                "file": impl_file,
+                                "line": user_line(impl_metadata.start_line),
+                                "trait": extracted_trait,
+                                "trait_id": Value::Null,
+                                "methods": methods,
+                            }));
+                        }
+                    }
+                    if !has_more {
+                        break;
+                    }
                 }
             }
         } else if let Some(name) = method_name {
@@ -734,6 +815,46 @@ pub async fn handle_implementations(
         &payload,
         touched,
     ))
+}
+
+fn resolved_impl_trait(
+    graph: &VerifiedGraphQuery,
+    impl_node: &CodeGraphSymbolSummaryV1,
+) -> Result<Option<CodeGraphSymbolSummaryV1>> {
+    let traits = single_graph_adjacency_batch(graph.callees(
+        std::slice::from_ref(&impl_node.occurrence),
+        &[RelationEdgeKindV1::Implements],
+        GRAPH_RELATION_READ_LIMIT,
+    )?)?;
+    Ok(traits.into_iter().next().map(|edge| edge.neighbor))
+}
+
+fn impl_trait_from_signature(
+    metadata: &tracedecay_graph_query::LineageSymbolRecordV1,
+) -> Option<&str> {
+    let (trait_name, _) = metadata
+        .signature
+        .as_deref()?
+        .strip_prefix("impl ")?
+        .split_once(" for ")?;
+    let trait_name = trait_name.trim();
+    (!trait_name.is_empty() && !trait_name.starts_with('!')).then_some(trait_name)
+}
+
+fn impl_trait_name_matches(trait_name: &str, query: &str) -> bool {
+    if trait_name == query {
+        return true;
+    }
+    let short_name = trait_name.rsplit("::").next().unwrap_or(trait_name);
+    if query.contains('<') {
+        return !query.contains("::") && short_name == query;
+    }
+    let trait_base = trait_name.split('<').next().unwrap_or(trait_name);
+    if query.contains("::") {
+        trait_base == query
+    } else {
+        trait_base.rsplit("::").next() == Some(query)
+    }
 }
 
 fn bound_source_file_len(graph: &VerifiedGraphQuery, file_path: &str) -> Result<u64> {

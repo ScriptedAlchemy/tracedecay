@@ -598,7 +598,7 @@ impl RustExtractor {
         }
 
         // If this is a trait impl, create an Implements edge/ref.
-        if let Some(ref trait_n) = trait_name {
+        if let Some(trait_n) = trait_name.as_ref().filter(|name| !name.starts_with('!')) {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: id.clone(),
                 reference_name: trait_n.clone(),
@@ -964,8 +964,16 @@ impl RustExtractor {
     ///
     /// For `impl Trait for Type`, tree-sitter gives us a "trait" field.
     fn extract_impl_trait_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
-        node.child_by_field_name("trait")
-            .map(|n| state.node_text(n).to_string())
+        let trait_node = node.child_by_field_name("trait")?;
+        let trait_name = state.node_text(trait_node);
+        let prefix = state
+            .source
+            .get(node.start_byte()..trait_node.start_byte())?;
+        Some(if prefix.trim_ascii_end().ends_with(b"!") {
+            format!("!{trait_name}")
+        } else {
+            trait_name.to_owned()
+        })
     }
 
     /// Extract visibility from a node.
