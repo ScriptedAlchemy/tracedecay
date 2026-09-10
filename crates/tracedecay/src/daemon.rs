@@ -16,9 +16,11 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
+use tracedecay_mcp::server::RmcpConnectionAdapter;
+
 use crate::mcp::server::{
-    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
-    classify_mcp_method, initialize_result,
+    McpMethod, ProductionMcpConnectionContext, RmcpInitializeResponseDecorator,
+    SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result,
 };
 use crate::mcp::tools::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,

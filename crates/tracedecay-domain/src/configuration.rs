@@ -827,7 +827,7 @@ impl Default for AutomationSettingsV1 {
             enabled: true,
             backend: AutomationBackendV1::CodexAppServer,
             host_mode: AutomationHostModeV1::Standalone,
-            model_id: None,
+            model_id: Some("gpt-5.6-sol".to_owned()),
             timeout_secs: 60,
             scheduler_tick_secs: 60,
             combine_due_tasks: true,
@@ -852,7 +852,7 @@ mod automation_settings_tests {
         assert!(settings.enabled);
         assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
         assert_eq!(settings.host_mode, AutomationHostModeV1::Standalone);
-        assert_eq!(settings.model_id, None);
+        assert_eq!(settings.model_id.as_deref(), Some("gpt-5.6-sol"));
         assert!(settings.validate().is_ok());
         assert_eq!(settings.scheduler_tick_secs, 60);
         assert!(settings.combine_due_tasks);

@@ -6135,6 +6135,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hotpath",
+ "libc",
  "mimalloc",
  "open",
  "rayon",
@@ -6744,8 +6745,6 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

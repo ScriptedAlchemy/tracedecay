@@ -8,13 +8,13 @@ use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::daemon::branch_admin::StoreAdministration;
-use crate::daemon::log_daemon_event;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 use super::{
     MAX_NEW_TRACKS_PER_CYCLE, PrCommandControl, PrDiscovery, PrStoreAdministration,
     discover_open_prs_with_control, load_state, reconcile_project_with_administration,
 };
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Base cadence of the poll loop; per-project intervals are honored on top of
 /// this floor via a last-run map.

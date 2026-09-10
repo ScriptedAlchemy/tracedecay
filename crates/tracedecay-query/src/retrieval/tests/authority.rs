@@ -49,6 +49,62 @@ fn authority_with_keyring(keyring: RetrievalCursorKeyringV1) -> QueryAuthorityV1
 }
 
 #[test]
+fn fallback_cursor_serves_disjoint_canonical_pages() {
+    let authority = authority();
+    let request = request();
+    let query = query_view();
+    let lanes = || {
+        composition_lanes(vec![
+            (
+                RetrieverKind::ExactLiteral,
+                RetrieverOutcome::Complete(batch(Vec::new(), "exact")),
+            ),
+            (
+                RetrieverKind::Lexical,
+                RetrieverOutcome::Complete(batch(
+                    vec![
+                        candidate(RetrieverKind::Lexical, "first", 900_000, 0),
+                        candidate(RetrieverKind::Lexical, "second", 800_000, 1),
+                    ],
+                    "lexical",
+                )),
+            ),
+            (
+                RetrieverKind::Graph,
+                RetrieverOutcome::Complete(batch(Vec::new(), "graph")),
+            ),
+        ])
+    };
+
+    let first = authority
+        .compose(&request, &query, lanes(), 1, None)
+        .expect("first page");
+    let cursor = first.fallback.cursor.clone().expect("continuation");
+    assert_eq!(cursor.next_ordinal, 1);
+    let second = authority
+        .compose(&request, &query, lanes(), 1, Some(&cursor))
+        .expect("second page");
+    assert_eq!(
+        second
+            .composition
+            .ranked_candidates
+            .iter()
+            .map(|candidate| candidate.final_ordinal)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+
+    let anchors = [first, second].map(|page| {
+        assert_eq!(page.fallback.ordered_candidates[0].final_ordinal, 0);
+        page.fallback.ordered_candidates[0]
+            .candidate
+            .anchor_id
+            .clone()
+    });
+    assert_eq!(anchors, [id("anchor.first"), id("anchor.second")]);
+}
+
+#[test]
 fn prepared_query_cursor_resumes_only_the_authenticated_generation_and_candidate_set() {
     let generation = CodeGenerationId::new("generation.prepared-query.v1").expect("generation");
     let bindings = PreparedQueryBindingsV1::new(

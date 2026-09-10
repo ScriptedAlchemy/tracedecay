@@ -787,5 +787,10 @@ pub(super) fn invocation_is_native_integration_operation(
             | DaemonInvocationOperation::NativeIntegrationApply
             | DaemonInvocationOperation::NativeIntegrationStatus
             | DaemonInvocationOperation::NativeIntegrationCancel
+            | DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+            | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+            | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+            | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+            | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
     )
 }

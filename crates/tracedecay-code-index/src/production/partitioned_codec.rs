@@ -51,7 +51,9 @@ use super::canonical_json::{
     CanonicalArrayOrderV1, CanonicalPolicyV1, canonicalize_json_into, visit_json_strings,
     write_json_string,
 };
-use super::lexical_page_source::{SealedLexicalFilesV1, checkpoint};
+use super::lexical_page_source::{
+    LEXICAL_FILE_PREFETCH_BYTES_V1, SealedLexicalFilesV1, checkpoint,
+};
 use super::sealed_codec::{
     PersistedFileGenerationArtifactsRefV2, PersistedFileGenerationArtifactsV1,
     PersistedFileGenerationArtifactsV2, SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -1006,9 +1008,22 @@ where
     }
 }
 
-/// One generation's reusable segment buffers. Encoding a generation now costs
-/// two buffers sized by its largest segment instead of a `serde_json::Value`
-/// tree plus a fresh `Vec<u8>` per file.
+/// Encoded file segments per worker held in memory ahead of the ordered
+/// publish; sized so a window keeps the pool busy without a batch barrier
+/// after every file.
+const SEALED_ENCODE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
+
+/// One file's sealed-segment outcome from the parallel plan: a parent
+/// segment reused unchanged, or fresh bytes awaiting the ordered publish.
+enum FileSegmentPlanV1 {
+    Reused(PartitionedFileSegmentDescriptorV1),
+    Encoded(PartitionedFileSegmentDescriptorV1, Vec<u8>),
+}
+
+/// One file segment's encode buffers: the serde staging payload and the
+/// canonical segment. Files encode on the indexing pool, so each file owns a
+/// fresh pair and hands its `segment` to the publish phase instead of
+/// borrowing one generation-wide buffer.
 #[derive(Default)]
 struct PartitionedSegmentEncoderV1 {
     payload: Vec<u8>,
@@ -1016,6 +1031,7 @@ struct PartitionedSegmentEncoderV1 {
 }
 
 impl PartitionedSegmentEncoderV1 {
+    #[cfg(test)]
     fn segment_bytes(&self) -> &[u8] {
         &self.segment
     }
@@ -1207,14 +1223,30 @@ fn decode_file_segment(
     bytes: &[u8],
     restored: &mut Vec<u8>,
 ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
-    verify_segment_identity(
-        bytes,
-        &descriptor.segment_digest,
-        descriptor.segment_size_bytes,
-        "sealed file segment length exceeds u64",
-        "sealed file segment byte size does not match its manifest",
-        "sealed file segment digest does not match its manifest",
+    hotpath::measure_block!(
+        "code_index.restore.segment_verify",
+        verify_segment_identity(
+            bytes,
+            &descriptor.segment_digest,
+            descriptor.segment_size_bytes,
+            "sealed file segment length exceeds u64",
+            "sealed file segment byte size does not match its manifest",
+            "sealed file segment digest does not match its manifest",
+        )
     )?;
+    hotpath::measure_block!(
+        "code_index.restore.segment_decode",
+        decode_verified_file_segment(descriptor, generation_id, bytes, restored)
+    )
+}
+
+/// Decode a segment whose bytes already verified against the manifest.
+fn decode_verified_file_segment(
+    descriptor: &PartitionedFileSegmentDescriptorV1,
+    generation_id: &CodeGenerationId,
+    bytes: &[u8],
+    restored: &mut Vec<u8>,
+) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
     let segment: PartitionedRawFileSegmentV1 = serde_json::from_slice(bytes).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed file segment decoding failed: {error}"
@@ -2398,46 +2430,90 @@ impl PartitionedLexicalFileSourceV1 {
         maximum_bytes: u64,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
-        let mut files = Vec::new();
-        let mut bytes = 0u64;
-        let mut segment = Vec::new();
-        let mut restored = Vec::new();
-        for descriptor in self.descriptors.get(start..).ok_or_else(|| {
+        let Self {
+            generation_id,
+            descriptors,
+            read_segment,
+        } = self;
+        let descriptors = descriptors.get(start..).ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed lexical file ordinal is unavailable".to_owned(),
             )
-        })? {
-            if !files.is_empty()
-                && (files.len() >= maximum_files
-                    || bytes.saturating_add(descriptor.segment_size_bytes) > maximum_bytes)
-            {
-                break;
-            }
-            checkpoint(control)?;
-            segment.clear();
-            (self.read_segment)(
-                &descriptor.segment_digest,
-                descriptor.segment_size_bytes,
-                &mut segment,
-            )?;
-            checkpoint(control)?;
-            files.push(decode_file_segment(
-                descriptor,
-                &self.generation_id,
-                &segment,
-                &mut restored,
-            )?);
-            bytes = bytes.saturating_add(descriptor.segment_size_bytes);
-        }
-        drop(segment);
-        drop(restored);
-        if files.is_empty() {
+        })?;
+        let window = read_segment_window(
+            descriptors,
+            maximum_files,
+            maximum_bytes,
+            |descriptor, segment| {
+                checkpoint(control)?;
+                (read_segment)(
+                    &descriptor.segment_digest,
+                    descriptor.segment_size_bytes,
+                    segment,
+                )?;
+                checkpoint(control)
+            },
+        )?;
+        if window.is_empty() {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical file window is empty".to_owned(),
             ));
         }
-        restore_file_pages(files)
+        restore_file_pages(decode_segment_window(&window, generation_id)?)
     }
+}
+
+/// The segment bytes of one bounded decode window, read in manifest order.
+type SegmentWindowV1<'a> = Vec<(&'a PartitionedFileSegmentDescriptorV1, Vec<u8>)>;
+
+/// Read the next window of segment bytes on the calling thread: at least one
+/// file, then as many as fit within `maximum_files` and `maximum_bytes`. The
+/// reader callback owns cancellation checkpoints and the actual store read.
+fn read_segment_window<'a>(
+    descriptors: &'a [PartitionedFileSegmentDescriptorV1],
+    maximum_files: usize,
+    maximum_bytes: u64,
+    mut read_segment: impl FnMut(
+        &PartitionedFileSegmentDescriptorV1,
+        &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<SegmentWindowV1<'a>, CodeIndexProductionErrorV1> {
+    let mut window = Vec::new();
+    let mut bytes = 0u64;
+    for descriptor in descriptors {
+        if !window.is_empty()
+            && (window.len() >= maximum_files
+                || bytes.saturating_add(descriptor.segment_size_bytes) > maximum_bytes)
+        {
+            break;
+        }
+        let mut segment = Vec::new();
+        hotpath::measure_block!(
+            "code_index.restore.segment_read",
+            read_segment(descriptor, &mut segment)
+        )?;
+        bytes = bytes.saturating_add(descriptor.segment_size_bytes);
+        window.push((descriptor, segment));
+    }
+    Ok(window)
+}
+
+/// Verify and decode one window of segment bytes on the indexing pool.
+///
+/// Reading is sequential and cheap (the store hands back bytes); verifying a
+/// segment against its manifest digest and re-materializing its JSON is the
+/// CPU-bound part, and doing it on the calling thread serialized ~4 ms per
+/// file ahead of the parallel page restore — 3.4 s of a 770-file build.
+/// Files are independent, so the whole window is one ordered fan-out with the
+/// lowest-index failure reported, exactly as the sequential loop did.
+fn decode_segment_window(
+    window: &SegmentWindowV1<'_>,
+    generation_id: &CodeGenerationId,
+) -> Result<Vec<PersistedFileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
+    collect_bounded_ordered(window, |(descriptor, segment), _worker| {
+        let mut restored = Vec::new();
+        decode_file_segment(descriptor, generation_id, segment, &mut restored)
+    })
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
@@ -2524,8 +2600,10 @@ impl CodeIndexPublishedGenerationV1 {
                 .map(|file| &file.file_occurrence_id),
         )?;
         let mut file_segments = Vec::with_capacity(self.files.len());
-        let mut encoder = PartitionedSegmentEncoderV1::default();
-        for file in &self.files {
+        let plan_file = |file: &FileGenerationArtifactsV1| -> Result<
+            FileSegmentPlanV1,
+            CodeIndexProductionErrorV1,
+        > {
             let key = file_keys
                 .get(&file.extraction.file_occurrence_id)
                 .copied()
@@ -2587,20 +2665,46 @@ impl CodeIndexPublishedGenerationV1 {
                     })
                 });
             if let Some(descriptor) = reused {
-                file_segments.push(descriptor);
-                continue;
+                return Ok(FileSegmentPlanV1::Reused(descriptor));
             }
-            let descriptor =
-                encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
-            publish_segment(SealedGenerationSegmentPublicationV1::File {
-                digest: &descriptor.segment_digest,
-                bytes: encoder.segment_bytes(),
-            })?;
-            file_segments.push(descriptor);
+            let mut encoder = PartitionedSegmentEncoderV1::default();
+            let descriptor = encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
+            Ok(FileSegmentPlanV1::Encoded(descriptor, encoder.segment))
+        };
+        // Files are independent, so each window is one ordered fan-out on the
+        // indexing pool (lowest-index failure, panic containment, CPU
+        // admission per unit); the window then publishes serially in file
+        // order, so segment bytes, on-disk order, and every digest are the
+        // ones the sequential loop produced. Windowing bounds the encoded
+        // bytes held in memory to a few segments per worker; the serial loop
+        // held one.
+        // ponytail: the window bound is a file count, not bytes; add a byte
+        // bound like `read_segment_window` if a few huge files ever matter.
+        let window_files = crate::parallelism::indexing_workers()
+            .max(1)
+            .saturating_mul(SEALED_ENCODE_WINDOW_FILES_PER_WORKER_V1);
+        for window in self.files.chunks(window_files) {
+            let plans = hotpath::measure_block!(
+                "code_index.sealed_encode.file_window",
+                collect_bounded_ordered(window, |file, _worker| plan_file(file))
+            )?;
+            for plan in plans {
+                let descriptor = match plan {
+                    FileSegmentPlanV1::Reused(descriptor) => descriptor,
+                    FileSegmentPlanV1::Encoded(descriptor, bytes) => {
+                        publish_segment(SealedGenerationSegmentPublicationV1::File {
+                            digest: &descriptor.segment_digest,
+                            bytes: &bytes,
+                        })?;
+                        descriptor
+                    }
+                };
+                file_segments.push(descriptor);
+            }
         }
         file_segments.sort_by_key(|segment| segment.file_key);
-        let generation_evidence = encoder.encode_generation_evidence(self, &mut publish_segment)?;
-        drop(encoder);
+        let generation_evidence = PartitionedSegmentEncoderV1::default()
+            .encode_generation_evidence(self, &mut publish_segment)?;
         let generation = PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
             manifest: &self.manifest,
@@ -2613,28 +2717,36 @@ impl CodeIndexPublishedGenerationV1 {
             capability: &self.capability,
             generation_evidence: &generation_evidence,
         };
-        let generation_bytes = serde_json::to_vec(&generation).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation manifest serialization failed: {error}"
-            ))
-        })?;
-        let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        let generation =
-            RawValue::from_string(String::from_utf8(generation_bytes).map_err(|error| {
+        let generation_bytes = hotpath::measure_block!(
+            "code_index.sealed_encode.manifest_serialize",
+            serde_json::to_vec(&generation).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation manifest is not UTF-8: {error}"
+                    "sealed generation manifest serialization failed: {error}"
                 ))
-            })?)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        serde_json::to_vec(&PartitionedEnvelopeRefV1 {
-            state_digest: &state_digest,
-            generation: &generation,
-        })
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation manifest serialization failed: {error}"
-            ))
+            })
+        )?;
+        let state_digest = hotpath::measure_block!(
+            "code_index.sealed_encode.manifest_digest",
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+        )?;
+        hotpath::measure_block!("code_index.sealed_encode.manifest_envelope", {
+            let generation =
+                RawValue::from_string(String::from_utf8(generation_bytes).map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "sealed generation manifest is not UTF-8: {error}"
+                    ))
+                })?)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+            serde_json::to_vec(&PartitionedEnvelopeRefV1 {
+                state_digest: &state_digest,
+                generation: &generation,
+            })
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation manifest serialization failed: {error}"
+                ))
+            })
         })
     }
 
@@ -2649,26 +2761,27 @@ impl CodeIndexPublishedGenerationV1 {
             return Ok(None);
         };
         let mut files = Vec::with_capacity(generation.file_segments.len());
-        let mut segment = Vec::new();
-        let mut restored = Vec::new();
-        for descriptor in &generation.file_segments {
-            segment.clear();
-            read_segment(
-                SealedGenerationSegmentReadV1::Whole {
-                    digest: &descriptor.segment_digest,
-                    size_bytes: descriptor.segment_size_bytes,
+        let window_files = crate::parallelism::indexing_workers().max(1);
+        while files.len() < generation.file_segments.len() {
+            let window = read_segment_window(
+                &generation.file_segments[files.len()..],
+                window_files,
+                LEXICAL_FILE_PREFETCH_BYTES_V1,
+                |descriptor, segment| {
+                    read_segment(
+                        SealedGenerationSegmentReadV1::Whole {
+                            digest: &descriptor.segment_digest,
+                            size_bytes: descriptor.segment_size_bytes,
+                        },
+                        segment,
+                    )
                 },
-                &mut segment,
             )?;
-            files.push(decode_file_segment(
-                descriptor,
+            files.extend(decode_segment_window(
+                &window,
                 &generation.manifest.generation_id,
-                &segment,
-                &mut restored,
             )?);
         }
-        drop(restored);
-        drop(segment);
         let evidence = decode_generation_evidence(
             &generation.generation_evidence,
             &generation.manifest.generation_id,

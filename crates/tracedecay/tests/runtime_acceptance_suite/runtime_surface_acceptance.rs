@@ -756,6 +756,8 @@ async fn assert_application_transport_parity(
     );
     let expected_contract = if operation == ApplicationSurfaceOperation::TestResults {
         "schema.application.feedback.test-results.result".to_owned()
+    } else if operation == ApplicationSurfaceOperation::CodeExactOccurrence {
+        "schema.application.code-query.exact-occurrence.result".to_owned()
     } else {
         format!(
             "schema.application.primitive.{}.result",
@@ -1404,7 +1406,7 @@ async fn project_open_application_boundary() {
 #[tokio::test(flavor = "multi_thread")]
 async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     let fixture = lsp_runtime_fixture().await;
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let generation = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let result = call_default_tool(
                 &fixture.handshake,
@@ -1426,7 +1428,12 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
                 serving["state"].as_str(),
                 serving["reason"].as_str(),
             ) {
-                (Some("current"), Some("ready"), _) => break,
+                (Some("current"), Some("ready"), _) => {
+                    break freshness["worktree"]["latest_generation_id"]
+                        .as_str()
+                        .expect("current code-index generation")
+                        .to_owned();
+                }
                 (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
                     panic!("graph readiness refused: {status}")
                 }
@@ -1515,17 +1522,34 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     assert_eq!(dependents["file"], "src/auth/session.rs");
     assert!(dependents["dependent_files"].as_array().is_some());
 
-    let source_path = fixture.project.join("src/auth/login.rs");
-    let source_len = std::fs::metadata(source_path)
-        .expect("fixture source metadata")
-        .len();
+    let exact = assert_application_transport_parity(
+        &fixture,
+        "exact-occurrence-authenticate",
+        ApplicationSurfaceOperation::CodeExactOccurrence,
+        serde_json::json!({
+            "literal": "authenticate",
+            "kind": "whole_symbol",
+            "scope": {
+                "generation": generation,
+                "path_prefix": "src/auth/login.rs",
+            },
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "cursor": null,
+            },
+        }),
+    )
+    .await;
+    let occurrence = &exact["items"][0]["occurrence"];
+    assert_eq!(occurrence["path"], "src/auth/login.rs");
     let source_lines = assert_application_transport_parity(
         &fixture,
         "source-lines",
         ApplicationSurfaceOperation::SourceLines,
         serde_json::json!({
-            "file": "src/auth/login.rs",
-            "span": { "start_byte": 0, "end_byte": source_len },
+            "file": occurrence["file"],
+            "span": occurrence["span"],
             "meta": {
                 "temporal": { "kind": "current" },
                 "page": { "page_size": 10, "cursor": null },
@@ -1535,10 +1559,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         }),
     )
     .await;
-    assert_eq!(
-        source_lines["references"][0]["span"],
-        serde_json::json!({ "start_byte": 0, "end_byte": source_len })
-    );
+    assert_eq!(source_lines["references"][0]["span"], occurrence["span"]);
 
     let source_body = assert_application_transport_parity(
         &fixture,

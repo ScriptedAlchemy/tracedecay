@@ -16,8 +16,8 @@ pub(super) use tracedecay_code_index_runtime::code_index_scheduler::query_runtim
 
 /// Spawns the deferred query-authority waiter on the project owner.
 ///
-/// A route whose code index is disabled never seats a text generation, so the
-/// runtime helper exits immediately and this returns `false`.
+/// A route whose code index is disabled never seats a text generation, so this
+/// returns `false` and never parks a waiter.
 pub(super) fn spawn_deferred_query_authority_mount(
     owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,
@@ -25,6 +25,10 @@ pub(super) fn spawn_deferred_query_authority_mount(
     scope: ResolvedScope,
     mount: DeferredQueryAuthorityMountV1,
 ) -> bool {
+    // Same contract as the deferred advisory owner: a route whose code index
+    // is disabled never seats a text generation, so this retry has nothing to
+    // wait for. Parking it would poll the shared store once a second for the
+    // daemon's life and re-mount on every other route's publication.
     if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
         &invocation.code_index_schedulers,
         &scope,
@@ -41,20 +45,13 @@ pub(super) fn spawn_deferred_query_authority_mount(
     owner.spawn_background_task(hotpath::future!(
         async move {
             let schedulers = invocation.code_index_schedulers.clone();
-            retry_deferred_query_authority_until_serving(
-                &schedulers,
-                project_root.clone(),
-                scope.clone(),
-                || {
-                    let invocation = invocation.clone();
-                    let project_root = project_root.clone();
-                    let scope = scope.clone();
-                    let mount = mount.clone();
-                    async move {
-                        try_deferred_mount(&invocation, &project_root, &scope, &mount).await
-                    }
-                },
-            )
+            retry_deferred_query_authority_until_serving(&schedulers, project_root.clone(), || {
+                let invocation = invocation.clone();
+                let project_root = project_root.clone();
+                let scope = scope.clone();
+                let mount = mount.clone();
+                async move { try_deferred_mount(&invocation, &project_root, &scope, &mount).await }
+            })
             .await;
         },
         label = "daemon.project.query_authority_deferred"

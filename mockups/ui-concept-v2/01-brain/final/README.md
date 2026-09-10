@@ -28,6 +28,10 @@ reconstructs private reasoning.
 
 ## Shared interaction contract
 
+- The measured structural atlas/treemap remains a Brain view option. It keeps
+  source containment geometry stable across structure, dependency, change,
+  cycle, forwarding, churn, exact-blob duplicate, and coverage lenses. It is an
+  exact source-oriented complement to the neural registry and scoped graph.
 - Project-body area encodes indexed holdings or another explicitly named mass
   measure; it never encodes popularity, importance, health, or activity.
 - Horizontal placement encodes measured recency. Unknown or stale timestamps
@@ -39,11 +43,15 @@ reconstructs private reasoning.
   relation. Inferred or ambiguous relations use their own line treatment and
   remain labelled.
 - An activity synapse exists only for admitted activity with exact touched
-  identities. The path may traverse only evidenced hops. Heat decays while the
+  identities. The path may traverse at most one evidenced drawn relation and
+  never continue onward or light sibling checkouts. Heat decays while the
   underlying graph remains stable; idle nodes do not shimmer or pulse.
 - Source-private chain-of-thought is never a node, edge, field, or tooltip.
   Visible persisted messages or reasoning summaries may appear only with their
   source class and evidence grade.
+- Atlas churn means commit/file touches in its stated window, and duplicate
+  groups mean byte-identical nonempty source files. Neither establishes code
+  quality, semantic duplication, importance, defect risk, or runtime reachability.
 
 ## Browser and accessibility contract
 

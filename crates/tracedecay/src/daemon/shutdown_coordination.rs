@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use tokio::time::Instant;
+use tracedecay_runtime_core::logging::log_daemon_event;
 pub(crate) use tracedecay_store_runtime::ShutdownStatus;
 
 type ShutdownJoin = Pin<Box<dyn Future<Output = ShutdownStatus> + Send + 'static>>;
@@ -283,7 +284,7 @@ async fn join_shutdown_phase(
                 ShutdownStatus::Failed(_) => "failed",
                 ShutdownStatus::TimedOut => "timed_out",
             };
-            super::log_daemon_event(
+            log_daemon_event(
                 "daemon_shutdown",
                 &[
                     ("outcome", "owner_joined".to_string()),

@@ -1043,61 +1043,100 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
 
 pub struct TraceDecaySourceLinesPortV1 {
     source_runtime: Arc<SourceReadContext>,
+    code_index_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
 }
 
 impl TraceDecaySourceLinesPortV1 {
-    pub fn new(source_runtime: Arc<SourceReadContext>) -> Self {
-        Self { source_runtime }
+    pub fn new(
+        source_runtime: Arc<SourceReadContext>,
+        code_index_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    ) -> Self {
+        Self {
+            source_runtime,
+            code_index_identity,
+        }
     }
 }
 
 impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
-    #[hotpath::measure(label = "usecases.primitives.source_lines")]
-    fn source_lines(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &SourceLinesRequest,
-    ) -> RetrievalPortOutcome<SourceLinesResult> {
-        let _ = context;
-        let finished_at = now_observed();
-        if request.span.validate().is_err() {
-            return failed(EvidenceDomain::Source, finished_at);
-        }
-        let relative = request.file.as_str();
-        let path = self.source_runtime.project_root().join(relative);
-        let Ok(bytes) = std::fs::read(&path) else {
-            return failed(EvidenceDomain::Source, finished_at);
-        };
-        let start = request.span.start_byte as usize;
-        let end = request.span.end_byte as usize;
-        if end > bytes.len() || start > end {
-            return failed(EvidenceDomain::Source, finished_at);
-        }
-        let Ok(digest) = canonical_sha256(&(
-            "tracedecay.primitive.source-lines.v1",
-            relative,
-            request.span.start_byte,
-            request.span.end_byte,
-            &bytes[start..end],
-        )) else {
-            return failed(EvidenceDomain::Source, finished_at);
-        };
-        let Ok(anchor) = RetrievalAnchorId::new(format!(
-            "anchor.source-lines.{}",
-            digest.as_str().trim_start_matches("sha256:")
-        )) else {
-            return failed(EvidenceDomain::Source, finished_at);
-        };
-        completed(
-            SourceLinesResult {
-                references: vec![SourceReference {
-                    anchor,
-                    span: request.span,
-                }],
+    fn source_lines<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a SourceLinesRequest,
+    ) -> ExtendedPrimitiveFuture<'a, SourceLinesResult> {
+        Box::pin(hotpath::future!(
+            async move {
+                let finished_at = now_observed();
+                let unavailable =
+                    |reason| evidence_unavailable(EvidenceDomain::Source, finished_at, reason, 0);
+                if request.span.validate().is_err() {
+                    return failed(EvidenceDomain::Source, finished_at);
+                }
+                let Some(identity) = self
+                    .code_index_identity
+                    .resolve(self.source_runtime.project_root().to_path_buf())
+                    .await
+                else {
+                    return unavailable(OmissionReason::Unavailable);
+                };
+                let scope = context.request.scope();
+                if identity.repository() != &scope.repository_id
+                    || identity.worktree() != Some(&scope.worktree_id)
+                    || identity.reference() != scope.reference.as_ref()
+                {
+                    return unavailable(OmissionReason::Stale);
+                }
+                let Some(relative) = identity.logical_path(&request.file) else {
+                    return unavailable(OmissionReason::Stale);
+                };
+                let Ok(bytes) =
+                    tokio::fs::read(self.source_runtime.project_root().join(relative)).await
+                else {
+                    return unavailable(OmissionReason::Unavailable);
+                };
+                let Some((_, indexed_digest)) = identity.file(relative) else {
+                    return unavailable(OmissionReason::Stale);
+                };
+                if &tracedecay_code_index::intake::content_digest(&bytes) != indexed_digest {
+                    return unavailable(OmissionReason::Stale);
+                }
+                let (Ok(start), Ok(end)) = (
+                    usize::try_from(request.span.start_byte),
+                    usize::try_from(request.span.end_byte),
+                ) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
+                if end > bytes.len() || start > end {
+                    return failed(EvidenceDomain::Source, finished_at);
+                }
+                let Ok(digest) = canonical_sha256(&(
+                    "tracedecay.primitive.source-lines.v1",
+                    relative,
+                    request.span.start_byte,
+                    request.span.end_byte,
+                    &bytes[start..end],
+                )) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
+                let Ok(anchor) = RetrievalAnchorId::new(format!(
+                    "anchor.source-lines.{}",
+                    digest.as_str().trim_start_matches("sha256:")
+                )) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
+                completed(
+                    SourceLinesResult {
+                        references: vec![SourceReference {
+                            anchor,
+                            span: request.span,
+                        }],
+                    },
+                    EvidenceDomain::Source,
+                    finished_at,
+                )
             },
-            EvidenceDomain::Source,
-            finished_at,
-        )
+            label = "usecases.primitives.source_lines"
+        ))
     }
 }
 
@@ -2792,7 +2831,7 @@ pub async fn open_production_primitive_runtime(
         database.clone(),
         session_db.clone(),
         code_index,
-        diagnostic_identity,
+        Arc::clone(&diagnostic_identity),
         AuthenticatedDiagnosticCursorAuthorityV1 {
             key,
             configuration_digest,
@@ -2812,9 +2851,10 @@ pub async fn open_production_primitive_runtime(
         )),
         Arc::new(TraceDecayRedundancyAuthorityV1),
         temporal,
-        Arc::new(TraceDecaySourceLinesPortV1::new(Arc::clone(
-            &source_runtime,
-        ))),
+        Arc::new(TraceDecaySourceLinesPortV1::new(
+            Arc::clone(&source_runtime),
+            Arc::clone(&diagnostic_identity),
+        )),
         Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&source_runtime))),
         extended,
         scope,

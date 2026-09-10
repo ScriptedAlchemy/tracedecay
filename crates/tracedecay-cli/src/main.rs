@@ -396,6 +396,18 @@ fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
+#[cfg(unix)]
+fn restore_sigpipe_default() -> std::io::Result<()> {
+    // SAFETY: `async_main` calls this only after selecting the one-shot tool
+    // client mode, before that mode starts worker threads or writes output.
+    let previous = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    if previous == libc::SIG_ERR {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(any(feature = "hotpath", test))]
 fn hotpath_output_format_is_valid(output_format: Option<&OsStr>) -> bool {
     output_format.is_none_or(|value| {
@@ -656,6 +668,14 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         }
     };
     normalize_tool_reserved_global_flags(&mut cli);
+    #[cfg(unix)]
+    if matches!(cli.command.as_ref(), Some(Commands::Tool { .. })) {
+        restore_sigpipe_default().map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("failed to configure tool pipeline output: {error}"),
+            }
+        })?;
+    }
     if let Some(Commands::Daemon {
         action:
             DaemonAction::Run {
@@ -726,6 +746,12 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         hotpath::val!("cli.command.name").set(&command_name.as_str());
         hotpath::gauge!("process_in_command").set(1);
     }
+    let foreground_daemon = matches!(
+        cli.command.as_ref(),
+        Some(Commands::Daemon {
+            action: DaemonAction::Run { .. }
+        })
+    );
     #[cfg(feature = "hotpath")]
     let result = hotpath::measure_block!(
         "process_command",
@@ -738,7 +764,16 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
     // can leave OS-backed watcher work behind after their async handles abort,
     // so bound teardown after the command's own graceful shutdown completes.
-    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    //
+    // The foreground daemon already coordinated every owner with typed
+    // receipts; a blocking task still running here is one its shutdown owner
+    // reported as pending and abandoned at the task-abort deadline. Waiting
+    // for it a second time only spends the supervisor's TERM grace.
+    if foreground_daemon {
+        runtime.shutdown_background();
+    } else {
+        runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    }
     result
 }
 

@@ -1,5 +1,9 @@
 use crate::support::*;
+#[cfg(feature = "test-transport")]
+use sha2::{Digest, Sha256};
 use tracedecay_domain::SessionId;
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 #[path = "session_reflector/automatic_fact_receipts.rs"]
 mod automatic_fact_receipts;
@@ -547,7 +551,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             },
             {
                 "content": "Use the fact-store workflow only when the user explicitly asks to memorize or remember a subject",
-                "category": "tool_guidance",
+                "category": "tool",
                 "tags": ["memory", "workflow"],
                 "entities": ["TraceDecay"],
                 "trust": 0.74,
@@ -714,7 +718,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     ));
     assert!(has_quarantine_reason("reason is required"));
     assert!(has_quarantine_reason(
-        "confidence is not supported; use trust"
+        "fact proposal contains an unsupported field"
     ));
     assert_eq!(
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
@@ -803,7 +807,11 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(11));
+    assert_eq!(
+        eval_payload["summary"]["eval_count"],
+        json!(4),
+        "evals come from applied receipt ids plus the sanitized rejection summary"
+    );
     assert!(
         eval_payload["eval_definitions"]
             .as_array()
@@ -1243,14 +1251,28 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
     let _global_db = isolate_global_db(&cg);
 
     let backend = InspectSessionEvidenceBackend;
-    for (host_mode, query) in [
-        (AutomationHostMode::Standalone, "active project banana"),
-        (AutomationHostMode::DelegatedHost, "project banana evidence"),
-    ] {
-        let config = AutomationConfig {
+    let unsupported_filter_options = SessionReflectorAutomationOptions {
+        trigger: AutomationTrigger::ManualCli,
+        provider: "cursor".to_string(),
+        query: "active project banana".to_string(),
+        scope: LcmScope::Session,
+        session_id: Some("project-reflect-1".to_string()),
+        include_summaries: false,
+        evidence_limit: 5,
+        sort: LcmGrepSort::Relevance,
+        source: Some("project_lcm".to_string()),
+        role: Some("assistant".to_string()),
+        start_time: Some(1_715_100_000),
+        end_time: Some(1_715_100_010),
+        run_id: None,
+        ..SessionReflectorAutomationOptions::default()
+    };
+    let standalone = run_session_reflector_with_backend(
+        &cg,
+        &AutomationConfig {
             enabled: true,
             backend: AutomationBackend::CodexAppServer,
-            host_mode,
+            host_mode: AutomationHostMode::Standalone,
             tasks: AutomationTaskSet {
                 session_reflector: AutomationTaskConfig {
                     enabled: true,
@@ -1260,44 +1282,79 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
                 ..AutomationTaskSet::default()
             },
             ..AutomationConfig::default()
-        };
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        unsupported_filter_options.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standalone.ledger_record.status,
+        AutomationRunStatus::Skipped
+    );
+    assert_eq!(
+        standalone.ledger_record.error.as_deref(),
+        Some("session_evidence_filter_unavailable")
+    );
 
-        let run = run_session_reflector_with_backend(
-            &cg,
-            &config,
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            &backend,
-            SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::ManualCli,
-                provider: "cursor".to_string(),
-                query: query.to_string(),
-                scope: LcmScope::Session,
-                session_id: Some("project-reflect-1".to_string()),
-                include_summaries: false,
-                evidence_limit: 5,
-                sort: LcmGrepSort::Relevance,
-                source: Some("project_lcm".to_string()),
-                role: Some("assistant".to_string()),
-                start_time: Some(1_715_100_000),
-                end_time: Some(1_715_100_010),
-                run_id: None,
-                ..SessionReflectorAutomationOptions::default()
+    let delegated = run_session_reflector_with_backend(
+        &cg,
+        &AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            host_mode: AutomationHostMode::DelegatedHost,
+            tasks: AutomationTaskSet {
+                session_reflector: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("manual".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
             },
-        )
-        .await
-        .unwrap();
+            ..AutomationConfig::default()
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        SessionReflectorAutomationOptions {
+            query: "project banana evidence".to_string(),
+            ..unsupported_filter_options
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(delegated.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        delegated.ledger_record.error.as_deref(),
+        Some("delegated_host_mode")
+    );
 
-        assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-        assert_eq!(
-            run.ledger_record.error.as_deref(),
-            Some("session_evidence_filter_unavailable")
-        );
-    }
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        list_automatic_fact_receipts(&memory, None, 10, run_control.read_control())
             .await
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "filter and host-mode refusals must not write automatic facts"
+    );
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        records.len(),
+        1,
+        "only the delegated host gate persists a skip record: {records:?}"
+    );
+    assert!(
+        records.iter().all(|record| {
+            record.status == AutomationRunStatus::Skipped && record.proposed_ops.is_none()
+        }),
+        "refusals must not persist an applied run: {records:?}"
     );
 }
 
@@ -1719,7 +1776,19 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());
     assert!(records[0].input_hash.is_some());
-    assert_eq!(records[0].proposed_ops.as_ref(), Some(&output));
+    let expected_sha256 = encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(serde_json::to_vec(&output).unwrap()),
+    );
+    assert_eq!(
+        records[0].proposed_ops.as_ref(),
+        Some(&json!({
+            "schema_version": 1,
+            "expected_field": "facts",
+            "output_sha256": expected_sha256,
+            "output_kind": "object",
+        }))
+    );
     assert!(records[0].error.as_deref().is_some_and(|error| {
         error.contains("session reflector output must include a facts array")
     }));

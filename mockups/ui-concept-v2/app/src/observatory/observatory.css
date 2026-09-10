@@ -1,0 +1,1194 @@
+.ob-root {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 254px;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  background: var(--night-substrate);
+  color: var(--ink-primary);
+  font-family: var(--font-mono);
+}
+
+.ob-kicker {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--ink-muted) 78%, #0b1018);
+}
+
+/* ---- typed evidence tones ---- */
+
+.t-measured { --tone: var(--signal-cyan); }
+.t-partial { --tone: var(--activity-amber); }
+.t-empty { --tone: var(--activity-amber); }
+.t-unsealed { --tone: var(--activity-amber); }
+.t-host { --tone: var(--signal-cyan); }
+.t-exact { --tone: var(--signal-cyan); }
+.t-unavailable { --tone: var(--state-danger); }
+.t-stale { --tone: oklch(0.72 0.11 305); }
+
+.ob-chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 1px 4px 2px;
+  border: 1px solid color-mix(in oklab, var(--tone) 60%, transparent);
+  border-radius: 2px;
+  color: var(--tone);
+  background: color-mix(in oklab, var(--tone) 8%, transparent);
+  white-space: nowrap;
+}
+
+.ob-chip-large {
+  align-self: flex-start;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  padding: 2px 8px;
+}
+
+/* ---- canonical observations timeline (thin tick rail, main column only) ---- */
+
+.ob-time {
+  grid-row: 1;
+  grid-column: 1;
+  padding: 7px 10px 3px 14px;
+}
+
+.ob-time-row {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.ob-chip.still {
+  font-size: 7px;
+  letter-spacing: 0.1em;
+  opacity: 0.85;
+}
+
+.ob-legend {
+  display: flex;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.ob-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+
+.ob-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--tone);
+  box-shadow: 0 0 5px color-mix(in oklab, var(--tone) 60%, transparent);
+}
+
+.ob-dot.t-unavailable {
+  background: #3a4554;
+  box-shadow: inset 0 0 0 1px #5b6776;
+}
+
+.ob-track {
+  position: relative;
+  height: 22px;
+  margin-top: 1px;
+}
+
+.ob-track-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 14px;
+  height: 1px;
+  background: color-mix(in oklab, var(--signal-cyan) 22%, var(--edge-subtle));
+}
+
+/* unlit observation slots: geometry, not data — no packed observation
+ * falls inside the -12h..capture window */
+.ob-slot {
+  position: absolute;
+  top: 13px;
+  width: 3px;
+  height: 3px;
+  margin-left: -1px;
+  border-radius: 50%;
+  background: #313c4b;
+}
+
+.ob-tick {
+  position: absolute;
+  top: 11px;
+  width: 1px;
+  height: 7px;
+  background: var(--edge-strong);
+}
+
+.ob-tick b {
+  position: absolute;
+  bottom: 9px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-weight: 400;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: color-mix(in oklab, var(--ink-muted) 80%, #0b1018);
+  white-space: nowrap;
+}
+
+.ob-tick:last-of-type b { transform: translateX(-100%); }
+
+.ob-snap {
+  position: absolute;
+  top: 11.5px;
+  width: 6px;
+  height: 6px;
+  margin-left: -5px;
+  border-radius: 50%;
+  background: var(--signal-cyan);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--signal-cyan) 60%, transparent);
+}
+
+.ob-attention {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin: 3px 0 1px;
+  overflow: auto hidden;
+  scrollbar-width: none;
+}
+
+.ob-attention::-webkit-scrollbar { display: none; }
+
+.ob-attention-label,
+.ob-attention-empty {
+  flex: 0 0 auto;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  color: color-mix(in oklab, var(--ink-muted) 74%, #0b1018);
+}
+
+.ob-attention-empty { font-style: italic; letter-spacing: 0.04em; }
+
+.ob-attention-item {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid color-mix(in oklab, var(--edge-strong) 64%, transparent);
+  border-radius: 2px;
+  background: #071019;
+  color: var(--ink-secondary);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ob-attention-item:hover,
+.ob-attention-item:focus-visible {
+  border-color: var(--tone, var(--signal-cyan));
+  color: var(--ink-primary);
+  outline: none;
+}
+
+.ob-attention-item.is-warning { --tone: var(--activity-amber); }
+.ob-attention-item.is-information { --tone: var(--signal-cyan); }
+.ob-attention-item.is-error { --tone: var(--state-danger); }
+.ob-attention-item b {
+  color: var(--tone);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ---- main grid (plate band ratios) ---- */
+
+.ob-main {
+  grid-row: 2;
+  grid-column: 1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1.21fr) minmax(0, 0.94fr) minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 8px 10px 14px;
+  overflow: hidden;
+}
+
+.ob-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-height: 0;
+}
+
+/* ---- panel chassis (deep night-glass, thin cyan rim) ---- */
+
+.ob-panel {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px 6px;
+  background:
+    radial-gradient(120% 80% at 14% 0%, color-mix(in oklab, var(--signal-cyan) 3%, transparent), transparent 60%),
+    linear-gradient(180deg, #050b11, #03070c);
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 13%, var(--edge-subtle));
+  border-radius: 1px;
+  box-shadow: inset 0 0 22px rgba(2, 8, 16, 0.55);
+  overflow: hidden;
+}
+
+.ob-panel:hover,
+.ob-panel:focus-visible {
+  border-color: color-mix(in oklab, var(--signal-cyan) 30%, var(--edge-subtle));
+  outline: none;
+}
+
+.ob-panel.is-on {
+  border-color: color-mix(in oklab, var(--signal-cyan) 55%, var(--edge-subtle));
+  box-shadow:
+    inset 0 0 22px rgba(2, 8, 16, 0.55),
+    inset 0 0 16px color-mix(in oklab, var(--signal-cyan) 9%, transparent);
+}
+
+.ob-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 5px;
+}
+
+.ob-panel-head .ob-chip { margin-left: auto; }
+
+.ob-panel-head.chip-left .ob-chip { margin-left: 2px; }
+
+.ob-head-meta {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: color-mix(in oklab, var(--ink-muted) 82%, #0b1018);
+  white-space: nowrap;
+}
+
+.ob-panel-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-secondary);
+  min-width: 0;
+  white-space: normal;
+}
+
+.ob-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ob-panel-foot {
+  padding-top: 3px;
+  text-align: right;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: color-mix(in oklab, var(--ink-muted) 62%, #0b1018);
+  white-space: nowrap;
+}
+
+/* ---- shared bits ---- */
+
+.ob-micro {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: color-mix(in oklab, var(--ink-muted) 62%, #0b1018);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- doctor: labels + lit dot-matrix instrument ---- */
+
+.ob-doctor {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.ob-doctor-list {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 2px 0;
+}
+
+.ob-doctor-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+}
+
+.ob-doctor-row span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ob-doctor-row b {
+  font-weight: 500;
+  color: color-mix(in oklab, var(--ink-muted) 72%, #0b1018);
+}
+
+.ob-matrix {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.ob-matrix .m-grid {
+  stroke: #16202e;
+  stroke-width: 0.6;
+  stroke-dasharray: 0.8 3.2;
+}
+
+.ob-matrix .m-dot { fill: #27313f; }
+
+/* ---- adoption: fill-bar instrument ---- */
+
+.ob-adopt-axis {
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 1px;
+  border-bottom: 1px solid color-mix(in oklab, var(--edge-subtle) 60%, transparent);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: color-mix(in oklab, var(--ink-muted) 85%, #0b1018);
+}
+
+.ob-bars {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  gap: 4px;
+}
+
+.ob-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 10px;
+}
+
+.ob-bar-lab {
+  flex: 0 0 58px;
+  font-size: 11px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ob-bar-track {
+  flex: 1;
+  height: 12px;
+  border-radius: 1px;
+  border: 1px solid color-mix(in oklab, var(--edge-strong) 55%, transparent);
+  background: linear-gradient(180deg, #0c1824, #091220);
+  box-shadow:
+    inset 0 0 7px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(140, 190, 215, 0.06);
+}
+
+.ob-bar-track.thick { height: 13px; }
+
+.ob-bar-none {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in oklab, var(--edge-subtle) 35%, transparent);
+}
+
+.ob-bar-val {
+  flex: 0 0 26px;
+  text-align: right;
+  font-weight: 500;
+  font-size: 9px;
+  color: color-mix(in oklab, var(--ink-muted) 72%, #0b1018);
+}
+
+.ob-bar-scale {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 34px 0 66px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: color-mix(in oklab, var(--ink-muted) 70%, #0b1018);
+}
+
+/* ---- retrieval: named spark rows with 1.0 axis ---- */
+
+.ob-metrics {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ob-metric-row {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+  padding: 3px 0;
+}
+
+.ob-metric-row + .ob-metric-row {
+  border-top: 1px dotted color-mix(in oklab, var(--edge-subtle) 55%, transparent);
+}
+
+.ob-metric-id {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0;
+  min-width: 0;
+}
+
+.ob-metric-id span {
+  font-size: 9px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+.ob-metric-id b {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 500;
+  color: color-mix(in oklab, var(--ink-muted) 80%, #0b1018);
+}
+
+/* borderless spark rail: dotted ceiling (1.0), faint floor (0) */
+.ob-rail {
+  position: relative;
+  flex: 1;
+  min-height: 16px;
+  margin-right: 18px;
+}
+
+.ob-rail .top {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  border-top: 1px dotted color-mix(in oklab, var(--edge-strong) 55%, transparent);
+}
+
+.ob-rail .mid {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 1px dotted color-mix(in oklab, var(--edge-subtle) 50%, transparent);
+}
+
+.ob-rail .bot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 3px;
+  border-top: 1px solid color-mix(in oklab, var(--edge-subtle) 60%, transparent);
+}
+
+.ob-rail em {
+  position: absolute;
+  right: -16px;
+  font-style: normal;
+  font-size: 9px;
+  color: color-mix(in oklab, var(--ink-muted) 72%, #0b1018);
+}
+
+.ob-rail em.hi { top: -1px; }
+.ob-rail em.lo { bottom: -1px; }
+
+/* ---- code-index pipeline: starfield + filament river ---- */
+
+.ob-pipe {
+  padding-bottom: 4px;
+  background:
+    radial-gradient(70% 120% at 50% 54%, color-mix(in oklab, var(--signal-cyan) 6%, transparent), transparent 62%),
+    radial-gradient(120% 80% at 14% 0%, color-mix(in oklab, var(--signal-cyan) 3%, transparent), transparent 60%),
+    linear-gradient(180deg, #071019, #050a12);
+}
+
+.ob-pipe .ob-panel-body { gap: 0; }
+
+.ob-pipe-flow {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.ob-flow {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ob-flow path.fan,
+.ob-flow path.in,
+.ob-flow path.hot {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.ob-flow path.fan { stroke: #6fc9e4; }
+.ob-flow path.in { stroke: #cdeefb; }
+.ob-flow path.hot { stroke: #eefaff; }
+
+/* cyan haze base under the filament body */
+.ob-flow path.v-outer { fill: #1d6f92; }
+.ob-flow path.v-mid { fill: #4fb8da; }
+
+.ob-flow-halo path.halo { stroke: var(--signal-cyan); fill: none; vector-effect: non-scaling-stroke; }
+
+.ob-flow-halo circle.knot { fill: #eefaff; }
+.ob-nebula circle { fill: var(--signal-cyan); }
+
+.ob-stars circle { fill: #9db8cc; }
+
+.ob-flow circle.mote { fill: #8ec6df; }
+
+.ob-flow circle.mote.hot { fill: #e5f8ff; }
+
+.ob-stages {
+  position: relative;
+  height: 100%;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  align-items: center;
+}
+
+.ob-stage {
+  justify-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  padding: 2px 10px;
+  text-align: center;
+}
+
+.ob-stage.is-dim { opacity: 0.6; }
+
+.ob-stage-name {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: #e8f2f8;
+  text-shadow: 0 0 5px #020810, 0 0 9px #020810;
+}
+
+.ob-stage-val {
+  font-weight: 600;
+  font-size: 10.5px;
+  color: #d9f2fc;
+  text-shadow: 0 0 4px #020810, 0 0 8px #020810;
+}
+
+.ob-stage-unit {
+  font-size: 10px;
+  color: var(--ink-muted);
+  text-shadow: 0 0 5px #020810, 0 0 9px #020810;
+  white-space: nowrap;
+}
+
+/* hollow orbital ring: glowing annulus, dark interior, label inside */
+.ob-ring {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  width: 82px;
+  height: 82px;
+  border-radius: 50%;
+  border: 1px solid #8eddf4;
+  box-shadow:
+    0 0 7px color-mix(in oklab, var(--signal-cyan) 50%, transparent),
+    0 0 19px color-mix(in oklab, var(--signal-cyan) 30%, transparent),
+    0 0 38px color-mix(in oklab, var(--signal-cyan) 12%, transparent),
+    inset 0 0 14px color-mix(in oklab, var(--signal-cyan) 32%, transparent);
+  background: rgba(2, 7, 14, 0.72);
+}
+
+.ob-ring .ob-stage-name { font-size: 10px; }
+
+.ob-ring .ob-stage-val { font-size: 11px; }
+
+.ob-ring-sub {
+  font-size: 7px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--activity-amber);
+}
+
+.ob-pipe-arrow {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 13px;
+  color: color-mix(in oklab, var(--ink-muted) 80%, #0b1018);
+}
+
+/* per-stage typed state row (colored words, not boxes — plate rhythm) */
+.ob-stage-states {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  padding-top: 3px;
+}
+
+.ob-stage-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.ob-stage-state span {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--tone);
+}
+
+.ob-stage-state b {
+  font-weight: 500;
+  font-size: 11px;
+  color: color-mix(in oklab, var(--ink-muted) 82%, #0b1018);
+}
+
+/* ---- hooks: two stacked count lists ---- */
+
+.ob-hooks {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  gap: 1px;
+}
+
+.ob-hooks-lab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ob-hooks-lab i {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.ob-hooks-lab.cyan { color: var(--signal-cyan); }
+.ob-hooks-lab.cyan i { background: var(--signal-cyan); box-shadow: 0 0 5px var(--signal-cyan); }
+.ob-hooks-lab.amber { color: var(--activity-amber); }
+.ob-hooks-lab.amber i { background: var(--activity-amber); box-shadow: 0 0 5px var(--activity-amber); }
+
+.ob-hooks-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding-left: 13px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ob-hooks-row span {
+  color: var(--ink-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ob-hooks-row b { font-weight: 500; }
+
+/* ---- budgets: dense five-column ledger ---- */
+
+.ob-budget {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  gap: 1px;
+}
+
+.ob-budget-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) 0.5fr 0.55fr 0.7fr 0.7fr;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+}
+
+.ob-budget-row > :not(:first-child) { text-align: right; white-space: nowrap; }
+
+.ob-budget-row b {
+  font-weight: 500;
+  color: color-mix(in oklab, var(--ink-muted) 68%, #0b1018);
+}
+
+.ob-budget-row.head {
+  grid-template-columns: minmax(0, 1.95fr) 0.55fr 0.7fr 0.7fr;
+  font-size: 10px;
+  color: color-mix(in oklab, var(--ink-muted) 85%, #0b1018);
+  border-bottom: 1px solid color-mix(in oklab, var(--edge-subtle) 70%, transparent);
+  padding-bottom: 2px;
+}
+
+.ob-budget-row.head .b2 { text-align: left; }
+
+/* ---- dependency topology: fixed source → consumer landmarks ---- */
+
+.ob-topology { cursor: default; }
+.ob-topology .ob-panel-head { flex: 0 0 auto; }
+
+.ob-topology-legend {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.ob-topology-legend span { display: inline-flex; align-items: center; gap: 3px; }
+.ob-topology-legend i { width: 5px; height: 5px; border: 1px solid currentColor; }
+.ob-topology-legend .role-source { color: var(--signal-cyan); }
+.ob-topology-legend .role-affected { color: var(--activity-amber); border-radius: 50%; }
+
+.ob-topo {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.ob-topo svg {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.ob-topo .topo-edges path {
+  fill: none;
+  stroke: color-mix(in oklab, var(--signal-cyan) 48%, transparent);
+  stroke-width: 1.1;
+  marker-end: url(#ob-topo-arrow);
+}
+
+.ob-topo .topo-edges path.is-comparison { stroke-dasharray: 3 3; }
+.ob-topo .topo-arrow { fill: color-mix(in oklab, var(--signal-cyan) 72%, transparent); }
+
+.ob-topo .topo-node { cursor: pointer; outline: none; }
+.ob-topo .topo-node circle {
+  fill: #06101a;
+  stroke: var(--tone);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 5px color-mix(in oklab, var(--tone) 56%, transparent));
+}
+
+.ob-topo .topo-node.role-affected circle { stroke-dasharray: 2 1.5; }
+.ob-topo .topo-node.role-independent circle { stroke-width: 1; opacity: 0.82; }
+.ob-topo .topo-node rect { fill: var(--tone); }
+.ob-topo .topo-node path { fill: none; stroke: var(--tone); stroke-width: 1.2; }
+.ob-topo .topo-node text {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.02em;
+  fill: var(--ink-secondary);
+  pointer-events: none;
+}
+
+.ob-topo .topo-node text.topo-state {
+  font-size: 6px;
+  letter-spacing: 0.1em;
+  fill: var(--tone);
+}
+
+.ob-topo .topo-node:hover circle,
+.ob-topo .topo-node:focus-visible circle,
+.ob-topo .topo-node.is-focused circle {
+  stroke-width: 2.8;
+  filter: drop-shadow(0 0 7px color-mix(in oklab, var(--tone) 88%, transparent));
+}
+
+/* ---- live pipeline: stat rows + empty spark rail ---- */
+
+.ob-live {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  gap: 12px;
+}
+
+.ob-live-stats {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  min-width: 0;
+}
+
+.ob-live-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ink-secondary);
+}
+
+.ob-live-row b {
+  font-weight: 500;
+  color: color-mix(in oklab, var(--ink-muted) 68%, #0b1018);
+}
+
+.ob-live-spark {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 4px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ob-live-y {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px 0 12px;
+  text-align: right;
+  font-size: 9px;
+  color: color-mix(in oklab, var(--ink-muted) 70%, #0b1018);
+}
+
+.ob-live-plot {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ob-rail.tall { flex: 1; min-height: 0; margin-right: 0; }
+
+.ob-spark-x {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: color-mix(in oklab, var(--ink-muted) 70%, #0b1018);
+}
+
+/* ---- storage telemetry: thick tier bars ---- */
+
+.ob-telem {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  gap: 3px;
+}
+
+.ob-telem-row {
+  display: grid;
+  grid-template-columns: 86px 32px minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 8px;
+  min-height: 12px;
+  font-size: 11px;
+}
+
+.ob-telem-row .lab {
+  color: var(--ink-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ob-telem-row .num {
+  font-weight: 500;
+  text-align: right;
+  color: color-mix(in oklab, var(--ink-muted) 72%, #0b1018);
+}
+
+.ob-telem-row .pct {
+  font-weight: 500;
+  text-align: right;
+  font-size: 9px;
+  color: color-mix(in oklab, var(--ink-muted) 72%, #0b1018);
+}
+
+/* ---- storage / branch findings: tagged rows ---- */
+
+.ob-findings {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  gap: 2px;
+}
+
+.ob-finding {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto 12px;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  border: 1px solid transparent;
+  border-radius: 2px;
+}
+
+.ob-finding-tag {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--tone);
+}
+
+.ob-finding-lab {
+  color: var(--ink-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ob-finding b { font-weight: 500; text-align: right; }
+
+.ob-finding.t-unavailable b,
+.ob-finding.t-unavailable .ob-finding-lab {
+  color: color-mix(in oklab, var(--ink-muted) 62%, #0b1018);
+}
+
+.ob-finding i {
+  font-style: normal;
+  color: var(--activity-amber);
+}
+
+.ob-finding.is-sel {
+  border-color: color-mix(in oklab, var(--activity-amber) 62%, transparent);
+  background: color-mix(in oklab, var(--activity-amber) 7%, transparent);
+}
+
+.ob-finding.is-sel .ob-finding-lab { color: var(--ink-primary); }
+
+/* ---- evidence inspector: full-height right column ---- */
+
+.ob-insp {
+  grid-row: 1 / 3;
+  grid-column: 2;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 7px 8px 10px 2px;
+  padding: 10px 13px 12px;
+  background: linear-gradient(180deg, #050b11, #03070c);
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 13%, var(--edge-subtle));
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.ob-insp-title {
+  margin: 6px 0 4px;
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  color: var(--activity-amber);
+  overflow-wrap: break-word;
+}
+
+.ob-insp-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ob-insp-body::-webkit-scrollbar { display: none; }
+
+.ob-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ob-fact-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ob-fact-k {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--ink-muted) 75%, #0b1018);
+}
+
+.ob-fact-v {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+.ob-fact-v.tone { color: var(--tone); }
+.ob-fact-v.danger { color: var(--state-danger); }
+
+.ob-note {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-muted);
+}
+
+.ob-insp-foot {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge-subtle);
+  font-family: var(--font-body);
+  font-size: 9px;
+  line-height: 1.4;
+  color: color-mix(in oklab, var(--ink-muted) 70%, #0b1018);
+}
+
+.ob-source-route {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge-subtle);
+}
+
+.ob-source-route p {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--ink-muted);
+}
+
+.ob-source-route div { display: flex; gap: 4px; flex-wrap: wrap; }
+.ob-source-route button {
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 48%, transparent);
+  border-radius: 2px;
+  background: #08121c;
+  color: var(--signal-cyan);
+  padding: 3px 5px;
+  font: 600 8px var(--font-mono);
+  letter-spacing: 0.07em;
+  cursor: pointer;
+}
+
+.ob-source-route button:hover,
+.ob-source-route button:focus-visible {
+  border-color: var(--signal-cyan-hot);
+  background: color-mix(in oklab, var(--signal-cyan) 12%, #08121c);
+  outline: none;
+}
+
+.ob-dependency-basis {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge-subtle);
+}
+
+.ob-dependency-basis div { display: flex; flex-direction: column; gap: 1px; }
+.ob-dependency-basis b {
+  color: var(--signal-cyan);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.ob-dependency-basis p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.ob-panel:focus-visible { outline: 2px solid #b8ebff; outline-offset: -4px; }
+
+@media (max-width: 1200px) {
+  .ob-root { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) 240px; }
+  .ob-time { padding-right: 14px; }
+  .ob-time-row { flex-wrap: wrap; gap: 6px 12px; }
+  .ob-legend { flex-wrap: wrap; }
+  .ob-main { display: block; overflow: auto; padding-right: 14px; }
+  .ob-row { grid-template-columns: minmax(0, 1fr); }
+  .ob-panel { min-height: 240px; margin-bottom: 8px; width: 100%; }
+  .ob-pipe { min-height: 200px; }
+  .ob-insp { grid-column: 1; grid-row: 3; margin: 4px 14px 8px; }
+  .ob-insp-title { font-size: 16px; margin: 0; }
+  .ob-insp-body { margin-top: 0; }
+  .ob-insp-foot { display: none; }
+}

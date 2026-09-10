@@ -8,6 +8,7 @@ use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
