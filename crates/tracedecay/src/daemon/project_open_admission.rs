@@ -5,6 +5,7 @@
 //! open stays backed off, so a repeated request neither stampedes nor retries a
 //! known-unrepairable store.
 
+use super::project_open_handshake::is_missing_index_error;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg(unix)]
