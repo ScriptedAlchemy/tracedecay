@@ -1249,14 +1249,28 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
     let _global_db = isolate_global_db(&cg);
 
     let backend = InspectSessionEvidenceBackend;
-    for (host_mode, query) in [
-        (AutomationHostMode::Standalone, "active project banana"),
-        (AutomationHostMode::DelegatedHost, "project banana evidence"),
-    ] {
-        let config = AutomationConfig {
+    let unsupported_filter_options = SessionReflectorAutomationOptions {
+        trigger: AutomationTrigger::ManualCli,
+        provider: "cursor".to_string(),
+        query: "active project banana".to_string(),
+        scope: LcmScope::Session,
+        session_id: Some("project-reflect-1".to_string()),
+        include_summaries: false,
+        evidence_limit: 5,
+        sort: LcmGrepSort::Relevance,
+        source: Some("project_lcm".to_string()),
+        role: Some("assistant".to_string()),
+        start_time: Some(1_715_100_000),
+        end_time: Some(1_715_100_010),
+        run_id: None,
+        ..SessionReflectorAutomationOptions::default()
+    };
+    let standalone = run_session_reflector_with_backend(
+        &cg,
+        &AutomationConfig {
             enabled: true,
             backend: AutomationBackend::CodexAppServer,
-            host_mode,
+            host_mode: AutomationHostMode::Standalone,
             tasks: AutomationTaskSet {
                 session_reflector: AutomationTaskConfig {
                     enabled: true,
@@ -1266,44 +1280,79 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
                 ..AutomationTaskSet::default()
             },
             ..AutomationConfig::default()
-        };
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        unsupported_filter_options.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standalone.ledger_record.status,
+        AutomationRunStatus::Skipped
+    );
+    assert_eq!(
+        standalone.ledger_record.error.as_deref(),
+        Some("session_evidence_filter_unavailable")
+    );
 
-        let run = run_session_reflector_with_backend(
-            &cg,
-            &config,
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            &backend,
-            SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::ManualCli,
-                provider: "cursor".to_string(),
-                query: query.to_string(),
-                scope: LcmScope::Session,
-                session_id: Some("project-reflect-1".to_string()),
-                include_summaries: false,
-                evidence_limit: 5,
-                sort: LcmGrepSort::Relevance,
-                source: Some("project_lcm".to_string()),
-                role: Some("assistant".to_string()),
-                start_time: Some(1_715_100_000),
-                end_time: Some(1_715_100_010),
-                run_id: None,
-                ..SessionReflectorAutomationOptions::default()
+    let delegated = run_session_reflector_with_backend(
+        &cg,
+        &AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            host_mode: AutomationHostMode::DelegatedHost,
+            tasks: AutomationTaskSet {
+                session_reflector: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("manual".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
             },
-        )
-        .await
-        .unwrap();
+            ..AutomationConfig::default()
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        SessionReflectorAutomationOptions {
+            query: "project banana evidence".to_string(),
+            ..unsupported_filter_options
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(delegated.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        delegated.ledger_record.error.as_deref(),
+        Some("delegated_host_mode")
+    );
 
-        assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-        assert_eq!(
-            run.ledger_record.error.as_deref(),
-            Some("session_evidence_filter_unavailable")
-        );
-    }
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        list_automatic_fact_receipts(&memory, None, 10, run_control.read_control())
             .await
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "filter and host-mode refusals must not write automatic facts"
+    );
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        records.len(),
+        1,
+        "only the delegated host gate persists a skip record: {records:?}"
+    );
+    assert!(
+        records.iter().all(|record| {
+            record.status == AutomationRunStatus::Skipped && record.proposed_ops.is_none()
+        }),
+        "refusals must not persist an applied run: {records:?}"
     );
 }
 
