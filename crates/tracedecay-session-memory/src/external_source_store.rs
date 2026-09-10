@@ -41,8 +41,6 @@ pub enum RuntimeExternalSourceErrorV1 {
     Admission(#[from] SourceCaptureAdmissionErrorV1),
     #[error("external source commit is invalid: {0}")]
     Invalid(String),
-    #[error("external source runtime is unavailable")]
-    Unavailable,
     #[error(
         "external source runtime rejected {admission_bytes}-byte commit for {commit_count} source observations: {outcome:?}"
     )]
