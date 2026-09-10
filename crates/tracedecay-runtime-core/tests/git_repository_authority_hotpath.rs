@@ -6,8 +6,8 @@
 //!
 //! - feature-off (default features): the same authority workload runs with
 //!   every Hotpath report/output variable set, and must leave no report file
-//!   and no live-metrics/MCP listener on 6770/6771. The profiler has to be
-//!   compiled out, not merely idle.
+//!   and no live-metrics/MCP listener. The profiler has to be compiled out,
+//!   not merely idle.
 //! - `--features hotpath`: one process-boundary guard wraps the workload with
 //!   the metrics server off and the CPU section excluded (never autospawn
 //!   `samply`; CPU sampling stays opt-in via an explicit `HOTPATH_REPORT`).
@@ -43,8 +43,22 @@ use tracedecay_runtime_core::git_repository::{GitHistoryOptions, GitRepositoryAu
 #[global_allocator]
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
-/// Fixed localhost ports the Hotpath live metrics and MCP servers would bind.
-const HOTPATH_PORTS: [u16; 2] = [6770, 6771];
+/// Environment variables Hotpath reads for its live-metrics and meta (MCP)
+/// server ports. The defaults are the fixed 6770/6780, which any TraceDecay
+/// daemon on the same machine may legitimately be holding, so this suite
+/// never asserts against them: a developer box running `tracedecay serve`
+/// would fail a test about whether *this* build starts a server.
+const HOTPATH_PORT_VARIABLES: [&str; 2] = ["HOTPATH_METRICS_PORT", "HOTPATH_META_METRICS_PORT"];
+
+/// Two loopback ports nothing else is using, claimed by binding and released
+/// immediately so Hotpath can bind them if it wrongly starts a server.
+fn unused_loopback_ports() -> [u16; 2] {
+    let claim = |()| {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral port");
+        listener.local_addr().expect("bound address").port()
+    };
+    [claim(()), claim(())]
+}
 
 /// Every static `#[hotpath::measure]` label on the `GitRepositoryAuthority`
 /// surface this suite exercises. Compile-time constants on purpose: a label
@@ -58,8 +72,25 @@ const AUTHORITY_LABELS: [&str; 4] = [
     "runtime_core.git.history",
 ];
 
-fn assert_no_hotpath_listener() {
-    for port in HOTPATH_PORTS {
+/// Point Hotpath's two servers at ports this process just proved were free,
+/// and hand them back for the post-workload assertion.
+///
+/// # Safety
+///
+/// Callers set these before the workload spawns any thread that could read
+/// the environment concurrently; both tests in this binary already document
+/// that requirement for the report variables they set alongside these.
+unsafe fn pin_hotpath_ports() -> [u16; 2] {
+    let ports = unused_loopback_ports();
+    for (variable, port) in HOTPATH_PORT_VARIABLES.iter().zip(ports) {
+        // SAFETY: the caller's contract, documented above.
+        unsafe { std::env::set_var(variable, port.to_string()) };
+    }
+    ports
+}
+
+fn assert_no_hotpath_listener(ports: [u16; 2]) {
+    for port in ports {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         assert!(
             TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err(),
@@ -128,7 +159,7 @@ fn run_authority_workload(root: &Path) {
 
 #[cfg(not(feature = "hotpath"))]
 mod feature_off {
-    use super::{assert_no_hotpath_listener, fixture, run_authority_workload};
+    use super::{assert_no_hotpath_listener, fixture, pin_hotpath_ports, run_authority_workload};
 
     /// The feature-off contract: with every report/output variable pointing
     /// at a writable destination, the workload still produces no report file
@@ -140,17 +171,18 @@ mod feature_off {
         // SAFETY: this configuration compiles exactly one test into the
         // binary and the variables are set before the workload spawns any
         // thread that could read the environment concurrently.
-        unsafe {
+        let ports = unsafe {
             std::env::set_var("HOTPATH_OUTPUT_FORMAT", "json");
             std::env::set_var("HOTPATH_OUTPUT_PATH", &report_path);
             std::env::set_var("HOTPATH_REPORT", "functions-timing");
             std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "0");
-        }
+            pin_hotpath_ports()
+        };
 
         let repository = fixture();
         run_authority_workload(repository.path());
 
-        assert_no_hotpath_listener();
+        assert_no_hotpath_listener(ports);
         assert!(
             !report_path.exists(),
             "feature-off build must not write a Hotpath report"
@@ -160,7 +192,10 @@ mod feature_off {
 
 #[cfg(feature = "hotpath")]
 mod feature_on {
-    use super::{AUTHORITY_LABELS, assert_no_hotpath_listener, fixture, run_authority_workload};
+    use super::{
+        AUTHORITY_LABELS, assert_no_hotpath_listener, fixture, pin_hotpath_ports,
+        run_authority_workload,
+    };
 
     /// The feature-on contract: one guard, metrics server off, CPU section
     /// excluded, and the exit report lands in the requested file carrying
@@ -170,17 +205,18 @@ mod feature_on {
         let report_directory = tempfile::tempdir().expect("report directory");
         let report_path = report_directory.path().join("hotpath-report.json");
         // Environment overrides builder configuration, so pin it: the
-        // metrics server stays off (losing a fixed-port race would print a
-        // Hotpath error onto this process's stderr), and no ambient output
-        // variables may redirect the report this test asserts on.
+        // metrics server stays off (a started server would print a Hotpath
+        // error onto this process's stderr), and no ambient output variables
+        // may redirect the report this test asserts on.
         // SAFETY: single test in this configuration; set before the guard or
         // workload spawn any thread reading the environment.
-        unsafe {
+        let ports = unsafe {
             std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
             std::env::remove_var("HOTPATH_OUTPUT_FORMAT");
             std::env::remove_var("HOTPATH_OUTPUT_PATH");
             std::env::remove_var("HOTPATH_REPORT");
-        }
+            pin_hotpath_ports()
+        };
 
         let repository = fixture();
         {
@@ -195,7 +231,7 @@ mod feature_on {
                 .build();
             run_authority_workload(repository.path());
             // Guard alive and collecting; the server-off switch must hold.
-            assert_no_hotpath_listener();
+            assert_no_hotpath_listener(ports);
         }
 
         let report = std::fs::read_to_string(&report_path)
