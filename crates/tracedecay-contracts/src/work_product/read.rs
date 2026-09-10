@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     UtcMicros, WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
-    WorkRuntimeProjectionV1,
+    WorkRuntimeProjectionV1, WorkTopologyGenerationRefV1,
 };
 
 use crate::{OpaqueCursor, RequestAdmission, RequestContext};
@@ -222,6 +222,21 @@ impl WorkGraphVersionEntryV1 {
     #[hotpath::skip]
     pub const fn projections(&self) -> &WorkProductProjectionBundleV1 {
         &self.projections
+    }
+
+    /// Canonical topology generation for this exact verified WorkProduct graph.
+    /// The recovered graph digest is already the publication authority, so
+    /// consumers reuse it instead of deriving a parallel generation.
+    pub fn topology_generation_ref(
+        &self,
+    ) -> Result<WorkTopologyGenerationRefV1, WorkProductApplicationErrorV1> {
+        WorkTopologyGenerationRefV1::new(
+            self.verified_version
+                .recovered_graph_digest()
+                .as_str()
+                .to_owned(),
+        )
+            .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
     }
 }
 
