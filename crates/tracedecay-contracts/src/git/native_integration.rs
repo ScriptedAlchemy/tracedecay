@@ -14,7 +14,7 @@ use tracedecay_domain::{
     NativeIntegrationApprovalV1, NativeIntegrationDirectionV1, NativeIntegrationPreviewId,
     NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
     NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, StackNodeId, UtcMicros, WorktreeInventoryEpoch,
+    NativeIntegrationTransactionStatusV1, RefId, StackNodeId, UtcMicros, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId,
 };
 
@@ -39,6 +39,8 @@ pub enum NativeIntegrationSelectionBindingV1 {
     },
     IndependentBranch {
         proposal_digest: ManifestDigest,
+        source_ref: RefId,
+        destination_ref: RefId,
     },
 }
 
@@ -71,7 +73,20 @@ impl NativeIntegrationSelectionBindingV1 {
                     });
                 }
             }
-            Self::IndependentBranch { proposal_digest } => proposal_digest.validate()?,
+            Self::IndependentBranch {
+                proposal_digest,
+                source_ref,
+                destination_ref,
+            } => {
+                proposal_digest.validate()?;
+                source_ref.validate()?;
+                destination_ref.validate()?;
+                if source_ref == destination_ref {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "native integration independent refs",
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -302,8 +317,6 @@ impl NativeIntegrationApplyRequestV1 {
             || self.context.actor() != &self.approval.principal
             || self.context.scope().project_id != self.preview.repository_snapshot.project_id
             || self.context.scope().repository_id != self.preview.repository_snapshot.repository_id
-            || self.context.scope().reference.as_ref()
-                != Some(&self.preview.repository_snapshot.destination_ref)
             || self.preview.expires_at.0 <= self.observed_at.0
             || self.approval.expires_at.0 <= self.observed_at.0
             || !matches!(
