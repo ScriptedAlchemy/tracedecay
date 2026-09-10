@@ -353,11 +353,21 @@ fn project_import_matches(
     target_path: &str,
     target_qualified_name: &str,
 ) -> bool {
-    if let Some(module) = binding.module_specifier.strip_prefix("crate::") {
+    if binding.module_specifier == "crate"
+        || binding.module_specifier.starts_with("crate::")
+        || binding.module_specifier == "self"
+        || binding.module_specifier.starts_with("self::")
+        || binding.module_specifier == "super"
+        || binding.module_specifier.starts_with("super::")
+    {
         let Some(imported_name) = binding.imported_name.as_deref() else {
             return false;
         };
-        let qualified = format!("{module}::{imported_name}");
+        let Some(qualified) =
+            rust_import_qualified_name(&binding.module_specifier, imported_name, source_path)
+        else {
+            return false;
+        };
         return rust_crate_qualified_name_matches(
             &qualified,
             source_path,
@@ -375,6 +385,48 @@ fn project_import_matches(
     module_file_matches(&module, target)
         || (target.parent() == Some(module.as_path())
             && target.file_stem().is_some_and(|stem| stem == "index"))
+}
+
+fn rust_import_qualified_name(
+    module_specifier: &str,
+    imported_name: &str,
+    source_path: &str,
+) -> Option<String> {
+    let mut module = if module_specifier == "crate" {
+        Vec::new()
+    } else if let Some(module) = module_specifier.strip_prefix("crate::") {
+        module.split("::").collect()
+    } else {
+        let source_root = rust_source_root(source_path)?;
+        let relative = source_path.strip_prefix(source_root)?.strip_prefix('/')?;
+        let source_module = rust_file_module(relative)?;
+        let mut module = source_module
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        let mut relative = module_specifier.split("::");
+        let mut may_ascend = match relative.next()? {
+            "self" => false,
+            "super" => {
+                module.pop()?;
+                true
+            }
+            _ => return None,
+        };
+        for part in relative {
+            if part == "super" && may_ascend {
+                module.pop()?;
+            } else if matches!(part, "self" | "super") {
+                return None;
+            } else if !part.is_empty() {
+                may_ascend = false;
+                module.push(part);
+            }
+        }
+        module
+    };
+    module.push(imported_name);
+    Some(module.join("::"))
 }
 
 fn module_file_matches(module: &Path, target: &Path) -> bool {
@@ -474,16 +526,22 @@ fn rust_crate_qualified_name_matches(
     ) {
         return false;
     }
-    let module = match relative_file {
-        "lib.rs" | "main.rs" => "",
-        path if path.ends_with("/mod.rs") => path.strip_suffix("/mod.rs").unwrap_or_default(),
-        path if path.ends_with(".rs") => path.strip_suffix(".rs").unwrap_or_default(),
-        _ => return false,
+    let Some(module) = rust_file_module(relative_file) else {
+        return false;
     };
     if module.is_empty() {
         reference_path == symbol_path
     } else {
         reference_path == format!("{}::{symbol_path}", module.replace('/', "::"))
+    }
+}
+
+fn rust_file_module(relative_file: &str) -> Option<&str> {
+    match relative_file {
+        "lib.rs" | "main.rs" => Some(""),
+        path if path.ends_with("/mod.rs") => path.strip_suffix("/mod.rs"),
+        path if path.ends_with(".rs") => path.strip_suffix(".rs"),
+        _ => None,
     }
 }
 
@@ -497,7 +555,9 @@ fn rust_source_root(path: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_qualified_name_matches, rust_crate_qualified_name_matches};
+    use super::{
+        file_qualified_name_matches, rust_crate_qualified_name_matches, rust_import_qualified_name,
+    };
     use tracedecay_code_extraction::{LanguageExtractor, RustExtractor};
 
     #[test]
@@ -552,5 +612,27 @@ mod tests {
             "src/right.ts",
             "src/right.ts::Base",
         ));
+    }
+
+    #[test]
+    fn rust_relative_imports_use_the_source_module() {
+        assert_eq!(
+            rust_import_qualified_name(
+                "self::read::nested",
+                "Detail",
+                "crates/tracedecay-contracts/src/feedback/mod.rs",
+            )
+            .as_deref(),
+            Some("feedback::read::nested::Detail")
+        );
+        assert_eq!(
+            rust_import_qualified_name(
+                "super::shared",
+                "Item",
+                "crates/tracedecay-contracts/src/feedback/read.rs",
+            )
+            .as_deref(),
+            Some("feedback::shared::Item")
+        );
     }
 }
