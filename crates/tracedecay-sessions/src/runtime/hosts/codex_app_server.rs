@@ -21,6 +21,7 @@ use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{WorkApprovalPolicy, WorkEgressPolicy, WorkFilesystemPolicy};
 use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_lcm::LcmSummaryRequest;
 
@@ -240,6 +241,9 @@ pub struct CodexAppServerWorkExecution<'a> {
     pub timeout: Duration,
     pub admitted_environment: &'a BTreeMap<String, OsString>,
     pub launch_receipt: &'a CodexAppServerLaunchReceipt,
+    pub approval: WorkApprovalPolicy,
+    pub filesystem: WorkFilesystemPolicy,
+    pub egress: WorkEgressPolicy,
 }
 
 /// Runs a Work attempt through Codex app-server with only the environment
@@ -263,6 +267,7 @@ fn run_prompt_with_optional_execution(
     execution: Option<CodexAppServerWorkExecution<'_>>,
 ) -> Result<CodexAppServerSummary> {
     hotpath::measure_block!("sessions.hosts.codex_app_server.run", {
+        let work_policy = execution.as_ref().map(codex_work_policy).transpose()?;
         let model = configured_model(config);
         let mut command = codex_app_server_command(&config.codex_bin);
         if let Some(execution) = &execution {
@@ -333,6 +338,7 @@ fn run_prompt_with_optional_execution(
             model,
             response_schema,
             execution.as_ref().map(|execution| execution.cwd),
+            work_policy,
             execution
                 .as_ref()
                 .map_or(config.timeout, |execution| execution.timeout),
@@ -353,6 +359,7 @@ fn run_codex_protocol(
     model: Option<&str>,
     response_schema: Option<&Value>,
     cwd: Option<&Path>,
+    work_policy: Option<CodexWorkPolicy>,
     timeout: Duration,
 ) -> Result<CodexAppServerSummary> {
     hotpath::measure_block!("sessions.hosts.codex_app_server.protocol", {
@@ -381,7 +388,8 @@ fn run_codex_protocol(
         wait_for_response(line_rx, deadline, 0)?;
         send_json(&mut stdin, &json!({"method": "initialized", "params": {}}))?;
 
-        let thread_params = build_ephemeral_thread_start_params(model, thread_source);
+        let thread_params =
+            build_ephemeral_thread_start_params(model, thread_source, work_policy.as_ref());
         send_json(
             &mut stdin,
             &json!({"method": "thread/start", "id": 1, "params": thread_params}),
@@ -412,6 +420,10 @@ fn run_codex_protocol(
         }
         if let Some(response_schema) = response_schema {
             turn_params["outputSchema"] = response_schema.clone();
+        }
+        if let Some(policy) = work_policy {
+            turn_params["approvalPolicy"] = json!(policy.approval);
+            turn_params["sandboxPolicy"] = policy.sandbox_policy;
         }
         send_json(
             &mut stdin,
@@ -507,13 +519,59 @@ fn command_for_codex_bin(codex_bin: &str) -> Command {
     Command::new(codex_bin)
 }
 
-fn build_ephemeral_thread_start_params(model: Option<&str>, thread_source: &str) -> Value {
+#[derive(Clone)]
+struct CodexWorkPolicy {
+    approval: &'static str,
+    sandbox: &'static str,
+    sandbox_policy: Value,
+}
+
+fn codex_work_policy(execution: &CodexAppServerWorkExecution<'_>) -> Result<CodexWorkPolicy> {
+    let approval = match execution.approval {
+        WorkApprovalPolicy::Never => "never",
+        WorkApprovalPolicy::OnRequest => "on-request",
+    };
+    if execution.egress == WorkEgressPolicy::Allowlisted {
+        return Err(TraceDecayError::Config {
+            message: "Codex app-server cannot enforce a Work egress allowlist".to_owned(),
+        });
+    }
+    let (sandbox, sandbox_policy) = match execution.filesystem {
+        WorkFilesystemPolicy::ReadOnly => (
+            "read-only",
+            json!({"type": "readOnly", "networkAccess": false}),
+        ),
+        WorkFilesystemPolicy::WorkspaceWrite => (
+            "workspace-write",
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": [execution.cwd.to_string_lossy()],
+                "networkAccess": false
+            }),
+        ),
+    };
+    Ok(CodexWorkPolicy {
+        approval,
+        sandbox,
+        sandbox_policy,
+    })
+}
+
+fn build_ephemeral_thread_start_params(
+    model: Option<&str>,
+    thread_source: &str,
+    work_policy: Option<&CodexWorkPolicy>,
+) -> Value {
     let mut params = json!({
         "ephemeral": true,
         "threadSource": thread_source
     });
     if let Some(model) = model {
         params["model"] = json!(model);
+    }
+    if let Some(policy) = work_policy {
+        params["approvalPolicy"] = json!(policy.approval);
+        params["sandbox"] = json!(policy.sandbox);
     }
     params
 }
@@ -939,8 +997,11 @@ mod tests {
 
     #[test]
     fn summary_thread_start_params_are_ephemeral_and_identified() {
-        let params =
-            build_ephemeral_thread_start_params(Some("gpt-5.5-codex"), "tracedecay_codex_summary");
+        let params = build_ephemeral_thread_start_params(
+            Some("gpt-5.5-codex"),
+            "tracedecay_codex_summary",
+            None,
+        );
 
         assert_eq!(params["ephemeral"], json!(true));
         assert_eq!(params["threadSource"], json!("tracedecay_codex_summary"));
@@ -955,12 +1016,14 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temporary = tempfile::tempdir().expect("temporary app-server directory");
         let marker = temporary.path().join("environment");
+        let requests = temporary.path().join("requests.jsonl");
         let executable = temporary.path().join("fake-codex");
         let admitted_key = format!("TRACEDECAY_WORK_ADMITTED_{}", std::process::id());
         let ambient_secret = format!("TRACEDECAY_WORK_SECRET_{}", std::process::id());
         let script = format!(
-            "#!/bin/sh\nprintf '%s|%s|%s' \"${{{admitted_key}:-missing}}\" \"${{{ambient_secret}:-missing}}\" \"${{{child_marker}:-missing}}\" > {marker}\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\",\"params\":{{\"turn\":{{\"id\":\"work-turn\"}}}}}}'; exit 0 ;;\n  esac\ndone\n",
+            "#!/bin/sh\nprintf '%s|%s|%s' \"${{{admitted_key}:-missing}}\" \"${{{ambient_secret}:-missing}}\" \"${{{child_marker}:-missing}}\" > {marker}\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> {requests}\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\",\"params\":{{\"turn\":{{\"id\":\"work-turn\"}}}}}}'; exit 0 ;;\n  esac\ndone\n",
             marker = marker.display(),
+            requests = requests.display(),
             child_marker = CODEX_SUMMARY_CHILD_ENV,
         );
         std::fs::write(&executable, script).expect("write fake app-server");
@@ -1005,6 +1068,9 @@ mod tests {
                 timeout: Duration::from_secs(2),
                 admitted_environment: &admitted_environment,
                 launch_receipt: &launch_receipt,
+                approval: WorkApprovalPolicy::Never,
+                filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+                egress: WorkEgressPolicy::Deny,
             },
         );
         // SAFETY: return the process environment to the state this test found.
@@ -1026,6 +1092,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&marker).expect("child environment marker"),
             "admitted-value|missing|1"
+        );
+        let requests = std::fs::read_to_string(requests)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let thread = requests.iter().find(|request| request["id"] == 1).unwrap();
+        assert_eq!(thread["params"]["approvalPolicy"], json!("never"));
+        assert_eq!(thread["params"]["sandbox"], json!("workspace-write"));
+        let turn = requests.iter().find(|request| request["id"] == 2).unwrap();
+        assert_eq!(turn["params"]["approvalPolicy"], json!("never"));
+        assert_eq!(
+            turn["params"]["sandboxPolicy"],
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": [temporary.path().to_string_lossy()],
+                "networkAccess": false
+            })
         );
     }
 
@@ -1055,6 +1139,9 @@ mod tests {
                 timeout: Duration::from_secs(1),
                 admitted_environment: &BTreeMap::new(),
                 launch_receipt: &launch_receipt,
+                approval: WorkApprovalPolicy::Never,
+                filesystem: WorkFilesystemPolicy::ReadOnly,
+                egress: WorkEgressPolicy::Deny,
             },
         );
 

@@ -40,7 +40,9 @@ use tracedecay_contracts::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
-    WorkAttemptCapacityVerdictV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
+    WorkAttemptCapacityVerdictV1, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
+    WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1, WorkAttemptEffectStorageErrorV1,
+    WorkAttemptEffectStoragePortV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
     WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
@@ -105,6 +107,7 @@ struct AttemptRows {
     /// here, so the tests read the ladder from the durable trail rather than
     /// from the terminal row alone.
     observed_states: Vec<WorkAttemptStateV1>,
+    effects: BTreeMap<AttemptKey, WorkAttemptEffectHolderV1>,
 }
 
 /// In-memory attempt rows with the same fenced compare-and-swap semantics as
@@ -400,6 +403,65 @@ fn deadline_in(seconds: i64) -> UtcMicros {
     UtcMicros(current_micros().0.saturating_add(seconds * 1_000_000))
 }
 
+impl WorkAttemptEffectStoragePortV1 for AttemptStore {
+    fn begin_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        holder: &WorkAttemptEffectHolderV1,
+    ) -> Result<WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectStorageErrorV1> {
+        let key = attempt_key(authority, holder.attempt());
+        let mut rows = self.inner.lock().unwrap();
+        if !rows.rows.contains_key(&key) {
+            return Err(WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized);
+        }
+        if let Some(existing) = rows.effects.get(&key) {
+            return if existing == holder {
+                Ok(WorkAttemptEffectDispatchOutcomeV1::Replayed(
+                    existing.clone(),
+                ))
+            } else {
+                Err(WorkAttemptEffectStorageErrorV1::Conflict)
+            };
+        }
+        rows.effects.insert(key, holder.clone());
+        Ok(WorkAttemptEffectDispatchOutcomeV1::Recorded(holder.clone()))
+    }
+
+    fn settle_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptIdentityV1,
+        resolution: WorkAttemptEffectResolutionV1,
+        resolved_at: UtcMicros,
+    ) -> Result<WorkAttemptEffectHolderV1, WorkAttemptEffectStorageErrorV1> {
+        let key = attempt_key(authority, attempt);
+        let mut rows = self.inner.lock().unwrap();
+        let current = rows
+            .effects
+            .get(&key)
+            .ok_or(WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized)?;
+        let next = current
+            .with_resolution(resolution, resolved_at)
+            .map_err(|_| WorkAttemptEffectStorageErrorV1::Conflict)?;
+        rows.effects.insert(key, next.clone());
+        Ok(next)
+    }
+
+    fn load_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptIdentityV1,
+    ) -> Result<Option<WorkAttemptEffectHolderV1>, WorkAttemptEffectStorageErrorV1> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .effects
+            .get(&attempt_key(authority, attempt))
+            .cloned())
+    }
+}
+
 struct SnapshotShape {
     backend: WorkProviderBackendV1,
     max_stdout_bytes: u64,
@@ -475,6 +537,7 @@ fn crossed_execution_snapshot(
 
 struct Fixture {
     attempts: WorkAttemptService<AttemptStore>,
+    effects: WorkAttemptEffectServiceV1<AttemptStore>,
     rows: AttemptStore,
     context: RequestContext,
     authority: WorkAuthority,
@@ -583,6 +646,7 @@ fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShap
     );
     Fixture {
         attempts,
+        effects: WorkAttemptEffectServiceV1::new(rows.clone()),
         rows,
         context,
         authority,
@@ -752,6 +816,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -780,6 +845,14 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
     );
 
     assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
+    assert_eq!(
+        fixture
+            .effects
+            .load(&fixture.context, fixture.identity())
+            .unwrap()
+            .and_then(|holder| holder.resolution()),
+        Some(WorkAttemptEffectResolutionV1::NoEffect)
+    );
     let settled = fixture.current_attempt();
     assert_eq!(settled.artifacts().len(), 1);
     assert_eq!(
@@ -907,6 +980,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
     }
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -980,6 +1054,7 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1159,6 +1234,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
     tokio::select! {
         () = execute_provider_with_environment(
             &fixture.attempts,
+            &fixture.effects,
             &fixture.context,
             &fixture.attempt,
             &provider,
@@ -1254,6 +1330,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1490,6 +1567,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
         &fixture.context,
         &fixture.attempt,
         &selection,
@@ -1770,6 +1848,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
         &fixture.context,
         &fixture.attempt,
         &preferred(
