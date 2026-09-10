@@ -2,8 +2,9 @@
 //!
 //! Direct MCP servers never construct this grant. The daemon derives the
 //! principal from its authenticated durable profile identity and binds the
-//! authorization revision to the registered project owner and exact resolved
-//! repository/worktree/ref scope.
+//! authorization revision to the registered project owner and physical
+//! repository/worktree checkout. A moving Git reference remains source
+//! attribution and is revalidated by the generation selected for each query.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -187,7 +188,8 @@ fn admit_query_mcp_read_at(
         brain_id,
         profile_id,
         project_id,
-        &scope.scope_digest,
+        &scope.repository_id,
+        &scope.worktree_id,
         &capabilities,
     ))
     .map_err(|_| QueryMcpAdmissionUnavailableV1::InvalidGrant)?;
@@ -296,9 +298,9 @@ impl QueryMcpReadAdmissionV1 {
         {
             return Err(QueryMcpAdmissionUnavailableV1::CapabilityMismatch);
         }
-        if scope.project_id != self.project_id
-            || scope.scope_digest != self.scope.scope_digest
-            || scope != &self.scope
+        if scope.validate().is_err()
+            || scope.project_id != self.project_id
+            || !scope.identifies_same_checkout(&self.scope)
         {
             return Err(QueryMcpAdmissionUnavailableV1::ScopeMismatch);
         }
@@ -333,14 +335,28 @@ mod tests {
         T::try_from(value.to_owned()).expect("typed fixture id")
     }
 
-    fn scope(project: &str, worktree: &str) -> ResolvedScope {
+    fn scoped(
+        project: &str,
+        repository: &str,
+        worktree: &str,
+        reference: Option<&str>,
+    ) -> ResolvedScope {
         ResolvedScope::new(
             id::<ProjectId>(project),
-            id::<RepositoryId>("repository.fixture"),
+            id::<RepositoryId>(repository),
             id::<WorktreeId>(worktree),
-            Some(id::<RefId>("refs/heads/main")),
+            reference.map(id::<RefId>),
         )
         .expect("scope")
+    }
+
+    fn scope(project: &str, worktree: &str) -> ResolvedScope {
+        scoped(
+            project,
+            "repository.fixture",
+            worktree,
+            Some("refs/heads/main"),
+        )
     }
 
     fn admission(scope: &ResolvedScope) -> super::QueryMcpReadAdmissionV1 {
@@ -356,15 +372,27 @@ mod tests {
     }
 
     #[test]
-    fn route_admission_is_exactly_project_and_worktree_scoped() {
+    fn route_admission_follows_checkout_across_branch_switches() {
         let admitted_scope = scope("project.one", "worktree.one");
+        let switched_scope = scoped(
+            "project.one",
+            "repository.fixture",
+            "worktree.one",
+            Some("refs/heads/feature"),
+        );
         let other_project = scope("project.two", "worktree.one");
+        let other_repository = scoped(
+            "project.one",
+            "repository.other",
+            "worktree.one",
+            Some("refs/heads/feature"),
+        );
         let other_worktree = scope("project.one", "worktree.two");
-        let admission = admission(&admitted_scope);
-        let authority = admission.search_authority();
+        let admitted = admission(&admitted_scope);
+        let authority = admitted.search_authority();
 
         assert_eq!(
-            admission.authorize_at(
+            admitted.authorize_at(
                 &admitted_scope,
                 Some(&authority),
                 super::QUERY_MCP_READ_CAPABILITY_V1,
@@ -373,7 +401,27 @@ mod tests {
             Ok(authority.clone())
         );
         assert_eq!(
-            admission.authorize_at(
+            admitted.authorize_at(
+                &switched_scope,
+                Some(&authority),
+                super::QUERY_MCP_READ_CAPABILITY_V1,
+                UtcMicros(11),
+            ),
+            Ok(authority.clone())
+        );
+        let switched_admission = admission(&switched_scope);
+        assert_eq!(switched_admission.search_authority(), authority);
+        assert_eq!(
+            switched_admission.authorize_at(
+                &switched_scope,
+                Some(&authority),
+                super::QUERY_MCP_READ_CAPABILITY_V1,
+                UtcMicros(11),
+            ),
+            Ok(authority.clone())
+        );
+        assert_eq!(
+            admitted.authorize_at(
                 &other_project,
                 Some(&authority),
                 super::QUERY_MCP_READ_CAPABILITY_V1,
@@ -382,7 +430,16 @@ mod tests {
             Err(QueryMcpAdmissionUnavailableV1::ScopeMismatch)
         );
         assert_eq!(
-            admission.authorize_at(
+            admitted.authorize_at(
+                &other_repository,
+                Some(&authority),
+                super::QUERY_MCP_READ_CAPABILITY_V1,
+                UtcMicros(11),
+            ),
+            Err(QueryMcpAdmissionUnavailableV1::ScopeMismatch)
+        );
+        assert_eq!(
+            admitted.authorize_at(
                 &other_worktree,
                 Some(&authority),
                 super::QUERY_MCP_READ_CAPABILITY_V1,
