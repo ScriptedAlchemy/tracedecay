@@ -3906,20 +3906,20 @@ mod tests {
         );
     }
 
-    /// The historical writer's revision-1 file segments (byte-array exact
-    /// terms with persisted canonical bytes, per-chunk revisions, explicit
-    /// parent ids, and the document's chunk roster) must still decode, and
-    /// re-encoding that file as a revision-2 row segment must restore the
-    /// identical file record from a strictly smaller segment.
+    /// The historical writer's revision-1 file segments predate the required
+    /// symbol evidence (`docstring`, then `is_async` and `derives`). Older
+    /// sealed rows are never defaulted: the decoder refuses them with the
+    /// typed contract failure naming the first missing field so the
+    /// generation is rebuilt instead of being served as negative evidence.
     #[test]
-    fn revision_one_file_segments_decode_and_round_trip_through_revision_two() {
+    fn revision_one_historical_segments_are_refused_without_docstring_evidence() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/partitioned_pre_paging");
         let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
         let generation = parse_partitioned_manifest(&manifest)
             .expect("historical manifest parses")
             .expect("revision seven manifest");
-        let mut decoded_segments = 0;
+        let mut refused_segments = 0;
         for descriptor in &generation.file_segments {
             let name = descriptor
                 .segment_digest
@@ -3931,82 +3931,32 @@ mod tests {
             let probe: PartitionedFormatProbeV1 =
                 serde_json::from_slice(&bytes).expect("segment format probe");
             assert_eq!(probe.format_revision, FILE_SEGMENT_FORMAT_REVISION_V1);
-            assert!(
-                bytes
-                    .windows(b"\"canonical_bytes\":[".len())
-                    .any(|window| { window == b"\"canonical_bytes\":[".as_slice() }),
-                "the historical segment must carry byte-array exact terms"
-            );
             let mut restored = Vec::new();
-            let revision_one = decode_file_segment(
+            let error = decode_file_segment(
                 descriptor,
                 &generation.manifest.generation_id,
                 &bytes,
                 &mut restored,
             )
-            .expect("revision-1 segment decodes");
-            let chunk_count = revision_one.artifacts.chunks.chunks.len();
-            assert!(chunk_count > 0, "the fixture file must carry chunks");
+            .expect_err("historical rows without documentation evidence must be refused");
             assert!(
-                revision_one
-                    .artifacts
-                    .chunks
-                    .chunks
-                    .iter()
-                    .any(|chunk| !chunk.exact_terms.is_empty()),
-                "the fixture file must carry exact terms"
-            );
-
-            let mut encoder = PartitionedSegmentEncoderV1::default();
-            encoder.payload.clear();
-            serde_json::to_writer(
-                &mut encoder.payload,
-                &PersistedFileGenerationArtifactsRefV2::new(
-                    &revision_one.authority,
-                    &revision_one.extraction,
-                    &revision_one.artifacts,
+                matches!(
+                    &error,
+                    CodeIndexProductionErrorV1::Contract(message)
+                        if message.contains("missing field `docstring`")
                 ),
-            )
-            .expect("revision-2 payload serializes");
-            let reencoded = encoder
-                .encode_serialized_file_segment(
-                    FILE_SEGMENT_FORMAT_REVISION_V2,
-                    generation.manifest.generation_id.as_str(),
-                    descriptor.file_occurrence_id.clone(),
-                    revision_one
-                        .artifacts
-                        .symbols
-                        .iter()
-                        .map(|symbol| (symbol.identity.as_str(), symbol.occurrence.as_str())),
-                    descriptor.file_key,
-                )
-                .expect("revision-2 segment encodes");
-            assert!(
-                reencoded.segment_size_bytes < descriptor.segment_size_bytes,
-                "revision 2 must be smaller than revision 1 ({} >= {})",
-                reencoded.segment_size_bytes,
-                descriptor.segment_size_bytes
+                "unexpected error: {error}"
             );
-            let revision_two = decode_file_segment(
-                &reencoded,
-                &generation.manifest.generation_id,
-                encoder.segment_bytes(),
-                &mut restored,
-            )
-            .expect("revision-2 segment decodes");
-            assert_eq!(
-                serde_json::to_value(&revision_two).expect("revision-2 record"),
-                serde_json::to_value(&revision_one).expect("revision-1 record"),
-                "both revisions must restore the same file record"
-            );
-            decoded_segments += 1;
+            refused_segments += 1;
         }
-        assert!(decoded_segments > 0);
+        assert!(refused_segments > 0);
     }
 
     /// A revision-2 row that omits a per-file constant needs the file default
     /// to carry it; a segment with neither is refused as a contract failure
-    /// rather than filled in.
+    /// rather than filled in. The historical revision-1 bytes are refused
+    /// before their chunk rows are reached (see the test above), so this test
+    /// supplies the symbol evidence those rows lack to obtain a typed record.
     #[test]
     fn revision_two_rows_without_defaults_are_refused() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4023,14 +3973,27 @@ mod tests {
             .expect("sha256 segment digest");
         let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
             .expect("historical segment bytes");
+        let segment: PartitionedRawFileSegmentV1 =
+            serde_json::from_slice(&bytes).expect("historical segment envelope");
+        let mut policy = FileSegmentDecodePolicyV1 {
+            generation_id: generation.manifest.generation_id.as_str(),
+            file_occurrence_id: descriptor.file_occurrence_id.as_str(),
+            symbol_occurrences: &descriptor.symbol_occurrences,
+        };
         let mut restored = Vec::new();
-        let file = decode_file_segment(
-            descriptor,
-            &generation.manifest.generation_id,
-            &bytes,
-            &mut restored,
-        )
-        .expect("revision-1 segment decodes");
+        canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, &mut restored)
+            .expect("historical payload canonicalizes");
+        let mut value: Value = serde_json::from_slice(&restored).expect("historical payload value");
+        for symbol in value["artifacts"]["symbols"]
+            .as_array_mut()
+            .expect("historical symbol rows")
+        {
+            symbol["docstring"] = Value::Null;
+            symbol["is_async"] = Value::Bool(false);
+            symbol["derives"] = Value::Array(Vec::new());
+        }
+        let file: PersistedFileGenerationArtifactsV1 =
+            serde_json::from_value(value).expect("payload with symbol evidence decodes");
         let mut payload = serde_json::to_value(PersistedFileGenerationArtifactsRefV2::new(
             &file.authority,
             &file.extraction,

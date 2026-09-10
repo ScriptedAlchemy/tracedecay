@@ -5,10 +5,10 @@ use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
     ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
-    ConfigurationSettlementAuthorityV1, ConfigurationValueV1, RuleEffect,
-    SEMANTIC_RUNTIME_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding,
-    SettingKey, SourceBindingId, SourceKindV1, UserProfileId, WorktreePlacementModeV1,
-    resolve_restrictive_capabilities, safe_work_topology_policy_v1,
+    ConfigurationValueV1, RuleEffect, SEMANTIC_RUNTIME_SETTING_KEY, ScopeAccessRule,
+    ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    UserProfileId, WorktreePlacementModeV1, resolve_restrictive_capabilities,
+    safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{

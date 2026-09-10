@@ -540,14 +540,14 @@ impl<'a> GraphQueryManager<'a> {
     }
 }
 
-fn health_symbol_metadata<'a>(
-    symbols: &'a [CodeGraphSymbolSummaryV1],
+fn health_symbol_metadata(
+    symbols: &[CodeGraphSymbolSummaryV1],
 ) -> Result<
     HashMap<
         SymbolOccurrenceId,
         (
             String,
-            &'a tracedecay_code_index::lineage::LineageSymbolRecordV1,
+            &tracedecay_code_index::lineage::LineageSymbolRecordV1,
         ),
     >,
 > {

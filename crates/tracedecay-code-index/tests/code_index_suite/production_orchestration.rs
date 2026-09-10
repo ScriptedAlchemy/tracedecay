@@ -3069,19 +3069,19 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:ac227b0a6bcf26a7e7d751355d135550af3f295046f32909c5b53b5c4e459ef7";
+    "sha256:f1741f8ee5b4fec3dfc723e6de9ab9794de3a016f837ef7d1186306e09526abf";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:d5148f9e32259a9700bd5255b8e97b2c125285a7d142a8fb3d2f056670c0e9d3",
-        8_494,
+        "sha256:0ae42f3ae5844c46e7fea6cfb07f91e09d6634e8f9c2f1df053d62cc7d7c1f24",
+        8_584,
     ),
     (
-        "sha256:f15c31cd2eed88327209a18a98b51a3ca6b53e57e3c224b6ab1d28d04d5f18c4",
-        3_826,
+        "sha256:21d54dff99989ad1b91b8254ad1a7c1310fe866755e0c3157153c2ab18951b19",
+        3_856,
     ),
     (
-        "sha256:1ba027447565a0fcb55b2f7268a7475ffdbd90b8c257cdebdd05513654a7161e",
-        3_934,
+        "sha256:4f03e051764f885e2eb5f3537a2f7d26741f72f936fd6e4dc5ec1fd53a0751da",
+        3_964,
     ),
     (
         "sha256:1bfa6399cd1a9f5d06ec697add39064ac1cc4f51dcfc866ba903c62ac3cad476",
@@ -3349,8 +3349,11 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
 
 /// Bytes the unmodified pre-paging writer emitted (see the fixture README and
 /// `provenance.json`). Descriptor readers can still inventory its retained
-/// segments, but serving refuses the generation with typed rebuild-required
-/// unavailability because those bytes predate source commitments.
+/// segments, but serving refuses the generation: text metadata reports typed
+/// rebuild-required unavailability because those bytes predate source
+/// commitments, and a complete restore refuses the first file segment with
+/// the contract failure naming the symbol evidence (`docstring`) its rows
+/// predate rather than defaulting it.
 #[test]
 fn historical_writer_bytes_read_through_both_partitioned_readers() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3436,10 +3439,16 @@ fn historical_writer_bytes_read_through_both_partitioned_readers() {
         CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest),
         Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
     ));
-    assert!(matches!(
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read),
-        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
-    ));
+    let refused = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read)
+        .expect_err("historical rows without documentation evidence must be refused");
+    assert!(
+        matches!(
+            &refused,
+            CodeIndexProductionErrorV1::Contract(message)
+                if message.contains("missing field `docstring`")
+        ),
+        "unexpected error: {refused}"
+    );
 
     let corrupted = &identities[0].digest;
     let corrupt = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
