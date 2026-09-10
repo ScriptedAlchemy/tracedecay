@@ -381,7 +381,7 @@ fn render_grep_md(
     if hits.iter().any(|hit| hit.node_id.is_some()) {
         md.blank();
         md.line(
-            "_Use `tracedecay_body` with a result's `node_id` to read the verified enclosing symbol._",
+            "_Use `tracedecay_source_body` with a result's `node_id` to read the verified enclosing symbol._",
         );
     }
 
@@ -677,6 +677,29 @@ mod tests {
 
     fn one_budget_omission() -> Value {
         json!([{"domain": "source", "count": 1, "reason": "budget"}])
+    }
+
+    #[test]
+    fn enriched_hit_routes_node_id_to_source_body() {
+        let markdown = render_grep_md(
+            &[GrepHit {
+                file: "src/lib.rs".to_owned(),
+                line: 1,
+                text: "fn execute() {}".to_owned(),
+                before: Vec::new(),
+                after: Vec::new(),
+                symbol: Some("execute".to_owned()),
+                node_id: Some("symbol.v1.sha256:fixture".to_owned()),
+            }],
+            false,
+            1,
+            GrepScanOmissionsV1::default(),
+        );
+
+        assert!(
+            markdown.contains("`tracedecay_source_body` with a result's `node_id`"),
+            "{markdown}"
+        );
     }
 
     #[test]
