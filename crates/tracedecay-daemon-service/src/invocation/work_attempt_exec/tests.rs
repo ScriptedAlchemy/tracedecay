@@ -721,7 +721,13 @@ fn binding(
     path: &Path,
     capability: WorkExecutableCapabilityV1,
 ) -> WorkExecutableBindingV1 {
-    WorkExecutableBindingV1::new(reference.clone(), path.to_path_buf(), vec![capability]).unwrap()
+    WorkExecutableBindingV1::new(
+        reference.clone(),
+        path.to_path_buf(),
+        vec![capability],
+        Vec::new(),
+    )
+    .unwrap()
 }
 
 /// A real `PinnedWorkExecutableBindingResolver` over exactly these bindings.

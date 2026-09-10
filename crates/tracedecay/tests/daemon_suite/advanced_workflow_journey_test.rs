@@ -512,6 +512,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
                     executable.clone(),
                     executable_path,
                     vec![WorkExecutableCapabilityV1::ClaudeCodeStreamJson],
+                    Vec::new(),
                 )
                 .expect("provider binding"),
             ]),

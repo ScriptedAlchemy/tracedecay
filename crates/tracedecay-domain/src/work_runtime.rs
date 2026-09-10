@@ -444,7 +444,7 @@ impl WorkExecutionEnvelopeV1 {
 }
 
 impl WorkProviderBackendV1 {
-    pub(crate) fn provider_id(self) -> &'static ProviderId {
+    pub fn provider_id(self) -> &'static ProviderId {
         static CLAUDE: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
         static CODEX_APP_SERVER: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
         static CODEX_CLI: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
@@ -464,7 +464,7 @@ impl WorkProviderBackendV1 {
         }
     }
 
-    pub(crate) const fn protocol(self) -> crate::WorkProviderProtocol {
+    pub const fn protocol(self) -> crate::WorkProviderProtocol {
         match self {
             Self::ClaudeCodeCli => crate::WorkProviderProtocol::ClaudeStreamJson,
             Self::CodexAppServer => crate::WorkProviderProtocol::CodexAppServerJsonRpc,

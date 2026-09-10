@@ -6,6 +6,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::{DomainError, ProviderId, WorkProviderRouteId, canonical_text};
+
 /// Ordinal band. Never a probability, never a scalar score.
 ///
 /// Bands are ordered `Lowest` .. `Highest`. Comparison is the only operation
@@ -85,4 +87,25 @@ pub struct WorkRouteCandidateV1 {
     pub cost: WorkOrdinalBandV1,
     pub autonomy: WorkOrdinalBandV1,
     pub evidence_quality: WorkOrdinalBandV1,
+}
+
+impl WorkRouteCandidateV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        WorkProviderRouteId::new(self.route_id.clone()).map_err(|_| DomainError::NonCanonical {
+            field: "work route candidate route id",
+        })?;
+        ProviderId::new(self.provider_capability_id.clone()).map_err(|_| {
+            DomainError::NonCanonical {
+                field: "work route candidate provider id",
+            }
+        })?;
+        if !canonical_text::is_canonical_text_within(&self.model_id, 256)
+            || self.declared_budget_ceiling == 0
+        {
+            return Err(DomainError::NonCanonical {
+                field: "work route candidate declaration",
+            });
+        }
+        Ok(())
+    }
 }
