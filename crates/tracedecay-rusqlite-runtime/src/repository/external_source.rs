@@ -9,12 +9,13 @@ use tracedecay_store::{
     SourceAcquisitionQueueStateV1, SourceAuthorityPublicationReceiptV1,
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
     SourceCommitV1, SourceObjectMutationV1, SourcePendingProjectionV1,
-    SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceStoreStateV1,
-    apply_source_authority_publication_owned, apply_source_commit_owned,
+    SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceStoreErrorV1,
+    SourceStoreStateV1, apply_source_authority_publication_owned, apply_source_commit_owned,
     apply_source_projection_owned, build_source_projection,
 };
 
 use super::support::{decode, encode, invalid};
+use crate::operation::StorageOperationError;
 
 // Immutable histories stay append-only until the canonical retention policy
 // explicitly covers external-source receipts. Current-state reads and writes
@@ -192,28 +193,49 @@ impl ExternalSourceExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         commit: &SourceCommitV1,
-    ) -> rusqlite::Result<()> {
-        commit.validate().map_err(invalid)?;
-        let binding = commit.binding().immutable_identity().map_err(invalid)?;
+    ) -> Result<(), StorageOperationError> {
+        commit
+            .validate()
+            .map_err(invalid)
+            .map_err(StorageOperationError::Native)?;
+        let binding = commit
+            .binding()
+            .immutable_identity()
+            .map_err(invalid)
+            .map_err(StorageOperationError::Native)?;
         if let Some(receipt) =
             load_commit_receipt_by_idempotency(savepoint, &binding, commit.idempotency_key())?
         {
             return if receipt.request_digest() == commit.request_digest() {
                 Ok(())
             } else {
-                Err(invalid(
+                Err(StorageOperationError::Native(invalid(
                     "external source idempotency key collides with another request",
-                ))
+                )))
             };
         }
         let current = self.take_verified_state(savepoint, &binding)?;
+        let actual_frontier = current
+            .as_ref()
+            .map(|state| state.source_frontier().clone());
         let mutation_encodings = validate_revision_collisions(savepoint, &binding, commit)?;
-        match apply_source_commit_owned(current, commit.clone()).map_err(invalid)? {
+        let applied =
+            apply_source_commit_owned(current, commit.clone()).map_err(|error| match error {
+                SourceStoreErrorV1::FrontierConflict => {
+                    StorageOperationError::ExternalSourceFrontierConflict {
+                        expected: Box::new(commit.expected_frontier().cloned()),
+                        actual: Box::new(actual_frontier),
+                    }
+                }
+                error => StorageOperationError::Native(invalid(error)),
+            })?;
+        match applied {
             SourceCommitApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
             SourceCommitApplyOutcomeV1::Committed(state) => {
                 let state = *state;
                 persist_source_commit(savepoint, &state, state.receipt(), mutation_encodings)?;
-                self.cache_verified_state(savepoint, state)
+                self.cache_verified_state(savepoint, state)?;
+                Ok(())
             }
         }
     }

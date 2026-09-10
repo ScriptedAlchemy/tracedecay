@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::ObservationSourceCursorV1;
+use tracedecay_domain::{ObservationSourceCursorV1, SourceAggregateFrontierV1};
 
 use super::{DurabilityClassV1, StoreIncarnationV1};
 use crate::observation::CursorAdvanceLedgerDisagreementV1;
@@ -159,6 +159,11 @@ pub enum StorageRuntimeErrorV1 {
     ObservationSourceCursorConflict {
         expected: Box<Option<ObservationSourceCursorV1>>,
         actual: Box<Option<ObservationSourceCursorV1>>,
+    },
+    #[error("external source frontier conflict: expected {expected:?}, found {actual:?}")]
+    ExternalSourceFrontierConflict {
+        expected: Box<Option<SourceAggregateFrontierV1>>,
+        actual: Box<Option<SourceAggregateFrontierV1>>,
     },
     #[error("observation cursor-advance ledger disagrees with immutable coverage")]
     ObservationCursorAdvanceLedgerDisagreement {

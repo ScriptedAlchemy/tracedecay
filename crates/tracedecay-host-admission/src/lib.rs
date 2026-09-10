@@ -1167,6 +1167,9 @@ fn classify_external_source_error(
         tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::SubmitRejected { .. } => {
             HostAdmissionOutcome::retained_unavailable("external_source_runtime_rejected")
         }
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::FrontierConflict { .. } => {
+            HostAdmissionOutcome::retained_unavailable("external_source_frontier_conflict")
+        }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
     }
 }

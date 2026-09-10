@@ -128,7 +128,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         commit: &SourceCommitV1,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         self.external_source.execute_write(savepoint, commit)
     }
 
@@ -136,7 +136,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         commits: &[SourceCommitV1],
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         for commit in commits {
             self.external_source.execute_write(savepoint, commit)?;
         }

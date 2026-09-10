@@ -25,7 +25,8 @@ use tracedecay_store::{
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
     SourceCommitApplyOutcomeV1, SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1,
     SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
-    SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit, build_source_projection,
+    SourceProjectionCommitV1, SourceStoreStateV1, StorageRuntimeErrorV1, apply_source_commit,
+    build_source_projection,
 };
 
 use tracedecay_contracts::request_identity::{
@@ -58,6 +59,11 @@ pub enum RuntimeExternalSourceErrorV1 {
     ReadUnavailable {
         phase: &'static str,
         coverage: RuntimeReadCoverageV1,
+    },
+    #[error("external source frontier changed while preparing a commit")]
+    FrontierConflict {
+        expected: Box<Option<SourceAggregateFrontierV1>>,
+        actual: Box<Option<SourceAggregateFrontierV1>>,
     },
     #[error("external source idempotency key conflicts with a prior command")]
     IdempotencyConflict,
@@ -371,6 +377,18 @@ impl RuntimeExternalSourceStore {
 
     #[hotpath::skip]
     pub async fn capture_host_observations(
+        &self,
+        receipts: &[tracedecay_store::ObservationCommitReceipt],
+    ) -> Result<Vec<RuntimeSourceCaptureOutcomeV1>, RuntimeExternalSourceErrorV1> {
+        match self.capture_host_observations_once(receipts).await {
+            Err(RuntimeExternalSourceErrorV1::FrontierConflict { .. }) => {
+                self.capture_host_observations_once(receipts).await
+            }
+            outcome => outcome,
+        }
+    }
+
+    async fn capture_host_observations_once(
         &self,
         receipts: &[tracedecay_store::ObservationCommitReceipt],
     ) -> Result<Vec<RuntimeSourceCaptureOutcomeV1>, RuntimeExternalSourceErrorV1> {
@@ -1177,6 +1195,15 @@ fn dispatch_error(
     phase: &'static str,
     failure: StoreRuntimeRegistryFailure,
 ) -> RuntimeExternalSourceErrorV1 {
+    if let StoreRuntimeRegistryFailure::StorageRuntime(error) = &failure
+        && let StorageRuntimeErrorV1::ExternalSourceFrontierConflict { expected, actual } =
+            error.as_ref()
+    {
+        return RuntimeExternalSourceErrorV1::FrontierConflict {
+            expected: expected.clone(),
+            actual: actual.clone(),
+        };
+    }
     RuntimeExternalSourceErrorV1::Dispatch {
         phase,
         failure: Box::new(failure),

@@ -84,6 +84,9 @@ fn map_operation_error(error: StorageOperationError) -> StorageRuntimeErrorV1 {
         StorageOperationError::ObservationSourceCursorConflict { expected, actual } => {
             StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual }
         }
+        StorageOperationError::ExternalSourceFrontierConflict { expected, actual } => {
+            StorageRuntimeErrorV1::ExternalSourceFrontierConflict { expected, actual }
+        }
         StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } => {
             StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement }
         }
@@ -168,6 +171,20 @@ mod tests {
                     )
                 )
                     && disagreement.coverage() == coverage
+        ));
+    }
+
+    #[test]
+    fn external_source_frontier_conflict_survives_runtime_error_mapping() {
+        let mapped = map_operation_error(StorageOperationError::ExternalSourceFrontierConflict {
+            expected: Box::new(None),
+            actual: Box::new(None),
+        });
+
+        assert!(matches!(
+            mapped,
+            StorageRuntimeErrorV1::ExternalSourceFrontierConflict { expected, actual }
+                if expected.is_none() && actual.is_none()
         ));
     }
 

@@ -527,3 +527,119 @@ async fn scoped_reset_readmits_the_same_host_observation_without_conflict() {
     );
     outcome.expect("re-admission must converge in one pass");
 }
+
+#[tokio::test]
+async fn stale_host_frontier_is_typed_and_reprepare_preserves_idempotency() {
+    let fixture = Fixture::open().await;
+    let first = fixture
+        .persist(observation(
+            ClineTranscriptStream::ApiHistory,
+            false,
+            0,
+            "native-concurrent-first",
+            false,
+        ))
+        .await;
+    let second = fixture
+        .persist(observation(
+            ClineTranscriptStream::ApiHistory,
+            false,
+            1,
+            "native-concurrent-second",
+            false,
+        ))
+        .await;
+    let (_, stale) = prepare_host_source_commit(
+        &second,
+        None,
+        None,
+        fixture.retained.runtime.binding(),
+    )
+    .unwrap();
+
+    fixture
+        .retained
+        .capture_host_observation(&first)
+        .await
+        .unwrap();
+    let request = runtime_submit_request(
+        fixture.retained.runtime.binding(),
+        RepositoryWritePayloadV1::ExternalSource(Box::new(stale.clone())),
+        &stale,
+        stale.idempotency_key(),
+        tracedecay_store::OperationPriorityV1::Foreground,
+    )
+    .unwrap();
+    let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
+    let failure = fixture
+        .retained
+        .runtime
+        .dispatch_submit(request, probe)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        dispatch_error("stale host observation", failure),
+        RuntimeExternalSourceErrorV1::FrontierConflict {
+            expected,
+            actual,
+        } if expected.is_none() && actual.is_some()
+    ));
+
+    let outcome = fixture
+        .retained
+        .capture_host_observation(&second)
+        .await
+        .expect("fresh reprepare must commit after a legitimate competing write");
+    let receipt = match outcome {
+        RuntimeSourceCaptureOutcomeV1::Projected(receipt)
+        | RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) => receipt,
+    };
+    assert_eq!(receipt.idempotency_key(), stale.idempotency_key());
+    assert_eq!(receipt.request_digest(), stale.request_digest());
+    assert_ne!(receipt.prior_source_frontier(), stale.expected_frontier());
+}
+
+#[tokio::test]
+async fn concurrent_same_binding_captures_reprepare_the_cas_loser() {
+    let fixture = Fixture::open().await;
+    let first = fixture
+        .persist(observation(
+            ClineTranscriptStream::ApiHistory,
+            false,
+            0,
+            "native-concurrent-a",
+            false,
+        ))
+        .await;
+    let second = fixture
+        .persist(observation(
+            ClineTranscriptStream::ApiHistory,
+            false,
+            1,
+            "native-concurrent-b",
+            false,
+        ))
+        .await;
+
+    let (first_outcome, second_outcome) = tokio::join!(
+        fixture.retained.capture_host_observation(&first),
+        fixture.retained.capture_host_observation(&second),
+    );
+    first_outcome.expect("the first legitimate capture must commit");
+    second_outcome.expect("the concurrent CAS loser must reprepare and commit");
+
+    let (_, _, binding) =
+        host_source_authority(&first, fixture.retained.runtime.binding()).unwrap();
+    let state = fixture
+        .retained
+        .read_state(binding)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.observed_objects().len(), 2);
+    assert_eq!(state.source_frontier().partitions().len(), 1);
+    assert_eq!(
+        state.source_frontier().partitions().values().next().unwrap().sequence(),
+        2
+    );
+}

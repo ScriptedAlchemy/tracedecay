@@ -852,11 +852,17 @@ fn stale_source_fork_rejection_preserves_the_committed_pending_chain() {
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        assert!(
-            ExternalSourceExecutor::default()
-                .execute_write(&savepoint, &fork)
-                .is_err()
-        );
+        let error = ExternalSourceExecutor::default()
+            .execute_write(&savepoint, &fork)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            StorageOperationError::ExternalSourceFrontierConflict {
+                expected,
+                actual,
+            } if expected.as_ref() == &Some(predecessor.source_frontier().clone())
+                && actual.as_ref() == &Some(accepted.next_frontier().clone())
+        ));
     }
     assert_eq!(
         connection
