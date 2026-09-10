@@ -1898,20 +1898,20 @@ fn reference_name_suffix_start(candidate: &str, reference_name: &str) -> Option<
 fn reference_evidence_span(
     source: &str,
     offsets: &[u64],
-    references: &[UnresolvedRef],
+    references_by_site: &HashMap<(&str, EdgeKind, u32, u32), Vec<&UnresolvedRef>>,
     reference: &UnresolvedRef,
 ) -> Option<SourceSpan> {
     let line_start = offsets.get(reference.line as usize).copied()?;
     let site_start = usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()?;
     let source_at_site = source.get(site_start..)?;
-    references
+    references_by_site
+        .get(&(
+            reference.from_node_id.as_str(),
+            reference.reference_kind,
+            reference.line,
+            reference.column,
+        ))?
         .iter()
-        .filter(|candidate| {
-            candidate.from_node_id == reference.from_node_id
-                && candidate.reference_kind == reference.reference_kind
-                && candidate.line == reference.line
-                && candidate.column == reference.column
-        })
         .filter_map(|candidate| {
             let suffix =
                 reference_name_suffix_start(&candidate.reference_name, &reference.reference_name)?;
@@ -1954,6 +1954,19 @@ fn resolve_file_references(
             .entry(relative_name)
             .or_default()
             .push(symbol);
+    }
+    let mut references_by_site: HashMap<(&str, EdgeKind, u32, u32), Vec<&UnresolvedRef>> =
+        HashMap::new();
+    for reference in unresolved {
+        references_by_site
+            .entry((
+                reference.from_node_id.as_str(),
+                reference.reference_kind,
+                reference.line,
+                reference.column,
+            ))
+            .or_default()
+            .push(reference);
     }
     // A node id normally identifies one symbol row; duplicates abstain rather
     // than anchoring retained evidence to an arbitrary row.
@@ -2025,15 +2038,20 @@ fn resolve_file_references(
                     to_occurrence: target.occurrence.clone(),
                     kind,
                     authority: EdgeAuthorityV1::SyntaxExact,
-                    evidence_span: reference_evidence_span(source, offsets, unresolved, reference)
-                        .unwrap_or(from.span),
+                    evidence_span: reference_evidence_span(
+                        source,
+                        offsets,
+                        &references_by_site,
+                        reference,
+                    )
+                    .unwrap_or(from.span),
                 });
             }
             [] => {
                 if let Some(candidate) = cross_file_reference_candidate(
                     source,
                     offsets,
-                    unresolved,
+                    &references_by_site,
                     reference,
                     &by_node_id,
                 ) {
@@ -2056,7 +2074,7 @@ fn resolve_file_references(
 fn cross_file_reference_candidate(
     source: &str,
     offsets: &[u64],
-    references: &[UnresolvedRef],
+    references_by_site: &HashMap<(&str, EdgeKind, u32, u32), Vec<&UnresolvedRef>>,
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
@@ -2077,7 +2095,7 @@ fn cross_file_reference_candidate(
         from_occurrence: from.occurrence.clone(),
         reference_name: reference.reference_name.clone(),
         kind,
-        evidence_span: reference_evidence_span(source, offsets, references, reference)
+        evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
             .unwrap_or(from.span),
     })
 }
@@ -3683,7 +3701,7 @@ pub fn real_symbol() {}
 
     #[test]
     fn resolved_calls_keep_each_parser_observed_invocation_span() {
-        let source = "pub fn target() {}\npub fn caller() {\n    target();\n    target();\n}\n";
+        let source = "pub fn target() {}\npub fn caller() {\n    let _label = \"λ\"; target();\n    target();\n}\n";
         let file = validated_file("src/lib.rs", source.as_bytes());
         let batch = batch_for(&file, ParseOutcomeV1::Complete);
         let artifacts = chunker()
@@ -3722,6 +3740,61 @@ pub fn real_symbol() {}
             ["target", "target"]
         );
         assert_ne!(calls[0].evidence_span, calls[1].evidence_span);
+    }
+
+    #[test]
+    fn qualified_reference_siblings_keep_their_exact_token_spans() {
+        let source = "pub fn caller() { crate::target(); }\n";
+        let caller = fixture_function_row(
+            source,
+            "node.caller",
+            "sym.caller",
+            "caller",
+            'a',
+            SourceSpan {
+                start_byte: 0,
+                end_byte: source.len() as u64,
+            },
+        );
+        let site = source.find("crate::target").unwrap() as u32;
+        let references = [
+            UnresolvedRef {
+                from_node_id: caller.node_id.clone(),
+                reference_name: "crate::target".to_owned(),
+                reference_kind: EdgeKind::Calls,
+                line: 0,
+                column: site,
+                file_path: "src/lib.rs".to_owned(),
+            },
+            UnresolvedRef {
+                from_node_id: caller.node_id.clone(),
+                reference_name: "target".to_owned(),
+                reference_kind: EdgeKind::Calls,
+                line: 0,
+                column: site,
+                file_path: "src/lib.rs".to_owned(),
+            },
+        ];
+
+        let (resolved, retained) = resolve_file_references(
+            source,
+            &line_offsets(source.as_bytes()),
+            &references,
+            &[caller],
+        );
+
+        assert!(resolved.is_empty());
+        assert_eq!(retained.len(), 2);
+        assert_eq!(
+            retained
+                .iter()
+                .map(|reference| {
+                    &source[reference.evidence_span.start_byte as usize
+                        ..reference.evidence_span.end_byte as usize]
+                })
+                .collect::<Vec<_>>(),
+            ["crate::target", "target"]
+        );
     }
 
     #[test]
