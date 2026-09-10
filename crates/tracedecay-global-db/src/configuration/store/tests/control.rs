@@ -9,7 +9,7 @@ use super::super::{
 };
 use super::{
     HostAdmissionScope, control_authority, control_authority_with_key, digest,
-    direct_project_layer, evidence_for, global_setup, id, policy_digest, protected_plan_for,
+    direct_project_layer, evidence_for, global_setup, id, protected_plan_for,
 };
 use crate::configuration::contracts::{ConfigurationRollbackRequest, DirectConfigurationMutation};
 use crate::configuration::registry::ConfigurationRegistry;
