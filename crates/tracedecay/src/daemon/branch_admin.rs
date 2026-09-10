@@ -693,11 +693,26 @@ impl StoreAdministration {
         publication: Publication,
     ) -> Result<BranchAddOutcome>
     where
-        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Publication:
+            FnOnce(CancellationToken, tokio::sync::oneshot::Sender<()>) -> Task + Send + 'static,
         Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
     {
-        let _completion = self.spawn_manual_branch_publication(publication).await?;
-        Ok(BranchAddOutcome::Deferred)
+        let (admitted_sender, admitted_receiver) = tokio::sync::oneshot::channel();
+        let completion = self
+            .spawn_manual_branch_publication(move |cancellation| {
+                publication(cancellation, admitted_sender)
+            })
+            .await?;
+        match admitted_receiver.await {
+            Ok(()) => Ok(BranchAddOutcome::Deferred),
+            Err(_) => completion.await.map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before admission: {error}"),
+                )
+            })?,
+        }
     }
 
     #[cfg(unix)]

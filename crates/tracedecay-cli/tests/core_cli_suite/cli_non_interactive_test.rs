@@ -2605,6 +2605,21 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
         String::from_utf8_lossy(&output.stderr).contains("indexing continues in the background"),
         "branch add must report truthful pending state"
     );
+    let mut pending = tracedecay_command_without_daemon(home.path(), &project_root);
+    pending.args(["branch", "list"]);
+    let pending = run_with_timeout(pending, cli_timeout());
+    let pending_stderr = String::from_utf8_lossy(&pending.stderr);
+    assert!(
+        pending.status.success(),
+        "branch list must read durable admission\nstdout:\n{}\nstderr:\n{pending_stderr}",
+        String::from_utf8_lossy(&pending.stdout)
+    );
+    assert!(
+        pending_stderr
+            .lines()
+            .any(|line| line.contains("feature/new") && line.contains("indexing")),
+        "admitted branch must be durably visible as indexing: {pending_stderr}"
+    );
     let started = Instant::now();
     let meta = loop {
         if let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)

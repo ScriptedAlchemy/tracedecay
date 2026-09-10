@@ -11,7 +11,10 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 };
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
-use tracedecay_runtime_core::branch::BranchAddOutcome;
+use tracedecay_runtime_core::branch::{
+    BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
+    prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
+};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::{DaemonHandshake, StoreAdministration};
@@ -151,7 +154,7 @@ async fn activate_and_track_manual_branch(
     let branch = branch.to_owned();
 
     administration
-        .admit_manual_branch_publication(|cancellation| async move {
+        .admit_manual_branch_publication(|cancellation, admitted| async move {
             let result = async {
                 let lifecycle =
                     try_acquire_manual_branch_lifecycle(&data_root, &branch).map_err(|error| {
@@ -161,16 +164,54 @@ async fn activate_and_track_manual_branch(
                             error.detail(),
                         )
                     })?;
-                activate_and_track_manual_branch_owned(
+                let prepared = match prepare_branch_tracking_in_layout(
+                    &project_root,
+                    &branch,
+                    &data_root,
+                )
+                .await
+                .map_err(|error| {
+                    TraceDecayError::project_route(
+                        BRANCH_TRACKING_FAILED,
+                        false,
+                        format!("failed to prepare branch tracking for '{branch}': {error}"),
+                    )
+                })? {
+                    BranchTrackingPreparation::Added(prepared) => Some(prepared),
+                    BranchTrackingPreparation::AlreadyTracked => None,
+                    BranchTrackingPreparation::Deferred => {
+                        let _ = admitted.send(());
+                        return Ok(BranchAddOutcome::Deferred);
+                    }
+                };
+                let _ = admitted.send(());
+                let tracked = activate_and_track_manual_branch_owned(
                     project_root,
                     graph,
                     schedulers,
                     branch.clone(),
-                    data_root,
+                    data_root.clone(),
                     lifecycle,
                     cancellation,
                 )
-                .await
+                .await;
+                if let (Err(error), Some(prepared)) = (&tracked, prepared.as_deref()) {
+                    match rollback_prepared_branch_tracking(&data_root, prepared).map_err(
+                        |rollback| {
+                            TraceDecayError::project_route(
+                                BRANCH_TRACKING_FAILED,
+                                true,
+                                format!(
+                                    "branch activation failed: {error}; branch rollback failed: {rollback}"
+                                ),
+                            )
+                        },
+                    )? {
+                        PreparedBranchRollbackOutcome::RolledBack
+                        | PreparedBranchRollbackOutcome::NoMatch => {}
+                    }
+                }
+                tracked
             }
             .await;
             match &result {

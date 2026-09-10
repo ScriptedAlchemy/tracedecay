@@ -38,7 +38,8 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
     let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
     let admission = administration
-        .admit_manual_branch_publication(|_| async move {
+        .admit_manual_branch_publication(|_, admitted| async move {
+            let _ = admitted.send(());
             let _ = started_sender.send(());
             let _ = release_receiver.await;
             Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
