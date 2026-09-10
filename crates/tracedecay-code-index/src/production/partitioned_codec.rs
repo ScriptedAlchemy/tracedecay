@@ -51,9 +51,7 @@ use super::canonical_json::{
     CanonicalArrayOrderV1, CanonicalPolicyV1, canonicalize_json_into, visit_json_strings,
     write_json_string,
 };
-use super::lexical_page_source::{
-    LEXICAL_FILE_PREFETCH_BYTES_V1, SealedLexicalFilesV1, checkpoint,
-};
+use super::lexical_page_source::{LEXICAL_FILE_PREFETCH_BYTES_V1, checkpoint};
 use super::sealed_codec::{
     PersistedFileGenerationArtifactsRefV2, PersistedFileGenerationArtifactsV1,
     PersistedFileGenerationArtifactsV2, SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -2390,6 +2388,24 @@ impl PartitionedLexicalFileSourceV1 {
         self.descriptors.len()
     }
 
+    pub(super) fn lexical_byte_offsets(&self) -> Result<Vec<u64>, CodeIndexProductionErrorV1> {
+        let mut offsets = Vec::with_capacity(self.descriptors.len().saturating_add(1));
+        offsets.push(0_u64);
+        for descriptor in &self.descriptors {
+            let next = offsets
+                .last()
+                .copied()
+                .and_then(|offset| offset.checked_add(descriptor.segment_size_bytes))
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "partitioned lexical byte total exceeds u64".to_owned(),
+                    )
+                })?;
+            offsets.push(next);
+        }
+        Ok(offsets)
+    }
+
     pub(super) fn maximum_file_bytes(&self) -> u64 {
         self.descriptors
             .iter()
@@ -2542,17 +2558,17 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let Some(generation) = parse_partitioned_manifest(manifest_bytes)? else {
             return Ok(None);
         };
-        let files = SealedLexicalFilesV1::Partitioned(PartitionedLexicalFileSourceV1 {
+        let source = PartitionedLexicalFileSourceV1 {
             generation_id: generation.manifest.generation_id.clone(),
             descriptors: generation.file_segments,
             read_segment: Box::new(read_segment),
-        });
+        };
         Self::open_partitioned_parts(
             reader,
             generation.manifest,
             generation.snapshot,
             Some(generation.statistics),
-            files,
+            source,
             source_state_digest,
             maximum_page_chunks,
             maximum_page_bytes,
