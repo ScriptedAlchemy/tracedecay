@@ -1264,11 +1264,11 @@ impl DeterministicCodeChunker {
         let symbols = hotpath::measure_block!("code_index.chunk.lineage", {
             self.lineage_symbols(source, &file_identity, &symbol_rows)
         })?;
-        let mut relation_edges = result.edges.clone();
+        let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
         let (same_file_edges, unresolved_references) =
-            resolve_file_references(&result.unresolved_refs, &symbol_rows);
-        relation_edges.extend(same_file_edges);
-        let (edges, edge_abstentions) = canonical_relation_edges(&relation_edges, &symbol_rows);
+            resolve_file_references(source, &offsets, &result.unresolved_refs, &symbol_rows);
+        edges.extend(same_file_edges);
+        edges.sort_by(|left, right| canonical_edge_key(left).cmp(&canonical_edge_key(right)));
 
         let eligibility = if partial_reason.is_empty() {
             CodeSearchEligibilityV1::Eligible
@@ -1890,10 +1890,55 @@ pub(crate) const CROSS_FILE_REFERENCE_BLOCKLIST: &[&str] = &[
 /// name match against this file's own symbol table resolves; ambiguous or
 /// unmatched references stay unresolved rather than guessing. Cross-file
 /// resolution requires the whole generation's symbol set and runs at sealing.
+fn reference_name_suffix_start(candidate: &str, reference_name: &str) -> Option<usize> {
+    let prefix = candidate.strip_suffix(reference_name)?;
+    (prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("::")).then_some(prefix.len())
+}
+
+fn reference_evidence_span(
+    source: &str,
+    offsets: &[u64],
+    references: &[UnresolvedRef],
+    reference: &UnresolvedRef,
+) -> Option<SourceSpan> {
+    let line_start = offsets.get(reference.line as usize).copied()?;
+    let site_start = usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()?;
+    let source_at_site = source.get(site_start..)?;
+    references
+        .iter()
+        .filter(|candidate| {
+            candidate.from_node_id == reference.from_node_id
+                && candidate.reference_kind == reference.reference_kind
+                && candidate.line == reference.line
+                && candidate.column == reference.column
+        })
+        .filter_map(|candidate| {
+            let suffix =
+                reference_name_suffix_start(&candidate.reference_name, &reference.reference_name)?;
+            source_at_site
+                .starts_with(&candidate.reference_name)
+                .then_some((candidate.reference_name.len(), suffix))
+        })
+        .min_by_key(|(candidate_len, _)| *candidate_len)
+        .and_then(|(_, suffix)| {
+            let start = site_start.checked_add(suffix)?;
+            let end = start.checked_add(reference.reference_name.len())?;
+            Some(SourceSpan {
+                start_byte: u64::try_from(start).ok()?,
+                end_byte: u64::try_from(end).ok()?,
+            })
+        })
+}
+
 fn resolve_file_references(
+    source: &str,
+    offsets: &[u64],
     unresolved: &[UnresolvedRef],
     symbols: &[SymbolRow],
-) -> (Vec<Edge>, Vec<CodeIndexUnresolvedReferenceV1>) {
+) -> (
+    Vec<CanonicalRelationEdgeV1>,
+    Vec<CodeIndexUnresolvedReferenceV1>,
+) {
     let mut by_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
     let mut by_file_relative_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
     for symbol in symbols {
@@ -1969,15 +2014,29 @@ fn resolve_file_references(
                 {
                     continue;
                 }
-                resolved.push(Edge {
-                    source: reference.from_node_id.clone(),
-                    target: target.node_id.clone(),
-                    kind: reference.reference_kind,
-                    line: Some(reference.line),
+                let Some(Some(from)) = by_node_id.get(reference.from_node_id.as_str()) else {
+                    continue;
+                };
+                let Some(kind) = canonical_relation_kind(&reference.reference_kind) else {
+                    continue;
+                };
+                resolved.push(CanonicalRelationEdgeV1 {
+                    from_occurrence: from.occurrence.clone(),
+                    to_occurrence: target.occurrence.clone(),
+                    kind,
+                    authority: EdgeAuthorityV1::SyntaxExact,
+                    evidence_span: reference_evidence_span(source, offsets, unresolved, reference)
+                        .unwrap_or(from.span),
                 });
             }
             [] => {
-                if let Some(candidate) = cross_file_reference_candidate(reference, &by_node_id) {
+                if let Some(candidate) = cross_file_reference_candidate(
+                    source,
+                    offsets,
+                    unresolved,
+                    reference,
+                    &by_node_id,
+                ) {
                     retained.push(candidate);
                 }
             }
@@ -1995,6 +2054,9 @@ fn resolve_file_references(
 /// kinds outside the canonical graph contract, and references whose
 /// enclosing symbol is not uniquely identified.
 fn cross_file_reference_candidate(
+    source: &str,
+    offsets: &[u64],
+    references: &[UnresolvedRef],
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
@@ -2015,7 +2077,8 @@ fn cross_file_reference_candidate(
         from_occurrence: from.occurrence.clone(),
         reference_name: reference.reference_name.clone(),
         kind,
-        evidence_span: from.span,
+        evidence_span: reference_evidence_span(source, offsets, references, reference)
+            .unwrap_or(from.span),
     })
 }
 
@@ -3619,8 +3682,62 @@ pub fn real_symbol() {}
     }
 
     #[test]
+    fn resolved_calls_keep_each_parser_observed_invocation_span() {
+        let source = "pub fn target() {}\npub fn caller() {\n    target();\n    target();\n}\n";
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let occurrence = |name: &str| {
+            artifacts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.simple_name == name)
+                .unwrap_or_else(|| panic!("{name} symbol"))
+                .occurrence
+                .clone()
+        };
+        let caller = occurrence("caller");
+        let target = occurrence("target");
+        let calls = artifacts
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == caller
+                    && edge.to_occurrence == target
+                    && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|edge| {
+                    &source[edge.evidence_span.start_byte as usize
+                        ..edge.evidence_span.end_byte as usize]
+                })
+                .collect::<Vec<_>>(),
+            ["target", "target"]
+        );
+        assert_ne!(calls[0].evidence_span, calls[1].evidence_span);
+    }
+
+    #[test]
     fn implements_reference_rejects_leaf_symbol_target_but_keeps_trait_target() {
-        let source = "pub enum Token { Default }\npub trait Default {}\n";
+        let source = "pub struct Implementor;\npub enum Token { Default }\npub trait Default {}\nimpl Default for Implementor {}\n";
+        let implementor = fixture_function_row(
+            source,
+            "node.implementor",
+            "sym.implementor",
+            "Implementor",
+            'c',
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 23,
+            },
+        );
         let mut enum_variant = fixture_function_row(
             source,
             "node.variant.default",
@@ -3628,8 +3745,8 @@ pub fn real_symbol() {}
             "Token::Default",
             'd',
             SourceSpan {
-                start_byte: 17,
-                end_byte: 24,
+                start_byte: 42,
+                end_byte: 49,
             },
         );
         enum_variant.kind = "enum_variant".to_owned();
@@ -3640,8 +3757,8 @@ pub fn real_symbol() {}
             "Default",
             'e',
             SourceSpan {
-                start_byte: 37,
-                end_byte: 44,
+                start_byte: 62,
+                end_byte: 69,
             },
         );
         trait_target.kind = "trait".to_owned();
@@ -3650,15 +3767,20 @@ pub fn real_symbol() {}
             reference_name: "Default".to_owned(),
             reference_kind: EdgeKind::Implements,
             line: 3,
-            column: 6,
+            column: 5,
             file_path: "src/lib.rs".to_owned(),
         };
+        let trait_occurrence = trait_target.occurrence.clone();
 
-        let (resolved, retained) =
-            resolve_file_references(&[reference], &[enum_variant, trait_target]);
+        let (resolved, retained) = resolve_file_references(
+            source,
+            &line_offsets(source.as_bytes()),
+            &[reference],
+            &[implementor, enum_variant, trait_target],
+        );
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].kind, EdgeKind::Implements);
-        assert_eq!(resolved[0].target, "node.trait.default");
+        assert_eq!(resolved[0].kind, RelationEdgeKindV1::Implements);
+        assert_eq!(resolved[0].to_occurrence, trait_occurrence);
         assert!(
             retained.is_empty(),
             "a same-file-resolved reference must not also be retained: {retained:?}"
@@ -3667,8 +3789,7 @@ pub fn real_symbol() {}
 
     #[test]
     fn qualified_reference_selects_its_namespace_and_bare_name_stays_ambiguous() {
-        let source =
-            "namespace left { interface Base {} }\nnamespace right { interface Base {} }\n";
+        let source = "namespace left { interface Base {} }\nnamespace right { interface Base {} }\ninterface Child extends right::Base {}\n";
         let mut left = fixture_function_row(
             source,
             "node.left.base",
@@ -3693,27 +3814,49 @@ pub fn real_symbol() {}
             },
         );
         right.kind = "interface".to_owned();
+        let mut child = fixture_function_row(
+            source,
+            "node.child",
+            "sym.child",
+            "src/settings.ts::Child",
+            'c',
+            SourceSpan {
+                start_byte: 75,
+                end_byte: 113,
+            },
+        );
+        child.kind = "interface".to_owned();
         let reference = UnresolvedRef {
             from_node_id: "node.child".to_owned(),
             reference_name: "right::Base".to_owned(),
             reference_kind: EdgeKind::Extends,
-            line: 3,
-            column: 31,
+            line: 2,
+            column: 24,
             file_path: "src/settings.ts".to_owned(),
         };
 
-        let symbols = [left, right];
-        let (resolved, retained) = resolve_file_references(&[reference.clone()], &symbols);
+        let right_occurrence = right.occurrence.clone();
+        let symbols = [child, left, right];
+        let (resolved, retained) = resolve_file_references(
+            source,
+            &line_offsets(source.as_bytes()),
+            &[reference.clone()],
+            &symbols,
+        );
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].target, "node.right.base");
+        assert_eq!(resolved[0].to_occurrence, right_occurrence);
         assert!(retained.is_empty());
 
         let missing_namespace = UnresolvedRef {
             reference_name: "other::Base".to_owned(),
             ..reference.clone()
         };
-        let (resolved, _) =
-            resolve_file_references(&[missing_namespace], std::slice::from_ref(&symbols[0]));
+        let (resolved, _) = resolve_file_references(
+            source,
+            &line_offsets(source.as_bytes()),
+            &[missing_namespace],
+            &symbols[..2],
+        );
         assert!(
             resolved.is_empty(),
             "an explicit missing namespace must not bind a unique local short name"
@@ -3723,7 +3866,12 @@ pub fn real_symbol() {}
             reference_name: "Base".to_owned(),
             ..reference
         };
-        let (resolved, retained) = resolve_file_references(&[ambiguous], &symbols);
+        let (resolved, retained) = resolve_file_references(
+            source,
+            &line_offsets(source.as_bytes()),
+            &[ambiguous],
+            &symbols,
+        );
         assert!(resolved.is_empty());
         assert!(retained.is_empty());
     }
