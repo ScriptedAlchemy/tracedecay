@@ -176,11 +176,19 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
     if project.store_layout().identity.project_id.is_none() {
         return Ok(());
     }
-    let owner = project
-        .context_scout_owner()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project Context Scout owner did not start".to_owned(),
-        })?;
+    let owner = match project.context_scout_owner_lookup() {
+        crate::tracedecay::ContextScoutOwnerLookupV1::Ready(owner) => owner,
+        crate::tracedecay::ContextScoutOwnerLookupV1::ReadOnly => {
+            return Err(TraceDecayError::Config {
+                message: "read-only project has no Context Scout owner".to_owned(),
+            });
+        }
+        crate::tracedecay::ContextScoutOwnerLookupV1::Unregistered => {
+            return Err(TraceDecayError::Config {
+                message: "project Context Scout owner did not start".to_owned(),
+            });
+        }
+    };
     if matches!(
         owner.startup_outcome(),
         tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutDurableStartupOutcomeV1::Unavailable

@@ -154,6 +154,10 @@ async fn release_one_idle_project_server_before_open(
                     message: format!("retired project server identity is invalid: {error}"),
                 }
             })?;
+            super::branch_admin::retire_registered_context_scout_owner(
+                &project_id,
+                &retired_owner.graph_db_path,
+            );
             let runtime_quiescence = retirement_invocation
                 .quiesce_project_runtime_owners(
                     profile_identity.profile_id(),
