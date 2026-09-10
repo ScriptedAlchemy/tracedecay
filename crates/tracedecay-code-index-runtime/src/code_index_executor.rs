@@ -34,6 +34,48 @@ impl<A> McpSemanticExecutionControlV1<A> {
             tracedecay_contracts::clock::now_micros().0,
         )
     }
+
+    /// Resolves when this request has settled — the async twin of
+    /// [`Self::request_termination`].
+    ///
+    /// `request_termination` only answers where something asks it, and the
+    /// execution permit is acquired *before* generation resolution, which is
+    /// the one stretch of an admitted search that consults no control at all:
+    /// it parks on the scheduler's mounted map and, when nothing is servable,
+    /// on the in-flight decode. A request that settles inside that window has
+    /// no checkpoint to unwind at, so the single execution permit stayed held
+    /// by work no caller was waiting for, and every following search was
+    /// refused `search_capacity_unavailable` — a refusal the dispatch contract
+    /// advertises as retryable while guaranteeing the retry fails too.
+    /// Awaiting this alongside the execution drops the abandoned work at its
+    /// current await point and releases the permit with it.
+    async fn settled(&self) {
+        let cancelled = async {
+            match self.cancellation.as_ref() {
+                Some(cancellation) => cancellation.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let expired = async {
+            match self.deadline.as_ref() {
+                Some(deadline) => {
+                    let remaining = deadline
+                        .expires_at
+                        .0
+                        .saturating_sub(tracedecay_contracts::clock::now_micros().0);
+                    tokio::time::sleep(std::time::Duration::from_micros(
+                        u64::try_from(remaining).unwrap_or(0),
+                    ))
+                    .await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            () = cancelled => (),
+            () = expired => (),
+        }
+    }
 }
 
 pub fn mcp_search_request_termination(
@@ -680,9 +722,11 @@ where
                             policy,
                         );
                     let runtime = tokio::runtime::Handle::current();
+                    let settlement_control = Arc::clone(&control);
                     let execution = tokio::task::spawn_blocking(move || {
                         let _execution_permit = execution_permit;
                         runtime.block_on(async move {
+                        let work = async move {
                         let Some(revision) = execution_source_revision else {
                             return execution_schedulers
                                 .execute_query_with_semantic(
@@ -780,6 +824,29 @@ where
                             query,
                             semantic,
                         })
+                        };
+                        // The permit follows request settlement, not this
+                        // work's natural completion. `work` is polled first, so
+                        // an unsettled request behaves exactly as before; a
+                        // settled one is dropped where it stands — including
+                        // mid-`mounted.lock()` or mid-decode, the awaits that
+                        // no checkpoint covers — and `_execution_permit` is
+                        // released with the task. `settle_owned_blocking_task`
+                        // below normally names the precise terminal reason
+                        // first; this only keeps the typed state when it did
+                        // not.
+                        tokio::pin!(work);
+                        tokio::select! {
+                            biased;
+                            output = &mut work => output,
+                            () = settlement_control.settled() => Err(
+                                code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
+                                    code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::Retrieval(
+                                        tracedecay_query::retrieval::RetrievalPortError::Cancelled,
+                                    ),
+                                ),
+                            ),
+                        }
                     })
                     });
                     match hotpath::future!(
