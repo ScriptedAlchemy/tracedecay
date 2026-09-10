@@ -459,7 +459,6 @@ fn extended_primitive_reads_bind_cli_mcp_and_http() {
         ApplicationSurfaceOperation::SourceBody,
         ApplicationSurfaceOperation::SourceOutline,
         ApplicationSurfaceOperation::ModuleApi,
-        ApplicationSurfaceOperation::FileMetadata,
         ApplicationSurfaceOperation::HealthRead,
         ApplicationSurfaceOperation::StorageStatus,
         ApplicationSurfaceOperation::DiagnosticsRead,

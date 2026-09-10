@@ -69,6 +69,50 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
 }
 
 #[tokio::test]
+async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
+    let retired = "tracedecay_file_metadata";
+    assert!(
+        get_tool_definitions()
+            .expect("tool definitions")
+            .iter()
+            .all(|definition| definition.name != retired)
+    );
+    assert!(
+        crate::mcp::tools::binding::mcp_dispatch_catalog()
+            .expect("MCP dispatch catalog")
+            .contract(retired)
+            .is_none()
+    );
+
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temporary project");
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("retired-file-metadata");
+    fs::create_dir_all(&project).expect("project root");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.retired-file-metadata",
+    )
+    .await
+    .expect("TraceDecay fixture");
+    let error = handle_tool_call_with_registry_options(
+        &cg,
+        retired,
+        json!({"files": ["../outside"]}),
+        None,
+        None,
+        ToolCallRegistryOptions::default(),
+    )
+    .await
+    .expect_err("retired tool must be refused");
+    assert!(
+        error.to_string().contains("unknown tool"),
+        "retired tool reached a public dispatch path: {error}"
+    );
+    cg.close();
+}
+
+#[tokio::test]
 async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();

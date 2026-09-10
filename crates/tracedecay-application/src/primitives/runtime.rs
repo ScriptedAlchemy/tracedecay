@@ -139,8 +139,7 @@ pub trait ManagedTestRunCurrentScopePort: Send + Sync {
 pub use tracedecay_contracts::retrieval::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, DiagnosticsPrimitiveScope,
-    FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult, FileMetadataPrimitiveRequest,
-    FileMetadataPrimitiveResult, FileMetadataRecord, ModuleApiPrimitiveRequest,
+    FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult, ModuleApiPrimitiveRequest,
     ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
     SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
     SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
@@ -186,12 +185,6 @@ pub trait ExtendedPrimitivePort: Send + Sync {
         context: RetrievalPortContext<'a>,
         request: &'a ModuleApiPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult>;
-
-    fn file_metadata<'a>(
-        &'a self,
-        context: RetrievalPortContext<'a>,
-        request: &'a FileMetadataPrimitiveRequest,
-    ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult>;
 
     fn health_delta<'a>(
         &'a self,
@@ -941,14 +934,6 @@ async fn dispatch_admitted(
             observed_at,
             request,
             module_api
-        ),
-        PrimitiveRequest::FileMetadata(request) => dispatch_extended!(
-            runtime,
-            &context,
-            &operation,
-            observed_at,
-            request,
-            file_metadata
         ),
         PrimitiveRequest::HealthRead(request) => {
             let outcome = runtime

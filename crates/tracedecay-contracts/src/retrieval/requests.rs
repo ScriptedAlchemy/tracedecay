@@ -373,27 +373,6 @@ pub struct ModuleApiPrimitiveResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct FileMetadataPrimitiveRequest {
-    pub files: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileMetadataRecord {
-    pub file: String,
-    pub language: Option<String>,
-    pub indexed_at: Option<i64>,
-    pub byte_size: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileMetadataPrimitiveResult {
-    pub files: Vec<FileMetadataRecord>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StorageStatusPrimitiveRequest {
     #[serde(default)]
     pub include_details: bool,
@@ -492,7 +471,6 @@ pub enum PrimitiveRequest {
     SourceBody(SourceBodyPrimitiveRequest),
     SourceOutline(SourceOutlinePrimitiveRequest),
     ModuleApi(ModuleApiPrimitiveRequest),
-    FileMetadata(FileMetadataPrimitiveRequest),
     HealthRead(HealthReadRequest),
     HealthDelta(HealthDeltaRequest),
     StorageStatus(StorageStatusPrimitiveRequest),

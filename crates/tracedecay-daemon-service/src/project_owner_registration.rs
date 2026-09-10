@@ -39,6 +39,7 @@ pub fn project_owner_capabilities() -> Result<BTreeSet<CapabilityId>, Applicatio
         "capability.application.code-query.definition",
         "capability.application.code-query.type-definition",
         "capability.application.code-query.references",
+        "capability.application.code-query.source-metadata",
         "capability.application.symbol-search",
         GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
         CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,

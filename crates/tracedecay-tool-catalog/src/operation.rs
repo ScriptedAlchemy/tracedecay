@@ -168,7 +168,6 @@ application_surface_operations! {
     SourceBody => "source_body";
     SourceOutline => "source_outline";
     ModuleApi => "module_api";
-    FileMetadata => "file_metadata";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";

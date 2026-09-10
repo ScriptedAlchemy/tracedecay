@@ -118,15 +118,14 @@ fn application_surface_branch_sensitivity(
         ContextScoutClaim, ContextScoutDelivery, ContextScoutExplain, ContextScoutFeedback,
         ContextScoutPause, ContextScoutRecent, ContextScoutResume, ContextScoutStatus,
         DiagnosticsRead, FeedbackAdvisoryCycle, FeedbackDiagnostics, FeedbackExpand, FeedbackGet,
-        FeedbackImpact, FeedbackList, FileDependents, FileMetadata, GitApply, GitBlame, GitDiff,
-        GitHistory, GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta,
-        HealthRead, ModuleApi, NativeIntegrationApply, NativeIntegrationApprove,
-        NativeIntegrationCancel, NativeIntegrationPreflight, NativeIntegrationStackSnapshot,
-        NativeIntegrationStatus, NativeIntegrationWorktreeConfirm,
-        NativeIntegrationWorktreeInspect, NativeIntegrationWorktreeInventory,
-        NativeIntegrationWorktreeReconcile, NativeIntegrationWorktreeRemove, ObservatoryRead,
-        QualifiedName, SessionLookup, SourceBody, SourceLines, SourceOutline, StorageStatus,
-        TestResults,
+        FeedbackImpact, FeedbackList, FileDependents, GitApply, GitBlame, GitDiff, GitHistory,
+        GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta, HealthRead,
+        ModuleApi, NativeIntegrationApply, NativeIntegrationApprove, NativeIntegrationCancel,
+        NativeIntegrationPreflight, NativeIntegrationStackSnapshot, NativeIntegrationStatus,
+        NativeIntegrationWorktreeConfirm, NativeIntegrationWorktreeInspect,
+        NativeIntegrationWorktreeInventory, NativeIntegrationWorktreeReconcile,
+        NativeIntegrationWorktreeRemove, ObservatoryRead, QualifiedName, SessionLookup, SourceBody,
+        SourceLines, SourceOutline, StorageStatus, TestResults,
     };
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
@@ -208,7 +207,6 @@ fn application_surface_branch_sensitivity(
         | SourceBody
         | SourceOutline
         | ModuleApi
-        | FileMetadata
         | HealthRead
         | HealthDelta
         | DiagnosticsRead => BranchSensitivity::Sensitive,

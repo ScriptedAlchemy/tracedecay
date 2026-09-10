@@ -81,7 +81,7 @@ pub fn callable_code_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     CallableCodeOperationKind::ALL
         .into_iter()
-        .filter(|kind| canonical_surface_equivalent(*kind).is_none())
+        .filter(|kind| !is_internal_only(*kind) && canonical_surface_equivalent(*kind).is_none())
         .map(|kind| {
             let surface_operation = reachable_surface_operation(kind).ok_or(
                 ApplicationContractError::Inconsistent {
@@ -108,7 +108,7 @@ pub fn callable_code_catalog_contribution()
     let mut bindings = Vec::with_capacity(27);
     for kind in CallableCodeOperationKind::ALL
         .into_iter()
-        .filter(|kind| canonical_surface_equivalent(*kind).is_none())
+        .filter(|kind| !is_internal_only(*kind) && canonical_surface_equivalent(*kind).is_none())
     {
         let operation =
             reachable_surface_operation(kind).ok_or(ApplicationContractError::Inconsistent {
@@ -146,10 +146,6 @@ pub fn callable_code_catalog_contribution()
         }
         capabilities.push(code_query_capability(kind, binding_ids)?);
     }
-    debug_assert_eq!(
-        capabilities.len() + CANONICAL_SURFACE_EQUIVALENT_COUNT,
-        CALLABLE_CODE_OPERATION_COUNT
-    );
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.callable-code-query")?,
         depends_on: Vec::new(),
@@ -250,8 +246,6 @@ where
     )?)
 }
 
-const CANONICAL_SURFACE_EQUIVALENT_COUNT: usize = 9;
-
 /// Existing canonical application surfaces own these semantics. Keeping the
 /// mapping here prevents the callable-code catalog from advertising a second
 /// capability, kernel, or transport operation for the same query.
@@ -265,7 +259,6 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
         CallableCodeOperationKind::Callers => Some("code_callers"),
         CallableCodeOperationKind::Impact => Some("feedback_impact"),
         CallableCodeOperationKind::ModuleApi => Some("module_api"),
-        CallableCodeOperationKind::SourceMetadata => Some("file_metadata"),
         CallableCodeOperationKind::ExactOccurrence
         | CallableCodeOperationKind::PhraseSearch
         | CallableCodeOperationKind::Callees
@@ -274,8 +267,13 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
         | CallableCodeOperationKind::Declaration
         | CallableCodeOperationKind::Definition
         | CallableCodeOperationKind::TypeDefinition
-        | CallableCodeOperationKind::References => None,
+        | CallableCodeOperationKind::References
+        | CallableCodeOperationKind::SourceMetadata => None,
     }
+}
+
+fn is_internal_only(kind: CallableCodeOperationKind) -> bool {
+    kind == CallableCodeOperationKind::SourceMetadata
 }
 
 fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'static str> {
@@ -427,7 +425,6 @@ mod tests {
                 (CallableCodeOperationKind::Callers, "code_callers"),
                 (CallableCodeOperationKind::Impact, "feedback_impact"),
                 (CallableCodeOperationKind::ModuleApi, "module_api"),
-                (CallableCodeOperationKind::SourceMetadata, "file_metadata"),
             ]
         );
         let mut operation_names: Vec<_> = equivalents
@@ -436,6 +433,6 @@ mod tests {
             .collect();
         operation_names.sort_unstable();
         operation_names.dedup();
-        assert_eq!(operation_names.len(), CANONICAL_SURFACE_EQUIVALENT_COUNT);
+        assert_eq!(operation_names.len(), equivalents.len());
     }
 }
