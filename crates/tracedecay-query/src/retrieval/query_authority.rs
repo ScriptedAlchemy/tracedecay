@@ -357,7 +357,7 @@ impl QueryAuthorityV1 {
             },
             &self.diversity,
         )?;
-        let page = self.kernel.paginate_at(
+        let mut page = self.kernel.paginate_at(
             request,
             query_view,
             &self.keyring,
@@ -367,6 +367,9 @@ impl QueryAuthorityV1 {
             request.snapshot.captured_at,
         )?;
         hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
+        for (ordinal, candidate) in page.ranked_candidates.iter_mut().enumerate() {
+            candidate.final_ordinal = ordinal as u32;
+        }
         let fallback = QueryFallbackSubpayload::new(
             composition.profile_id.clone(),
             page.ranked_candidates,
