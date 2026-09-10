@@ -2206,7 +2206,7 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
@@ -2270,7 +2270,7 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let _started_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STARTED", &started);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);

@@ -4006,23 +4006,6 @@ mod tests {
             unsafe { std::env::set_var(key, value) };
             Self { key, previous }
         }
-
-        /// Put `dir` in front of the inherited `PATH` instead of replacing it.
-        ///
-        /// A host lifecycle test needs its fake host CLI to win resolution on
-        /// a developer machine that also has the real one installed, but the
-        /// same tests resolve `tracedecay` itself off `PATH`
-        /// (`which_tracedecay`) and must keep seeing whatever the ambient
-        /// environment offers — replacing `PATH` outright would silently
-        /// change the staged binary identity the activation probe compares.
-        fn prepend_path(dir: &Path) -> Self {
-            let mut entries = vec![dir.to_path_buf()];
-            if let Some(existing) = std::env::var_os("PATH") {
-                entries.extend(std::env::split_paths(&existing));
-            }
-            let joined = std::env::join_paths(entries).expect("join PATH entries");
-            Self::set("PATH", joined)
-        }
     }
 
     impl Drop for EnvVarGuard {
@@ -4049,10 +4032,14 @@ mod tests {
     /// not a preference: the host-capability doctrine forbids a fallback that
     /// edits Codex-owned files behind the host's back. CI runners carry no
     /// `codex` binary, so a test that exercises activation has to supply the
-    /// host CLI the same way the Kiro tests supply theirs.
-    fn install_fake_codex_cli(dir: &std::path::Path) -> EnvVarGuard {
+    /// host CLI the same way the Kiro tests supply theirs. Only host program
+    /// resolution sees the fixture directory; the process `PATH` is untouched,
+    /// so `which_tracedecay` and sibling tests keep the ambient environment.
+    fn install_fake_codex_cli(
+        dir: &std::path::Path,
+    ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
         super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "codex");
-        EnvVarGuard::prepend_path(dir)
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
     }
 
     fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -4373,7 +4360,8 @@ mod tests {
         #[cfg(unix)]
         write_fake_kiro_cli(&kiro_cli_path);
         #[cfg(unix)]
-        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
+        let _kiro_path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -4432,7 +4420,8 @@ mod tests {
         #[cfg(unix)]
         write_fake_kiro_cli(&kiro_cli_path);
         #[cfg(unix)]
-        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
+        let _kiro_path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -4520,7 +4509,8 @@ mod tests {
         let kiro_cli_dir = tempfile::tempdir().unwrap();
         let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
         write_fake_kiro_cli(&kiro_cli_path);
-        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
+        let _kiro_path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set =
@@ -4605,7 +4595,8 @@ mod tests {
     fn absent_kiro_cli_is_typed_unavailability_not_an_ownership_conflict() {
         let _profile = pinned_host_profile();
         let empty_path = tempfile::tempdir().unwrap();
-        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let _path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -4645,7 +4636,8 @@ mod tests {
         let _profile = pinned_host_profile();
         let kiro_cli_dir = tempfile::tempdir().unwrap();
         write_fake_kiro_cli(&kiro_cli_dir.path().join("kiro-cli"));
-        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
+        let _kiro_path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".tracedecay-host-cli-fixture")).unwrap();
         std::fs::write(
@@ -5270,7 +5262,8 @@ mod tests {
         #[cfg(unix)]
         write_fake_kiro_cli(&kiro_cli_path);
         #[cfg(unix)]
-        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
+        let _kiro_path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
             .to_string_lossy()
@@ -5444,7 +5437,8 @@ mod tests {
         #[cfg(unix)]
         write_fake_kiro_cli(&kiro_cli_path);
         #[cfg(unix)]
-        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
+        let _kiro_path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
             .to_string_lossy()
@@ -5899,7 +5893,8 @@ mod tests {
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
             &code_home,
         );
-        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let _path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let installed_path = code_home.join("plugins/installed.json");
         std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -5973,7 +5968,8 @@ mod tests {
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
             &code_home,
         );
-        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let _path =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let installed_path = code_home.join("plugins/installed.json");
         std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
         let original =
