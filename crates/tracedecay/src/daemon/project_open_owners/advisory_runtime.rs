@@ -959,10 +959,20 @@ async fn refresh_project_open_feedback_configuration(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open feedback configuration is unavailable: {error}"),
         })?;
+    let access = daemon_owned_project_source_access_at(
+        &state.scope,
+        state.graph.project_root(),
+        &configuration,
+        now_micros(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open feedback source access is unavailable: {error}"),
+    })?;
     state.scout_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id().clone(),
         snapshot: configuration.snapshot().clone(),
     };
+    state.access = access;
     Ok(())
 }
 
