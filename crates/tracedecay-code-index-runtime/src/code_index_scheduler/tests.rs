@@ -13,11 +13,11 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
-    CodeQueryScope, CodeRelationRequest, CodeSymbolSearchRequest, Deadline, DisclosureClass,
-    ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest, PhraseSearchRequest,
-    QualifiedNameRequest, RequestContext, RequestId, ResolvedScope, ResultProjection,
-    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
-    SourceMetadataRequest, callable_code_operation,
+    CodeQueryScope, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest, Deadline,
+    DisclosureClass, ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest,
+    PhraseSearchRequest, QualifiedNameRequest, RequestContext, RequestId, ResolvedScope,
+    ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
+    RetrievalRequestMeta, SourceMetadataRequest, callable_code_operation,
 };
 use tracedecay_domain::{
     ActorId, AuthorizationRevision, CalibrationProfileId, ChunkerRevision, CodeGenerationId,
@@ -14218,6 +14218,161 @@ async fn symbol_search_is_generation_bound_and_uses_mounted_authority() {
         page.items.iter().any(|symbol| symbol.name == "alpha"),
         "implemented symbol search must return the indexed symbol"
     );
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn symbol_queries_use_the_seated_graph_without_decoding_the_generation() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub async fn handle_tool_call(value: &TraceDecay) {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation = latest.generation().manifest().generation_id.clone();
+    let projector_revision = tracedecay_graph_db::GraphProjectorRevision::try_from(
+        crate::code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let projection = crate::code_index::graph_projection::code_graph_projection_identity(
+        tracedecay_graph_db::GraphNamespace::new("code-graph").expect("graph namespace"),
+    )
+    .expect("projection identity");
+    let manifest =
+        crate::code_index::graph_projection::build_published_code_graph_manifest_checked(
+            projection,
+            latest.generation(),
+            &projector_revision,
+            &|| Ok(()),
+        )
+        .expect("code graph manifest");
+    let graph_snapshot = tracedecay_graph_db::VerifiedGraphSnapshot::memory(
+        manifest.as_ref().clone(),
+        Arc::new(tracedecay_graph_db::NeverCancelled),
+    )
+    .expect("verified graph snapshot");
+    let graph_store = Arc::new(
+        crate::code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
+            graph_snapshot,
+            generation.clone(),
+        )
+        .expect("graph projection store"),
+    );
+    graph_store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .expect("warm interactive catalog");
+    let graph_reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation,
+            Some(scope.repository_id.clone()),
+            latest.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph evidence reader");
+    latest
+        .install_graph_serving(
+            graph_reader,
+            Some(Arc::clone(&graph_store)),
+            super::CodeGraphServingAuthorityV1::Memory,
+        )
+        .expect("install graph serving");
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .expect("mounted worktree");
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        Arc::clone(&worktree.scheduler)
+    };
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::SymbolSearch).expect("operation");
+    let context = application_context(
+        &operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let query = EphemeralSanitizedQueryViewV1::sanitize(
+        "handle_tool_call",
+        SanitizerRevision::new("sanitizer.query.fixture").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.query.fixture").expect("normalization"),
+    )
+    .expect("query");
+    let request = CodeSymbolSearchRequest {
+        query,
+        scope: CodeQueryScope::new(generation.clone(), Some("src".to_owned()))
+            .expect("query scope"),
+        meta: query_meta(),
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        registry.symbol_search(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        ),
+    )
+    .await
+    .expect("symbol search must not wait for the sealed-generation decoder");
+    let RetrievalPortOutcome::Completed(evidence) = outcome else {
+        panic!("seated graph symbol search must complete: {outcome:?}");
+    };
+    assert_eq!(
+        evidence.payload.expect("symbol page").items[0].name,
+        "handle_tool_call"
+    );
+
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::SignatureSearch).expect("operation");
+    let context = application_context(
+        &operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let request = CodeSignatureRequest {
+        returns: None,
+        params: vec!["&TraceDecay".to_owned()],
+        is_async: Some(true),
+        scope: CodeQueryScope::new(generation, Some("src".to_owned())).expect("query scope"),
+        meta: query_meta(),
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        registry.signature_search(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        ),
+    )
+    .await
+    .expect("signature search must not wait for the sealed-generation decoder");
+    let RetrievalPortOutcome::Completed(evidence) = outcome else {
+        panic!("seated graph signature search must complete: {outcome:?}");
+    };
+    assert_eq!(
+        evidence.payload.expect("signature page").items[0].name,
+        "handle_tool_call"
+    );
+    assert_eq!(
+        held_decode.waiter_count(),
+        0,
+        "symbol queries must not enter the sealed-generation decode"
+    );
+
+    drop(held_decode);
     registry.shutdown().await;
 }
 
