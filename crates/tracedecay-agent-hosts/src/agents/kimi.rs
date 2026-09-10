@@ -380,8 +380,10 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
         .map(|(relative, contents)| {
             let rendered = if relative == KIMI_PLUGIN_MANIFEST_RELATIVE {
                 let stamped = super::plugin_bundle::stamp_manifest_version(contents)?;
-                let with_mcp = super::plugin_bundle::set_mcp_command(&stamped, tracedecay_bin)?;
-                render_kimi_hook_commands(&with_mcp, tracedecay_bin)?
+                // Kimi resolves plugin MCP executables from PATH and rejects
+                // absolute commands. Keep the template's `tracedecay` command;
+                // hooks are shell commands and may use the resolved path.
+                render_kimi_hook_commands(&stamped, tracedecay_bin)?
             } else {
                 contents.to_string()
             };
@@ -545,6 +547,27 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_plugin_uses_kimi_supported_mcp_command() {
+        let manifest = rendered_plugin_files("/opt/tracedecay/bin/tracedecay")
+            .unwrap()
+            .into_iter()
+            .find(|(relative, _)| *relative == KIMI_PLUGIN_MANIFEST_RELATIVE)
+            .map(|(_, contents)| serde_json::from_str::<serde_json::Value>(&contents).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            manifest["mcpServers"]["tracedecay"]["command"],
+            "tracedecay"
+        );
+        assert!(
+            manifest["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("/opt/tracedecay/bin/tracedecay")
+        );
+    }
 
     fn installed_prompt(path: &Path, operator_contents: Option<&[u8]>) {
         if let Some(contents) = operator_contents {
