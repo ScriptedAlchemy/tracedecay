@@ -56,7 +56,7 @@ pub async fn handle_hotspots(
                 "name": symbol.metadata.simple_name,
                 "kind": symbol.metadata.kind,
                 "file": symbol.path,
-                "line": symbol.metadata.start_line,
+                "line": user_line(symbol.metadata.start_line),
                 "incoming": incoming,
                 "outgoing": outgoing,
                 "total": incoming + outgoing,
