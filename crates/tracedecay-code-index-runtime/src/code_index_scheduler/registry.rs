@@ -3188,6 +3188,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 )
                 .await;
                 if worker_shutting_down.load(Ordering::Acquire) {
+                    tracing::info!(
+                        event = "code_index_worker_shutdown_observed",
+                        phase = "wake",
+                        "code-index worker observed shutdown and stopped its pass"
+                    );
                     return;
                 }
                 // This aggregate starts when the wake is observed and ends
@@ -3221,6 +3226,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _semantic_evaluation_publication =
                     worker_semantic_evaluation_publication_gate.lock().await;
                 if worker_shutting_down.load(Ordering::Acquire) {
+                    tracing::info!(
+                        event = "code_index_worker_shutdown_observed",
+                        phase = "gates_held",
+                        "code-index worker observed shutdown and stopped its pass"
+                    );
                     return;
                 }
                 let mut build_publication =
@@ -3230,6 +3240,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         guard = &mut build_publication => break guard,
                         () = tokio::time::sleep(Duration::from_millis(5)) => {
                             if worker_shutting_down.load(Ordering::Acquire) {
+                                tracing::info!(
+                                    event = "code_index_worker_shutdown_observed",
+                                    phase = "build_publication_lock",
+                                    "code-index worker observed shutdown and stopped its pass"
+                                );
                                 return;
                             }
                         }
@@ -3384,6 +3399,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
+                    tracing::info!(
+                        event = "code_index_worker_shutdown_observed",
+                        phase = "text_projection",
+                        "code-index worker observed shutdown and stopped its pass"
+                    );
                     return;
                 }
                 if text_slice_incomplete {
@@ -3422,6 +3442,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     )
                     .await;
                     if worker_shutting_down.load(Ordering::Acquire) {
+                        tracing::info!(
+                            event = "code_index_worker_shutdown_observed",
+                            phase = "text_restore",
+                            "code-index worker observed shutdown and stopped its pass"
+                        );
                         return;
                     }
                     if let Ok(Ok(Some(retained_text))) = retained_text {
@@ -3580,6 +3605,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 )
                 .await;
                 if worker_shutting_down.load(Ordering::Acquire) {
+                    tracing::info!(
+                        event = "code_index_worker_shutdown_observed",
+                        phase = "reconcile_or_seal",
+                        "code-index worker observed shutdown and stopped its pass"
+                    );
                     return;
                 }
                 if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &source_result {
@@ -3649,6 +3679,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     })
                     .await;
                     if worker_shutting_down.load(Ordering::Acquire) {
+                        tracing::info!(
+                            event = "code_index_worker_shutdown_observed",
+                            phase = "published_text_reopen",
+                            "code-index worker observed shutdown and stopped its pass"
+                        );
                         return;
                     }
                     graph_text = if let Ok(Ok(Some(published_text))) = published_text {
@@ -3675,6 +3710,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         let mut advances = 0_usize;
                         while text.text_serving_needs_work() {
                             if worker_shutting_down.load(Ordering::Acquire) {
+                                tracing::info!(
+                                    event = "code_index_worker_shutdown_observed",
+                                    phase = "text_projection_before_seat",
+                                    "code-index worker observed shutdown and stopped its pass"
+                                );
                                 return;
                             }
                             advances += 1;
@@ -4565,6 +4605,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
+                    tracing::info!(
+                        event = "code_index_worker_shutdown_observed",
+                        phase = "pass_end",
+                        "code-index worker observed shutdown and stopped its pass"
+                    );
                     return;
                 }
                 let _ = result;
@@ -6703,11 +6748,27 @@ impl CodeIndexSchedulerRegistryV1 {
         let mut owner_releases = Vec::new();
         while let Some(root) = retiring.keys().next().cloned() {
             if let Some(worktree) = retiring.get_mut(&root) {
+                let started = std::time::Instant::now();
+                tracedecay_runtime_core::logging::log_daemon_event(
+                    "daemon_shutdown",
+                    &[
+                        ("outcome", "code_index_worker_join_start".to_string()),
+                        ("root", root.display().to_string()),
+                    ],
+                );
                 let _ = hotpath::future!(
                     &mut worktree.task,
                     label = "daemon.code_index.shutdown.worker_join"
                 )
                 .await;
+                tracedecay_runtime_core::logging::log_daemon_event(
+                    "daemon_shutdown",
+                    &[
+                        ("outcome", "code_index_worker_joined".to_string()),
+                        ("root", root.display().to_string()),
+                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                    ],
+                );
             }
             if let Some(worktree) = retiring.remove(&root) {
                 // A joined owner still holds whatever its last pass built: a
@@ -6730,6 +6791,8 @@ impl CodeIndexSchedulerRegistryV1 {
         for mut completion in cold_mount_completions {
             let _ = completion.changed().await;
         }
+        let release_started = std::time::Instant::now();
+        let release_count = owner_releases.len();
         for release in owner_releases {
             let _ = hotpath::future!(
                 release,
@@ -6737,6 +6800,17 @@ impl CodeIndexSchedulerRegistryV1 {
             )
             .await;
         }
+        tracedecay_runtime_core::logging::log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "code_index_owner_releases_joined".to_string()),
+                ("releases", release_count.to_string()),
+                (
+                    "elapsed_ms",
+                    release_started.elapsed().as_millis().to_string(),
+                ),
+            ],
+        );
     }
 
     pub async fn retire_project_roots(
