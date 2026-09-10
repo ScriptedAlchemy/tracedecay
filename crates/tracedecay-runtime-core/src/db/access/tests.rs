@@ -326,10 +326,18 @@ fn a_scope_entered_before_its_profile_root_exists_still_matches_the_opened_datab
     let scope = crate::db::enter_daemon_database_scope(&profile_root, 1, "alias scope").unwrap();
 
     // Only now does the profile root exist, which is what lets the opened
-    // database resolve it to the `resolved` spelling.
+    // database resolve it to the `resolved` spelling. The identity is fully
+    // canonical, so the expectation must be too: on macOS `tempdir()` itself
+    // is spelled through the `/var` -> `/private/var` alias, and comparing
+    // against `resolved.join("profile")` would fail on spelling alone even
+    // though both name the same directory.
     std::fs::create_dir(&profile_root).unwrap();
     let identity = DatabaseIdentity::for_path(&profile_root.join("global.db")).unwrap();
-    assert_eq!(identity.profile_root, resolved.join("profile"));
+    assert_eq!(
+        identity.profile_root,
+        resolved.canonicalize().unwrap().join("profile"),
+        "the opened database must resolve the alias to the target directory"
+    );
     assert_eq!(
         exact_scoped_runtime_role(&identity.profile_root, "match alias scope").unwrap(),
         Some(DatabaseAuthorityRole::Daemon),
