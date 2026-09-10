@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1};
 
-use crate::chunks::relation_target_kind_is_compatible;
+use crate::chunks::{CROSS_FILE_REFERENCE_BLOCKLIST, relation_target_kind_is_compatible};
 use crate::lineage::LineageSymbolRecordV1;
 
 pub(crate) struct StagedGenerationV1 {
