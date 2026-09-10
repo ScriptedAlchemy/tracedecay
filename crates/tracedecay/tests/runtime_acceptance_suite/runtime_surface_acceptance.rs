@@ -1649,7 +1649,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         "source payload must be the first rendered field: {source_body_markdown}"
     );
     assert!(
-        source_body_markdown.contains("    create_session(username)"),
+        source_body_markdown.contains("        Ok(create_session(username))"),
         "source payload must contain the retrieved body: {source_body_markdown}"
     );
 }
