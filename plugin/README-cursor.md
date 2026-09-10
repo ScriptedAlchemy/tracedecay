@@ -145,7 +145,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_complexity",
     "tracedecay:tracedecay_config",
     "tracedecay:tracedecay_configuration_audit",
-    "tracedecay:tracedecay_configuration_explain",
     "tracedecay:tracedecay_configuration_get",
     "tracedecay:tracedecay_configuration_list",
     "tracedecay:tracedecay_configuration_observed_state",

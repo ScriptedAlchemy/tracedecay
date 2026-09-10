@@ -314,11 +314,6 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
             json!({}),
         ),
         (
-            "tracedecay_configuration_explain",
-            ApplicationSurfaceOperation::ConfigurationExplain,
-            json!({"key": "mcp.tool_timings"}),
-        ),
-        (
             "tracedecay_configuration_get",
             ApplicationSurfaceOperation::ConfigurationGet,
             json!({"key": "mcp.tool_timings"}),

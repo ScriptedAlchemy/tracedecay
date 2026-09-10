@@ -2413,7 +2413,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::DiagnosticsRead
         | ApplicationSurfaceOperation::ObservatoryRead
         | ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset

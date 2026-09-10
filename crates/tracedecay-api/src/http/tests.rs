@@ -198,10 +198,6 @@ fn configuration_operation_parser_is_exact_and_closed() {
             ApplicationSurfaceOperation::ConfigurationList,
         ),
         (
-            "configuration_explain",
-            ApplicationSurfaceOperation::ConfigurationExplain,
-        ),
-        (
             "configuration_get",
             ApplicationSurfaceOperation::ConfigurationGet,
         ),
@@ -261,6 +257,7 @@ fn configuration_operation_parser_is_exact_and_closed() {
         "configuration",
         "configuration_LIST",
         "configuration_list/",
+        "configuration_explain",
         "configuration_unknown",
     ] {
         assert_eq!(parse_configuration_operation(rejected), None);

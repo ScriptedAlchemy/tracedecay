@@ -14,9 +14,8 @@ use tracedecay_tool_catalog::{
 
 use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 
-pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 12] = [
+pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 11] = [
     ApplicationSurfaceOperation::ConfigurationList,
-    ApplicationSurfaceOperation::ConfigurationExplain,
     ApplicationSurfaceOperation::ConfigurationGet,
     ApplicationSurfaceOperation::ConfigurationSet,
     ApplicationSurfaceOperation::ConfigurationUnset,
@@ -165,11 +164,9 @@ pub(super) fn validate_configuration_outcome(
         (ApplicationSurfaceOperation::ConfigurationList, ApplicationOutcome::Evidence(packet)) => {
             payload_decodes::<Vec<SettingSummary>>(packet.payload.as_ref())
         }
-        (
-            ApplicationSurfaceOperation::ConfigurationExplain
-            | ApplicationSurfaceOperation::ConfigurationGet,
-            ApplicationOutcome::Evidence(packet),
-        ) => payload_decodes::<ResolvedSetting>(packet.payload.as_ref()),
+        (ApplicationSurfaceOperation::ConfigurationGet, ApplicationOutcome::Evidence(packet)) => {
+            payload_decodes::<ResolvedSetting>(packet.payload.as_ref())
+        }
         (
             ApplicationSurfaceOperation::ConfigurationObservedState,
             ApplicationOutcome::Evidence(packet),

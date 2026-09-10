@@ -190,7 +190,6 @@ pub struct ConfigurationAuditPage {
 #[serde(rename_all = "snake_case", tag = "operation", content = "request")]
 pub enum ConfigurationWireRequestV1 {
     List(ConfigurationListRequestV1),
-    Explain(ConfigurationGetRequestV1),
     Get(ConfigurationGetRequestV1),
     Set(ConfigurationSetRequestV1),
     Unset(ConfigurationUnsetRequestV1),
@@ -216,9 +215,6 @@ pub fn configuration_wire_request_from_invocation_payload(
 ) -> Result<ConfigurationWireRequestV1, ApplicationContractError> {
     match operation {
         "configuration_list" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::List),
-        "configuration_explain" => {
-            wrap_configuration_inner(payload, ConfigurationWireRequestV1::Explain)
-        }
         "configuration_get" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::Get),
         "configuration_set" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::Set),
         "configuration_unset" => {
@@ -280,22 +276,12 @@ const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
-const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 12] = [
+const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 11] = [
     ConfigurationSurfaceSpec {
         name: "configuration_list",
         summary: "List configuration settings",
         description: "List typed settings visible through the retained configuration authority.",
         example: "List project configuration settings",
-        effect: EffectClass::Read,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "configuration_explain",
-        summary: "Explain effective configuration",
-        description: "Explain the resolved value and provenance for one typed setting.",
-        example: "Explain this configuration setting",
         effect: EffectClass::Read,
         paginated: false,
         maximum_deadline_millis: 15_000,
@@ -486,11 +472,6 @@ fn configuration_executable_schemas(
         "configuration_list",
         ConfigurationListRequestV1,
         Vec<SettingSummary>
-    );
-    add!(
-        "configuration_explain",
-        ConfigurationGetRequestV1,
-        ResolvedSetting
     );
     add!(
         "configuration_get",
@@ -688,7 +669,6 @@ fn capability(
             if matches!(
                 spec.name,
                 "configuration_list"
-                    | "configuration_explain"
                     | "configuration_get"
                     | "configuration_observed_state"
                     | "configuration_audit"

@@ -30,12 +30,6 @@ pub trait ConfigurationControlPlane: Sync {
     fn list(&self, actor: AuthorizedActor)
     -> ConfigurationOperationFuture<'_, Vec<SettingSummary>>;
 
-    fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting>;
-
     fn get(
         &self,
         actor: AuthorizedActor,
@@ -138,14 +132,6 @@ where
                 })
                 .collect())
         })
-    }
-
-    fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        Box::pin(async move { self.get(actor, key).await })
     }
 
     fn get(
