@@ -140,10 +140,9 @@ pub fn derive_workflow_fan_out_census(
         .collect::<BTreeMap<_, _>>();
     if attempts.len() != evidence.attempts.len()
         || attempts.keys().any(|identity| {
-            !children.iter().any(|child| {
-                &child.attempt_identity == identity
-                    || projection.active_fan_out_attempt(&child.attempt_identity) == identity
-            })
+            !children
+                .iter()
+                .any(|child| projection.active_fan_out_attempt(&child.attempt_identity) == identity)
         })
         || evidence.non_duplicate_attempts.is_some_and(|classified| {
             classified

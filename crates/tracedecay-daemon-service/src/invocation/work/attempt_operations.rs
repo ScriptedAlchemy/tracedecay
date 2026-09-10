@@ -330,7 +330,7 @@ pub(super) fn cancel_attempt(
 #[hotpath::measure(label = "daemon.service.work.retry_attempt")]
 pub(super) fn retry_attempt(
     registered: &RegisteredWorkRuntime,
-    services: &RegisteredWorkApplicationServicesV1,
+    _services: &RegisteredWorkApplicationServicesV1,
     binding: tracedecay_contracts::WorkProductBindingV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<&Arc<BoundedObservabilityProducerV1>>,
@@ -351,39 +351,26 @@ pub(super) fn retry_attempt(
             message: "The Work retry runtime owner is unavailable.".to_owned(),
         }))
     } else {
-        services
-            .run_control()
-            .admit_reservation(
-                context,
-                command.original_attempt.task_id(),
-                command.original_attempt.run_id(),
-            )
-            .and_then(|()| {
-                RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
-                    .map_err(|_| {
-                        work_product_problem(
-                            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-                        )
-                    })
-                    .and_then(|product| {
-                        preparation::current_work_product_revision_pins(registered).and_then(
-                            |revisions| {
-                                let workflow_rebind = workflow_retry_rebind(
-                                    registered,
-                                    &command.original_attempt,
-                                )?;
-                                product.retry().retry(
-                                    context,
-                                    &binding,
-                                    &revisions,
-                                    &registered.work_topology_policy,
-                                    command,
-                                    observed_at,
-                                    workflow_rebind,
-                                )
-                            },
-                        )
-                    })
+        RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
+            .map_err(|_| {
+                work_product_problem(
+                    tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+                )
+            })
+            .and_then(|product| {
+                preparation::current_work_product_revision_pins(registered).and_then(|revisions| {
+                    let workflow_rebind =
+                        workflow_retry_rebind(registered, &command.original_attempt)?;
+                    product.retry().retry(
+                        context,
+                        &binding,
+                        &revisions,
+                        &registered.work_topology_policy,
+                        command,
+                        observed_at,
+                        workflow_rebind,
+                    )
+                })
             })
     };
     if let Ok(outcome) = &retried {
