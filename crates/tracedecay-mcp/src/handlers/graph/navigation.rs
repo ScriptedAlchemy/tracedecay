@@ -845,15 +845,21 @@ fn impl_trait_name_matches(trait_name: &str, query: &str) -> bool {
     if trait_name == query {
         return true;
     }
-    let short_name = trait_name.rsplit("::").next().unwrap_or(trait_name);
-    if query.contains('<') {
-        return !query.contains("::") && short_name == query;
+    let (trait_path, trait_generics) = trait_name
+        .split_once('<')
+        .map_or((trait_name, None), |(path, generics)| {
+            (path, Some(generics))
+        });
+    let (query_path, query_generics) = query
+        .split_once('<')
+        .map_or((query, None), |(path, generics)| (path, Some(generics)));
+    if query_generics.is_some() && query_generics != trait_generics {
+        return false;
     }
-    let trait_base = trait_name.split('<').next().unwrap_or(trait_name);
-    if query.contains("::") {
-        trait_base == query
+    if query_path.contains("::") {
+        trait_path == query_path
     } else {
-        trait_base.rsplit("::").next() == Some(query)
+        trait_path.rsplit("::").next() == Some(query_path)
     }
 }
 
