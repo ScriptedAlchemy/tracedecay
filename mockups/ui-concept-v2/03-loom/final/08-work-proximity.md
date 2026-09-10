@@ -21,9 +21,13 @@ drilldown; it does not replace provenance with decorative curves.
   session attempts; bundles represent named workstream participations.
 - Bend affected threads toward each other only within an evidenced activity
   interval. Screen distance is an explanatory layout, not a measured risk score.
-- Observed overlapping edits use a localized coral marker. Separate-worktree
-  shared-code candidates use amber with a distinct dashed outline. Shared symbols
+- Affected strands fade from their base color into amber for shared-code
+  candidates or coral for observed overlapping edits, then back after the local
+  interval. The minimap repeats the same colored strand segments. Outlines appear
+  only on hover or keyboard focus, as a secondary selection affordance. Shared symbols
   alone do not establish duplicate implementation or an impending conflict.
+  The fade describes the observed activity interval, not predicted risk or proof
+  of resolution; source labels and the encounter navigator retain that distinction.
 - Proximity never creates spawn, handoff, rejoin, or causal edges. Those require
   their own evidence. Unaffected threads retain their identity colors.
 - Select a marker or navigator row to open the encounter's source identities,
