@@ -221,12 +221,13 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
             NativeIntegrationPreviewDispositionV1::Unavailable {
                 reason: NativeIntegrationUnavailabilityV1::NativeStateUnavailable,
             }
-        } else if destination_occupied {
-            NativeIntegrationPreviewDispositionV1::Partial {
-                reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
-            }
         } else {
             match native.disposition {
+                GitNativePreflightDisposition::Eligible if destination_occupied => {
+                    NativeIntegrationPreviewDispositionV1::Partial {
+                        reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
+                    }
+                }
                 GitNativePreflightDisposition::Eligible => {
                     NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(mode)
                 }
