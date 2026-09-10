@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use tracedecay_application::observability::BoundedObservabilityProducerV1;
 use tracedecay_contracts::{
-    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline,
-    RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryWorkAttemptCommandV1,
-    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkSynthesisAttemptV1,
+    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline, LegalAction,
+    RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryDirective,
+    RetryWorkAttemptCommandV1, SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1,
+    WorkAttemptStatusV1, WorkSynthesisAttemptV1, WorkflowArtifactStorePort,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1};
 use tracedecay_tool_catalog::UseCaseId;
@@ -23,6 +24,89 @@ use super::{
     RegisteredWorkRuntime, complete_work_effect, complete_work_read,
     reconcile_active_workflow_fan_out, work_product_problem,
 };
+
+fn consume_synthesis_bytes(remaining: &mut u64, bytes: u64) -> Result<(), ApplicationProblem> {
+    *remaining = remaining.checked_sub(bytes).ok_or_else(|| ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic {
+            code: "application.work-synthesis.source-context-oversized".to_owned(),
+            message: "The synthesis instructions and source payloads exceed the admitted protocol byte bound.".to_owned(),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::CorrectRequest],
+    })?;
+    Ok(())
+}
+
+fn synthesis_source_context(
+    registered: &RegisteredWorkRuntime,
+    services: &RegisteredWorkApplicationServicesV1,
+    context: &RequestContext,
+    command: &AdmitWorkSynthesisCommand,
+) -> Result<String, ApplicationProblem> {
+    let artifacts = registered.database.workflow_storage().map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.work-synthesis.artifact-body-unavailable".to_owned(),
+            message: "The admitted synthesis source payload authority is unavailable.".to_owned(),
+        })
+    })?;
+    let mut remaining = command
+        .start
+        .execution_snapshot
+        .limits()
+        .max_protocol_bytes();
+    consume_synthesis_bytes(&mut remaining, command.start.instructions.len() as u64)?;
+    consume_synthesis_bytes(&mut remaining, 2)?;
+    let mut sources = Vec::with_capacity(command.sources.len());
+    for source in &command.sources {
+        let attempt = services.attempts().status(
+            context,
+            &WorkAttemptStatusRequestV1 {
+                task_id: source.task_id().clone(),
+                run_id: source.run_id().clone(),
+                attempt_id: source.attempt_id().clone(),
+            },
+        )?;
+        let mut payloads = Vec::with_capacity(attempt.artifacts().len());
+        for artifact in attempt.artifacts() {
+            consume_synthesis_bytes(&mut remaining, artifact.byte_length())?;
+            let payload = artifacts.load(artifact).map_err(|_| {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.work-synthesis.artifact-body-unavailable".to_owned(),
+                    message: "An admitted synthesis source payload is absent or invalid."
+                        .to_owned(),
+                })
+            })?;
+            let content = std::str::from_utf8(payload.bytes()).map_err(|_| {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.work-synthesis.artifact-body-not-text".to_owned(),
+                    message: "An admitted synthesis source payload is not UTF-8 text.".to_owned(),
+                })
+            })?;
+            payloads.push(serde_json::json!({
+                "artifact_id": artifact.artifact_id().as_str(),
+                "digest": artifact.digest().as_str(),
+                "byte_length": artifact.byte_length(),
+                "content": content,
+            }));
+        }
+        sources.push(serde_json::json!({
+            "identity": {
+                "task_id": source.task_id().as_str(),
+                "run_id": source.run_id().as_str(),
+                "attempt_id": source.attempt_id().as_str(),
+            },
+            "state": attempt.state(),
+            "terminal": attempt.terminal(),
+            "artifacts": payloads,
+        }));
+    }
+    serde_json::to_string(&serde_json::json!({"work_synthesis_sources": sources})).map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.work-synthesis.source-context-invalid".to_owned(),
+            message: "The admitted synthesis source context could not be encoded.".to_owned(),
+        })
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "daemon.service.work.start_attempt")]
@@ -110,12 +194,25 @@ pub(super) fn synthesize(
     input_digest: ManifestDigest,
     observed_at: UtcMicros,
     deadline: Deadline,
-    command: AdmitWorkSynthesisCommand,
+    mut command: AdmitWorkSynthesisCommand,
 ) -> DaemonInvocationResponse {
     let admitted = services
         .run_control()
         .admit_reservation(context, &command.start.task_id, &command.start.run_id)
         .and_then(|()| {
+            let source_context = synthesis_source_context(registered, services, context, &command)?;
+            let prompt_bytes = command
+                .start
+                .instructions
+                .len()
+                .saturating_add(2)
+                .saturating_add(source_context.len());
+            consume_synthesis_bytes(
+                &mut command.start.execution_snapshot.limits().max_protocol_bytes(),
+                prompt_bytes as u64,
+            )?;
+            command.start.instructions.push_str("\n\n");
+            command.start.instructions.push_str(&source_context);
             RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
                 .map_err(|_| {
                     work_product_problem(
@@ -386,4 +483,16 @@ pub(super) fn resume_attempts(
         deadline,
         WorkApplicationOutcomeV1::ResumeAttempts,
     )
+}
+
+#[cfg(test)]
+#[test]
+fn synthesis_payload_read_budget_is_cumulative_and_refuses_overflow() {
+    let mut remaining = 10;
+    consume_synthesis_bytes(&mut remaining, 6).unwrap();
+    assert!(consume_synthesis_bytes(&mut remaining, 5).is_err());
+    assert_eq!(remaining, 4);
+    assert!(consume_synthesis_bytes(&mut remaining, u64::MAX).is_err());
+    consume_synthesis_bytes(&mut remaining, 4).unwrap();
+    assert_eq!(remaining, 0);
 }
