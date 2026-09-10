@@ -9,6 +9,7 @@ use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::{DaemonInvocationService, Lease};
 use tracedecay_mcp::BrokerSelectedResponseLease;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_memory::context::CancellationToken;
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.

@@ -31,6 +31,9 @@ use tracedecay_code_index_runtime::git_transactions;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_daemon_identity::profile_identity;
 
+#[cfg(all(unix, any(test, feature = "test-transport")))]
+use tracedecay_runtime_core::logging::log_daemon_event;
+
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.
 #[cfg(all(unix, feature = "test-transport"))]
@@ -1145,7 +1148,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .shutdown_manual_branch_publications()
         .await
     {
-        super::log_daemon_event(
+        log_daemon_event(
             "manual_branch_publication",
             &[
                 ("outcome", "harness_shutdown_failed".to_owned()),
