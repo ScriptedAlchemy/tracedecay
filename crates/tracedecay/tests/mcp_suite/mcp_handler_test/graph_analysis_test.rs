@@ -2850,8 +2850,9 @@ interface SettingsEditable { draft: string }
 interface SettingsUnderReview extends SettingsEditable { review: string }
 interface GenericEditable<T> { draft: T }
 interface GenericReview extends GenericEditable<string> { review: string }
-namespace settings { export interface ScopedEditable { draft: string } }
-interface ScopedReview extends settings.ScopedEditable { review: string }
+namespace left { export interface Base { left: string } }
+namespace right { export interface Base { right: string } }
+interface ScopedReview extends right.Base { review: string }
 interface Renderer<T> { render(value: T): void }
 class Screen implements Renderer<string> { render(value: string) {} }
 const unrelated = 1;
@@ -2908,7 +2909,6 @@ function helper() { return unrelated; }
 
     for (parent, relation, child) in [
         ("GenericEditable", "extends", "GenericReview"),
-        ("ScopedEditable", "extends", "ScopedReview"),
         ("Renderer", "implements", "Screen"),
     ] {
         let parent_id = find_node_id(&cg, parent).await;
@@ -2926,6 +2926,49 @@ function helper() { return unrelated; }
         assert!(
             hierarchy["tree"].as_str().unwrap().contains(&expected),
             "{expected} missing from hierarchy: {hierarchy}"
+        );
+    }
+
+    let exact = handle_tool_call(
+        &cg,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "Base", "limit": 20}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let exact: Value = serde_json::from_str(extract_text(&exact.value)).unwrap();
+    let matches = exact["matches"].as_array().unwrap();
+    let namespace_id = |namespace: &str| {
+        matches
+            .iter()
+            .find(|item| {
+                item["qualified_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(&format!("::{namespace}::Base")))
+            })
+            .and_then(|item| item["id"].as_str())
+            .unwrap_or_else(|| panic!("{namespace}.Base missing from exact symbols: {exact}"))
+    };
+    for (namespace, contains_child) in [("left", false), ("right", true)] {
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": namespace_id(namespace), "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        assert_eq!(
+            hierarchy["tree"]
+                .as_str()
+                .unwrap()
+                .contains("extends ScopedReview"),
+            contains_child,
+            "qualified parent bound to the wrong namespace: {hierarchy}"
         );
     }
 }

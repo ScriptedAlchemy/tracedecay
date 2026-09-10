@@ -1359,9 +1359,10 @@ impl TypeScriptExtractor {
     fn declared_type_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
         match node.kind() {
             "type_identifier" => Some(state.node_text(node).to_string()),
-            "generic_type" | "nested_type_identifier" => node
+            "generic_type" => node
                 .child_by_field_name("name")
                 .and_then(|name| Self::declared_type_name(state, name)),
+            "nested_type_identifier" => Some(state.node_text(node).replace('.', "::")),
             _ => None,
         }
     }
