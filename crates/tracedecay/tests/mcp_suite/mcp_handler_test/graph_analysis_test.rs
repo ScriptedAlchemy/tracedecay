@@ -1416,7 +1416,36 @@ async fn test_health_detailed_includes_raw_signals() {
 
 #[tokio::test]
 async fn test_dsm_stats() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src/alpha")).unwrap();
+        fs::create_dir_all(project.join("src/beta")).unwrap();
+        fs::write(project.join("src/lib.rs"), "pub mod alpha; pub mod beta;").unwrap();
+        fs::write(
+            project.join("src/alpha/mod.rs"),
+            "pub fn run() -> i32 { crate::beta::run() }",
+        )
+        .unwrap();
+        fs::write(project.join("src/beta/mod.rs"), "pub fn run() -> i32 { 1 }").unwrap();
+    })
+    .await;
+    let matrix = handle_tool_call(
+        &cg,
+        "tracedecay_dsm",
+        json!({ "shape": "matrix", "format": "json" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let matrix: Value = serde_json::from_str(extract_text(&matrix.value)).unwrap();
+    let files = matrix["matrix"]["files"].as_array().unwrap();
+    assert!(files.contains(&json!("src/alpha/mod.rs")));
+    assert!(files.contains(&json!("src/beta/mod.rs")));
+    let density = matrix["stats"]["density"].as_f64().unwrap();
+    assert!(
+        density > 0.0 && density <= 1.0,
+        "missing indexed dependency: {matrix}"
+    );
     let result = handle_tool_call(
         &cg,
         "tracedecay_dsm",
@@ -1434,8 +1463,8 @@ async fn test_dsm_stats() {
         text
     );
     assert!(
-        text.contains("**density:**"),
-        "density field should exist, got: {}",
+        text.contains(&format!("**density:** {density}")),
+        "density must render the calculated numeric value, got: {}",
         text
     );
     assert!(

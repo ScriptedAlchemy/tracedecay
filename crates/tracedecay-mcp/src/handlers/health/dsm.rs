@@ -104,18 +104,10 @@ fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value
             (f.clone(), out + inc)
         })
         .collect();
-    file_edge_counts.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+    file_edge_counts.sort_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.cmp(b)));
     file_edge_counts.truncate(max_files);
 
     let selected: Vec<String> = file_edge_counts.into_iter().map(|(f, _)| f).collect();
-    let short_names: Vec<String> = selected
-        .iter()
-        .map(|f| {
-            f.rfind('/')
-                .map_or_else(|| f.clone(), |i| f[i + 1..].to_string())
-        })
-        .collect();
-
     let n = selected.len();
     let mut matrix: Vec<Vec<u8>> = vec![vec![0u8; n]; n];
     for (i, src) in selected.iter().enumerate() {
@@ -129,7 +121,7 @@ fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value
     }
 
     json!({
-        "files": short_names,
+        "files": selected,
         "matrix": matrix,
         "note": format!("Top {} files by edge count shown", n),
     })
@@ -142,7 +134,7 @@ fn render_dsm_md(value: &Value) -> String {
     if let Some(stats) = value.get("stats") {
         md.field("files", &render::field_i64(stats, "files").to_string());
         md.field("edges", &render::field_i64(stats, "edges").to_string());
-        md.field("density", render::field_str(stats, "density"));
+        md.field("density", &stats["density"].to_string());
         md.field(
             "clusters",
             &render::field_i64(stats, "clusters").to_string(),
