@@ -71,7 +71,6 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply

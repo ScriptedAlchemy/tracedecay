@@ -162,7 +162,6 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply

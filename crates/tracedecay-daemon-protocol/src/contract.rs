@@ -1128,7 +1128,6 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::ConfigurationSet
             | ApplicationSurfaceOperation::ConfigurationUnset
             | ApplicationSurfaceOperation::ConfigurationBatch
-            | ApplicationSurfaceOperation::ConfigurationWriteCredential
             | ApplicationSurfaceOperation::ConfigurationObservedState
             | ApplicationSurfaceOperation::ConfigurationProtectedPreview
             | ApplicationSurfaceOperation::ConfigurationProtectedApply

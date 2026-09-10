@@ -5,11 +5,10 @@ use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
     ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
-    ConfigurationSettlementAuthorityV1, ConfigurationValueV1, CredentialKindV1,
-    CredentialReferenceId, CredentialReferenceMetadataV1, RuleEffect, SEMANTIC_RUNTIME_SETTING_KEY,
-    ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey, SourceBindingId,
-    SourceKindV1, UserProfileId, WorktreePlacementModeV1, resolve_restrictive_capabilities,
-    safe_work_topology_policy_v1,
+    ConfigurationSettlementAuthorityV1, ConfigurationValueV1, RuleEffect,
+    SEMANTIC_RUNTIME_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding,
+    SettingKey, SourceBindingId, SourceKindV1, UserProfileId, WorktreePlacementModeV1,
+    resolve_restrictive_capabilities, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{
@@ -121,32 +120,6 @@ fn deny_rules_union_before_allow_rules_intersect() {
 }
 
 #[test]
-fn credential_metadata_has_no_plaintext_value_surface() {
-    let reference = CredentialReferenceMetadataV1 {
-        reference_id: id::<CredentialReferenceId>("credential.reference"),
-        kind: CredentialKindV1::ApiToken,
-        reference_digest: digest('c'),
-        operation_digest: digest('d'),
-        settlement_authority: ConfigurationSettlementAuthorityV1 {
-            policy_epoch: 1,
-            policy_digest: id::<AccessPolicyDigest>(&format!("sha256:{}", "e".repeat(64))),
-            revalidated_at: UtcMicros(42),
-        },
-        created_at: UtcMicros(42),
-        effective_deadline_at: UtcMicros(84),
-        rotation: 1,
-    };
-    reference.validate().unwrap();
-
-    let encoded = serde_json::to_value(reference).unwrap();
-    assert!(encoded.get("value").is_none());
-    assert!(encoded.get("plaintext").is_none());
-    assert!(encoded.get("secret").is_none());
-    assert!(encoded.get("reference_digest").is_some());
-    assert!(encoded.get("operation_digest").is_some());
-}
-
-#[test]
 fn final_configuration_inventory_is_canonical_and_uses_typed_scalar_values() {
     assert!(!CONFIGURATION_SETTING_KEYS_V1.is_empty());
     assert!(CONFIGURATION_SETTING_KEYS_V1.contains(&SEMANTIC_RUNTIME_SETTING_KEY));
@@ -213,11 +186,11 @@ fn mutation_receipt_rejects_expiry_and_binding_replay() {
         receipt
             .validate_for(
                 &receipt.actor_id,
-                ConfigurationMutationOperationV1::CredentialWrite,
+                ConfigurationMutationOperationV1::ProtectedApply,
                 &receipt.scope_digest,
                 &receipt.expected_configuration_revision,
-                ConfigurationMutationSinkV1::CredentialStore,
-                ConfigurationMutationEffectV1::WriteCredentialReference,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
                 UtcMicros(19),
             )
             .is_err()
