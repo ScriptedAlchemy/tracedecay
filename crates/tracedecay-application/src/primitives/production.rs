@@ -1951,6 +1951,16 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 if !(1..=1_000).contains(&request.maximum_diagnostics) {
                     return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
                 }
+                let query = DiagnosticsQuery::new(self.database.clone());
+                let current = query.current_generation().await;
+                let Some(current_generation) = current.generation else {
+                    // No diagnostic publication means there is no retained
+                    // source identity to validate yet.
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                };
+                if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
                 let Some(identity) = self
                     .diagnostic_identity
                     .resolve(self.source_runtime.project_root().to_path_buf())
@@ -2004,23 +2014,6 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 };
                 if current_index.code_generation_id != *identity.generation_id() {
                     return diagnostics_unavailable(finished_at, OmissionReason::Stale);
-                }
-                let query = DiagnosticsQuery::new(self.database.clone());
-                let current = query.current_generation().await;
-                let Some(current_generation) = current.generation else {
-                    // The store answered and holds no published generation at
-                    // all: no diagnostic producer has ever published for this
-                    // project. That is a terminal absence, not readiness. It is
-                    // cleared only by running a producer, never by re-issuing
-                    // this read, so reporting it as a retryable pre-admission
-                    // state told every caller to spin against a state its own
-                    // retries cannot change. `Stale` below still covers the
-                    // transient case where a producer published for an earlier
-                    // code generation.
-                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
-                };
-                if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
-                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
                 }
                 if current_generation != *identity.generation_id() {
                     return diagnostics_unavailable(finished_at, OmissionReason::Stale);
