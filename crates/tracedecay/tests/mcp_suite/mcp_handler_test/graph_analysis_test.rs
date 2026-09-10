@@ -3417,6 +3417,12 @@ impl core::fmt::Display for CoreDisplay {
 pub struct GenericRenderer;
 impl external::Render<u8> for GenericRenderer {}
 
+pub struct Thing;
+pub struct FromThing;
+impl std::convert::From<crate::Thing> for FromThing {
+    fn from(_: crate::Thing) -> Self { Self }
+}
+
 pub trait Render {}
 pub struct LocalRenderer;
 impl Render for LocalRenderer {}
@@ -3539,6 +3545,24 @@ impl !Disabled for DisabledType {}
     let different_generic: Value =
         serde_json::from_str(extract_text(&different_generic.value)).unwrap();
     assert_eq!(different_generic["count"], 0);
+
+    let qualified_generic_argument = handle_tool_call(
+        &fixture,
+        "tracedecay_implementations",
+        json!({"trait": "From<crate::Thing>", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let qualified_generic_argument: Value =
+        serde_json::from_str(extract_text(&qualified_generic_argument.value)).unwrap();
+    assert_eq!(qualified_generic_argument["match_count"], 1);
+    assert_eq!(
+        qualified_generic_argument["implementations"][0]["trait"],
+        "std::convert::From<crate::Thing>"
+    );
+    assert!(qualified_generic_argument["implementations"][0]["trait_id"].is_null());
 
     let typescript = handle_tool_call(
         &fixture,
