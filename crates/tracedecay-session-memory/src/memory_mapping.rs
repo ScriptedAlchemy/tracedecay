@@ -1099,7 +1099,9 @@ pub fn map_memory_error(error: MemoryApplicationError) -> RetainedSurfaceExecuti
         MemoryApplicationError::OwnerMismatch { .. } => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        MemoryApplicationError::Store(error) => map_store_error(error),
+        MemoryApplicationError::Store(error) | MemoryApplicationError::Cancelled(error) => {
+            map_store_error(error)
+        }
         error @ (MemoryApplicationError::InvalidAuthorityResult { .. }
         | MemoryApplicationError::InvalidEvidenceAnchor(_)
         | MemoryApplicationError::EvidenceAnchor(_)) => {
