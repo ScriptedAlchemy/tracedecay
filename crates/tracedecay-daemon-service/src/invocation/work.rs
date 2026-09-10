@@ -19,7 +19,6 @@ use outcome::{
     complete_work_effect, complete_work_read, offer_work_blocked_interval_receipts,
     work_command_effect, work_effect, work_evidence_packet, work_product_problem,
     work_projection_problem, work_request_context, work_topology_problem,
-    work_topology_unavailable_problem,
 };
 pub(super) use outcome::{work_background_context, work_blocked_interval_recovery_context};
 use tracedecay_domain::git::{GitChangeKindV1, GitStatusEntryV1};
