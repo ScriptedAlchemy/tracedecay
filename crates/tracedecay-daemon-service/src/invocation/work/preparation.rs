@@ -129,6 +129,26 @@ pub(super) fn current_work_product_revision_pins(
     })
 }
 
+pub(super) fn current_work_product_attempt_topology(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_contracts::WorkAttemptTopologyStateV1, ApplicationProblem> {
+    let capability =
+        CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
+    let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
+    tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
+        &registered.database,
+        binding,
+    )
+    .map_err(|_| work_product_authority_unavailable())?
+    .reads()
+    .read_attempt_topology(context, observed_at)
+    .map_err(work_product_problem)
+}
+
 pub(super) fn decide_product_proposal(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
