@@ -40,6 +40,7 @@ pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
+pub(crate) use project_retirement::retire_registered_context_scout_owner;
 mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;

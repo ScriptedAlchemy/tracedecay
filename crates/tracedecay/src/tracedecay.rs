@@ -28,6 +28,14 @@ mod source_edit_runtime;
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 pub use lifecycle::MovedStoreAdoption;
 
+/// Why a `TraceDecay` instance has no Context Scout owner.
+#[derive(Clone)]
+pub(crate) enum ContextScoutOwnerLookupV1 {
+    Ready(Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>),
+    ReadOnly,
+    Unregistered,
+}
+
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///
 /// Provides a high-level API for initializing, indexing, querying, and
@@ -110,15 +118,28 @@ impl TraceDecay {
         &self,
     ) -> Option<Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>>
     {
-        let project_id =
-            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&self.store_layout)?;
+        match self.context_scout_owner_lookup() {
+            ContextScoutOwnerLookupV1::Ready(owner) => Some(owner),
+            ContextScoutOwnerLookupV1::ReadOnly | ContextScoutOwnerLookupV1::Unregistered => None,
+        }
+    }
+
+    pub(crate) fn context_scout_owner_lookup(&self) -> ContextScoutOwnerLookupV1 {
+        if self.read_only {
+            return ContextScoutOwnerLookupV1::ReadOnly;
+        }
+        let Some(project_id) =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&self.store_layout)
+        else {
+            return ContextScoutOwnerLookupV1::Unregistered;
+        };
         let mut owners =
             tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
                 project_id,
             );
         match owners.len() {
-            1 => owners.pop(),
-            _ => None,
+            1 => ContextScoutOwnerLookupV1::Ready(owners.remove(0)),
+            _ => ContextScoutOwnerLookupV1::Unregistered,
         }
     }
 
@@ -175,11 +196,7 @@ impl TraceDecay {
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let owner = self.context_scout_owner()?;
-        let Some(pin) = owner.mounted_claim_pin(lifecycle).await else {
-            return owner
-                .resolve_current_claim_authority(hook, lifecycle, observed_at, true)
-                .await;
-        };
+        let pin = owner.mounted_claim_pin(lifecycle).await?;
         let configuration_is_current = self.context_scout_configuration_is_current(&pin).await;
         let resolved = owner
             .resolve_current_claim_authority(hook, lifecycle, observed_at, configuration_is_current)
