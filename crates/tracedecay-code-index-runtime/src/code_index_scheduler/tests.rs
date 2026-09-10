@@ -12699,6 +12699,39 @@ fn current_pinned_relation_pages_do_not_wait_for_the_blocking_pool() {
             .to_owned();
         let scope = CodeQueryScope::new(generation.clone(), None).expect("query scope");
 
+        let cancellation =
+            tracedecay_contracts::CancellationSignal::active("cancel.current-relation")
+                .expect("cancellation");
+        cancellation.cancel(tracedecay_contracts::clock::now_micros());
+        assert!(matches!(
+            registry
+                .generation_for_controlled(
+                    context.scope(),
+                    &generation,
+                    Some(super::branch_generations::BranchGenerationReadControlV1 {
+                        deadline: None,
+                        cancellation: Some(cancellation),
+                    }),
+                )
+                .await,
+            Err(tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
+        ));
+        let expired =
+            Deadline::new(tracedecay_contracts::clock::now_micros()).expect("expired deadline");
+        assert!(matches!(
+            registry
+                .generation_for_controlled(
+                    context.scope(),
+                    &generation,
+                    Some(super::branch_generations::BranchGenerationReadControlV1 {
+                        deadline: Some(expired),
+                        cancellation: None,
+                    }),
+                )
+                .await,
+            Err(tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
+        ));
+
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let blocker = tokio::task::spawn_blocking(move || {

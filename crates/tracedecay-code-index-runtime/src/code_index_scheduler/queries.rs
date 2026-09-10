@@ -324,6 +324,14 @@ impl CodeIndexSchedulerRegistryV1 {
     {
         #[cfg(feature = "hotpath")]
         hotpath::gauge!("query.generation.resolve.attempts_total").inc(1_u64);
+        if let Some(reason) = control
+            .as_ref()
+            .and_then(super::branch_generations::BranchGenerationReadControlV1::termination)
+        {
+            return finish_generation_resolution(GenerationResolutionSettlementV1::Completed(Err(
+                reason,
+            )));
+        }
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             match unique_mounted_for_scope(&mounted, scope) {
@@ -355,6 +363,14 @@ impl CodeIndexSchedulerRegistryV1 {
             })
             .cloned()
         {
+            if let Some(reason) = control
+                .as_ref()
+                .and_then(super::branch_generations::BranchGenerationReadControlV1::termination)
+            {
+                return finish_generation_resolution(GenerationResolutionSettlementV1::Completed(
+                    Err(reason),
+                ));
+            }
             #[cfg(feature = "hotpath")]
             hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
             return finish_generation_resolution(GenerationResolutionSettlementV1::Completed(Ok(
