@@ -484,10 +484,16 @@ pub(super) async fn execute_context_scout(
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
         );
     };
-    let current = match registered.runtime.client().current().await {
+    let current = match registered.runtime.activated_configuration() {
         Ok(current) => current.into_current_state(),
-        Err(error) => {
-            return application_problem(wire_request_id, configuration_problem(error));
+        Err(_) => {
+            return application_problem(
+                wire_request_id,
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "context_scout.configuration_unavailable".to_owned(),
+                    message: "The activated Context Scout configuration is unavailable".to_owned(),
+                }),
+            );
         }
     };
     let Some(configuration) =
@@ -901,9 +907,7 @@ async fn reconcile_context_scout_configuration(
     observed_at: UtcMicros,
 ) -> Result<(), ContextScoutActivationReconciliationError> {
     let current = runtime
-        .client()
-        .current()
-        .await
+        .activated_configuration()
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
     let current = current.into_current_state();
     let refreshed =
