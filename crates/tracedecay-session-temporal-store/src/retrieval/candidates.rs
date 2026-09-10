@@ -564,9 +564,13 @@ pub(super) async fn query_candidate_clause(
         (
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
             CandidateChannel::Span | CandidateChannel::Burst,
-        ) => (
-            ROOT_DERIVED_CANDIDATE_QUERY,
-            vec![
+        ) => {
+            let sql = if direct_user_filter {
+                ROOT_DIRECT_USER_DERIVED_CANDIDATE_QUERY
+            } else {
+                ROOT_DERIVED_CANDIDATE_QUERY
+            };
+            let mut params = vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
@@ -581,8 +585,13 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(limit),
-            ],
-        ),
+            ];
+            if direct_user_filter {
+                params.push(filter_start);
+                params.push(filter_end);
+            }
+            (sql, params)
+        }
         (TemporalRetrievalScope::Session(session_id), CandidateChannel::ExactMessage) => (
             EXACT_CANDIDATE_QUERY,
             vec![
