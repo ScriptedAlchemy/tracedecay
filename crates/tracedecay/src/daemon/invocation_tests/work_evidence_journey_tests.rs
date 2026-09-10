@@ -373,7 +373,8 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     )
     .expect("Work authority");
     let service = DaemonInvocationService::default();
-    let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let (proposal_routing, configuration_digest) =
+        empty_work_proposal_routing(scope.clone(), &grant);
     let policy_digest = mount_test_work_observability(
         &service,
         &project,

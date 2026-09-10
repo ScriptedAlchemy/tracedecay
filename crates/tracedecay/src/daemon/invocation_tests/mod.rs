@@ -11,8 +11,8 @@ use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::work::{
     WorkTaskSessionAdmittedRetrievalPortV1, WorkTaskSessionEvidenceRetrievalV1,
 };
-use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::feedback::observations::FeedbackSourceEventV1;
+use tracedecay_contracts::{CapabilityGrantSnapshot, ResolvedScope};
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonWorkProposalRoutingAuthorityV1,
     UnavailableFeedbackCycleRuntimeV1,
@@ -37,6 +37,7 @@ pub(super) fn denied_work_evidence_retrieval() -> WorkTaskSessionEvidenceRetriev
 
 pub(super) fn empty_work_proposal_routing(
     scope: ResolvedScope,
+    grant: &CapabilityGrantSnapshot,
 ) -> (DaemonWorkProposalRoutingAuthorityV1, ManifestDigest) {
     let revision = tracedecay_domain::configuration::ConfigurationRevisionId::new(
         "configuration.revision.work-empty-routing",
@@ -67,8 +68,18 @@ pub(super) fn empty_work_proposal_routing(
     )
     .expect("empty Work routing snapshot");
     let digest = snapshot.effective_behavior_digest.clone();
-    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(scope, revision, &snapshot, &digest)
-        .expect("empty Work proposal routing");
+    let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            project_id: scope.project_id.clone(),
+            project_root: std::env::current_dir().expect("test project root"),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("empty pinned Work routing configuration");
+    let routing =
+        DaemonWorkProposalRoutingAuthorityV1::mount(scope, &configuration, &digest, grant)
+            .expect("empty Work proposal routing");
     (routing, digest)
 }
 

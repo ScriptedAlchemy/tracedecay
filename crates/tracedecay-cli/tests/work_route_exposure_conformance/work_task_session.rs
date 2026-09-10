@@ -756,6 +756,7 @@ fn pin_executable_binding(
                     },
                     "canonical_path": executable_path,
                     "capabilities": ["claude_code_stream_json"],
+                    "routes": [],
                 }],
             },
             "expected_revision": base_revision,
