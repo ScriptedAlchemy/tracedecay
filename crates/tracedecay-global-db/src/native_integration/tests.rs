@@ -432,6 +432,13 @@ async fn terminal_receipts_replay_and_survive_restart() {
             .read_receipt(&record.status.transaction_id)
             .await
             .expect("read receipt after restart"),
+        Some(receipt.clone())
+    );
+    assert_eq!(
+        store
+            .read_receipt_by_digest(&receipt.receipt_digest)
+            .await
+            .expect("read receipt by digest after restart"),
         Some(receipt)
     );
     assert_eq!(

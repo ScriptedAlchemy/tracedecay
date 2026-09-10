@@ -11,8 +11,8 @@ use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
 use tracedecay_domain::{
     AnchorOwnerBindingV1, CommitId, GitHubPullRequestIdV1, GitTopologySourceRoleV1, ManifestDigest,
     OrderedGitTopologySourceV1, PrivacyDomainId, ProjectId, ProviderId,
-    PullRequestSnapshotAnchorRefV1, RefId, RepositoryId, RetrievalAnchorId, UserProfileId,
-    UtcMicros, WorktreeId,
+    PullRequestSnapshotAnchorRefV1, RefId, RepositoryId, RetrievalAnchorId, StackSignalKindV1,
+    UserProfileId, UtcMicros, WorktreeId,
 };
 
 use tracedecay_application::stack_coordinator::*;

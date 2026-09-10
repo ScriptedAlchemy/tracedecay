@@ -135,6 +135,33 @@ impl GitRepositoryAuthority {
         head_from_gix(&repository)
     }
 
+    /// Whether any current main or linked worktree has the reference checked out.
+    ///
+    /// Reading the complete repository worktree inventory lets mutation
+    /// callers fail closed when a linked checkout was not part of their
+    /// authorized routing roots or appeared after preflight.
+    pub fn reference_is_checked_out(&self, reference: &str) -> Result<bool, GitRepositoryError> {
+        let repository = self.repository.to_thread_local();
+        let main = repository
+            .main_repo()
+            .map_err(|error| operation("open main worktree", error))?;
+        if main.workdir().is_some() && head_matches_reference(head_from_gix(&main)?, reference) {
+            return Ok(true);
+        }
+        for proxy in repository
+            .worktrees()
+            .map_err(|error| operation("list worktrees", error))?
+        {
+            let linked = proxy
+                .into_repo()
+                .map_err(|error| operation("open linked worktree", error))?;
+            if head_matches_reference(head_from_gix(&linked)?, reference) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// All ordinary repository refs in stable name order.
     #[hotpath::measure(label = "runtime_core.git.references")]
     pub fn references(&self) -> Result<Vec<GitReference>, GitRepositoryError> {
@@ -460,6 +487,16 @@ impl GitRepositoryAuthority {
         }
         degradations
     }
+}
+
+fn head_matches_reference(head: GitHeadStateV1, reference: &str) -> bool {
+    let GitHeadStateV1::Attached { branch, .. } = head else {
+        return false;
+    };
+    branch == reference
+        || reference
+            .strip_prefix("refs/heads/")
+            .is_some_and(|short| branch == short)
 }
 
 #[derive(Debug)]

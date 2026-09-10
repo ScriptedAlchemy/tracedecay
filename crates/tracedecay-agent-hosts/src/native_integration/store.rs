@@ -41,6 +41,7 @@ enum StoreCommand {
         NativeIntegrationPreviewId,
         Reply<Option<NativeIntegrationPreviewV1>>,
     ),
+    ReadPreviewByDigest(ManifestDigest, Reply<Option<NativeIntegrationPreviewV1>>),
     SaveApproval(Box<NativeIntegrationApprovalV1>, Reply<()>),
     ReadApproval(
         NativeIntegrationApprovalId,
@@ -62,6 +63,7 @@ enum StoreCommand {
         NativeIntegrationTransactionId,
         Reply<Option<NativeIntegrationReceiptV1>>,
     ),
+    ReadReceiptByDigest(ManifestDigest, Reply<Option<NativeIntegrationReceiptV1>>),
     CompareAndSwapStatus(
         NativeIntegrationTransactionId,
         u64,
@@ -219,6 +221,32 @@ impl DaemonNativeIntegrationStore {
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationApprovalV1>> {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::ReadApproval(approval_id.clone(), reply))?;
+        Self::await_reply(&receiver)
+    }
+
+    #[hotpath::measure(label = "agent_hosts.native_store.read_preview_by_digest")]
+    pub(crate) fn read_preview_by_digest(
+        &self,
+        preview_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ReadPreviewByDigest(
+            preview_digest.clone(),
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
+    #[hotpath::measure(label = "agent_hosts.native_store.read_receipt_by_digest")]
+    pub(crate) fn read_receipt_by_digest(
+        &self,
+        receipt_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ReadReceiptByDigest(
+            receipt_digest.clone(),
+            reply,
+        ))?;
         Self::await_reply(&receiver)
     }
 
@@ -471,6 +499,9 @@ fn run_store_actor(
             StoreCommand::ReadPreview(preview_id, reply) => {
                 let _ = reply.send(runtime.block_on(store.read_preview(&preview_id)));
             }
+            StoreCommand::ReadPreviewByDigest(preview_digest, reply) => {
+                let _ = reply.send(runtime.block_on(store.read_preview_by_digest(&preview_digest)));
+            }
             StoreCommand::SaveApproval(approval, reply) => {
                 let _ = reply.send(runtime.block_on(store.save_approval(*approval)));
             }
@@ -488,6 +519,9 @@ fn run_store_actor(
             }
             StoreCommand::ReadReceipt(transaction_id, reply) => {
                 let _ = reply.send(runtime.block_on(store.read_receipt(&transaction_id)));
+            }
+            StoreCommand::ReadReceiptByDigest(receipt_digest, reply) => {
+                let _ = reply.send(runtime.block_on(store.read_receipt_by_digest(&receipt_digest)));
             }
             StoreCommand::CompareAndSwapStatus(
                 transaction_id,
@@ -593,6 +627,20 @@ impl SharedDaemonNativeIntegrationStore {
         approval_id: &NativeIntegrationApprovalId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationApprovalV1>> {
         self.inner.read_approval(approval_id)
+    }
+
+    pub fn read_preview_by_digest(
+        &self,
+        preview_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
+        self.inner.read_preview_by_digest(preview_digest)
+    }
+
+    pub fn read_receipt_by_digest(
+        &self,
+        receipt_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
+        self.inner.read_receipt_by_digest(receipt_digest)
     }
 }
 
