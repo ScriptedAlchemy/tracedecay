@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, FileOccurrenceId, FreshnessCompatibilityV1,
-    technical_tokens,
+    RetrievalFailure, RetrieverOutcome, technical_tokens,
 };
 use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
@@ -126,8 +126,8 @@ fn common_term_candidates_are_bounded_by_the_rarest_source() {
         CodeLexicalProjectionAdapterV1::new(metadata, chunks).expect("postings build"),
     );
 
-    let mixed = complete(
-        lane.retrieve_lexical(&lexical_request(
+    let mixed_outcome = lane
+        .retrieve_lexical(&lexical_request(
             "needle shared_flag",
             &["needle", "shared_flag"],
             &[],
@@ -135,7 +135,27 @@ fn common_term_candidates_are_bounded_by_the_rarest_source() {
             0,
             8,
         ))
-        .expect("mixed-selectivity query"),
+        .expect("mixed-selectivity query");
+    let RetrieverOutcome::Partial {
+        value: mixed,
+        reason:
+            RetrievalFailure::CandidateSourcesPruned {
+                term_sources,
+                document_frequency_budget,
+            },
+    } = mixed_outcome
+    else {
+        panic!(
+            "mixed-selectivity query must report the typed pruning partial, got {mixed_outcome:?}"
+        );
+    };
+    assert_eq!(
+        term_sources,
+        vec![("shared_flag".to_owned(), u64::from(documents))],
+    );
+    assert_eq!(
+        document_frequency_budget,
+        MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
     );
     assert_eq!(
         mixed.candidates.len(),
