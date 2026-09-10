@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
@@ -340,11 +341,13 @@ impl<'a> GraphQueryManager<'a> {
             .await?
             .adjacency
             .into_iter()
-            .filter(|(source, _)| path_prefix.is_none_or(|prefix| source.starts_with(prefix)))
+            .filter(|(source, _)| path_prefix.is_none_or(|prefix| path_is_within(source, prefix)))
             .map(|(source, targets)| {
                 let targets = targets
                     .into_iter()
-                    .filter(|target| path_prefix.is_none_or(|prefix| target.starts_with(prefix)))
+                    .filter(|target| {
+                        path_prefix.is_none_or(|prefix| path_is_within(target, prefix))
+                    })
                     .collect();
                 (source, targets)
             })
@@ -483,10 +486,11 @@ impl<'a> GraphQueryManager<'a> {
             }
         }
         adjacency.retain(|source, targets| {
-            if path_prefix.is_some_and(|prefix| !source.starts_with(prefix)) {
+            if path_prefix.is_some_and(|prefix| !path_is_within(source, prefix)) {
                 return false;
             }
-            targets.retain(|target| path_prefix.is_none_or(|prefix| target.starts_with(prefix)));
+            targets
+                .retain(|target| path_prefix.is_none_or(|prefix| path_is_within(target, prefix)));
             true
         });
         Ok(VerifiedHealthInputsV1 {
@@ -598,7 +602,7 @@ fn fold_health_aggregates(
         .collect::<HashSet<_>>();
     let mut by_file = HashMap::<String, VerifiedHealthFileAggregateV1>::new();
     for (occurrence, (file_path, record)) in metadata {
-        if path_prefix.is_some_and(|prefix| !file_path.starts_with(prefix)) {
+        if path_prefix.is_some_and(|prefix| !path_is_within(&file_path, prefix)) {
             continue;
         }
         let aggregate =
@@ -648,5 +652,27 @@ fn unavailable(detail: &str) -> TraceDecayError {
         reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
         retryable: false,
         detail: detail.to_owned(),
+    }
+}
+
+fn path_is_within(path: &str, directory: &str) -> bool {
+    Path::new(path).starts_with(directory)
+}
+
+#[cfg(test)]
+mod path_scope_tests {
+    use super::path_is_within;
+
+    #[test]
+    fn directory_scope_excludes_sibling_names_with_the_same_prefix() {
+        assert!(path_is_within(
+            "crates/tracedecay/src/lib.rs",
+            "crates/tracedecay"
+        ));
+        assert!(path_is_within("crates/tracedecay", "crates/tracedecay"));
+        assert!(!path_is_within(
+            "crates/tracedecay-code-index/src/lib.rs",
+            "crates/tracedecay"
+        ));
     }
 }
