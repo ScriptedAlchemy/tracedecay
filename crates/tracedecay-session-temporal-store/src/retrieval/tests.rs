@@ -19,11 +19,11 @@ use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ports::{
     BindingDigest, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, ExecutionControl,
     ExecutionLimits, KernelVersions, PageLimits, PageRequest, PageStatus, TemporalAuthorizedRoot,
-    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
-    TemporalParticipantManifest, TemporalPortError, TemporalPreparedCandidateCohort,
-    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
-    TemporalWatermarks, await_controlled, begin_prepared_candidate_pull,
-    commit_prepared_candidate_pull,
+    TemporalCandidateFilterV1, TemporalExecutionSnapshot, TemporalMessageTypeFilterV1,
+    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
+    TemporalPortError, TemporalPreparedCandidateCohort, TemporalRecord, TemporalRetrievalScope,
+    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks, await_controlled,
+    begin_prepared_candidate_pull, commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
@@ -1222,11 +1222,16 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
          INSERT INTO observations (
              observation_id, payload_digest, receipt_id, observation_json,
              committed_cursor_json
-         ) VALUES (
-             'observation-common-tool', 'sha256:common-tool', 'receipt-common-tool',
-             '{\"payload\":{\"facts\":[{\"kind\":\"message\",\"role\":\"user\",\"content\":{\"text\":\"common\"},\"timestamp\":42},{\"kind\":\"tool_result\",\"content\":{\"text\":\"common\"}}]}}',
-             '{}'
-         );
+         )
+         SELECT 'observation-common-tool', 'sha256:common-tool', 'receipt-common-tool',
+                json_insert(
+                    source.observation_json,
+                    '$.payload.facts[#]',
+                    json('{\"kind\":\"tool_result\",\"invocation_id\":null,\"content\":{\"text\":\"common\"},\"success\":true}')
+                ),
+                '{}'
+         FROM observations AS source
+         WHERE source.observation_id = 'observation-plan-inside';
          INSERT INTO session_messages (
              provider, message_id, session_id, role, timestamp, ordinal, text, kind
          ) VALUES
@@ -1285,7 +1290,7 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
              (
                  'session-plan-inside', 1, 'span', 'span-common-user',
                  'anchor-plan-inside', 'occurrence-common-user',
-                 'occurrence-common-user', 'fixture', 'fixture', 1,
+                 'occurrence-common-tool-257', 'fixture', 'fixture', 258,
                  'fixture-user', '{}'
              );
          INSERT INTO session_derived_evidence_members (
@@ -1299,7 +1304,17 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
              (
                  'session-plan-inside', 1, 'span', 'span-common-user', 0,
                  'occurrence-common-user', 'member'
-             );",
+             );
+         WITH RECURSIVE members(n) AS (
+             VALUES(1) UNION ALL SELECT n + 1 FROM members WHERE n < 257
+         )
+         INSERT INTO session_derived_evidence_members (
+             session_id, generation, evidence_kind, evidence_id, ordinal,
+             occurrence_id, member_role
+         )
+         SELECT 'session-plan-inside', 1, 'span', 'span-common-user', n,
+                printf('occurrence-common-tool-%03d', n), 'member'
+         FROM members;",
     )
     .await
     .expect("common-term fixture");
@@ -1445,6 +1460,27 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
             .any(|line| line.contains("IDX_SESSION_DERIVED_EVIDENCE_MEMBERS_OCCURRENCE")),
         "direct-user evidence must join membership by occurrence: {derived_plan:?}"
     );
+
+    let filter = TemporalCandidateFilterV1 {
+        message_type: TemporalMessageTypeFilterV1::DirectUser,
+        start_time: Some(40),
+        end_time: Some(50),
+        ..TemporalCandidateFilterV1::default()
+    };
+    let request = root_preparation_request(TemporalModeV1::Current)
+        .with_provider_scope(Some("claude".to_string()))
+        .expect("provider scope")
+        .with_semantic_filter(filter)
+        .expect("direct-user filter");
+    let candidates = read
+        .adapter()
+        .prepare_root_candidate_cohort(&request, &plan_temporal_candidates("common", None, false))
+        .await
+        .expect("direct-user candidates stay eligible past derived member scan limits");
+    assert!(candidates.candidates().iter().any(|candidate| {
+        candidate.channel == CandidateChannel::Span
+            && candidate.retriever_record_id == "span-common-user"
+    }));
 }
 
 #[tokio::test]
