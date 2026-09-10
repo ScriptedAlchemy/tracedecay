@@ -1,7 +1,9 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1;
+use tracedecay_application::semantic_runtime::{
+    SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleOutcomeV1,
+};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -76,9 +78,9 @@ async fn unchanged_reconcile_retries_semantic_admission_for_the_serving_generati
         Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| {
             if accepting.load(Ordering::Acquire) {
                 accepted.fetch_add(1, Ordering::AcqRel);
-                true
+                SavedGenerationScheduleOutcomeV1::Scheduled
             } else {
-                false
+                SavedGenerationScheduleOutcomeV1::QueueRefused
             }
         }) as SavedCodeGenerationScheduleHookV1
     };
