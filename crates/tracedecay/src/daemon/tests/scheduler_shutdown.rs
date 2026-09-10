@@ -37,15 +37,20 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     let administration = engine.store_administration.clone();
     let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
     let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
-    let request = tokio::spawn(async move {
-        administration
-            .run_manual_branch_publication(|_| async move {
-                let _ = started_sender.send(());
-                let _ = release_receiver.await;
-                Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
-            })
-            .await
-    });
+    let admission = administration
+        .admit_manual_branch_publication(|_, admitted| async move {
+            let _ = admitted.send(());
+            let _ = started_sender.send(());
+            let _ = release_receiver.await;
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+        })
+        .await
+        .expect("manual branch publication is admitted");
+    assert_eq!(
+        admission,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Deferred,
+        "branch add must return while exact publication continues"
+    );
     started_receiver
         .await
         .expect("manual branch publication starts");

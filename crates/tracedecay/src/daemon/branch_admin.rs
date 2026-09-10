@@ -608,10 +608,10 @@ impl Default for StoreAdministration {
 
 impl StoreAdministration {
     #[cfg(unix)]
-    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+    async fn spawn_manual_branch_publication<Publication, Task>(
         &self,
         publication: Publication,
-    ) -> Result<BranchAddOutcome>
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<BranchAddOutcome>>>
     where
         Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
         Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
@@ -661,13 +661,59 @@ impl StoreAdministration {
                 let _ = result_sender.send(publication(cancellation).await);
             });
         }
-        result_receiver.await.map_err(|error| {
-            TraceDecayError::project_route(
-                "branch_tracking_failed",
-                true,
-                format!("manual branch publication owner stopped before completion: {error}"),
-            )
-        })?
+        Ok(result_receiver)
+    }
+
+    #[cfg(all(unix, any(test, feature = "test-transport")))]
+    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        self.spawn_manual_branch_publication(publication)
+            .await?
+            .await
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before completion: {error}"),
+                )
+            })?
+    }
+
+    /// Admit exact branch publication to the daemon-owned task set. The
+    /// caller returns while activation and indexing continue under shutdown
+    /// ownership.
+    #[cfg(unix)]
+    pub(super) async fn admit_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication:
+            FnOnce(CancellationToken, tokio::sync::oneshot::Sender<()>) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        let (admitted_sender, admitted_receiver) = tokio::sync::oneshot::channel();
+        let completion = self
+            .spawn_manual_branch_publication(move |cancellation| {
+                publication(cancellation, admitted_sender)
+            })
+            .await?;
+        match admitted_receiver.await {
+            Ok(()) => Ok(BranchAddOutcome::Deferred),
+            Err(_) => completion.await.map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before admission: {error}"),
+                )
+            })?,
+        }
     }
 
     #[cfg(unix)]
