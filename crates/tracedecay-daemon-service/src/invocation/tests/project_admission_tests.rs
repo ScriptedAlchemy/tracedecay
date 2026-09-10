@@ -669,3 +669,49 @@ async fn same_authority_source_edit_owners_alias_one_incumbent() {
         "a refused foreign route must leave the incumbent in place"
     );
 }
+
+#[tokio::test]
+async fn missing_work_owner_stops_retrying_after_publication() {
+    let service = DaemonInvocationService::default();
+    let root = PathBuf::from("/projects/work-unmounted");
+    let publication =
+        admit_project_without_retained_runtime(&service, &root, "work-unmounted").await;
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    for ready in [false, true] {
+        if ready {
+            assert!(
+                service
+                    .project_runtimes
+                    .mark_publication_ready(&publication)
+            );
+        }
+        let now = current_micros();
+        let request = DaemonInvocationRequest::work_application(
+            "request.work.unmounted",
+            tracedecay_daemon_protocol::WorkApplicationInvocationV1::Topology(
+                tracedecay_contracts::WorkTopologyViewRequestV1 {
+                    page_size: 1,
+                    cursor: None,
+                },
+            ),
+            now,
+            Deadline::new(UtcMicros(now.0 + 30_000_000)).unwrap(),
+            CancellationContext::active("cancel.work.unmounted").unwrap(),
+        );
+        let problem = application_problem_from(
+            service
+                .invoke(&registry, Some(&root), None, None, None, request)
+                .await,
+        );
+        if ready {
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(
+                problem.kind(),
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never).kind()
+            );
+        } else {
+            assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+            assert_eq!(problem.retry(), RetryDirective::AfterDelay);
+        }
+    }
+}
