@@ -19,11 +19,11 @@ use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ports::{
     BindingDigest, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, ExecutionControl,
     ExecutionLimits, KernelVersions, PageLimits, PageRequest, PageStatus, TemporalAuthorizedRoot,
-    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
-    TemporalParticipantManifest, TemporalPortError, TemporalPreparedCandidateCohort,
-    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
-    TemporalWatermarks, await_controlled, begin_prepared_candidate_pull,
-    commit_prepared_candidate_pull,
+    TemporalCandidateFilterV1, TemporalExecutionSnapshot, TemporalMessageTypeFilterV1,
+    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
+    TemporalPortError, TemporalPreparedCandidateCohort, TemporalRecord, TemporalRetrievalScope,
+    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks, await_controlled,
+    begin_prepared_candidate_pull, commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
@@ -572,7 +572,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 (
                     'observation-plan-inside', 'sha256:plan-inside',
                     'receipt-plan-inside',
-                    '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
+                    '{\"identity\":{\"source\":{\"provider\":\"claude\"}},\"payload\":{\"facts\":[{\"kind\":\"message\",\"role\":\"user\",\"content\":{\"text\":\"needle candidate\"},\"timestamp\":42}]}}', '{}'
                 ),
                 (
                     'observation-plan-outside', 'sha256:plan-outside',
@@ -1203,6 +1203,287 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
 }
 
 #[tokio::test]
+async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    Executor::execute_batch(
+        &database
+            .writer_connection()
+            .expect("registered profile writer"),
+        "INSERT INTO sanitization_receipts (
+             receipt_id, sanitizer_version, payload_digest, receipt_json
+         ) VALUES ('receipt-common-tool', 'fixture', 'sha256:common-tool', '{}');
+         INSERT INTO observations (
+             observation_id, payload_digest, receipt_id, observation_json,
+             committed_cursor_json
+         )
+         SELECT 'observation-common-tool', 'sha256:common-tool', 'receipt-common-tool',
+                json_insert(
+                    source.observation_json,
+                    '$.payload.facts[#]',
+                    json('{\"kind\":\"tool_result\",\"invocation_id\":null,\"content\":{\"text\":\"common\"},\"success\":true}')
+                ),
+                '{}'
+         FROM observations AS source
+         WHERE source.observation_id = 'observation-plan-inside';
+         INSERT INTO session_messages (
+             provider, message_id, session_id, role, timestamp, ordinal, text, kind
+         ) VALUES
+             (
+                 'claude', 'message-common-tool', 'session-plan-inside',
+                 'user', 42, 321, 'common', 'message'
+             ),
+             (
+                 'claude', 'message-common-user', 'session-plan-inside',
+                 'user', 42, 322, 'common', 'message'
+             );
+         INSERT INTO retrieval_anchors (
+             anchor_id, anchor_json, owner_json, projection_generation
+         ) VALUES ('anchor-common-tool', '{}', '{\"kind\":\"profile\"}', 'fixture');
+         WITH RECURSIVE excluded(n) AS (
+             VALUES(1) UNION ALL SELECT n + 1 FROM excluded WHERE n < 320
+         )
+         INSERT INTO session_occurrences (
+             session_id, generation, occurrence_id, source_observation_id,
+             source_provider, projection_output_ordinal, retrieval_anchor_id,
+             message_id, role, knowledge_at, valid_time_json, evidence_json,
+             sanitized_content_digest, sanitized_content_bytes, snippet_text, index_text
+         )
+         SELECT 'session-plan-inside', 1, printf('occurrence-common-tool-%03d', n),
+                'observation-common-tool', 'claude', n, 'anchor-common-tool',
+                'message-common-tool', 'user', 1000 + n,
+                '{\"kind\":\"known\",\"valid_at\":42}', '{}',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                6, 'common', 'common'
+         FROM excluded;
+         INSERT INTO session_occurrences (
+             session_id, generation, occurrence_id, source_observation_id,
+             source_provider, projection_output_ordinal, retrieval_anchor_id,
+             message_id, role, knowledge_at, valid_time_json, evidence_json,
+             sanitized_content_digest, sanitized_content_bytes, snippet_text, index_text
+         ) VALUES (
+             'session-plan-inside', 1, 'occurrence-common-user',
+             'observation-plan-inside', 'claude', 321, 'anchor-plan-inside',
+             'message-common-user', 'user', 20,
+             '{\"kind\":\"known\",\"valid_at\":42}', '{}',
+             '0000000000000000000000000000000000000000000000000000000000000000',
+             6, 'common', 'common'
+         );
+         INSERT INTO session_derived_evidence (
+             session_id, generation, evidence_kind, evidence_id,
+             retrieval_anchor_id, first_occurrence_id, last_occurrence_id,
+             algorithm_version, configuration_digest, member_count,
+             member_digest, evidence_json
+         ) VALUES
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-tool',
+                 'anchor-common-tool', 'occurrence-common-tool-001',
+                 'occurrence-common-tool-001', 'fixture', 'fixture', 1,
+                 'fixture-tool', '{}'
+             ),
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-user',
+                 'anchor-plan-inside', 'occurrence-common-user',
+                 'occurrence-common-tool-257', 'fixture', 'fixture', 258,
+                 'fixture-user', '{}'
+             );
+         INSERT INTO session_derived_evidence_members (
+             session_id, generation, evidence_kind, evidence_id, ordinal,
+             occurrence_id, member_role
+         ) VALUES
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-tool', 0,
+                 'occurrence-common-tool-001', 'member'
+             ),
+             (
+                 'session-plan-inside', 1, 'span', 'span-common-user', 0,
+                 'occurrence-common-user', 'member'
+             );
+         WITH RECURSIVE members(n) AS (
+             VALUES(1) UNION ALL SELECT n + 1 FROM members WHERE n < 257
+         )
+         INSERT INTO session_derived_evidence_members (
+             session_id, generation, evidence_kind, evidence_id, ordinal,
+             occurrence_id, member_role
+         )
+         SELECT 'session-plan-inside', 1, 'span', 'span-common-user', n,
+                printf('occurrence-common-tool-%03d', n), 'member'
+         FROM members;",
+    )
+    .await
+    .expect("common-term fixture");
+    let read = runtime.retrieval_read_for_test().await;
+    let params = |direct_user| {
+        vec![
+            SqlValue::Text("user".to_string()),
+            SqlValue::Null,
+            SqlValue::Text(fts_phrase("common")),
+            SqlValue::Integer(i64::MAX),
+            SqlValue::Text(String::new()),
+            SqlValue::Text(String::new()),
+            SqlValue::Integer(128),
+            SqlValue::Integer(128),
+            SqlValue::Integer(128),
+            SqlValue::Integer(1_024),
+            SqlValue::Integer(128),
+            SqlValue::Integer(1),
+            SqlValue::Integer(direct_user),
+            SqlValue::Integer(40),
+            SqlValue::Integer(50),
+        ]
+    };
+
+    assert!(
+        read.text_column(ROOT_OCCURRENCE_FTS_QUERY, params(0), 0)
+            .await[0]
+            .starts_with("occurrence-common-tool-")
+    );
+    assert_eq!(
+        read.text_column(ROOT_OCCURRENCE_FTS_QUERY, params(1), 0)
+            .await,
+        ["occurrence-common-user"]
+    );
+
+    let mut direct_params = params(1);
+    direct_params.push(SqlValue::Text(
+        "text : (\"common\") AND role : user".to_string(),
+    ));
+    assert_eq!(
+        read.text_column(
+            ROOT_DIRECT_USER_OCCURRENCE_FTS_QUERY,
+            direct_params.clone(),
+            0,
+        )
+        .await,
+        ["occurrence-common-user"]
+    );
+    let direct_plan = read
+        .explain_query_plan(ROOT_DIRECT_USER_OCCURRENCE_FTS_QUERY, direct_params)
+        .await;
+    assert!(
+        direct_plan
+            .iter()
+            .any(|line| line.contains("MATERIALIZE DIRECT_USER_MESSAGE_FTS")),
+        "direct-user retrieval must materialize its FTS matches once: {direct_plan:?}"
+    );
+    assert!(
+        direct_plan
+            .iter()
+            .any(|line| line.contains("MATERIALIZE DIRECT_USER_MESSAGES")),
+        "direct-user retrieval must bound occurrence FTS from matching messages: {direct_plan:?}"
+    );
+    assert!(
+        direct_plan
+            .iter()
+            .any(|line| line.contains("IDX_SESSION_OCCURRENCES_MESSAGE")),
+        "direct-user retrieval must join occurrences by message identity: {direct_plan:?}"
+    );
+    assert!(
+        direct_plan
+            .iter()
+            .any(|line| line.contains("IDX_SESSION_MESSAGES_TIMESTAMP")),
+        "bounded direct-user retrieval must start from the message time range: {direct_plan:?}"
+    );
+
+    let direct_exact_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Text("common".to_string()),
+        SqlValue::Text(fts_phrase("common")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(1),
+        SqlValue::Integer(1),
+        SqlValue::Integer(40),
+        SqlValue::Integer(50),
+        SqlValue::Text("text : (\"common\") AND role : user".to_string()),
+    ];
+    assert_eq!(
+        read.text_column(
+            ROOT_DIRECT_USER_EXACT_CANDIDATE_QUERY,
+            direct_exact_params,
+            0,
+        )
+        .await,
+        ["occurrence-common-user"]
+    );
+
+    let direct_derived_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Null,
+        SqlValue::Text(fts_phrase("common")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(1),
+        SqlValue::Integer(40),
+        SqlValue::Integer(50),
+    ];
+    assert_eq!(
+        read.text_column(
+            ROOT_DIRECT_USER_DERIVED_CANDIDATE_QUERY,
+            direct_derived_params.clone(),
+            0,
+        )
+        .await,
+        ["span-common-user"]
+    );
+    let derived_plan = read
+        .explain_query_plan(
+            ROOT_DIRECT_USER_DERIVED_CANDIDATE_QUERY,
+            direct_derived_params,
+        )
+        .await;
+    assert!(
+        derived_plan
+            .iter()
+            .any(|line| line.contains("MATERIALIZE DIRECT_USER_EVIDENCE")),
+        "direct-user derived retrieval must filter evidence before occurrence FTS: {derived_plan:?}"
+    );
+    assert!(
+        derived_plan
+            .iter()
+            .any(|line| line.contains("IDX_SESSION_DERIVED_EVIDENCE_MEMBERS_OCCURRENCE")),
+        "direct-user evidence must join membership by occurrence: {derived_plan:?}"
+    );
+
+    let filter = TemporalCandidateFilterV1 {
+        message_type: TemporalMessageTypeFilterV1::DirectUser,
+        start_time: Some(40),
+        end_time: Some(50),
+        ..TemporalCandidateFilterV1::default()
+    };
+    let request = root_preparation_request(TemporalModeV1::Current)
+        .with_provider_scope(Some("claude".to_string()))
+        .expect("provider scope")
+        .with_semantic_filter(filter)
+        .expect("direct-user filter");
+    let candidates = read
+        .adapter()
+        .prepare_root_candidate_cohort(&request, &plan_temporal_candidates("common", None, false))
+        .await
+        .expect("direct-user candidates stay eligible past derived member scan limits");
+    assert!(candidates.candidates().iter().any(|candidate| {
+        candidate.channel == CandidateChannel::Span
+            && candidate.retriever_record_id == "span-common-user"
+    }));
+}
+
+#[tokio::test]
 async fn frozen_generation_survives_rotation_while_a_new_snapshot_observes_drift() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1484,6 +1765,9 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(1_024),
         SqlValue::Integer(128),
         SqlValue::Integer(10),
+        SqlValue::Integer(0),
+        SqlValue::Null,
+        SqlValue::Null,
     ];
     assert_eq!(
         read.text_column(ROOT_OCCURRENCE_FTS_QUERY, root_fts_params.clone(), 0)
@@ -1516,6 +1800,9 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(128),
         SqlValue::Integer(i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap")),
         SqlValue::Integer(10),
+        SqlValue::Integer(0),
+        SqlValue::Null,
+        SqlValue::Null,
     ];
     assert_eq!(
         read.text_column(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone(), 0)

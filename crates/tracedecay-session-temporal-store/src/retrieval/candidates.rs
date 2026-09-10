@@ -391,11 +391,18 @@ pub(super) async fn query_candidate_clause(
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
+    let filter = snapshot_request.semantic_filter();
+    let direct_user_filter = filter.message_type
+        == tracedecay_temporal_query::ports::TemporalMessageTypeFilterV1::DirectUser;
+    let direct_user = SqlValue::Integer(i64::from(direct_user_filter));
+    let filter_start = filter.start_time.map_or(SqlValue::Null, SqlValue::Integer);
+    let filter_end = filter.end_time.map_or(SqlValue::Null, SqlValue::Integer);
     let occurrence_fts_query = if clause.channel == CandidateChannel::Lexical {
         fts_any_terms(&clause.value)
     } else {
         fts_phrase(&clause.value)
     };
+    let direct_user_fts_query = format!("text : ({occurrence_fts_query}) AND role : user");
     let (sql, params) = match (scope, clause.channel) {
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
             return Err(read_message(
@@ -422,9 +429,13 @@ pub(super) async fn query_candidate_clause(
         // `🚨 :: --`) is an empty FTS phrase, which FTS5 resolves to EOF: zero
         // rows through the index and no retained-row text scan. That is a
         // measured empty channel, not a budget refusal.
-        (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
-            ROOT_EXACT_CANDIDATE_QUERY,
-            vec![
+        (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => {
+            let sql = if direct_user_filter {
+                ROOT_DIRECT_USER_EXACT_CANDIDATE_QUERY
+            } else {
+                ROOT_EXACT_CANDIDATE_QUERY
+            };
+            let mut params = vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
@@ -441,14 +452,25 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(stable_cap),
                 SqlValue::Integer(exact_source_cap),
                 SqlValue::Integer(limit),
-            ],
-        ),
+                direct_user.clone(),
+                filter_start.clone(),
+                filter_end.clone(),
+            ];
+            if direct_user_filter {
+                params.push(SqlValue::Text(direct_user_fts_query.clone()));
+            }
+            (sql, params)
+        }
         (
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
             CandidateChannel::Phrase | CandidateChannel::Entity | CandidateChannel::Lexical,
-        ) => (
-            ROOT_OCCURRENCE_FTS_QUERY,
-            vec![
+        ) => {
+            let sql = if direct_user_filter {
+                ROOT_DIRECT_USER_OCCURRENCE_FTS_QUERY
+            } else {
+                ROOT_OCCURRENCE_FTS_QUERY
+            };
+            let mut params = vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
@@ -463,8 +485,15 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(item_cap),
                 SqlValue::Integer(stable_cap),
                 SqlValue::Integer(limit),
-            ],
-        ),
+                direct_user,
+                filter_start,
+                filter_end,
+            ];
+            if direct_user_filter {
+                params.push(SqlValue::Text(direct_user_fts_query));
+            }
+            (sql, params)
+        }
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Time) => {
             let (start, end) = iso_day_bounds(&clause.value)?;
             (
@@ -535,9 +564,13 @@ pub(super) async fn query_candidate_clause(
         (
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
             CandidateChannel::Span | CandidateChannel::Burst,
-        ) => (
-            ROOT_DERIVED_CANDIDATE_QUERY,
-            vec![
+        ) => {
+            let sql = if direct_user_filter {
+                ROOT_DIRECT_USER_DERIVED_CANDIDATE_QUERY
+            } else {
+                ROOT_DERIVED_CANDIDATE_QUERY
+            };
+            let mut params = vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
@@ -552,8 +585,13 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(limit),
-            ],
-        ),
+            ];
+            if direct_user_filter {
+                params.push(filter_start);
+                params.push(filter_end);
+            }
+            (sql, params)
+        }
         (TemporalRetrievalScope::Session(session_id), CandidateChannel::ExactMessage) => (
             EXACT_CANDIDATE_QUERY,
             vec![
