@@ -1,5 +1,7 @@
 use crate::support::*;
+use sha2::{Digest, Sha256};
 use tracedecay_domain::SessionId;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 #[path = "session_reflector/automatic_fact_receipts.rs"]
 mod automatic_fact_receipts;
@@ -1723,7 +1725,19 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());
     assert!(records[0].input_hash.is_some());
-    assert_eq!(records[0].proposed_ops.as_ref(), Some(&output));
+    let expected_sha256 = encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(serde_json::to_vec(&output).unwrap()),
+    );
+    assert_eq!(
+        records[0].proposed_ops.as_ref(),
+        Some(&json!({
+            "schema_version": 1,
+            "expected_field": "facts",
+            "output_sha256": expected_sha256,
+            "output_kind": "object",
+        }))
+    );
     assert!(records[0].error.as_deref().is_some_and(|error| {
         error.contains("session reflector output must include a facts array")
     }));
