@@ -1,8 +1,11 @@
 use super::*;
 
-use tracedecay_domain::EdgeAuthorityV1;
+use std::path::{Component, Path, PathBuf};
 
-use crate::chunks::{CROSS_FILE_REFERENCE_BLOCKLIST, relation_target_kind_is_compatible};
+use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
+use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1};
+
+use crate::chunks::relation_target_kind_is_compatible;
 use crate::lineage::LineageSymbolRecordV1;
 
 pub(crate) struct StagedGenerationV1 {
@@ -227,12 +230,10 @@ where
 /// derived; incremental generations re-run it over their full carried +
 /// re-extracted file set, so an edge disappears with either endpoint.
 ///
-/// Binding is deliberately conservative, mirroring the same-file binder:
-/// a reference binds only when exactly one kind-compatible symbol matches
-/// its simple name across the generation, and never when its own file also
-/// defines a compatible candidate (local ambiguity or suppression owns those).
-/// Everything else stays truthfully unresolved. Bound edges carry the
-/// `NameResolved` authority class, not `SyntaxExact`.
+/// Binding requires a qualified reference or an exact parser-attested,
+/// project-relative import, plus exactly one kind-compatible symbol. Other
+/// bare names have no cross-file authority and stay unresolved. Bound edges
+/// carry the `NameResolved` authority class, not `SyntaxExact`.
 fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
@@ -249,11 +250,19 @@ where
     let mut edges = Vec::new();
     for (index, file) in files.iter().enumerate() {
         for reference in &file.as_ref().artifacts.unresolved_references {
-            let simple_name = reference
-                .reference_name
-                .rsplit("::")
-                .next()
+            let import = if reference.reference_name.contains("::") {
+                None
+            } else {
+                unique_project_import(file.as_ref(), &reference.reference_name, reference.kind)
+            };
+            if !reference.reference_name.contains("::") && import.is_none() {
+                continue;
+            }
+            let simple_name = import
+                .and_then(|binding| binding.imported_name.as_deref())
+                .or_else(|| reference.reference_name.rsplit("::").next())
                 .unwrap_or(reference.reference_name.as_str());
+            let crate_qualified = reference.reference_name.strip_prefix("crate::");
             // Retention already narrows names, but carried artifacts outlive
             // policy revisions; the blocklist is a resolution rule, so apply
             // it to every retained reference regardless of when it was sealed.
@@ -263,8 +272,40 @@ where
             let Some(candidates) = by_simple_name.get(simple_name) else {
                 continue;
             };
-            let mut compatible = candidates.iter().filter(|(_, symbol)| {
-                relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+            let source_path = &file.as_ref().authority.logical_path;
+            let mut compatible = candidates.iter().filter(|(candidate_index, symbol)| {
+                files[*candidate_index].as_ref().extraction.language
+                    == file.as_ref().extraction.language
+                    && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                    && import.map_or_else(
+                        || {
+                            crate_qualified.map_or_else(
+                                || {
+                                    file_qualified_name_matches(
+                                        &reference.reference_name,
+                                        &files[*candidate_index].as_ref().authority.logical_path,
+                                        &symbol.qualified_name,
+                                    )
+                                },
+                                |qualified| {
+                                    rust_crate_qualified_name_matches(
+                                        qualified,
+                                        source_path,
+                                        &files[*candidate_index].as_ref().authority.logical_path,
+                                        &symbol.qualified_name,
+                                    )
+                                },
+                            )
+                        },
+                        |binding| {
+                            project_import_matches(
+                                binding,
+                                source_path,
+                                &files[*candidate_index].as_ref().authority.logical_path,
+                                &symbol.qualified_name,
+                            )
+                        },
+                    )
             });
             let Some((first_index, target)) = compatible.next() else {
                 continue;
@@ -284,4 +325,232 @@ where
     edges.sort_by(edge_order);
     edges.dedup();
     edges
+}
+
+fn unique_project_import<'a>(
+    file: &'a FileGenerationArtifactsV1,
+    local_name: &str,
+    relation: RelationEdgeKindV1,
+) -> Option<&'a CodeIndexImportEvidenceV1> {
+    let mut matches = file.artifacts.imports.iter().filter(|binding| {
+        binding.module_kind == ImportModuleKindV1::ProjectRelative
+            && binding.local_name.as_deref() == Some(local_name)
+            && match relation {
+                RelationEdgeKindV1::Calls => binding.namespace == ImportNamespaceV1::Value,
+                RelationEdgeKindV1::Implements
+                | RelationEdgeKindV1::Extends
+                | RelationEdgeKindV1::TypeOf => binding.namespace == ImportNamespaceV1::Type,
+                _ => true,
+            }
+    });
+    let binding = matches.next()?;
+    matches.next().is_none().then_some(binding)
+}
+
+fn project_import_matches(
+    binding: &CodeIndexImportEvidenceV1,
+    source_path: &str,
+    target_path: &str,
+    target_qualified_name: &str,
+) -> bool {
+    if let Some(module) = binding.module_specifier.strip_prefix("crate::") {
+        let Some(imported_name) = binding.imported_name.as_deref() else {
+            return false;
+        };
+        let qualified = format!("{module}::{imported_name}");
+        return rust_crate_qualified_name_matches(
+            &qualified,
+            source_path,
+            target_path,
+            target_qualified_name,
+        );
+    }
+    let Some(parent) = Path::new(&binding.logical_path).parent() else {
+        return false;
+    };
+    let Some(module) = normalize_project_path(&parent.join(&binding.module_specifier)) else {
+        return false;
+    };
+    let target = Path::new(target_path);
+    module_file_matches(&module, target)
+        || (target.parent() == Some(module.as_path())
+            && target.file_stem().is_some_and(|stem| stem == "index"))
+}
+
+fn module_file_matches(module: &Path, target: &Path) -> bool {
+    if target == module {
+        return true;
+    }
+    let same_stem = target.parent() == module.parent() && target.file_stem() == module.file_stem();
+    if !same_stem {
+        return false;
+    }
+    match module.extension().and_then(|extension| extension.to_str()) {
+        None => true,
+        Some("js" | "jsx" | "mjs" | "cjs") => target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts")),
+        Some(_) => false,
+    }
+}
+
+fn normalize_project_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir if normalized.pop() => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+fn file_qualified_name_matches(
+    reference_path: &str,
+    target_path: &str,
+    target_qualified_name: &str,
+) -> bool {
+    let Some(symbol_path) = target_qualified_name
+        .strip_prefix(target_path)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    let Some(file_stem) = target_path
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.rsplit_once('.').map(|(stem, _)| stem))
+    else {
+        return false;
+    };
+    reference_path
+        .strip_prefix(file_stem)
+        .and_then(|path| path.strip_prefix("::"))
+        == Some(symbol_path)
+}
+
+/// Map an extracted Rust symbol back to the path used by a `crate::...`
+/// reference. Standard Cargo source roots scope the match, so equal module
+/// paths in sibling workspace crates cannot cross-bind.
+fn rust_crate_qualified_name_matches(
+    reference_path: &str,
+    source_path: &str,
+    target_path: &str,
+    target_qualified_name: &str,
+) -> bool {
+    let Some(source_root) = rust_source_root(source_path) else {
+        return false;
+    };
+    if rust_source_root(target_path) != Some(source_root) {
+        return false;
+    }
+    let Some(symbol_path) = target_qualified_name
+        .strip_prefix(target_path)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    let Some(relative_file) = target_path
+        .strip_prefix(source_root)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some(source_file) = source_path
+        .strip_prefix(source_root)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        return false;
+    };
+    if source_file.starts_with("bin/") || relative_file.starts_with("bin/") {
+        return false;
+    }
+    if matches!(
+        (source_file, relative_file),
+        ("lib.rs", "main.rs") | ("main.rs", "lib.rs")
+    ) {
+        return false;
+    }
+    let module = match relative_file {
+        "lib.rs" | "main.rs" => "",
+        path if path.ends_with("/mod.rs") => path.strip_suffix("/mod.rs").unwrap_or_default(),
+        path if path.ends_with(".rs") => path.strip_suffix(".rs").unwrap_or_default(),
+        _ => return false,
+    };
+    if module.is_empty() {
+        reference_path == symbol_path
+    } else {
+        reference_path == format!("{}::{symbol_path}", module.replace('/', "::"))
+    }
+}
+
+fn rust_source_root(path: &str) -> Option<&str> {
+    if path.starts_with("src/") {
+        return Some("src");
+    }
+    let marker = path.rfind("/src/")?;
+    Some(&path[..marker + "/src".len()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_qualified_name_matches, rust_crate_qualified_name_matches};
+    use tracedecay_code_extraction::{LanguageExtractor, RustExtractor};
+
+    #[test]
+    fn rust_crate_qualified_names_stay_inside_their_cargo_source_root() {
+        let call = RustExtractor.extract(
+            "src/alpha/mod.rs",
+            "pub fn run() -> i32 { crate::beta::run() }",
+        );
+        let target = RustExtractor.extract("src/beta/mod.rs", "pub fn run() -> i32 { 1 }");
+        assert!(
+            call.unresolved_refs
+                .iter()
+                .any(|reference| reference.reference_name == "crate::beta::run")
+        );
+        assert!(
+            target
+                .nodes
+                .iter()
+                .any(|node| node.qualified_name == "src/beta/mod.rs::run")
+        );
+        assert!(rust_crate_qualified_name_matches(
+            "outer::beta::run",
+            "src/alpha/mod.rs",
+            "src/outer/beta/mod.rs",
+            "src/outer/beta/mod.rs::run",
+        ));
+        assert!(!rust_crate_qualified_name_matches(
+            "beta::run",
+            "crates/one/src/alpha/mod.rs",
+            "crates/two/src/beta/mod.rs",
+            "crates/two/src/beta/mod.rs::run",
+        ));
+        assert!(!rust_crate_qualified_name_matches(
+            "beta::run",
+            "src/bin/tool.rs",
+            "src/beta/mod.rs",
+            "src/beta/mod.rs::run",
+        ));
+        assert!(!rust_crate_qualified_name_matches(
+            "run",
+            "src/main.rs",
+            "src/lib.rs",
+            "src/lib.rs::run",
+        ));
+        assert!(file_qualified_name_matches(
+            "right::Base",
+            "src/right.ts",
+            "src/right.ts::Base",
+        ));
+        assert!(!file_qualified_name_matches(
+            "other::Base",
+            "src/right.ts",
+            "src/right.ts::Base",
+        ));
+    }
 }

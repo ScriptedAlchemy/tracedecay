@@ -7,13 +7,21 @@ use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
+};
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
-    Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
+    UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Rust source files using tree-sitter.
 pub struct RustExtractor;
+
+#[derive(Default)]
+struct ShadowedCallNames {
+    names: Vec<String>,
+}
 
 /// Internal state used during AST traversal.
 ///
@@ -25,6 +33,7 @@ struct ExtractionState<'s> {
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
+    imports: Vec<ExtractedImportEvidenceV1>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
@@ -43,6 +52,7 @@ impl<'s> ExtractionState<'s> {
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
+            imports: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes(),
@@ -82,22 +92,26 @@ impl<'s> ExtractionState<'s> {
 impl RustExtractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     pub fn extract(file_path: &str, source: &str) -> ExtractionResult {
+        Self::extract_artifact(file_path, source).result
+    }
+
+    fn extract_artifact(file_path: &str, source: &str) -> ExtractionArtifactV1 {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
                 let start = Instant::now();
                 let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
-                return Self::build_result(state, start);
+                return Self::build_artifact(state, start);
             }
         };
-        Self::extract_tree(
+        Self::extract_tree_artifact(
             file_path,
             source,
             &tree,
             crate::parsed_extraction::ParsedExtractionScope::FullDocument,
         )
-        .result
+        .artifact
     }
 
     fn extract_tree(
@@ -106,6 +120,15 @@ impl RustExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree_artifact(file_path, source, tree, scope).into_parsed()
+    }
+
+    fn extract_tree_artifact(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
@@ -145,8 +168,8 @@ impl RustExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            Self::build_artifact(state, start),
             scope,
             metrics,
         )
@@ -255,6 +278,7 @@ impl RustExtractor {
         }
 
         Self::extract_call_sites(state, node, &id);
+        Self::suppress_shadowed_calls(state, node, &id);
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
@@ -635,6 +659,34 @@ impl RustExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
+        if node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "source_file")
+            && let Some(argument) = node.child_by_field_name("argument")
+            && argument.kind() == "scoped_identifier"
+        {
+            let specifier = state.node_text(argument).to_owned();
+            if specifier.starts_with("crate::")
+                && let Some((module_specifier, imported_name)) = specifier.rsplit_once("::")
+                && !module_specifier.is_empty()
+                && !imported_name.is_empty()
+            {
+                state.imports.push(ExtractedImportEvidenceV1 {
+                    logical_path: state.file_path.clone(),
+                    module_specifier: module_specifier.to_owned(),
+                    imported_name: Some(imported_name.to_owned()),
+                    local_name: Some(imported_name.to_owned()),
+                    namespace: ImportNamespaceV1::Value,
+                    module_kind: ImportModuleKindV1::ProjectRelative,
+                    span: SourceSpan {
+                        start_byte: argument.start_byte() as u64,
+                        end_byte: argument.end_byte() as u64,
+                    },
+                    start_line: argument.start_position().row as u32,
+                    start_column: argument.start_position().column as u32,
+                });
+            }
+        }
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
 
@@ -1319,6 +1371,78 @@ impl RustExtractor {
         }
     }
 
+    /// Import rows are file-scoped, so a local binding makes the same bare
+    /// call name ambiguous for its whole owning function. Withhold that call
+    /// rather than claiming statement-level resolution the artifact lacks.
+    fn suppress_shadowed_calls(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) {
+        let mut shadows = ShadowedCallNames::default();
+        Self::collect_shadowed_names(state, function, function, &mut shadows);
+        state.unresolved_refs.retain(|reference| {
+            reference.from_node_id != fn_node_id
+                || reference.reference_kind != EdgeKind::Calls
+                || !shadows.names.contains(&reference.reference_name)
+        });
+    }
+
+    fn collect_shadowed_names(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if matches!(
+            node.kind(),
+            "parameter" | "let_declaration" | "for_expression"
+        ) && let Some(pattern) = node.child_by_field_name("pattern")
+        {
+            Self::record_binding_pattern(state, pattern, shadows);
+        }
+        if node.kind() == "closure_expression"
+            && let Some(parameters) = node.child_by_field_name("parameters")
+        {
+            Self::record_binding_pattern(state, parameters, shadows);
+        }
+        if node != function && node.kind() == "function_item" {
+            return;
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::collect_shadowed_names(state, cursor.node(), function, shadows);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn record_binding_pattern(
+        state: &ExtractionState<'_>,
+        pattern: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if pattern.kind() == "identifier" {
+            shadows.names.push(state.node_text(pattern).to_owned());
+            return;
+        }
+        // Only walk the parser's binding field. Destructuring property and
+        // default-value subtrees may add names, deliberately withholding an
+        // ambiguous edge rather than inventing one.
+        let mut cursor = pattern.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::record_binding_pattern(state, cursor.node(), shadows);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
     /// Scan the children of a `token_tree` node (macro argument list) for
     /// function-call patterns: an `identifier` immediately followed by a
     /// `token_tree` sibling is treated as a call.  We also recurse into nested
@@ -1589,14 +1713,17 @@ impl RustExtractor {
         inner.split('(').next().unwrap_or(inner).trim().to_string()
     }
 
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState<'_>, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
+    /// Build the graph and parser-backed import evidence accumulated in one traversal.
+    fn build_artifact(state: ExtractionState<'_>, start: Instant) -> ExtractionArtifactV1 {
+        ExtractionArtifactV1 {
+            result: ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: state.unresolved_refs,
+                errors: state.errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            imports: state.imports,
         }
     }
 }
@@ -1614,6 +1741,10 @@ impl crate::LanguageExtractor for RustExtractor {
         RustExtractor::extract(file_path, source)
     }
 
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        RustExtractor::extract_artifact(file_path, source)
+    }
+
     fn extract_parsed(
         &self,
         file_path: &str,
@@ -1622,5 +1753,15 @@ impl crate::LanguageExtractor for RustExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         RustExtractor::extract_tree(file_path, source, tree, scope)
+    }
+
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        RustExtractor::extract_tree_artifact(file_path, source, tree, scope)
     }
 }

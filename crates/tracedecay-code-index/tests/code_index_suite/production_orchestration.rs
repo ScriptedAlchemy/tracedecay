@@ -34,12 +34,13 @@ use tracedecay_code_index::{
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
+    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, EdgeAuthorityV1,
+    FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, StackNodeId,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -384,6 +385,167 @@ pub(super) fn request_with_source(
     request.repository_parse_identity.tree = Some(id::<TreeId>(tree));
     request.changed_files.insert("src/lib.rs".to_owned());
     request
+}
+
+#[test]
+fn cross_file_edges_require_path_binding_evidence() {
+    let sources = [
+        (
+            "file.binding.model",
+            "dashboard/model.tsx",
+            "typescript",
+            "import { imported } from './target.js';\nexport function str(value: unknown): string { return String(value); }\nexport function local(): string { imported(); return str('x'); }\nexport function shadowed(imported: () => void): void { imported(); }\nexport function locallyShadowed(): void { const imported = () => {}; imported(); }\nexport function arrowShadowed(): void { const run = imported => imported(); run(() => {}); }\nexport function varShadowed(): void { if (true) { var imported = () => {}; } imported(); }\nexport function nestedCapture(): () => void { const imported = () => {}; function inner(): void { imported(); } return inner; }\n",
+        ),
+        (
+            "file.binding.ts-target",
+            "dashboard/target.ts",
+            "typescript",
+            "export function imported() {}\n",
+        ),
+        (
+            "file.binding.caller",
+            "src/caller.rs",
+            "rust",
+            "use crate::target::helper;\npub fn caller(value: &str) { let _ = value; helper(); let _ = crate::target::real(); }\npub fn shadowed(helper: fn()) { helper(); }\npub fn locally_shadowed() { let helper: fn() = || {}; helper(); }\n",
+        ),
+        (
+            "file.binding.target",
+            "src/target.rs",
+            "rust",
+            "pub fn helper() {}\npub fn real() {}\n",
+        ),
+    ];
+    let mut request = request("file.binding.seed", 1_100_000);
+    request.snapshot.files.clear();
+    request.snapshot.sanitization_receipts.clear();
+    request.captured_files.clear();
+    let mut identity = Sha256::new();
+    for (ordinal, (occurrence, path, language, source)) in sources.into_iter().enumerate() {
+        identity.update(path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        request.snapshot.files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: path.to_owned(),
+            language: Some(id::<LanguageId>(language)),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        request
+            .snapshot
+            .sanitization_receipts
+            .push(id::<SanitizationReceiptId>(&format!(
+                "receipt.binding.{ordinal}"
+            )));
+        request.captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+    }
+    request.snapshot.content_identity = content_digest(&identity.finalize());
+
+    let generation = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner")
+    .build_and_publish(request, &ActiveControl)
+    .expect("generation publishes");
+    let occurrence = |qualified_name: &str| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == qualified_name)
+            .unwrap_or_else(|| panic!("missing {qualified_name}"))
+            .occurrence
+            .clone()
+    };
+    let caller = occurrence("src/caller.rs::caller");
+    let helper = occurrence("src/target.rs::helper");
+    let real = occurrence("src/target.rs::real");
+    let imported = occurrence("dashboard/target.ts::imported");
+    let str_helper = occurrence("dashboard/model.tsx::str");
+    let local = occurrence("dashboard/model.tsx::local");
+    let ts_shadowed = occurrence("dashboard/model.tsx::shadowed");
+    let ts_locally_shadowed = occurrence("dashboard/model.tsx::locallyShadowed");
+    let ts_arrow_shadowed = occurrence("dashboard/model.tsx::arrowShadowed");
+    let ts_var_shadowed = occurrence("dashboard/model.tsx::varShadowed");
+    let rust_shadowed = occurrence("src/caller.rs::shadowed");
+    let rust_locally_shadowed = occurrence("src/caller.rs::locally_shadowed");
+    let incoming = |target: &SymbolOccurrenceId| {
+        generation
+            .edges()
+            .iter()
+            .filter(|edge| &edge.to_occurrence == target)
+            .count()
+    };
+
+    assert_eq!(incoming(&str_helper), 1, "only the same-file call is real");
+    assert_eq!(
+        incoming(&helper),
+        1,
+        "the explicit Rust import remains bound"
+    );
+    assert_eq!(incoming(&real), 1, "the qualified Rust path remains bound");
+    assert_eq!(
+        incoming(&imported),
+        1,
+        "only the unshadowed imported call remains bound"
+    );
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == local
+            && edge.to_occurrence == str_helper
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::SyntaxExact
+    }));
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == caller
+            && edge.to_occurrence == helper
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::NameResolved
+    }));
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == caller
+            && edge.to_occurrence == real
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::NameResolved
+    }));
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == local
+            && edge.to_occurrence == imported
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::NameResolved
+    }));
+    assert!(
+        !generation
+            .edges()
+            .iter()
+            .any(|edge| { edge.from_occurrence == ts_shadowed && edge.to_occurrence == imported })
+    );
+    assert!(
+        !generation
+            .edges()
+            .iter()
+            .any(|edge| { edge.from_occurrence == rust_shadowed && edge.to_occurrence == helper })
+    );
+    assert!(!generation.edges().iter().any(|edge| {
+        edge.from_occurrence == ts_locally_shadowed && edge.to_occurrence == imported
+    }));
+    assert!(!generation.edges().iter().any(|edge| {
+        edge.from_occurrence == ts_arrow_shadowed && edge.to_occurrence == imported
+    }));
+    assert!(
+        !generation.edges().iter().any(|edge| {
+            edge.from_occurrence == ts_var_shadowed && edge.to_occurrence == imported
+        })
+    );
+    assert!(!generation.edges().iter().any(|edge| {
+        edge.from_occurrence == rust_locally_shadowed && edge.to_occurrence == helper
+    }));
 }
 
 #[test]
@@ -3007,7 +3169,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                     evidence_buffer_address.set(Some(address));
                 }
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
-                evidence_buffer_capacity.set(buffer.capacity());
+                largest_evidence_read.set(largest_evidence_read.get().max(end - start));
             }
             segment_reads.set(segment_reads.get() + 1);
             Ok(())

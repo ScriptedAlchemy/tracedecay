@@ -104,8 +104,9 @@ impl CodeIndexImportEvidenceV1 {
             ));
         }
 
-        let is_project_relative =
-            self.module_specifier.starts_with("./") || self.module_specifier.starts_with("../");
+        let is_project_relative = self.module_specifier.starts_with("./")
+            || self.module_specifier.starts_with("../")
+            || self.module_specifier.starts_with("crate::");
         let module_kind_is_valid = matches!(
             (self.module_kind, is_project_relative),
             (ImportModuleKindV1::ProjectRelative, true) | (ImportModuleKindV1::BareModule, false)

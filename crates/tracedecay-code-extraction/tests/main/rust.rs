@@ -1,5 +1,4 @@
-use tracedecay_code_extraction::LanguageExtractor;
-use tracedecay_code_extraction::RustExtractor;
+use tracedecay_code_extraction::{ImportModuleKindV1, LanguageExtractor, RustExtractor};
 use tracedecay_domain::*;
 use tree_sitter::Parser;
 
@@ -281,11 +280,13 @@ impl Rect {
 #[test]
 fn test_rust_use_declarations() {
     let source = r#"
+use crate::target::helper;
 use std::collections::HashMap;
 use std::io::{self, Read};
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("imports.rs", source);
+    let artifact = extractor.extract_artifact("imports.rs", source);
+    let result = artifact.result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -294,10 +295,16 @@ use std::io::{self, Read};
         .collect();
     assert_eq!(
         uses.len(),
-        2,
-        "expected 2 use decls, got: {:?}",
+        3,
+        "expected 3 use decls, got: {:?}",
         uses.iter().map(|n| &n.name).collect::<Vec<_>>()
     );
+    assert_eq!(artifact.imports.len(), 1);
+    let import = &artifact.imports[0];
+    assert_eq!(import.module_specifier, "crate::target");
+    assert_eq!(import.imported_name.as_deref(), Some("helper"));
+    assert_eq!(import.local_name.as_deref(), Some("helper"));
+    assert_eq!(import.module_kind, ImportModuleKindV1::ProjectRelative);
 }
 
 #[test]
