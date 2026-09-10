@@ -301,12 +301,12 @@ async fn try_mount(
     project_root: &Path,
     state: &mut ProjectOpenDependentOwnerState,
 ) -> Attempt {
-    if let Some(lsp_session_factory) = state.lsp_session_factory.as_ref() {
+    if let Some(lsp_session_factory) = state.lsp_session_factory.clone() {
         return match register_production_feedback_and_advisory(
             invocation,
             project_root,
             state,
-            Arc::clone(lsp_session_factory),
+            lsp_session_factory,
         )
         .await
         {
