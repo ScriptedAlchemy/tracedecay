@@ -9,8 +9,8 @@ use tracedecay_store::{
     DiagnosticGenerationSupersessionV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
     DiagnosticRecordStateKindV1, SanitizedCleanDiagnosticSnapshotV1,
     diagnostic_evidence_class_name, diagnostic_producer_kind_name, diagnostic_severity_name,
-    diagnostic_state_columns, parse_diagnostic_evidence_class, parse_diagnostic_producer_kind,
-    parse_diagnostic_severity,
+    diagnostic_snapshot_observation_eq, diagnostic_state_columns, parse_diagnostic_evidence_class,
+    parse_diagnostic_producer_kind, parse_diagnostic_severity,
 };
 
 use super::support::{conversion, invalid, u64_to_i64};
@@ -54,7 +54,7 @@ impl DiagnosticExecutor {
                  ORDER BY diagnostic_anchor",
                 params![generation.as_str(), revision],
             )?;
-            if existing == snapshot.records() {
+            if diagnostic_snapshot_observation_eq(&existing, snapshot.records()) {
                 return Ok(());
             } else {
                 revision

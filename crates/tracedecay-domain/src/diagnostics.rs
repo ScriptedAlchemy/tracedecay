@@ -174,9 +174,9 @@ impl DiagnosticRecordStateV1 {
     }
 }
 
-/// One durable, generation-bound diagnostic record. Every field is part of
-/// canonical identity; the
-/// display message remains sanitized product data.
+/// One durable, generation-bound diagnostic record. Its diagnostic payload,
+/// scope, and producer provenance form observation identity; the display
+/// message remains sanitized product data.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationDiagnosticV1 {
@@ -208,13 +208,26 @@ pub struct GenerationDiagnosticV1 {
     pub message_digest: ManifestDigest,
     pub provenance: DiagnosticProvenanceV1,
     pub evidence_class: DiagnosticEvidenceClassV1,
-    /// Collection time for the evidence.
+    /// Time the server first accepted this evidence observation. Compiler
+    /// output does not carry a trustworthy producer capture time, and an exact
+    /// semantic replay retains the first accepted value.
     pub collected_at: UtcMicros,
     /// Current-vs-stale typing; publication is version-monotone.
     pub state: DiagnosticRecordStateV1,
 }
 
 impl GenerationDiagnosticV1 {
+    /// Whether two records carry the same diagnostic observation.
+    ///
+    /// Server collection time is deliberately excluded: retrying identical
+    /// producer content must converge on the first accepted observation rather
+    /// than minting a new publication because its ingestion clock advanced.
+    pub fn same_observation_as(&self, other: &Self) -> bool {
+        let mut normalized = other.clone();
+        normalized.collected_at = self.collected_at;
+        self == &normalized
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         self.diagnostic_anchor.validate()?;
         self.generation_id.validate()?;

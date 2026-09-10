@@ -23,8 +23,9 @@ use tracedecay_store::{
     DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1,
     DiagnosticRecordStateKindV1, DiagnosticStore as DiagnosticStorePort, DiagnosticStoreError,
     DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1, diagnostic_evidence_class_name,
-    diagnostic_producer_kind_name, diagnostic_severity_name, diagnostic_state_columns,
-    parse_diagnostic_evidence_class, parse_diagnostic_producer_kind, parse_diagnostic_severity,
+    diagnostic_producer_kind_name, diagnostic_severity_name, diagnostic_snapshot_observation_eq,
+    diagnostic_state_columns, parse_diagnostic_evidence_class, parse_diagnostic_producer_kind,
+    parse_diagnostic_severity,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -491,7 +492,7 @@ impl<'a> DiagnosticsStore<'a> {
                     ));
                 }
                 let existing = store.current_records(&generation).await?;
-                if existing == records {
+                if diagnostic_snapshot_observation_eq(&existing, &records) {
                     return Ok((0, 0, true, revision));
                 }
                 revision.checked_add(1).ok_or_else(|| {

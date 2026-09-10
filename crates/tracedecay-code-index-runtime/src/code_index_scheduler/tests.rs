@@ -14842,7 +14842,9 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1,
         FeedbackResultId, FeedbackScopeV1, FeedbackTargetV1, ProviderEvaluationStateV1,
     };
-    use tracedecay_domain::{ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan};
+    use tracedecay_domain::{
+        ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan, UtcMicros,
+    };
     use tracedecay_lsp::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure, LspRuntimeFuture};
 
     struct FixedDocument(String);
@@ -14934,6 +14936,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 .expect("analyzer revision"),
             ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned())
                 .expect("configuration revision"),
+            UtcMicros(1_700_000_000_000_000),
         )
         .await
     };
@@ -15166,7 +15169,7 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
         CompilerDiagnosticPublicationOutcomeV1, publish_compiler_diagnostics_through_code_index_v1,
     };
     use tracedecay_application::diagnostics_store::DiagnosticsStore;
-    use tracedecay_domain::ComponentVersion;
+    use tracedecay_domain::{ComponentVersion, UtcMicros};
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let database_root = TempDir::new().expect("database root");
@@ -15198,6 +15201,7 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
             .expect("analyzer revision"),
         ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned())
             .expect("configuration revision"),
+        UtcMicros(1_700_000_000_000_000),
     )
     .await;
     assert_eq!(

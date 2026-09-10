@@ -135,7 +135,6 @@ pub struct CleanGenerationDiagnosticScopeV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeIndexPublicationIdentityV1 {
     generation_id: CodeGenerationId,
-    sealed_at: UtcMicros,
     repository: RepositoryId,
     worktree: Option<WorktreeId>,
     reference: Option<RefId>,
@@ -150,7 +149,6 @@ impl CodeIndexPublicationIdentityV1 {
     #[must_use]
     pub fn new(
         generation_id: CodeGenerationId,
-        sealed_at: UtcMicros,
         repository: RepositoryId,
         worktree: Option<WorktreeId>,
         reference: Option<RefId>,
@@ -159,7 +157,6 @@ impl CodeIndexPublicationIdentityV1 {
     ) -> Self {
         Self {
             generation_id,
-            sealed_at,
             repository,
             worktree,
             reference,
@@ -219,6 +216,7 @@ impl CodeIndexPublicationIdentityV1 {
         &self,
         analyzer_revision: ComponentVersion,
         configuration_revision: ComponentVersion,
+        collected_at: UtcMicros,
     ) -> CleanGenerationDiagnosticScopeV1 {
         CleanGenerationDiagnosticScopeV1 {
             generation_id: self.generation_id.clone(),
@@ -228,10 +226,7 @@ impl CodeIndexPublicationIdentityV1 {
             source_revision: self.source_revision.clone(),
             analyzer_revision,
             configuration_revision,
-            // The snapshot is immutable per code generation. Binding evidence
-            // time to the generation seal makes identical re-publication
-            // converge instead of conflicting on wall-clock invocation time.
-            collected_at: self.sealed_at,
+            collected_at,
         }
     }
 }
@@ -864,6 +859,7 @@ pub async fn publish_compiler_diagnostics_through_code_index_v1(
     parsed: &[crate::diagnose::Diagnostic],
     analyzer_revision: ComponentVersion,
     configuration_revision: ComponentVersion,
+    collected_at: UtcMicros,
 ) -> CompilerDiagnosticPublicationOutcomeV1 {
     let Some(resolver) = resolver else {
         return CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable;
@@ -879,7 +875,7 @@ pub async fn publish_compiler_diagnostics_through_code_index_v1(
     if !parsed.is_empty() && resolved.is_empty() {
         return CompilerDiagnosticPublicationOutcomeV1::NoResolvableDiagnostics { unresolved };
     }
-    let scope = identity.publication_scope(analyzer_revision, configuration_revision);
+    let scope = identity.publication_scope(analyzer_revision, configuration_revision, collected_at);
     let generation = scope.generation_id.clone();
     if let Err(error) = store.ensure_schema().await {
         return CompilerDiagnosticPublicationOutcomeV1::Failed {
@@ -1150,7 +1146,6 @@ mod tests {
     ) -> CodeIndexPublicationIdentityV1 {
         CodeIndexPublicationIdentityV1::new(
             id(generation),
-            UtcMicros(1_700_000_000_000_000),
             id("repository.fixture"),
             Some(id("worktree.fixture")),
             Some(id("ref.main")),
@@ -1209,7 +1204,11 @@ mod tests {
         let store = DiagnosticsStore::new_runtime(&conn);
         store.ensure_schema().await.expect("ensure schema");
 
-        let scope = identity.publication_scope(id("analyzer.v1"), id("config.v1"));
+        let scope = identity.publication_scope(
+            id("analyzer.v1"),
+            id("config.v1"),
+            UtcMicros(1_700_000_000_000_100),
+        );
         let generation = identity.generation_id().clone();
         let report = publish_compiler_diagnostics_v1(&store, scope, &resolved)
             .await
@@ -1270,6 +1269,7 @@ mod tests {
             &[],
             id("analyzer.v1"),
             id("config.no-diagnostics"),
+            UtcMicros(1_700_000_000_000_100),
         )
         .await;
         let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = empty else {
@@ -1285,6 +1285,7 @@ mod tests {
             &parsed,
             id("analyzer.v1"),
             id("config.with-diagnostics"),
+            UtcMicros(1_700_000_000_000_200),
         )
         .await;
         let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = observed else {
@@ -1305,6 +1306,7 @@ mod tests {
             .unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].code, "E0425");
+        assert_eq!(current[0].collected_at, UtcMicros(1_700_000_000_000_200));
         assert_eq!(
             current[0].provenance.configuration_revision.as_str(),
             "config.with-diagnostics"
@@ -1317,6 +1319,7 @@ mod tests {
             &parsed,
             id("analyzer.v1"),
             id("config.with-diagnostics.v2"),
+            UtcMicros(1_700_000_000_000_300),
         )
         .await;
         let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } =
@@ -1336,6 +1339,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].collected_at, UtcMicros(1_700_000_000_000_300));
         assert_eq!(
             latest[0].provenance.configuration_revision.as_str(),
             "config.with-diagnostics.v2"
@@ -1348,6 +1352,7 @@ mod tests {
             &parsed,
             id("analyzer.v1"),
             id("config.with-diagnostics.v2"),
+            UtcMicros(1_700_000_000_000_400),
         )
         .await;
         let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = replay else {
@@ -1355,6 +1360,15 @@ mod tests {
         };
         assert_eq!(report.publication_revision, 3);
         assert_eq!(report.inserted, 0);
+        assert_eq!(
+            store
+                .records_for_generation(resolver.0.generation_id())
+                .await
+                .unwrap()[0]
+                .collected_at,
+            UtcMicros(1_700_000_000_000_300),
+            "exact replay retains the first accepted server observation time"
+        );
     }
 
     #[tokio::test]
@@ -1389,6 +1403,7 @@ mod tests {
                 &parsed,
                 id("analyzer.v1"),
                 id("config.v1"),
+                UtcMicros(1_700_000_000_000_000),
             )
             .await,
             CompilerDiagnosticPublicationOutcomeV1::Published { .. }
@@ -1405,6 +1420,7 @@ mod tests {
             &[],
             id("analyzer.v1"),
             id("config.v1"),
+            UtcMicros(1_700_000_000_000_100),
         )
         .await;
         let CompilerDiagnosticPublicationOutcomeV1::Published {
