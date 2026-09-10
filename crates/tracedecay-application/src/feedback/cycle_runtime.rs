@@ -16,9 +16,10 @@ use tracedecay_contracts::feedback::observations::{
 };
 use tracedecay_contracts::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult,
-    FeedbackCycleService, FeedbackExpandRequestV1, FeedbackImpactPort, FeedbackImpactPortOutcome,
-    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture, FeedbackRuntimeStatePort,
-    FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
+    FeedbackCycleService, FeedbackDiagnosticsReadRequestV1, FeedbackExpandRequestV1,
+    FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
+    FeedbackPortFuture, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    GenerationBoundFeedbackDiagnosticsAdapter,
 };
 use tracedecay_contracts::retrieval::{
     AffectedTestsRequest, AffectedTestsResult, AffectedTestsRetrievalPort, AnchorExpandRequest,
@@ -108,20 +109,30 @@ pub struct FeedbackFindingHandlesV1 {
     pub expansion_handle: Option<String>,
 }
 
+/// Short-lived handles for reads over the completed cycle publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeedbackCycleReadHandlesV1 {
+    pub diagnostics_handle: String,
+    pub list_handle: String,
+}
+
 /// Transport-neutral result retaining reference-only evidence and read handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalFeedbackResultV1 {
     pub execution: FeedbackCycleExecutionResult,
+    pub read_handles: Option<FeedbackCycleReadHandlesV1>,
     pub finding_handles: Vec<FeedbackFindingHandlesV1>,
 }
 
 impl CanonicalFeedbackResultV1 {
     fn new(
         execution: FeedbackCycleExecutionResult,
+        read_handles: Option<FeedbackCycleReadHandlesV1>,
         finding_handles: Vec<FeedbackFindingHandlesV1>,
     ) -> Result<Self, ApplicationContractError> {
         let result = Self {
             execution,
+            read_handles,
             finding_handles,
         };
         result.validate()?;
@@ -146,15 +157,27 @@ impl CanonicalFeedbackResultV1 {
             && (self.execution.dedupe_key.is_some()
                 || self.execution.authority.is_some()
                 || self.execution.publication.is_some()
+                || self.read_handles.is_some()
                 || !self.finding_handles.is_empty())
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "overlay feedback durable output",
             });
         }
-        if self.execution.publication.is_none() && !self.finding_handles.is_empty() {
+        if self.execution.publication.is_none()
+            && (self.read_handles.is_some() || !self.finding_handles.is_empty())
+        {
             return Err(ApplicationContractError::Inconsistent {
-                field: "unpublished feedback expansion handles",
+                field: "unpublished feedback read handles",
+            });
+        }
+        if self.execution.publication.is_some()
+            && self.read_handles.as_ref().is_none_or(|handles| {
+                handles.diagnostics_handle.is_empty() || handles.list_handle.is_empty()
+            })
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "feedback cycle read handles",
             });
         }
         if self.execution.publication.is_some()
@@ -326,7 +349,11 @@ impl FeedbackCycleRuntime {
         let requested_durability = request.input.request.durability();
         let execution = self.service.execute(&context, request).await?;
         crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
-        Ok(self.compose_canonical_result(execution, requested_durability)?)
+        Ok(compose_canonical_result(
+            &self.feedback,
+            execution,
+            requested_durability,
+        )?)
     }
 
     /// Runs one canonical feedback cycle with source-backed advisory findings.
@@ -350,61 +377,7 @@ impl FeedbackCycleRuntime {
             .execute_with_advisory(context, request, advisory)
             .await?;
         crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
-        self.compose_canonical_result(execution, requested_durability)
-    }
-
-    fn compose_canonical_result(
-        &self,
-        execution: FeedbackCycleExecutionResult,
-        requested_durability: FeedbackDurabilityV1,
-    ) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
-        if execution.cycle.durability != requested_durability {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "feedback result durability",
-            });
-        }
-        if execution.cycle.durability != FeedbackDurabilityV1::Durable
-            || execution.publication.is_none()
-        {
-            return CanonicalFeedbackResultV1::new(execution, Vec::new());
-        }
-
-        let observed_at = execution.usage.completed_at;
-        let mut finding_handles = Vec::with_capacity(execution.cycle.findings.len());
-        for finding in &execution.cycle.findings {
-            let get_handle = self
-                .feedback
-                .mint_get(
-                    feedback_handle_request_id("get", &execution, finding)?,
-                    finding.finding_id.clone(),
-                    observed_at,
-                )
-                .map_err(|_| ApplicationContractError::Inconsistent {
-                    field: "feedback get handle authority",
-                })?;
-            let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
-                Some(
-                    self.feedback
-                        .mint_expand(
-                            feedback_handle_request_id("expand", &execution, finding)?,
-                            request,
-                            observed_at,
-                        )
-                        .map_err(|_| ApplicationContractError::Inconsistent {
-                            field: "feedback expansion handle authority",
-                        })?,
-                )
-            } else {
-                None
-            };
-            finding_handles.push(FeedbackFindingHandlesV1 {
-                finding_id: finding.finding_id.clone(),
-                retrieval_anchor_id: finding.retrieval_anchor_id.clone(),
-                get_handle,
-                expansion_handle,
-            });
-        }
-        CanonicalFeedbackResultV1::new(execution, finding_handles)
+        compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 
     fn admits_provider_set(&self, providers: &[DiagnosticProviderIdentity]) -> bool {
@@ -417,6 +390,94 @@ impl FeedbackCycleRuntime {
                     == 1
             })
     }
+}
+
+pub(crate) fn compose_canonical_result(
+    feedback: &FeedbackRuntime,
+    execution: FeedbackCycleExecutionResult,
+    requested_durability: FeedbackDurabilityV1,
+) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
+    if execution.cycle.durability != requested_durability {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "feedback result durability",
+        });
+    }
+    if execution.cycle.durability != FeedbackDurabilityV1::Durable
+        || execution.publication.is_none()
+    {
+        return CanonicalFeedbackResultV1::new(execution, None, Vec::new());
+    }
+
+    let observed_at = execution.usage.completed_at;
+    let read_handles = FeedbackCycleReadHandlesV1 {
+        diagnostics_handle: feedback
+            .mint_diagnostics(
+                feedback_cycle_handle_request_id("diagnostics", &execution)?,
+                FeedbackDiagnosticsReadRequestV1 {
+                    head_commit_id: execution.cycle.scope.head_commit_id.clone(),
+                },
+                observed_at,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "feedback diagnostics handle authority",
+            })?,
+        list_handle: feedback
+            .mint_list(
+                feedback_cycle_handle_request_id("list", &execution)?,
+                Some(execution.cycle.scope.head_commit_id.clone()),
+                100,
+                observed_at,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "feedback list handle authority",
+            })?,
+    };
+    let mut finding_handles = Vec::with_capacity(execution.cycle.findings.len());
+    for finding in &execution.cycle.findings {
+        let get_handle = feedback
+            .mint_get(
+                feedback_handle_request_id("get", &execution, finding)?,
+                finding.finding_id.clone(),
+                observed_at,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "feedback get handle authority",
+            })?;
+        let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
+            Some(
+                feedback
+                    .mint_expand(
+                        feedback_handle_request_id("expand", &execution, finding)?,
+                        request,
+                        observed_at,
+                    )
+                    .map_err(|_| ApplicationContractError::Inconsistent {
+                        field: "feedback expansion handle authority",
+                    })?,
+            )
+        } else {
+            None
+        };
+        finding_handles.push(FeedbackFindingHandlesV1 {
+            finding_id: finding.finding_id.clone(),
+            retrieval_anchor_id: finding.retrieval_anchor_id.clone(),
+            get_handle,
+            expansion_handle,
+        });
+    }
+    CanonicalFeedbackResultV1::new(execution, Some(read_handles), finding_handles)
+}
+
+fn feedback_cycle_handle_request_id(
+    operation: &'static str,
+    execution: &FeedbackCycleExecutionResult,
+) -> Result<String, ApplicationContractError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.feedback.canonical-cycle-handle-request.v1",
+        operation,
+        &execution.cycle.result_id,
+    ))?;
+    Ok(format!("feedback.{operation}.{}", digest.as_str()))
 }
 
 fn feedback_handle_request_id(
