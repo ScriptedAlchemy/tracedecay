@@ -236,7 +236,7 @@ impl WorkGraphVersionEntryV1 {
                 .as_str()
                 .to_owned(),
         )
-            .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
+        .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
     }
 }
 

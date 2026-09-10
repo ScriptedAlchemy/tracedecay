@@ -19,5 +19,4 @@ pub mod observability_runtime_contract;
 mod registered_scope_route;
 mod semantic_graph_deadline_authority;
 mod work_service_composition;
-mod work_topology_contract;
 mod workflow_topology_contract;
