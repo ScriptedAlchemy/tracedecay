@@ -61,7 +61,7 @@ pub async fn handle_complexity(
                     "name": metadata.simple_name,
                     "kind": metadata.kind,
                     "file": symbol.path,
-                    "line": metadata.start_line,
+                    "line": user_line(metadata.start_line),
                     "lines": metadata.line_span,
                     "cyclomatic_complexity": complexity.map(|complexity| complexity.branches.saturating_add(1)),
                     "branches": complexity.map(|complexity| complexity.branches),
@@ -183,7 +183,7 @@ pub async fn handle_doc_coverage(
             "id": symbol.occurrence.as_str(),
             "name": symbol.metadata.simple_name,
             "kind": symbol.metadata.kind,
-            "line": symbol.metadata.start_line.saturating_add(1),
+            "line": user_line(symbol.metadata.start_line),
             "signature": symbol.metadata.signature,
         }));
     }
@@ -283,7 +283,7 @@ pub async fn handle_god_class(
                     "name": symbol.metadata.simple_name,
                     "kind": symbol.metadata.kind,
                     "file": symbol.path,
-                    "line": symbol.metadata.start_line,
+                    "line": user_line(symbol.metadata.start_line),
                     "methods": methods,
                     "fields": fields,
                     "total_members": methods.saturating_add(fields),
