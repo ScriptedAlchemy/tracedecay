@@ -1624,7 +1624,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(configuration.len(), 13);
+        // 11 since `6a669e47a` retired `configuration_explain` and
+        // `2b3eab89e` retired `configuration_write_credential`. The count is
+        // pinned so adding or removing a configuration operation has to be a
+        // deliberate diff here, not a silent change in generated SDK surface.
+        assert_eq!(configuration.len(), 11);
         assert!(unavailable.iter().all(|operation| {
             !operation
                 .operation_id
