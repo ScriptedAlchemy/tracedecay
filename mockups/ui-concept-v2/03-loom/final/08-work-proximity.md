@@ -5,7 +5,7 @@ design_status: current
 # Loom 08 — Work proximity
 
 - **Image:** [Generated concept](08-work-proximity.png)
-- **Interactive concept:** [Open prototype](08-work-proximity.html)
+- **Interactive concept:** [Open the existing concept application](../../app/README.md)
 - **Boundary:** CONCEPT / SYNTHETIC DATA. Neither artifact establishes production availability.
 
 ## User job
@@ -66,19 +66,15 @@ reduced motion, a readable exact encounter list, and reflow at 200% zoom.
 Synthetic examples remain visibly labeled; recorded mode must disclose unavailable
 evidence instead of substituting this demonstration.
 
-The dependency-free HTML is a bounded interaction prototype: 32 illustrative
-agents, two encounters, temporal-window controls and local evidence detail.
-Smooth authored layout knots give each strand a recognizable path; ordinary
-curve crossings carry no relationship claim. Only labeled encounter intervals
-carry proximity evidence. Event glyphs and minimap strands share the same path
-coordinates, including when replay revokes an encounter's local bend.
-Semantic aggregation, backend pivots and live observation ingestion remain
-production work; the execution-plate control opens the existing design reference.
-Run its focused browser journey with the dashboard's existing Playwright install:
+The implementation belongs to the imported application's existing Loom components
+under `app/src/loom/`. It reuses the retained event/session identities, evidence
+workspaces and source modes. The isolated HTML study is superseded, not a second
+application entry point. Existing execution, replay and selected-event states stay
+available alongside proximity. Ordinary curve crossings carry no relationship
+claim; only labeled encounter intervals carry proximity evidence.
+
+Run the focused journey from `mockups/ui-concept-v2/app` with the app server running:
 
 ```sh
-node mockups/ui-concept-v2/03-loom/final/08-work-proximity.check.mjs
+BASE_URL=http://127.0.0.1:5195 node qa/loom-proximity.mjs
 ```
-
-The check exercises pointer and keyboard selection, backward replay revocation
-of detail/markers/bends, minimap alignment and narrow-viewport reflow.

@@ -1,5 +1,21 @@
 # TraceDecay UI concept V2
 
+## Run the existing concept app
+
+The full former `td-brain-demo` application now lives in [app/](app/README.md),
+including all fourteen workspaces, existing interactions and recorded exports.
+Continue development there using these reconciled briefs. This directory is the
+single maintained home for the concept application and its design authority.
+
+```sh
+cd mockups/ui-concept-v2/app
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5195/`. [Current application screenshots](screenshots/README.md)
+are rendered UI; [the gallery](GALLERY.md) contains design references.
+
 Jayse Hansen / Cantina Avengers FUI grammar applied to TraceDecay's fourteen
 dashboard workspaces. Borrow the grammar—night glass, hairline frames, amber
 attention, cyan signal, and measured fields—without copying Marvel marks.
@@ -24,7 +40,7 @@ Do not use these images as `dashboard/audit-baselines/`.
   superseded/rejected concept-only assets.
 - [GALLERY.md](GALLERY.md) renders every authoritative final plate in one
   reviewable sequence.
-- [GAPS.md](GAPS.md) separates accepted concepts from standalone demonstration
+- [GAPS.md](GAPS.md) separates accepted concepts from concept-app demonstration
   coverage and production evidence gaps.
 - Each `<NN>-<workspace>/final/README.md` is that workspace's authoritative
   final state manifest and shared product/interaction contract.
@@ -38,10 +54,10 @@ shared authority. When a proposed plate exposes behavior the shipping product
 does not, label that path unavailable or omit the control; a concept image
 cannot supply the missing integration.
 
-The external [standalone interaction reference](https://github.com/ScriptedAlchemy/td-brain-demo)
-exercises many concepts over checked-in snapshots and labeled fixtures. It is
-interaction evidence, not production availability or a replacement authority
-for the briefs in this directory.
+The [imported interaction application](app/README.md) exercises the concepts over
+checked-in snapshots and labeled fixtures. Its source is maintained here; the
+original external repository remains historical provenance. Demonstration data
+is not production availability.
 
 ## Layout and lifecycle
 

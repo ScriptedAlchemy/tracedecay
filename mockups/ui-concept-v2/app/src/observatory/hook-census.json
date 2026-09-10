@@ -1,0 +1,89 @@
+{
+  "source": "profile-pack/hook_analytics.jsonl",
+  "bytes": 7435611,
+  "lines": 21992,
+  "parseFailures": 0,
+  "coverage": "file present \u00b7 host_measured events \u00b7 not a Doctor inspection",
+  "events": [
+    {
+      "name": "hook_invoked",
+      "count": 11036
+    },
+    {
+      "name": "hook_completed",
+      "count": 10612
+    },
+    {
+      "name": "workspace_status",
+      "count": 344
+    }
+  ],
+  "hookNames": [
+    {
+      "name": "PostToolUse",
+      "count": 19990
+    },
+    {
+      "name": "UserPromptSubmit",
+      "count": 1112
+    },
+    {
+      "name": "SessionStart",
+      "count": 430
+    },
+    {
+      "name": "PostCompact",
+      "count": 104
+    },
+    {
+      "name": "Stop",
+      "count": 12
+    }
+  ],
+  "dispositionStatus": [
+    {
+      "name": "degraded",
+      "count": 5804
+    },
+    {
+      "name": "unavailable",
+      "count": 2870
+    },
+    {
+      "name": "supported",
+      "count": 1886
+    },
+    {
+      "name": "unknown",
+      "count": 52
+    }
+  ],
+  "reasonCodes": [
+    {
+      "name": "hook_v2_catchup_required",
+      "count": 5804
+    },
+    {
+      "name": "daemon_unavailable",
+      "count": 2870
+    },
+    {
+      "name": "hook_v2_accepted",
+      "count": 1886
+    },
+    {
+      "name": "disposition_absent",
+      "count": 52
+    }
+  ],
+  "agents": [
+    {
+      "name": "codex",
+      "count": 21822
+    },
+    {
+      "name": "claude",
+      "count": 170
+    }
+  ]
+}

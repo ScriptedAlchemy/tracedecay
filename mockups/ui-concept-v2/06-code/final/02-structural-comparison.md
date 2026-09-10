@@ -32,7 +32,7 @@ exists to reveal.
 ## Production authorities and remaining boundary
 
 Git supplies revision and change identity; the Code index supplies structural
-relationships and coverage. The standalone atlas already demonstrates churn,
+relationships and coverage. The imported atlas already demonstrates churn,
 exact duplicates, and one forwarding comparison. A general revision comparison,
 semantic duplication and dead-facade interpretation require additional measured
 evidence. The image's illustrative 12-to-4 label is not proof of those features.

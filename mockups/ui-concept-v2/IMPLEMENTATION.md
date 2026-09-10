@@ -14,11 +14,12 @@ browser product. It does not authorize loading the concept PNGs into the
 shipping application, reproducing their sample values, or presenting a fixture
 as production evidence.
 
-The external [standalone interaction reference](https://github.com/ScriptedAlchemy/td-brain-demo)
-demonstrates authored and recorded interaction states. Its local lookbook also
-helps identify production joins still needed, but neither the fixture data nor
-the standalone implementation overrides this product authority or proves V2
-runtime availability.
+The [concept application](app/README.md) is the complete imported React/Rsbuild
+implementation formerly maintained in `td-brain-demo`. Its existing screens,
+interactions, fixtures and recorded data remain the starting point for refinements.
+The briefs in this folder own design intent; apply changes to that app rather than
+creating independent replacement screen applications. Neither fixture behavior nor
+recorded snapshot coverage proves live production availability.
 
 The implementation is deliberately hybrid:
 

@@ -19,7 +19,7 @@ All pictured data is **CONCEPT / SYNTHETIC DATA**. The plates specify product be
 | 05 | [Selected event evidence](05-selected-event-evidence.png) | [Product brief](05-selected-event-evidence.md) | Inspect exact hook, transcript, task, code, and causal-neighborhood evidence in a roomy workspace. |
 | 06 | [Feedback continuation](06-feedback-continuation.png) | [Product brief](06-feedback-continuation.md) | Attach local TraceDecay feedback and see later work that acknowledges, acts on, or contradicts it. |
 | 07 | [Evidence gaps](07-evidence-gaps.png) | [Product brief](07-evidence-gaps.md) | Distinguish ambiguity, staleness, missing data, and unavailable private reasoning without invention. |
-| 08 | [Work proximity](08-work-proximity.png) | [Product brief](08-work-proximity.md) · [Interactive concept](08-work-proximity.html) | Scan concurrent work proximity, then inspect one exact pair without replacing the execution weave. |
+| 08 | [Work proximity](08-work-proximity.png) | [Product brief](08-work-proximity.md) · [Concept application](../../app/README.md) | Scan concurrent work proximity, then inspect one exact pair without replacing the execution weave. |
 
 ## Shared interaction contract
 
