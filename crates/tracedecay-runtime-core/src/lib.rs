@@ -104,6 +104,7 @@ pub mod git;
 pub mod git_discovery;
 pub mod git_repository;
 pub mod lifecycle_lease;
+pub mod logging;
 pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;

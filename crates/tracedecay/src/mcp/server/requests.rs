@@ -143,6 +143,11 @@ struct ApplicationSurfaceDispatch<'a> {
 fn requires_application_invocation_executor(tool_name: &str) -> bool {
     ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || crate::mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
+        || crate::mcp::tools::binding::workflow_operation_for_tool(tool_name).is_some()
+        || matches!(
+            crate::mcp::tools::binding::dispatch_group_for_tool(tool_name),
+            Some(crate::mcp::tools::binding::McpToolDispatchGroup::MultiRoot)
+        )
         || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
 }
 
@@ -1920,11 +1925,29 @@ mod git_read_control_tests {
 
     #[test]
     fn all_retained_tools_request_the_daemon_invocation_executor() {
+        for definition in tracedecay_mcp::get_tool_definitions().expect("tool definitions") {
+            if crate::mcp::tools::binding::dispatch_group_for_tool(&definition.name)
+                == Some(crate::mcp::tools::binding::McpToolDispatchGroup::MultiRoot)
+            {
+                assert!(
+                    requires_application_invocation_executor(&definition.name),
+                    "{} must use the mounted multi-root owner",
+                    definition.name,
+                );
+            }
+        }
         for operation in tracedecay_contracts::RetainedSurfaceOperation::CALLABLE {
             let tool_name = format!("tracedecay_{}", operation.as_str());
             assert!(
                 requires_application_invocation_executor(&tool_name),
                 "{tool_name} must use the mounted retained owner",
+            );
+        }
+        for operation in tracedecay_api::WorkflowOperation::ALL {
+            let tool_name = format!("tracedecay_workflow_{}", operation.operation_key());
+            assert!(
+                requires_application_invocation_executor(&tool_name),
+                "{tool_name} must use the mounted Workflow owner",
             );
         }
     }

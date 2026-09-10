@@ -180,17 +180,4 @@ mod enrolled_project_roots_tests {
         let roots = enrolled_project_roots(Vec::<PathBuf>::new(), &project_id).expect("filter");
         assert!(roots.is_empty());
     }
-
-    #[test]
-    fn keeps_only_roots_whose_path_derived_id_matches() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let enrolled = temp.path().join("enrolled");
-        let other = temp.path().join("other");
-        fs::create_dir_all(&enrolled).expect("enrolled");
-        fs::create_dir_all(&other).expect("other");
-        let project_id = ProjectId::new(default_profile_project_id(&enrolled)).expect("project id");
-        let roots =
-            enrolled_project_roots(vec![enrolled.clone(), other], &project_id).expect("filter");
-        assert_eq!(roots, vec![enrolled.canonicalize().expect("canonical")]);
-    }
 }

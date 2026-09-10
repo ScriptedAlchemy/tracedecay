@@ -2,8 +2,8 @@
 
 ## Retained authority
 
-- 35 reviewed PNG plates under the fourteen screen-specific `final/` folders.
-- 35 same-stem product briefs and fourteen `final/README.md` manifests.
+- 37 reviewed PNG plates under the fourteen screen-specific `final/` folders.
+- 37 same-stem product briefs and fourteen `final/README.md` manifests.
 - The deterministic PR #743 HTML source beside its rendered plate.
 - [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md), [NAVIGATION.md](NAVIGATION.md), [INTERACTION-STATES.md](INTERACTION-STATES.md), and [IMPLEMENTATION.md](IMPLEMENTATION.md).
 - The screen-level READMEs, which route implementation readers to the final manifests and record production authority boundaries.
@@ -32,3 +32,14 @@ The internal Task 2 SDD report was also removed because it was process-only, was
 ## Cleanup rule
 
 No unrelated source, production dashboard code, plan authority, or historical material referenced by a final brief was removed. Future concept revisions must replace a final plate and its same-stem brief together, update the owning manifest, and record any subsequent cleanup here.
+
+## Concept application consolidation
+
+The complete tracked application, recorded data, existing checks and final
+screenshots from `td-brain-demo` moved into this folder. `app/` is the application;
+`screenshots/` contains its captures; the numbered `final/` directories remain the
+single design-plate and brief authority. No duplicate lookbook, nested Git history,
+old comparison galleries, dependency directory or generated build is committed.
+The original repository is retained as historical provenance, not another active
+implementation target. The isolated Loom HTML study is superseded by the imported
+app's Loom implementation; its generated plate and brief remain references.

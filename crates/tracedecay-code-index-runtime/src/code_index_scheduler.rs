@@ -654,6 +654,13 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// The canonical source-hint authority plus the exact pre-capture epoch
     /// used by a retained rebuild. Ordinary publication leaves this absent.
     reconcile_publication_fence: Option<(Arc<Mutex<PendingHintsV1>>, DaemonCodeIndexControlV1)>,
+    /// The owning worktree's shutdown flag. An initial build has no fence, so
+    /// this is the only cancellation a first seal can observe.
+    shutdown_signal: Option<Arc<AtomicBool>>,
+    /// Test-only: observes every durably published file segment so a test can
+    /// retire the shutdown signal between two segments of one seal.
+    #[cfg(test)]
+    seal_segment_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Last generation handed to `publish_atomically`. A transient store
     /// failure must not drop it: the next undecoded retry republishes this
     /// candidate instead of extracting the whole worktree again.
@@ -941,6 +948,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             )),
             undecoded_active_expectation: None,
             reconcile_publication_fence: None,
+            shutdown_signal: None,
+            #[cfg(test)]
+            seal_segment_observer: None,
             unpublished_candidate: Arc::new(Mutex::new(None)),
         })
     }
@@ -962,6 +972,44 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Self {
         self.reconcile_publication_fence = Some((hints, control));
         self
+    }
+
+    fn with_shutdown_signal(mut self, shutting_down: Arc<AtomicBool>) -> Self {
+        self.shutdown_signal = Some(shutting_down);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_seal_segment_observer_for_test(
+        mut self,
+        observer: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        self.seal_segment_observer = Some(observer);
+        self
+    }
+
+    /// The seal encodes and durably writes one segment per file, so a
+    /// generation-sized worktree spends seconds here with no other
+    /// cancellation point. Daemon shutdown retires the worktree's shutdown
+    /// signal and a retained rebuild's supersession retires its fence;
+    /// checking both before every segment keeps the blocking reconcile pass
+    /// joinable inside the shutdown budget instead of forcing the coordinator
+    /// to abandon it and the runtime teardown to wait for it again.
+    fn seal_checkpoint(&self) -> Result<(), CodeIndexProductionErrorV1> {
+        if self
+            .shutdown_signal
+            .as_ref()
+            .is_some_and(|shutting_down| shutting_down.load(Ordering::Acquire))
+            || self
+                .reconcile_publication_fence
+                .as_ref()
+                .is_some_and(|(_, control)| control.is_cancelled())
+        {
+            return Err(CodeIndexProductionErrorV1::Interrupted(
+                crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+            ));
+        }
+        Ok(())
     }
 
     fn retained_history(&self) -> Self {
@@ -2293,6 +2341,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             generation.encode_partitioned_sealed_with_parent(
                 parent_manifest_bytes.as_deref(),
                 |publication| {
+                    self.seal_checkpoint()?;
                     match publication {
                         SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                             let segment_size = u64::try_from(bytes.len()).map_err(|_| {
@@ -2300,10 +2349,17 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                                     "sealed segment length exceeds u64".to_owned(),
                                 )
                             })?;
-                            self.publish_segment_durable(digest, bytes)
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(error.to_string())
-                                })?;
+                            hotpath::measure_block!(
+                                "code_index.generation.publish.segment_durable",
+                                self.publish_segment_durable(digest, bytes)
+                            )
+                            .map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(error.to_string())
+                            })?;
+                            #[cfg(test)]
+                            if let Some(observer) = self.seal_segment_observer.as_ref() {
+                                observer();
+                            }
                             referenced_segment_bytes =
                                 referenced_segment_bytes.saturating_add(segment_size);
                             self.seal_encoded_segment_bytes
@@ -2314,11 +2370,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             page_digest,
                             bytes,
                         } => {
-                            evidence_pack
-                                .append_page(page_ordinal, page_digest, bytes)
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(error.to_string())
-                                })?;
+                            hotpath::measure_block!(
+                                "code_index.generation.publish.evidence_page_append",
+                                evidence_pack.append_page(page_ordinal, page_digest, bytes)
+                            )
+                            .map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(error.to_string())
+                            })?;
                             self.seal_evidence_page_count
                                 .fetch_add(1, Ordering::Relaxed);
                         }
@@ -2327,17 +2385,18 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             segment_size_bytes,
                             page_count,
                         } => {
-                            if evidence_pack
-                                .commit(
+                            if hotpath::measure_block!(
+                                "code_index.generation.publish.evidence_commit",
+                                evidence_pack.commit(
                                     &self.segments_root,
                                     segment_digest,
                                     segment_size_bytes,
                                     page_count,
                                 )
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(error.to_string())
-                                })?
-                            {
+                            )
+                            .map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(error.to_string())
+                            })? {
                                 self.seal_evidence_durable_transaction_count
                                     .fetch_add(1, Ordering::Relaxed);
                             }
@@ -2351,6 +2410,12 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         );
         let manifest_bytes = match manifest_bytes {
             Ok(bytes) => bytes,
+            Err(CodeIndexProductionErrorV1::Interrupted(
+                crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+            )) => {
+                evidence_pack.rollback_unattached(&self.segments_root)?;
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
             Err(error) => {
                 evidence_pack.rollback_unattached(&self.segments_root)?;
                 return Err(Self::unavailable(error));
@@ -5970,11 +6035,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         // freshness probes and sealed-generation decoding belong to the
         // retained background owner after the route is mounted.
         let sanitizer_revision = id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?;
+        let shutting_down = Arc::new(AtomicBool::new(false));
         let publication = DaemonCodeIndexPublicationStoreV1::new(
             &store_root,
             &project_root,
             sanitizer_revision.clone(),
-        )?;
+        )?
+        .with_shutdown_signal(Arc::clone(&shutting_down));
         let production_config = CodeIndexProductionConfigV1 {
             project_id: project_id.clone(),
             repository: repository_id.clone(),
@@ -6029,7 +6096,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             active_snapshot_changed_paths: Mutex::new(None),
             wake,
             epoch,
-            shutting_down: Arc::new(AtomicBool::new(false)),
+            shutting_down,
             reconcile_in_progress: Arc::new(AtomicUsize::new(0)),
             generation_recovery: Arc::new(RwLock::new(None)),
             latest_content_identity,

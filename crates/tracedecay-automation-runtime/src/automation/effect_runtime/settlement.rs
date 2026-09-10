@@ -19,10 +19,10 @@ use tracedecay_contracts::retained_surfaces::{
 };
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, ProblemOwningLayer,
-    RequestContext, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-    RetainedSurfaceOperation, retained_surface_application_operation,
-    retained_surface_execution_problem, retained_surface_outcome_matches_terminal,
-    retained_surface_problem_matches_terminal,
+    RequestAdmission, RequestContext, RetainedSurfaceExecutionContextV1,
+    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
+    retained_surface_application_operation, retained_surface_execution_problem,
+    retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, RunId, UtcMicros};
@@ -498,10 +498,11 @@ pub enum AutomationEffectAdmission {
     PreAdmissionProblem(ApplicationProblemEnvelope),
 }
 
-/// Bounded admission-decision census: every prepared automation effect
-/// settles into exactly one of these outcomes, so a run that never executed
-/// is diagnosable from counters instead of log archaeology.
-fn observe_admission_decision(admission: &AutomationEffectAdmission) {
+/// Bounded admission-decision census: every automation-effect admission,
+/// including a root refusal before prepare, settles into exactly one of
+/// these outcomes, so a run that never executed is diagnosable from
+/// counters instead of log archaeology.
+pub fn observe_admission_decision(admission: &AutomationEffectAdmission) {
     match admission {
         AutomationEffectAdmission::Execute(_) => {
             hotpath::gauge!("daemon.effect_admission.admitted_total").inc(1_u64);
@@ -1210,6 +1211,33 @@ impl AutomationEffectAuthority {
             process_run_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_owned(),
             recovery,
         };
+        // Classification I/O can outlive the admitted snapshot. Recheck the
+        // live cancellation and the usecase clock immediately before the
+        // journal write. `observed_at` stays the pinned admission instant.
+        let live_at = tracedecay_contracts::try_now_micros().map_err(|error| {
+            contract_error(format!(
+                "automation reservation clock is unavailable: {error}"
+            ))
+        })?;
+        let live_admission = context
+            .clone()
+            .with_cancellation(cancellation.context())
+            .admission_at(live_at);
+        if let Some(problem) = match live_admission {
+            RequestAdmission::Admitted => None,
+            RequestAdmission::Cancelled => Some(ApplicationProblem::cancelled_before_admission()),
+            RequestAdmission::TimedOut => Some(ApplicationProblem::timed_out_before_admission()),
+        } {
+            let envelope = ApplicationProblemEnvelope::new(
+                operation.result_contract().clone(),
+                context.request_id().clone(),
+                problem,
+            )
+            .map_err(contract_error)?;
+            let admission = AutomationEffectAdmission::PreAdmissionProblem(envelope);
+            observe_admission_decision(&admission);
+            return Ok(admission);
+        }
         let reserve_path = journal_path.clone();
         let requested = admission.clone();
         let index_root = dashboard_root.clone();

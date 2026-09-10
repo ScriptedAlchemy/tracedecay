@@ -30,8 +30,10 @@ use tracedecay_daemon_service::{
     WorkApplicationInvocationV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_store_runtime::ShutdownStatus;
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod project_invocation;
 
@@ -1087,26 +1089,24 @@ impl DaemonInvocationState {
     }
 
     #[hotpath::measure(label = "daemon.invocation_state.shutdown", future = true)]
-    pub(super) async fn shutdown(&self) -> bool {
+    pub(super) async fn shutdown(&self) -> ShutdownStatus {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.cancel();
-        // Reconciliation is abandonable: the worker already saw cancel, and a
-        // large follow-up pass must not spend the supervisor TERM grace. The
-        // abort deadline is the same bound every other uncooperative
-        // background owner uses; a timeout is a typed abandon, not a clean
-        // join.
-        if tokio::time::timeout(
+        // The bounded wait may expire while a blocking reconcile is still
+        // unwinding. The registry retains its worker until a retry joins it;
+        // an incomplete sweep must keep the outer shutdown receipt unclean.
+        let schedulers_timed_out = tokio::time::timeout(
             super::DAEMON_TASK_ABORT_DEADLINE,
             self.code_index_schedulers.shutdown(),
         )
         .await
-        .is_err()
-        {
+        .is_err();
+        if schedulers_timed_out {
             log_daemon_event(
                 "daemon_shutdown",
                 &[
-                    ("outcome", "code_index_scheduler_abandoned".to_string()),
+                    ("outcome", "code_index_scheduler_pending".to_string()),
                     (
                         "reason",
                         "reconcile_join_exceeded_abort_deadline".to_string(),
@@ -1117,12 +1117,13 @@ impl DaemonInvocationState {
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         let expired = self.service.expire_all().await;
         if !expired {
-            // A false expire-all means invocation sessions survived the
-            // drain; record the incomplete shutdown instead of hiding it
-            // behind the boolean.
             hotpath::gauge!("daemon.invocation_state.shutdown_incomplete_total").inc(1_u64);
+            ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
+        } else if schedulers_timed_out {
+            ShutdownStatus::TimedOut
+        } else {
+            ShutdownStatus::Clean
         }
-        expired
     }
 }
 
@@ -1213,13 +1214,47 @@ mod shutdown_tests {
     use super::*;
 
     #[tokio::test]
+    async fn failed_lsp_lease_is_preserved_in_the_invocation_owner_receipt() {
+        let state = DaemonInvocationState::default();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        state
+            .service
+            .lsp_lease_tasks
+            .start(
+                tracedecay_daemon_protocol::LspSessionId::new("lsp-failed-shutdown")
+                    .expect("lease identity"),
+                async move {
+                    let _ = started.send(());
+                    panic!("lease worker failed");
+                },
+            )
+            .await
+            .expect("admit lease worker");
+        observed.await.expect("lease worker was polled");
+        let receipt = shutdown_coordination::join_shutdown_owners(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            vec![shutdown_coordination::ShutdownOwner::with_deadline_status(
+                "invocation",
+                || {},
+                move |_| async move { state.shutdown().await },
+            )],
+        )
+        .await;
+        assert_eq!(
+            receipt.owners[0].status,
+            ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
+        );
+        assert_eq!(receipt.unfinished(), &["invocation"]);
+    }
+
+    #[tokio::test]
     async fn cancel_admissions_then_empty_shutdown_is_prompt() {
         let state = DaemonInvocationState::default();
         state.cancel_admissions();
         state.cancel_admissions();
         let started = std::time::Instant::now();
         assert!(
-            state.shutdown().await,
+            state.shutdown().await.is_clean(),
             "empty invocation shutdown must expire cleanly"
         );
         assert!(

@@ -2,7 +2,6 @@
 
 #[cfg(unix)]
 use std::collections::HashMap;
-use std::fmt::Write;
 
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::Layer as _;
@@ -12,6 +11,10 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 use super::{Path, TraceDecayError};
 #[cfg(unix)]
 use tracedecay_daemon_control::SERVICE_NAME;
+#[cfg(unix)]
+use tracedecay_runtime_core::logging::DAEMON_LOG_MARKER;
+use tracedecay_runtime_core::logging::format_daemon_log_line;
+
 /// A single git-watcher lifecycle event recovered from the daemon log, for the
 /// `tracedecay doctor` watcher-health section.
 #[cfg(unix)]
@@ -23,54 +26,6 @@ pub struct WatcherEvent {
     pub project: Option<String>,
     /// The `action=`/`reason=` field, when present (context for the event).
     pub detail: Option<String>,
-}
-
-/// Opening marker of every bespoke daemon log line. Watcher recovery anchors
-/// on it, so `tracing` output — which never carries the marker — cannot forge
-/// a `git_watch_*` event through a structured field that happens to be named
-/// `event`.
-const DAEMON_LOG_MARKER: &str = "[tracedecay] event=";
-
-pub(crate) fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
-    let mut line = format!("{DAEMON_LOG_MARKER}{}", quote_log_value(event));
-    for (key, value) in fields {
-        line.push(' ');
-        line.push_str(key);
-        line.push('=');
-        line.push_str(&quote_log_value(value));
-    }
-    line
-}
-
-fn quote_log_value(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b':'))
-    {
-        return value.to_string();
-    }
-
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            ch if ch.is_control() => {
-                let _ = write!(escaped, "\\u{{{:x}}}", ch as u32);
-            }
-            ch => escaped.push(ch),
-        }
-    }
-    format!("\"{escaped}\"")
-}
-
-pub(crate) fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
-    let line = format_daemon_log_line(event, fields);
-    eprintln!("{line}");
 }
 
 /// The stderr tracing filter derived from a `RUST_LOG` value.
@@ -415,6 +370,18 @@ mod stderr_tracing_tests {
             assert_eq!(filter.level_for_target("tracedecay"), LevelFilter::WARN);
             assert_eq!(filter.max_level(), LevelFilter::WARN);
             assert!(filter.unparsed().is_empty());
+        }
+    }
+
+    #[test]
+    fn unset_rust_log_defaults_maintenance_to_warn() {
+        for value in [None, Some(""), Some("  ")] {
+            let filter = parse(value);
+            assert_eq!(filter.level_for_target("tracedecay"), LevelFilter::WARN);
+            assert_eq!(
+                filter.level_for_target("tracedecay_maintenance"),
+                LevelFilter::WARN
+            );
         }
     }
 

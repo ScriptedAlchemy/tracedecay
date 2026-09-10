@@ -16,9 +16,10 @@ use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{
-    DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
-};
+use super::{DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey};
+#[cfg(test)]
+use tracedecay_runtime_core::logging::format_daemon_log_line;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod combined_effect;
 pub(crate) mod effect_admission;
@@ -243,7 +244,7 @@ pub(super) fn daemon_scheduler_record_log_line(
     project_path: &Path,
     record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
 ) -> String {
-    super::format_daemon_log_line(
+    format_daemon_log_line(
         "scheduler_task",
         &scheduler_record_log_fields(project_path, record),
     )

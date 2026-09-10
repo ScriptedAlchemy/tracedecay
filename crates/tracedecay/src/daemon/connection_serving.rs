@@ -9,6 +9,7 @@ use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::{DaemonInvocationService, Lease};
 use tracedecay_mcp::BrokerSelectedResponseLease;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_memory::context::CancellationToken;
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.
@@ -159,8 +160,13 @@ fn serve_routed_rmcp_connection_inner(
         for line in pending_lines {
             transport.push_replay(line)?;
         }
-        let adapter =
-            RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)?;
+        let delivery_settlement_recorder = server.delivery_settlement_recorder.clone();
+        let adapter = RmcpConnectionAdapter::new(
+            ProductionMcpConnectionContext::new(server),
+            timings_enabled,
+            initialize_response_decorator,
+            delivery_settlement_recorder,
+        )?;
         let transport = transport
             .with_rmcp_selected_project_responses(adapter.selected_project_responses())
             .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());

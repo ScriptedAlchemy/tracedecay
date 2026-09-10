@@ -150,6 +150,9 @@ pub struct SettingSummary {
 pub struct ResolvedSetting {
     pub key: SettingKey,
     pub effective_value: ConfigurationValueV1,
+    /// Current configuration revision accepted by mutation `expected_revision` CAS.
+    pub revision_id: ConfigurationRevisionId,
+    /// Content identity of the fully resolved configuration snapshot.
     pub snapshot_id: ConfigurationSnapshotId,
     pub effective_behavior_digest: ManifestDigest,
     pub resolution_provenance_digest: ManifestDigest,
