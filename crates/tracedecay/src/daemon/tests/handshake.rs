@@ -1023,6 +1023,21 @@ fn proxy_records_negotiated_catalog_capability_and_version() {
 #[cfg(unix)]
 #[tokio::test]
 async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() {
+    // The refusal advertises the daemon's build version, which is read from
+    // the registered product runtime and is deliberately fallible: a process
+    // that never registered one has no truthful version to advertise, and the
+    // refusal is abandoned rather than sent. Under `cargo test` a sibling test
+    // in the same process had already registered it, so this passed locally
+    // and failed under nextest, which runs every test in its own process.
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let _engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "saturated-handshake-refusal-test",
+    );
+
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
         super::super::reject_saturated_daemon_client(
