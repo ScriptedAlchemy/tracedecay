@@ -354,7 +354,7 @@ fn qualified_type_matches(qualified_name: &str, type_name: &str) -> bool {
 #[cfg(feature = "source-analysis")]
 fn rust_field_receiver_types(source: &str, field: &str) -> Result<HashMap<usize, String>> {
     let language = tracedecay_code_extraction::ts_provider::try_language("rust")
-        .map_err(|error| verified_analysis_unavailable("field-qualifier", &error.to_string()))?;
+        .map_err(|error| verified_analysis_unavailable("field-qualifier", &error))?;
     let tree =
         tracedecay_code_extraction::redundancy::parse_file(source, &language).ok_or_else(|| {
             verified_analysis_unavailable(
@@ -465,29 +465,27 @@ fn rust_receiver_is_shadowed(
             }) {
                 return true;
             }
-        } else if parent.kind() == "closure_expression"
-            && parent
-                .child_by_field_name("parameters")
-                .is_some_and(|parameters| rust_pattern_binds(parameters, source, receiver))
-        {
-            return true;
-        } else if matches!(parent.kind(), "if_expression" | "while_expression")
-            && parent.child_by_field_name(if parent.kind() == "if_expression" {
-                "consequence"
-            } else {
-                "body"
-            }) == Some(child)
-            && parent
-                .child_by_field_name("condition")
-                .is_some_and(|condition| rust_condition_binds(condition, source, receiver))
-        {
-            return true;
-        } else if parent.kind() != "let_declaration"
-            && parent
-                .child_by_field_name("pattern")
-                .is_some_and(|pattern| rust_pattern_binds(pattern, source, receiver))
-        {
-            return true;
+        } else {
+            let closure_binds = parent.kind() == "closure_expression"
+                && parent
+                    .child_by_field_name("parameters")
+                    .is_some_and(|parameters| rust_pattern_binds(parameters, source, receiver));
+            let condition_binds = matches!(parent.kind(), "if_expression" | "while_expression")
+                && parent.child_by_field_name(if parent.kind() == "if_expression" {
+                    "consequence"
+                } else {
+                    "body"
+                }) == Some(child)
+                && parent
+                    .child_by_field_name("condition")
+                    .is_some_and(|condition| rust_condition_binds(condition, source, receiver));
+            let pattern_binds = parent.kind() != "let_declaration"
+                && parent
+                    .child_by_field_name("pattern")
+                    .is_some_and(|pattern| rust_pattern_binds(pattern, source, receiver));
+            if closure_binds || condition_binds || pattern_binds {
+                return true;
+            }
         }
         child = parent;
     }
