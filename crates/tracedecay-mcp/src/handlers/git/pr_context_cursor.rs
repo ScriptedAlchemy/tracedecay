@@ -235,7 +235,7 @@ pub(super) async fn pr_context_cursor_authority(
     ctx: &McpToolContext<'_>,
     binding: &PrContextCursorBinding<'_>,
 ) -> Result<(TemporalExecutionSnapshot, GlobalDbCursorKeyProvider)> {
-    let Some((session_db, _)) = ctx.authorized_project_session_db() else {
+    let Some((session_db, authorization)) = ctx.authorized_project_session_db() else {
         // Attached means admitted; absent is the typed denied state.
         return Err(TraceDecayError::project_route(
             "pr_context_cursor_denied",
