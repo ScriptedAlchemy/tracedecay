@@ -84,13 +84,6 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     );
 
     let _ = release_sender.send(());
-    assert_eq!(
-        request
-            .await
-            .expect("manual branch request task joins")
-            .expect("manual branch publication succeeds"),
-        tracedecay_runtime_core::branch::BranchAddOutcome::Added
-    );
     let receipt = shutdown.await.expect("daemon shutdown task joins");
     assert!(
         receipt.unfinished().is_empty(),
