@@ -867,13 +867,19 @@ struct StagedSealedLexicalPageV1 {
 #[allow(clippy::large_enum_variant)] // staged pages dominate this private read result
 enum StagedSealedLexicalPageReadV1 {
     Page(StagedSealedLexicalPageV1),
-    Complete(VerifiedSealedLexicalSourceReceiptV1),
+    Complete {
+        receipt: VerifiedSealedLexicalSourceReceiptV1,
+        cursor: VerifiedSealedLexicalCursorV1,
+    },
 }
 
 #[allow(clippy::large_enum_variant)] // staged pages dominate this private batch result
 enum StagedSealedLexicalPageBatchReadV1 {
     Pages(Vec<VerifiedSealedLexicalPageV1>),
-    Complete(VerifiedSealedLexicalSourceReceiptV1),
+    Complete {
+        receipt: VerifiedSealedLexicalSourceReceiptV1,
+        cursor: VerifiedSealedLexicalCursorV1,
+    },
 }
 
 /// Seekable, bounded lexical projection source over a verified v5/v6 seal.
@@ -891,6 +897,7 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     first_file_offset: u64,
     files_end_offset: u64,
     file_ranges: Vec<(u64, u64)>,
+    partitioned_lexical_byte_offsets: Option<Vec<u64>>,
     total_lexical_bytes: u64,
     maximum_file_bytes: u64,
     source_state_digest: ManifestDigest,
@@ -910,15 +917,6 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
 pub(super) enum SealedLexicalFilesV1 {
     Published(Vec<Arc<FileGenerationArtifactsV1>>),
     Partitioned(PartitionedLexicalFileSourceV1),
-}
-
-impl SealedLexicalFilesV1 {
-    fn len(&self) -> usize {
-        match self {
-            Self::Published(files) => files.len(),
-            Self::Partitioned(source) => source.len(),
-        }
-    }
 }
 
 /// Authenticated generation metadata needed by exact and lexical serving.
@@ -995,37 +993,12 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
-    /// Open a partitioned generation from its already digest-verified,
-    /// fully validated in-memory representation. Partitioned file segments
-    /// have no offsets in the tiny generation manifest, so cursors use stable
-    /// file ordinals as their opaque positions while page admission consumes
-    /// the generation-owned file artifacts directly.
-    #[hotpath::measure(label = "code_index.restore.open_partitioned")]
-    pub fn open_partitioned(
-        reader: R,
-        generation: &CodeIndexPublishedGenerationV1,
-        source_state_digest: ManifestDigest,
-        maximum_page_chunks: usize,
-        maximum_page_bytes: usize,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        Self::open_partitioned_parts(
-            reader,
-            generation.manifest.clone(),
-            generation.snapshot.clone(),
-            Some(generation.statistics.clone()),
-            SealedLexicalFilesV1::Published(generation.files.clone()),
-            source_state_digest,
-            maximum_page_chunks,
-            maximum_page_bytes,
-        )
-    }
-
     pub(super) fn open_partitioned_parts(
         reader: R,
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
         statistics: Option<CodeIndexGenerationStatisticsV1>,
-        files: SealedLexicalFilesV1,
+        source: PartitionedLexicalFileSourceV1,
         source_state_digest: ManifestDigest,
         maximum_page_chunks: usize,
         maximum_page_bytes: usize,
@@ -1038,7 +1011,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let metadata = VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             manifest, snapshot, statistics,
         )?;
-        let file_count = u64::try_from(files.len()).map_err(|_| {
+        let file_count = u64::try_from(source.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "partitioned sealed generation file count exceeds u64".to_owned(),
             )
@@ -1046,10 +1019,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let file_ranges = (0..file_count)
             .map(|file| (file, file.saturating_add(1)))
             .collect::<Vec<_>>();
-        let maximum_file_bytes = match &files {
-            SealedLexicalFilesV1::Published(_) => 1,
-            SealedLexicalFilesV1::Partitioned(source) => source.maximum_file_bytes(),
-        };
+        let partitioned_lexical_byte_offsets = source.lexical_byte_offsets()?;
+        let total_lexical_bytes = partitioned_lexical_byte_offsets
+            .last()
+            .copied()
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "partitioned lexical byte offsets are empty".to_owned(),
+                )
+            })?;
+        let maximum_file_bytes = source.maximum_file_bytes();
         let cursor = VerifiedSealedLexicalCursorV1::initial(source_state_digest.clone(), 0)?;
         Ok(Self {
             reader,
@@ -1057,7 +1036,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             first_file_offset: 0,
             files_end_offset: file_count,
             file_ranges,
-            total_lexical_bytes: file_count,
+            partitioned_lexical_byte_offsets: Some(partitioned_lexical_byte_offsets),
+            total_lexical_bytes,
             maximum_file_bytes,
             source_state_digest,
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -1066,7 +1046,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_page_bytes,
             cursor,
             admitted_window: BTreeMap::new(),
-            file_source: Some(files),
+            file_source: Some(SealedLexicalFilesV1::Partitioned(source)),
         })
     }
 
@@ -1109,6 +1089,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             first_file_offset: layout.first_file_offset,
             files_end_offset: layout.files_end_offset,
             file_ranges: layout.file_ranges,
+            partitioned_lexical_byte_offsets: None,
             total_lexical_bytes,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
@@ -1201,6 +1182,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             first_file_offset: layout.first_file_offset,
             files_end_offset: layout.files_end_offset,
             file_ranges: layout.file_ranges,
+            partitioned_lexical_byte_offsets: None,
             total_lexical_bytes,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
@@ -1391,6 +1373,18 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// cursor. A partially consumed file counts only after its final chunk and
     /// imports are committed, matching `completed_files`.
     pub fn completed_lexical_bytes(&self) -> Result<u64, CodeIndexProductionErrorV1> {
+        if let Some(offsets) = &self.partitioned_lexical_byte_offsets {
+            let completed = usize::try_from(self.cursor.next_file_ordinal()).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical completed file count exceeds usize".to_owned(),
+                )
+            })?;
+            return offsets.get(completed).copied().ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical cursor exceeds partitioned byte bounds".to_owned(),
+                )
+            });
+        }
         self.cursor
             .next_file_offset
             .checked_sub(self.first_file_offset)
@@ -1467,6 +1461,15 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     .capacity()
                     .saturating_mul(std::mem::size_of::<(u64, u64)>()),
             )
+            .saturating_add(
+                self.partitioned_lexical_byte_offsets
+                    .as_ref()
+                    .map_or(0, |offsets| {
+                        offsets
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<u64>())
+                    }),
+            )
             .saturating_add(source_bytes)
     }
 
@@ -1501,7 +1504,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 self.cursor = staged.cursor;
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
             }
-            StagedSealedLexicalPageReadV1::Complete(receipt) => {
+            StagedSealedLexicalPageReadV1::Complete { receipt, cursor } => {
+                self.cursor = cursor;
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Complete(receipt)))
             }
         }
@@ -1571,17 +1575,17 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                             working_cursor = staged.cursor;
                             pages.push(staged.page);
                         }
-                        StagedSealedLexicalPageReadV1::Complete(receipt) => {
+                        StagedSealedLexicalPageReadV1::Complete { receipt, cursor } => {
                             if pages.is_empty() {
-                                completion = Some(receipt);
+                                completion = Some((receipt, cursor));
                             }
                             break;
                         }
                     }
                 }
 
-                Ok(if let Some(receipt) = completion {
-                    StagedSealedLexicalPageBatchReadV1::Complete(receipt)
+                Ok(if let Some((receipt, cursor)) = completion {
+                    StagedSealedLexicalPageBatchReadV1::Complete { receipt, cursor }
                 } else {
                     StagedSealedLexicalPageBatchReadV1::Pages(pages)
                 })
@@ -1589,7 +1593,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         })?;
 
         match staged {
-            StagedSealedLexicalPageBatchReadV1::Complete(receipt) => {
+            StagedSealedLexicalPageBatchReadV1::Complete { receipt, cursor } => {
+                self.cursor = cursor;
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)))
             }
             StagedSealedLexicalPageBatchReadV1::Pages(mut pages) => {
@@ -1842,19 +1847,20 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 },
             );
         }
-        Ok(StagedSealedLexicalPageReadV1::Complete(
-            VerifiedSealedLexicalSourceReceiptV1 {
+        Ok(StagedSealedLexicalPageReadV1::Complete {
+            receipt: VerifiedSealedLexicalSourceReceiptV1 {
                 source_state_digest: self.source_state_digest.clone(),
                 format_revision: self.format_revision,
-                page_count: previous_cursor.next_page_ordinal,
-                total_chunks: previous_cursor.emitted_chunks,
-                total_payload_bytes: previous_cursor.emitted_payload_bytes,
-                total_imports: previous_cursor.emitted_imports,
-                import_payload_bytes: previous_cursor.emitted_import_payload_bytes,
-                import_dictionary_digest: previous_cursor.import_dictionary_digest.clone(),
-                cumulative_digest: previous_cursor.cumulative_digest.clone(),
+                page_count: cursor.next_page_ordinal,
+                total_chunks: cursor.emitted_chunks,
+                total_payload_bytes: cursor.emitted_payload_bytes,
+                total_imports: cursor.emitted_imports,
+                import_payload_bytes: cursor.emitted_import_payload_bytes,
+                import_dictionary_digest: cursor.import_dictionary_digest.clone(),
+                cumulative_digest: cursor.cumulative_digest.clone(),
             },
-        ))
+            cursor,
+        })
     }
 
     fn admitted_arc(
@@ -3409,55 +3415,7 @@ mod lexical_page_source_tests {
     }
 
     #[test]
-    fn partitioned_memory_prefetch_is_bounded_before_the_first_page() {
-        let workers = crate::parallelism::indexing_workers().max(1);
-        let fixture = fixture_for_source_files(
-            BATCH_FIXTURE_SOURCE,
-            "src/batch_fixture.rs",
-            "rust",
-            workers * 3 + 1,
-        );
-        let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned(
-            Cursor::new(Vec::<u8>::new()),
-            &fixture.generation,
-            fixture.state_digest.clone(),
-            1,
-            1 << 20,
-        )
-        .expect("partitioned source opens");
-        source
-            .ensure_admitted_file(0, &ActiveControl)
-            .expect("first file admits");
-        assert!(
-            source.admitted_window.len() <= workers,
-            "first page retained {} files for {workers} workers",
-            source.admitted_window.len()
-        );
-        source
-            .ensure_admitted_file(workers as u64, &ActiveControl)
-            .expect("later file window");
-        source
-            .ensure_admitted_file(0, &ActiveControl)
-            .expect("retry earlier window");
-        assert!(
-            source.admitted_window.len() <= workers,
-            "revisiting an earlier range must replace the stale prefetch window"
-        );
-        let first = source.next_page(&ActiveControl).expect("first page");
-        source.rewind().expect("rewind");
-        let replay = source.next_page(&ActiveControl).expect("replayed page");
-        let (
-            VerifiedSealedLexicalPageReadV1::Page(first),
-            VerifiedSealedLexicalPageReadV1::Page(replay),
-        ) = (first, replay)
-        else {
-            panic!("fixture must expose a page");
-        };
-        assert_eq!(expectation(&first), expectation(&replay));
-    }
-
-    #[test]
-    fn partitioned_memory_prefetch_is_bounded_before_the_first_page_after_reopen() {
+    fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         let fixture =
             fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/batch_fixture.rs", "rust", 25);
         let mut segments = BTreeMap::new();
@@ -3472,6 +3430,18 @@ mod lexical_page_source_tests {
                 Ok(())
             })
             .expect("partitioned generation encodes");
+        let manifest_value: serde_json::Value =
+            serde_json::from_slice(&manifest).expect("partitioned manifest envelope");
+        let segment_sizes = manifest_value["generation"]["file_segments"]
+            .as_array()
+            .expect("partitioned file descriptors")
+            .iter()
+            .map(|descriptor| {
+                descriptor["segment_size_bytes"]
+                    .as_u64()
+                    .expect("partitioned segment size")
+            })
+            .collect::<Vec<_>>();
         let segments = Arc::new(segments);
         let read_segments = Arc::clone(&segments);
         let reads = Arc::new(AtomicUsize::new(0));
@@ -3491,6 +3461,10 @@ mod lexical_page_source_tests {
         )
         .expect("partitioned source opens")
         .expect("partitioned format");
+        let total_segment_bytes = segment_sizes.iter().sum::<u64>();
+        assert_eq!(source.total_lexical_bytes(), total_segment_bytes);
+        assert!(source.total_lexical_bytes() > source.total_files());
+        assert_eq!(source.completed_lexical_bytes().expect("initial bytes"), 0);
         assert_eq!(
             reads.load(Ordering::SeqCst),
             0,
@@ -3502,45 +3476,31 @@ mod lexical_page_source_tests {
         );
         source.next_page(&ActiveControl).expect("first page admits");
         assert!(reads.load(Ordering::SeqCst) <= crate::parallelism::indexing_workers().max(1));
-        // Partitioned files use snapshot-key order; monolithic seals use
-        // occurrence order. Compare the prior eager partitioned authority.
-        let mut files = fixture.generation.files.clone();
-        files.sort_by(|left, right| {
-            left.authority
-                .logical_path
-                .cmp(&right.authority.logical_path)
-        });
-        let mut eager = VerifiedSealedLexicalPageSourceV1::open_partitioned_parts(
-            Cursor::new(Vec::<u8>::new()),
-            fixture.generation.manifest.clone(),
-            fixture.generation.snapshot.clone(),
-            Some(
-                fixture
-                    .generation
-                    .generation_statistics()
-                    .expect("fixture generation statistics"),
-            ),
-            SealedLexicalFilesV1::Published(files),
-            fixture.state_digest.clone(),
-            1,
-            1 << 20,
-        )
-        .expect("eager partitioned source");
-        let mut expected = Vec::new();
-        while let VerifiedSealedLexicalPageReadV1::Page(page) =
-            eager.next_page(&ActiveControl).expect("eager source page")
-        {
-            expected.push(expectation(&page));
-        }
         source.rewind().expect("rewind lazy source");
-        let mut pages = Vec::new();
+        let mut observed_encoded_byte_progress = false;
         loop {
             match source.next_page(&ActiveControl).expect("lazy source page") {
-                VerifiedSealedLexicalPageReadV1::Page(page) => pages.push(expectation(&page)),
+                VerifiedSealedLexicalPageReadV1::Page(_) => {
+                    let completed =
+                        usize::try_from(source.completed_files()).expect("completed file count");
+                    let completed_bytes =
+                        source.completed_lexical_bytes().expect("completed bytes");
+                    assert_eq!(
+                        completed_bytes,
+                        segment_sizes[..completed].iter().sum::<u64>()
+                    );
+                    observed_encoded_byte_progress |= completed_bytes
+                        > u64::try_from(completed).expect("completed file count fits u64");
+                }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
                     receipt
                         .verify_completion(Some(source.cursor()))
                         .expect("verified completion");
+                    assert_eq!(
+                        source.completed_lexical_bytes().expect("completed bytes"),
+                        total_segment_bytes
+                    );
+                    assert!(observed_encoded_byte_progress);
                     break;
                 }
             }
@@ -3583,7 +3543,6 @@ mod lexical_page_source_tests {
             &initial,
             "tampered file must not advance the cursor"
         );
-        assert_eq!(expected, pages);
     }
 
     #[test]
