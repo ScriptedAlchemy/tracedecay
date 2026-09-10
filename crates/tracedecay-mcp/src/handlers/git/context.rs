@@ -20,6 +20,218 @@ use tracedecay_graph_query::VerifiedGraphQuery;
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
 const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;
 
+struct SemanticSymbolDiff {
+    base_generation: String,
+    head_generation: String,
+    added: Vec<tracedecay_query::code_search::CodeIndexBranchSymbolV1>,
+    removed: Vec<tracedecay_query::code_search::CodeIndexBranchSymbolV1>,
+    modified: Vec<tracedecay_query::code_search::CodeIndexBranchSymbolV1>,
+}
+
+struct SemanticSymbolDiffUnavailable {
+    reason: &'static str,
+    retryable: bool,
+}
+
+fn exact_local_branch(reference: &str, active_branch: Option<&str>) -> Option<String> {
+    match reference {
+        "HEAD" => active_branch.map(str::to_owned),
+        reference if reference.starts_with("refs/heads/") => reference
+            .strip_prefix("refs/heads/")
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned),
+        reference
+            if !reference.is_empty()
+                && !reference.starts_with("refs/")
+                && !reference.contains(['~', '^', ':']) =>
+        {
+            Some(reference.to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn local_branch_read_reason(
+    error: &tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1,
+) -> SemanticSymbolDiffUnavailable {
+    use tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1;
+    let (reason, retryable) = match error {
+        LocalBranchSnapshotErrorV1::InvalidReference { .. } => ("branch_ref_invalid", false),
+        LocalBranchSnapshotErrorV1::NotFound { .. } => ("branch_ref_not_found", false),
+        LocalBranchSnapshotErrorV1::RepositoryUnavailable => ("repository_unavailable", true),
+        LocalBranchSnapshotErrorV1::ReferenceUnavailable { .. }
+        | LocalBranchSnapshotErrorV1::EnumerationUnavailable => ("branch_refs_unavailable", true),
+        LocalBranchSnapshotErrorV1::InvalidLimit => ("invalid_request", false),
+        LocalBranchSnapshotErrorV1::CapacityExceeded { .. } => {
+            ("branch_read_capacity_unavailable", true)
+        }
+        LocalBranchSnapshotErrorV1::Cancelled => ("cancelled", false),
+        LocalBranchSnapshotErrorV1::TimedOut => ("timed_out", true),
+    };
+    SemanticSymbolDiffUnavailable { reason, retryable }
+}
+
+fn branch_symbol_value(symbol: &tracedecay_query::code_search::CodeIndexBranchSymbolV1) -> Value {
+    json!({
+        "id": symbol.symbol_occurrence_id,
+        "name": symbol.name,
+        "qualified_name": symbol.qualified_name,
+        "kind": symbol.kind,
+        "file": symbol.file,
+        "content_digest": symbol.content_digest,
+    })
+}
+
+async fn exact_semantic_symbol_diff(
+    ctx: &McpToolContext<'_>,
+    base_ref: &str,
+    head_ref: &str,
+    expected_base_revision: Option<&str>,
+    expected_head_revision: Option<&str>,
+) -> std::result::Result<SemanticSymbolDiff, SemanticSymbolDiffUnavailable> {
+    use tracedecay_query::code_search::{
+        CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1, CodeIndexBranchChangeV1,
+        CodeIndexBranchDiffOutcomeV1, CodeIndexBranchDiffRequestV1,
+        CodeIndexSearchUnavailableReasonV1,
+    };
+
+    let Some(base_branch) = exact_local_branch(base_ref, ctx.active_branch()) else {
+        return Err(SemanticSymbolDiffUnavailable {
+            reason: "exact_local_branch_required",
+            retryable: false,
+        });
+    };
+    let Some(head_branch) = exact_local_branch(head_ref, ctx.active_branch()) else {
+        return Err(SemanticSymbolDiffUnavailable {
+            reason: "exact_local_branch_required",
+            retryable: false,
+        });
+    };
+    let control = tracedecay_contracts::branch_snapshots::LocalBranchReadControlV1 {
+        max_refs: 1,
+        after: None,
+        deadline: ctx.deadline().cloned(),
+        cancellation: ctx.cancellation().cloned(),
+    };
+    let project_root = ctx.project_root().to_path_buf();
+    let resolution_base = base_branch.clone();
+    let resolution_head = head_branch.clone();
+    let revisions = blocking_git_span_controlled(
+        "semantic branch revisions",
+        ctx.cancellation().cloned(),
+        ctx.deadline().cloned(),
+        move |_| {
+            let base = tracedecay_query::native_git::local_branch_revision_controlled(
+                &project_root,
+                &resolution_base,
+                &control,
+            )?;
+            let head = tracedecay_query::native_git::local_branch_revision_controlled(
+                &project_root,
+                &resolution_head,
+                &control,
+            )?;
+            Ok::<_, tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1>((
+                base, head,
+            ))
+        },
+    )
+    .await
+    .map_err(|_| SemanticSymbolDiffUnavailable {
+        reason: "branch_read_failed",
+        retryable: true,
+    })?
+    .map_err(|error| local_branch_read_reason(&error))?;
+    if expected_base_revision.is_some_and(|expected| revisions.0.commit.as_str() != expected)
+        || expected_head_revision.is_some_and(|expected| revisions.1.commit.as_str() != expected)
+    {
+        return Err(SemanticSymbolDiffUnavailable {
+            reason: "comparison_revision_not_indexed_as_local_branch",
+            retryable: false,
+        });
+    }
+    let Some(executor) = ctx.code_index_branch_diff_executor() else {
+        return Err(SemanticSymbolDiffUnavailable {
+            reason: CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable.as_str(),
+            retryable: false,
+        });
+    };
+    let base_reference = tracedecay_domain::RefId::new(format!("refs/heads/{base_branch}"))
+        .map_err(|_| SemanticSymbolDiffUnavailable {
+            reason: "branch_ref_invalid",
+            retryable: false,
+        })?;
+    let head_reference = tracedecay_domain::RefId::new(format!("refs/heads/{head_branch}"))
+        .map_err(|_| SemanticSymbolDiffUnavailable {
+            reason: "branch_ref_invalid",
+            retryable: false,
+        })?;
+    let mut cursor = None;
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+    let (base_generation, head_generation) = loop {
+        let outcome = executor(CodeIndexBranchDiffRequestV1 {
+            project_root: ctx.project_root().to_path_buf(),
+            base_reference: base_reference.clone(),
+            base_revision: revisions.0.commit.clone(),
+            base_tree: revisions.0.tree.clone(),
+            head_reference: head_reference.clone(),
+            head_revision: revisions.1.commit.clone(),
+            head_tree: revisions.1.tree.clone(),
+            file_filter: None,
+            kind_filter: None,
+            limit: CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1,
+            cursor,
+            authority: ctx.code_index_search_authority().cloned(),
+            deadline: ctx.deadline().cloned(),
+            cancellation: ctx.cancellation().cloned(),
+        })
+        .await;
+        let (changes, generations, next) = match outcome {
+            CodeIndexBranchDiffOutcomeV1::Complete(complete) => (
+                complete.changes,
+                (complete.base_generation, complete.head_generation),
+                None,
+            ),
+            CodeIndexBranchDiffOutcomeV1::Partial(partial) => (
+                partial.changes,
+                (partial.base_generation, partial.head_generation),
+                Some(partial.next_cursor),
+            ),
+            CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => {
+                let retryable = matches!(
+                    unavailable.reason,
+                    CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                        | CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+                );
+                return Err(SemanticSymbolDiffUnavailable {
+                    reason: unavailable.reason.as_str(),
+                    retryable,
+                });
+            }
+        };
+        for change in changes {
+            match change {
+                CodeIndexBranchChangeV1::Added { symbol } => added.push(symbol),
+                CodeIndexBranchChangeV1::Removed { symbol } => removed.push(symbol),
+                CodeIndexBranchChangeV1::Changed { head, .. } => modified.push(head),
+            }
+        }
+        match next {
+            Some(next) => cursor = Some(next),
+            None => break generations,
+        }
+    };
+    Ok(SemanticSymbolDiff {
+        base_generation,
+        head_generation,
+        added,
+        removed,
+        modified,
+    })
+}
+
 fn symbol_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
     symbol
         .binding
@@ -354,7 +566,7 @@ pub async fn handle_diff_context(
 #[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
 pub async fn handle_changelog<F>(
     ctx: &McpToolContext<'_>,
-    graph: F,
+    _graph: F,
     args: Value,
 ) -> Result<ToolResult>
 where
@@ -397,62 +609,72 @@ where
             }
         }
     };
-    let graph = &hotpath::future!(graph, label = "mcp.git.changelog.graph_admission").await?;
-    ctx.verify_graph_scope(graph)?;
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
-    let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
-    let graph_symbols = hotpath::measure_block!(
-        "mcp.git.changelog.symbols",
-        all_symbols_in_files(graph, &changed_paths)?
-    );
-    let mut symbols_by_file: HashMap<String, Vec<Value>> = HashMap::new();
-    for symbol in &graph_symbols {
-        symbols_by_file
-            .entry(symbol_path(symbol)?.to_owned())
-            .or_default()
-            .push(symbol_value(symbol, true)?);
-    }
-
-    let mut symbols_added: Vec<Value> = Vec::new();
-    let mut symbols_modified: Vec<Value> = Vec::new();
-    let mut modified: Vec<Value> = Vec::new();
-    let mut file_symbols: HashMap<String, Vec<Value>> = HashMap::new();
-
-    for change in &changes {
-        let file = &change.path;
-        let symbols = symbols_by_file.remove(file).unwrap_or_default();
-
-        if symbols.is_empty() {
-            // File was likely removed or not indexed
-            modified.push(json!({
-                "file": file,
-                "status": change.status,
-            }));
-        } else if change.status == "added" {
-            symbols_added.extend(symbols.iter().cloned());
-        } else {
-            symbols_modified.extend(symbols.iter().cloned());
-        }
-        file_symbols.insert(file.clone(), symbols);
-    }
-
     let touched_files: Vec<String> = changed_files.clone();
+
+    let symbol_diff = hotpath::future!(
+        exact_semantic_symbol_diff(ctx, from_ref, to_ref, None, None),
+        label = "mcp.git.changelog.symbol_diff"
+    )
+    .await;
+    let symbol_diff = match symbol_diff {
+        Ok(diff) => diff,
+        Err(unavailable) => {
+            let result = json!({
+                "status": "partial",
+                "from_ref": from_ref,
+                "to_ref": to_ref,
+                "changed_file_count": changed_files.len(),
+                "changed_files": changed_files,
+                "symbols_added": [],
+                "symbols_removed": [],
+                "symbols_modified": [],
+                "symbol_changes_coverage": {
+                    "status": "unavailable",
+                    "reason": unavailable.reason,
+                    "retryable": unavailable.retryable,
+                },
+            });
+            return Ok(generic_tool_result(
+                Some(ctx.project_root()),
+                &args,
+                &result,
+                touched_files,
+            ));
+        }
+    };
+    let symbols_added = symbol_diff
+        .added
+        .iter()
+        .map(branch_symbol_value)
+        .collect::<Vec<_>>();
+    let symbols_removed = symbol_diff
+        .removed
+        .iter()
+        .map(branch_symbol_value)
+        .collect::<Vec<_>>();
+    let symbols_modified = symbol_diff
+        .modified
+        .iter()
+        .map(branch_symbol_value)
+        .collect::<Vec<_>>();
 
     let result = hotpath::measure_block!(
         "mcp.git.changelog.assemble",
         json!({
+            "status": "complete",
             "from_ref": from_ref,
             "to_ref": to_ref,
             "changed_file_count": changed_files.len(),
             "changed_files": changed_files,
+            "base_generation": symbol_diff.base_generation,
+            "head_generation": symbol_diff.head_generation,
             "symbols_added": symbols_added,
+            "symbols_removed": symbols_removed,
             "symbols_modified": symbols_modified,
-            "symbols_in_changed_files": file_symbols
-                .values()
-                .flatten()
-                .cloned()
-                .collect::<Vec<_>>(),
-            "files_not_indexed": modified,
+            "symbol_changes_coverage": {
+                "status": "complete",
+            },
         })
     );
 
@@ -973,6 +1195,91 @@ where
     };
     stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
 
+    let stage_started = std::time::Instant::now();
+    let symbol_diff = match hotpath::future!(
+        exact_semantic_symbol_diff(
+            ctx,
+            &base,
+            head,
+            Some(merge_base.as_str()),
+            Some(head_oid.as_str()),
+        ),
+        label = "mcp.pr_context.symbol_diff"
+    )
+    .await
+    {
+        Ok(diff) if diff.head_generation == graph.generation().as_str() => diff,
+        Ok(_) => {
+            return Ok(generic_tool_result(
+                Some(ctx.project_root()),
+                &args,
+                &json!({
+                    "status": "partial",
+                    "message": "Git comparison is available, but the verified graph is not the compared head generation.",
+                    "base": base,
+                    "head": head,
+                    "base_oid": base_oid,
+                    "head_oid": head_oid,
+                    "merge_base": merge_base,
+                    "graph_generation": graph.generation().as_str(),
+                    "commits": commits,
+                    "files_changed": changed_files.len(),
+                    "changes": changes,
+                    "symbols_added": 0,
+                    "symbols_removed": 0,
+                    "symbols_modified": 0,
+                    "added": [],
+                    "removed": [],
+                    "modified": [],
+                    "symbol_changes_coverage": {
+                        "status": "unavailable",
+                        "reason": "head_generation_mismatch",
+                        "retryable": true,
+                    },
+                    "next_cursor": null,
+                }),
+                changed_files,
+            ));
+        }
+        Err(unavailable) => {
+            return Ok(generic_tool_result(
+                Some(ctx.project_root()),
+                &args,
+                &json!({
+                    "status": "partial",
+                    "message": "Git comparison is available, but exact base/head symbol comparison is unavailable.",
+                    "base": base,
+                    "head": head,
+                    "base_oid": base_oid,
+                    "head_oid": head_oid,
+                    "merge_base": merge_base,
+                    "graph_generation": graph.generation().as_str(),
+                    "commits": commits,
+                    "files_changed": changed_files.len(),
+                    "changes": changes,
+                    "symbols_added": 0,
+                    "symbols_removed": 0,
+                    "symbols_modified": 0,
+                    "added": [],
+                    "removed": [],
+                    "modified": [],
+                    "symbol_changes_coverage": {
+                        "status": "unavailable",
+                        "reason": unavailable.reason,
+                        "retryable": unavailable.retryable,
+                    },
+                    "next_cursor": null,
+                }),
+                changed_files,
+            ));
+        }
+    };
+    controls.checkpoint()?;
+    stage_timings.insert(
+        "symbol_diff".to_owned(),
+        json!(elapsed_micros(stage_started)),
+    );
+
     let graph_generation = graph.generation().as_str().to_owned();
     // Byte-exact worktree identity: a lossy string would let two distinct
     // non-UTF-8 roots mint interchangeable cursors.
@@ -1040,12 +1347,16 @@ where
         "test_annotations".to_owned(),
         json!(elapsed_micros(stage_started)),
     );
-    let added_paths: Vec<String> = changes
+    let added_ids = symbol_diff
+        .added
         .iter()
-        .filter(|change| change.status == "added")
-        .map(|change| change.path.clone())
-        .collect();
-    let added_path_set: HashSet<&str> = added_paths.iter().map(String::as_str).collect();
+        .map(|symbol| symbol.symbol_occurrence_id.as_str())
+        .collect::<HashSet<_>>();
+    let modified_ids = symbol_diff
+        .modified
+        .iter()
+        .map(|symbol| symbol.symbol_occurrence_id.as_str())
+        .collect::<HashSet<_>>();
     for change in &changes {
         if tracedecay_code_index::is_test_file(&change.path)
             || files_with_inline_tests.contains(&change.path)
@@ -1083,12 +1394,18 @@ where
     for symbol in symbol_page.symbols {
         controls.checkpoint()?;
         let path = symbol_path(&symbol)?;
+        let is_added = added_ids.contains(symbol.occurrence.as_str());
+        let is_modified = modified_ids.contains(symbol.occurrence.as_str());
+        if !is_added && !is_modified {
+            continue;
+        }
         if classify_file_role(path, &files_with_inline_tests) == "config" {
-            *config_key_counts.entry(path.to_owned()).or_default() += 1;
+            let key = format!("{}\0{}", if is_added { "added" } else { "modified" }, path);
+            *config_key_counts.entry(key).or_default() += 1;
             continue;
         }
         let value = symbol_value(&symbol, false)?;
-        if added_path_set.contains(path) {
+        if is_added {
             added.push(value);
         } else {
             modified.push(value);
@@ -1097,20 +1414,31 @@ where
     }
     let mut config_summaries = config_key_counts.into_iter().collect::<Vec<_>>();
     config_summaries.sort_by(|left, right| left.0.cmp(&right.0));
-    for (path, config_keys) in config_summaries {
+    for (key, config_keys) in config_summaries {
+        let (change, path) = key
+            .split_once('\0')
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "invalid config symbol change key".to_owned(),
+            })?;
         let summary = json!({
             "file": path,
             "kind": "config_summary",
             "config_keys": config_keys,
         });
-        if added_path_set.contains(path.as_str()) {
+        if change == "added" {
             added.push(summary);
         } else {
             modified.push(summary);
         }
     }
+    let removed = symbol_diff
+        .removed
+        .iter()
+        .map(branch_symbol_value)
+        .collect::<Vec<_>>();
     let returned_symbols = added.len().saturating_add(modified.len());
     let symbols_added = added.len();
+    let symbols_removed = removed.len();
     let symbols_modified = modified.len();
 
     // Find transitively affected test files
@@ -1195,6 +1523,7 @@ where
     let output = hotpath::measure_block!(
         "mcp.pr_context.assemble",
         json!({
+            "status": "complete",
             "base": base,
             "head": head,
             "base_oid": base_oid,
@@ -1205,9 +1534,16 @@ where
             "files_changed": changed_files.len(),
             "changes": changes,
             "symbols_added": symbols_added,
+            "symbols_removed": symbols_removed,
             "symbols_modified": symbols_modified,
             "added": added,
+            "removed": removed,
             "modified": modified,
+            "symbol_changes_coverage": {
+                "status": "complete",
+                "base_generation": symbol_diff.base_generation,
+                "head_generation": symbol_diff.head_generation,
+            },
             "next_cursor": next_cursor,
             "symbol_page": {
                 "limit": maximum_symbols,
