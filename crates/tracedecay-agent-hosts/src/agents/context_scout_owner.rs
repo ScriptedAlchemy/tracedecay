@@ -851,8 +851,16 @@ impl ProjectContextScoutOwnerV1 {
         if claim.entry.work.address == address && claim.entry.envelope.delivery_window == window {
             return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
         }
-        let _ = self.store.requeue(claim).await;
-        ContextScoutDurableClaimOutcomeV1::Empty
+        match self.store.requeue(claim).await {
+            ContextScoutDurableStoreOutcomeV1::Unavailable => {
+                ContextScoutDurableClaimOutcomeV1::Unavailable
+            }
+            ContextScoutDurableStoreOutcomeV1::Stored
+            | ContextScoutDurableStoreOutcomeV1::Duplicate
+            | ContextScoutDurableStoreOutcomeV1::Superseded => {
+                ContextScoutDurableClaimOutcomeV1::Empty
+            }
+        }
     }
 
     pub async fn claim_delivery_request(
@@ -893,17 +901,25 @@ impl ProjectContextScoutOwnerV1 {
         if hex::decode_to_slice(encoded, &mut lease_id).is_err() {
             return ContextScoutDurableClaimOutcomeV1::Unavailable;
         }
-        drop(configuration);
-        self.claim_delivery_exact(
-            request.address,
-            window,
-            now,
-            ContextScoutLeaseV1 {
-                lease_id,
-                expires_at,
-            },
-        )
-        .await
+        let claimed = self
+            .claim_delivery_exact(
+                request.address,
+                window,
+                now,
+                ContextScoutLeaseV1 {
+                    lease_id,
+                    expires_at,
+                },
+            )
+            .await;
+        let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = claimed else {
+            return claimed;
+        };
+        if claim.entry.envelope.configuration_revision == control.configuration_revision {
+            return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
+        }
+        let _ = self.store.requeue(claim).await;
+        ContextScoutDurableClaimOutcomeV1::Empty
     }
 }
 
