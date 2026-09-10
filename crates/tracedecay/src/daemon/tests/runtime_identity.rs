@@ -450,6 +450,15 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         let mut servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
         assert_eq!(servers.aliases.len(), 2);
+        assert_eq!(
+            servers
+                .servers
+                .get(&linked_key)
+                .expect("the reopened linked route is published")
+                .publication,
+            crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
+            "the reopened linked route must publish full capabilities, not a degraded core"
+        );
         assert!(servers.remove(&primary_key).is_some());
     }
 
@@ -656,6 +665,22 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         let servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
         assert_eq!(servers.aliases.len(), 2);
+        // A reopen builds fresh ports, a fresh evidence adapter and a fresh
+        // semantic configuration operation. Keying any of those registrations
+        // by object identity refuses the reopen, `settle_failed_full_upgrade`
+        // reclaims the core, and `project_server` still answers `Ok` with a
+        // route that shares the store publication — so every assertion above
+        // holds while the route serves core-only capabilities for the life of
+        // the daemon. Name the published level so that degradation fails here.
+        assert_eq!(
+            servers
+                .servers
+                .get(&linked_key)
+                .expect("the reopened linked route is published")
+                .publication,
+            crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
+            "the reopened linked route must publish full capabilities, not a degraded core"
+        );
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
