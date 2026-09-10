@@ -869,10 +869,10 @@ impl TypeScriptExtractor {
             if cursor.goto_first_child() {
                 loop {
                     let parent = cursor.node();
-                    if parent.kind() == "type_identifier" {
+                    if let Some(reference_name) = Self::declared_type_name(state, parent) {
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: id.clone(),
-                            reference_name: state.node_text(parent).to_string(),
+                            reference_name,
                             reference_kind: EdgeKind::Extends,
                             line: parent.start_position().row as u32,
                             column: parent.start_position().column as u32,
@@ -1330,8 +1330,7 @@ impl TypeScriptExtractor {
                             if inner.goto_first_child() {
                                 loop {
                                     let iface = inner.node();
-                                    if iface.kind() == "type_identifier" {
-                                        let name = state.node_text(iface).to_string();
+                                    if let Some(name) = Self::declared_type_name(state, iface) {
                                         state.unresolved_refs.push(UnresolvedRef {
                                             from_node_id: class_id.to_string(),
                                             reference_name: name,
@@ -1354,6 +1353,16 @@ impl TypeScriptExtractor {
                     }
                 }
             }
+        }
+    }
+
+    fn declared_type_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
+        match node.kind() {
+            "type_identifier" => Some(state.node_text(node).to_string()),
+            "generic_type" | "nested_type_identifier" => node
+                .child_by_field_name("name")
+                .and_then(|name| Self::declared_type_name(state, name)),
+            _ => None,
         }
     }
 

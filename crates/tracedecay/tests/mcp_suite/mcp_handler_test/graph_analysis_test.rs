@@ -2848,6 +2848,12 @@ async fn typescript_interface_extends_drives_hierarchy_and_depth() {
         r#"
 interface SettingsEditable { draft: string }
 interface SettingsUnderReview extends SettingsEditable { review: string }
+interface GenericEditable<T> { draft: T }
+interface GenericReview extends GenericEditable<string> { review: string }
+namespace settings { export interface ScopedEditable { draft: string } }
+interface ScopedReview extends settings.ScopedEditable { review: string }
+interface Renderer<T> { render(value: T): void }
+class Screen implements Renderer<string> { render(value: string) {} }
 const unrelated = 1;
 function helper() { return unrelated; }
 "#,
@@ -2894,9 +2900,34 @@ function helper() { return unrelated; }
         "unexpected interface depth ranking: {ranking:?}"
     );
     assert!(
-        ranking.iter().all(|item| item["kind"] == "interface"),
+        ranking
+            .iter()
+            .all(|item| item["name"] != "helper" && item["name"] != "unrelated"),
         "non-hierarchy symbols leaked into inheritance depth: {ranking:?}"
     );
+
+    for (parent, relation, child) in [
+        ("GenericEditable", "extends", "GenericReview"),
+        ("ScopedEditable", "extends", "ScopedReview"),
+        ("Renderer", "implements", "Screen"),
+    ] {
+        let parent_id = find_node_id(&cg, parent).await;
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": parent_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        let expected = format!("{relation} {child}");
+        assert!(
+            hierarchy["tree"].as_str().unwrap().contains(&expected),
+            "{expected} missing from hierarchy: {hierarchy}"
+        );
+    }
 }
 
 /// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear
