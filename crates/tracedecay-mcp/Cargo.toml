@@ -28,7 +28,6 @@ test-transport = []
 # already part of the shipped code-index closure.
 source-analysis = [
     "dep:ignore",
-    "dep:tree-sitter",
     "tracedecay-code-extraction/lite",
 ]
 
@@ -68,7 +67,7 @@ tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracing = "0.1"
-tree-sitter = { version = "0.26", optional = true }
+tree-sitter = "0.26"
 
 [dev-dependencies]
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
