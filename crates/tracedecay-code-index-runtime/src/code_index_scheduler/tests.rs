@@ -17029,6 +17029,27 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
             .is_none(),
         "graph-off must leave the complete serving slot empty"
     );
+    let indexed_file = latest
+        .metadata()
+        .snapshot()
+        .files
+        .first()
+        .expect("indexed file");
+    let identity = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
+        &registry,
+        fixture.path().to_path_buf(),
+        scope.clone(),
+    )
+    .await
+    .expect("ready text owner retains file identity without a graph seat");
+    assert_eq!(
+        identity.generation_id(),
+        &latest.metadata().manifest().generation_id
+    );
+    assert_eq!(
+        identity.logical_path(&indexed_file.file_occurrence_id),
+        Some(indexed_file.logical_path.as_str())
+    );
     registry
         .mount_query_authority(
             fixture.path(),
