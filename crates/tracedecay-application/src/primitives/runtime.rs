@@ -51,7 +51,7 @@ use crate::ProjectSourceAccessSnapshot;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-    ManagedTestRunStaleReason, OperationEventAuthority,
+    ManagedTestRunStaleReason, OperationEventAuthority, current_managed_test_run,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -1635,6 +1635,14 @@ async fn recent_test_results(
     page: &PageRequest,
     observed_at: UtcMicros,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
+    let snapshot = match runtime
+        .test_runs
+        .latest_page(&runtime.admitted_root_uri, page)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => return unavailable(context, operation),
+    };
     let current = match runtime.test_run_scope.current_identity().await {
         Ok(identity) => ManagedTestRunCurrentScope {
             root_uri: runtime.admitted_root_uri.clone(),
@@ -1645,7 +1653,7 @@ async fn recent_test_results(
         },
         Err(_) => return unavailable(context, operation),
     };
-    let snapshot = match runtime.test_runs.latest_current_page(&current, page).await {
+    let snapshot = match current_managed_test_run(snapshot, &current) {
         ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
         ManagedTestRunReadOutcome::Stale(
             ManagedTestRunStaleReason::SourceIdentity | ManagedTestRunStaleReason::DocumentContent,
