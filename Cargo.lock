@@ -6135,6 +6135,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hotpath",
+ "libc",
  "mimalloc",
  "open",
  "rayon",
