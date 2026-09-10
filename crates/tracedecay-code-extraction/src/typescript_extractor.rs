@@ -864,6 +864,28 @@ impl TypeScriptExtractor {
             });
         }
 
+        if let Some(heritage) = find_direct_child_by_kind(node, "extends_type_clause") {
+            let mut cursor = heritage.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let parent = cursor.node();
+                    if parent.kind() == "type_identifier" {
+                        state.unresolved_refs.push(UnresolvedRef {
+                            from_node_id: id.clone(),
+                            reference_name: state.node_text(parent).to_string(),
+                            reference_kind: EdgeKind::Extends,
+                            line: parent.start_position().row as u32,
+                            column: parent.start_position().column as u32,
+                            file_path: state.file_path.clone(),
+                        });
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
         if let Some(body) = find_direct_child_by_kind(node, "interface_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_interface_body(state, body);
