@@ -8,18 +8,18 @@ use tracedecay_contracts::{
     AcceptWorkTaskRequestV1, AuthorizedWorkProductScopeV1, CancellationContext,
     CapabilityGrantSnapshot, CreateWorkProductRequestV1, Deadline, DisclosureClass, OpaqueCursor,
     RequestContext, RequestId, ResolvedScope, SelectedWorkEvidenceV1,
-    VerifiedWorkEvidenceExpansionV1, VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1,
-    WorkEvidenceReadPortErrorV1, WorkEvidenceReadPortV1, WorkEvidenceSelectRequestV1,
-    WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkGraphTimelineV1, WorkGraphVersionEntryV1,
-    WorkHistoryCoverageV1, WorkHistoryReadPortV1, WorkHistoryRequestV1, WorkHistoryServiceV1,
-    WorkHistoryV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
-    WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1, WorkProductEventDraftV1,
-    WorkProductEventPortErrorV1, WorkProductEventPortV1, WorkProductEvidenceServiceV1,
-    WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
-    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
-    WorkRelationScopeV1,
+    VerifiedWorkEvidenceExpansionV1, VerifiedWorkGraphVersionV1, WorkAttemptTopologyStateV1,
+    WorkEvidenceExpandRequestV1, WorkEvidenceReadPortErrorV1, WorkEvidenceReadPortV1,
+    WorkEvidenceSelectRequestV1, WorkGraphReadModeV1, WorkGraphReadPortErrorV1,
+    WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphSelectionCoverageV1,
+    WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkHistoryCoverageV1, WorkHistoryReadPortV1,
+    WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
+    WorkProductBindingV1, WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1,
+    WorkProductEventDraftV1, WorkProductEventPortErrorV1, WorkProductEventPortV1,
+    WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1,
+    WorkProductMutationServiceV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductReadServiceV1, WorkProductRevisionPinsV1,
+    WorkProductSelectionScopeV1, WorkRelationScopeV1,
 };
 use tracedecay_domain::{
     ActorId, BrainId, CatalogGenerationId, ConfigurationRevisionId, ManifestDigest,
@@ -471,6 +471,7 @@ struct RecordingGraphPort {
     requests: Mutex<Vec<WorkGraphReadRequestV1>>,
     return_wrong_owner: AtomicBool,
     paginate: AtomicBool,
+    absent: AtomicBool,
 }
 
 impl WorkGraphReadPortV1 for RecordingGraphPort {
@@ -481,6 +482,9 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
     ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.requests.lock().unwrap().push(request.clone());
+        if self.absent.load(Ordering::Relaxed) {
+            return Err(WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized);
+        }
         let scope = if self.return_wrong_owner.load(Ordering::Relaxed) {
             AuthorizedWorkProductScopeV1::new(
                 id("brain.work.foreign"),
@@ -547,6 +551,35 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
             },
         })
     }
+}
+
+#[test]
+fn attempt_topology_uses_the_current_canonical_product_graph() {
+    let graph = RecordingGraphPort::default();
+    let owner = RegisteredOwner::default();
+    let service = WorkProductReadServiceV1::new(&graph, &owner, binding());
+
+    let topology = service
+        .read_attempt_topology(&context(true), UtcMicros(100))
+        .unwrap();
+    let WorkAttemptTopologyStateV1::Verified(topology) = topology else {
+        panic!("the current canonical product graph must be a verified topology");
+    };
+    assert_eq!(topology.task_count, 0);
+    assert!(topology.generation.starts_with("sha256:"));
+    assert_eq!(graph.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        graph.requests.lock().unwrap()[0].selection,
+        repository_selection()
+    );
+
+    graph.absent.store(true, Ordering::Relaxed);
+    assert_eq!(
+        service
+            .read_attempt_topology(&context(true), UtcMicros(100))
+            .unwrap(),
+        WorkAttemptTopologyStateV1::Absent
+    );
 }
 
 #[test]
