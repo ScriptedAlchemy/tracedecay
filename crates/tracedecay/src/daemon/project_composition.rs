@@ -1225,6 +1225,10 @@ impl ProjectOpenInputs<'_> {
                         "process background CPU authority was not mounted during daemon bootstrap"
                             .to_owned(),
                 })?;
+        let session_project_root = tracedecay_runtime_core::worktree::repository_identity_root(
+            &self.canonical_project_path,
+        )
+        .unwrap_or_else(|| self.canonical_project_path.to_path_buf());
         let project_session_refresh_wake = refresh_schedulers
             .ensure_project_with_history(
                 key.owner.clone(),
@@ -1232,7 +1236,7 @@ impl ProjectOpenInputs<'_> {
                 Arc::new(ProjectSessionHistoricalIngestor::new(
                     session_db.clone(),
                     Arc::new(core.profile_identity.clone()),
-                    self.canonical_project_path.to_path_buf(),
+                    session_project_root.clone(),
                     code_index.project_id.clone(),
                     core.transcript_source_home.clone(),
                     refresh_schedulers.codex_discovery(),
@@ -1261,7 +1265,7 @@ impl ProjectOpenInputs<'_> {
                 profile_id: core.profile_identity.profile_id().clone(),
                 project_id: code_index.project_id.clone(),
                 profile_root: core.profile_identity.profile_root().to_path_buf(),
-                project_root: self.canonical_project_path.to_path_buf(),
+                project_root: session_project_root,
                 transcript_source_home: core.transcript_source_home.clone(),
                 project_sessions: session_db.clone(),
                 user_sessions: user_session_db.clone(),

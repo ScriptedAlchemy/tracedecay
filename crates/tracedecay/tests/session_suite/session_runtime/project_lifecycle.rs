@@ -41,6 +41,8 @@ async fn register(
     tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1,
     tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     UserProfileId,
+    SessionTemporalRefreshWake,
+    SessionTemporalRefreshWake,
 ) {
     let project_root = root.path().join(project_id.as_str());
     std::fs::create_dir_all(&project_root).unwrap();
@@ -59,6 +61,8 @@ async fn register(
         .unwrap();
     let brain_id = project_sessions.binding().shard_id.brain_id.clone();
     let profile_id = project_sessions.binding().shard_id.profile_id.clone();
+    let project_refresh = SessionTemporalRefreshWake::unavailable();
+    let user_refresh = SessionTemporalRefreshWake::unavailable();
     service
         .register_project(DaemonSessionSyncConfig {
             brain_id,
@@ -74,12 +78,18 @@ async fn register(
                 tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
                     .expect("install fixture worker plan authority"),
             startup_import: false,
-            project_refresh: SessionTemporalRefreshWake::unavailable(),
-            user_refresh: SessionTemporalRefreshWake::unavailable(),
+            project_refresh: project_refresh.clone(),
+            user_refresh: user_refresh.clone(),
         })
         .await
         .unwrap();
-    (runtime, project_sessions, profile_id)
+    (
+        runtime,
+        project_sessions,
+        profile_id,
+        project_refresh,
+        user_refresh,
+    )
 }
 
 #[tokio::test]
@@ -87,11 +97,69 @@ async fn shutdown_releases_registered_project_database_contexts() {
     let service = DaemonSessionSyncService::default();
     let root = tempfile::tempdir().unwrap();
     let project_id = ProjectId::new("project.session-sync.shutdown-context").unwrap();
-    let (_runtime, _project_sessions, _profile_id) = register(&service, &root, project_id).await;
+    let (_runtime, _project_sessions, _profile_id, _project_refresh, _user_refresh) =
+        register(&service, &root, project_id).await;
 
     assert_eq!(context_count(&service), 1);
     service.shutdown().await;
     assert_eq!(context_count(&service), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_registration_keeps_same_project_sync_tasks_running() {
+    let service = DaemonSessionSyncService::default();
+    let root = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.session-sync.repeated-registration").unwrap();
+    let project_root = root.path().join(project_id.as_str());
+    let (runtime, project_sessions, profile_id, project_refresh, user_refresh) =
+        register(&service, &root, project_id.clone()).await;
+    let profile_sessions = runtime
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
+        .unwrap();
+    let cancellation = CancellationSignal::active("session-sync.repeated-registration").unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let task_release = Arc::clone(&release);
+    push_task(
+        &service,
+        SessionSyncTaskV1 {
+            scope: SessionSyncScopeV1::new(project_id.clone(), profile_id.clone()),
+            key: "session-sync.repeated-registration".to_owned(),
+            cancellation: cancellation.clone(),
+            task: tokio::spawn(async move {
+                task_release.notified().await;
+            }),
+        },
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        service.register_project(DaemonSessionSyncConfig {
+            brain_id: project_sessions.binding().shard_id.brain_id.clone(),
+            profile_id,
+            project_id,
+            profile_root: root.path().to_path_buf(),
+            project_root,
+            transcript_source_home: None,
+            project_sessions,
+            user_sessions: profile_sessions.clone(),
+            registry: profile_sessions,
+            background_cpu:
+                tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+                    .expect("install fixture worker plan authority"),
+            startup_import: false,
+            project_refresh,
+            user_refresh,
+        }),
+    )
+    .await
+    .expect("same-project registration must not wait for active sync work")
+    .unwrap();
+
+    assert!(!cancellation.is_cancelled());
+    assert_eq!(context_count(&service), 1);
+    assert_eq!(task_count(&service), 1);
+    release.notify_one();
+    SessionSyncServicePort::shutdown(&service).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -116,7 +184,7 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
     let service = DaemonSessionSyncService::default();
     let root = tempfile::tempdir().unwrap();
     let project_id = ProjectId::new("project.session-sync.shutdown-task-owner").unwrap();
-    let (runtime, project_sessions, profile_id) =
+    let (runtime, project_sessions, profile_id, _project_refresh, _user_refresh) =
         register(&service, &root, project_id.clone()).await;
     let profile_sessions = runtime
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Profile)
@@ -217,8 +285,10 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     let project_b = project_a.clone();
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
-    let (_runtime_a, old_a, profile_a) = register(&service, &root_a, project_a.clone()).await;
-    let (_runtime_b, database_b, profile_b) = register(&service, &root_b, project_b.clone()).await;
+    let (_runtime_a, old_a, profile_a, _project_refresh_a, _user_refresh_a) =
+        register(&service, &root_a, project_a.clone()).await;
+    let (_runtime_b, database_b, profile_b, _project_refresh_b, _user_refresh_b) =
+        register(&service, &root_b, project_b.clone()).await;
 
     let cancellation_a = CancellationSignal::active("session-sync.retire-a").unwrap();
     let cancellation_b = CancellationSignal::active("session-sync.retire-b").unwrap();
