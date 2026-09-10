@@ -154,7 +154,8 @@ impl From<GraphDbError> for WorkTopologyError {
             }
             GraphDbError::Unavailable { message }
             | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
-            error @ GraphDbError::SourceCommitmentsUnavailable { .. } => {
+            error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
+            | GraphDbError::SealedRevisionIncompatible { .. }) => {
                 Self::Unavailable(error.to_string())
             }
             GraphDbError::Closed => Self::Unavailable("graph store is closed".to_owned()),
