@@ -350,9 +350,10 @@ pub struct ResumeWorkAttemptsCommand {
 /// What restart recovery did to each open attempt.
 ///
 /// This report never claims that a provider resumed. An attempt in
-/// `recovery_required` remains fenced under its original identity; launching
-/// more work requires an explicit `retry_attempt` request with a new identity
-/// and the retry service's effect-safety checks.
+/// `recovery_required` remains fenced under its original identity. It does not
+/// authorize another launch; the outcome must be resolved to terminal failure
+/// evidence before the current `retry_attempt` contract can admit a new
+/// identity.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkAttemptRecoveryReportV1 {
