@@ -8,18 +8,10 @@ use tracedecay_tool_catalog::ExecutableBindingV1;
 
 use super::{DispatchCatalogBinding, McpToolDispatchGroup};
 
-/// Resolve a Work MCP name through the canonical Work operation descriptor.
-///
 /// Work intentionally has no row in `MCP_TOOL_BINDINGS`: the executable
 /// registry already owns its complete operation set and lifecycle contracts.
-/// Keeping one handwritten row per operation here would create a second source
-/// of names that could drift from the mounted Work surface.
-pub(crate) fn work_operation_for_tool(tool_name: &str) -> Option<tracedecay_api::WorkOperation> {
-    let operation_key = tool_name.strip_prefix("tracedecay_work_")?;
-    tracedecay_api::WorkOperation::ALL
-        .into_iter()
-        .find(|operation| operation.operation_key() == operation_key)
-}
+/// The `tracedecay_work_` name map lives once, in the MCP handler crate.
+pub(crate) use tracedecay_mcp::handlers::work::work_operation_for_tool;
 
 /// Resolve the executable Work binding that names an MCP tool.
 ///
