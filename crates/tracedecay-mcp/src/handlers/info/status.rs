@@ -98,28 +98,27 @@ fn age_seconds(recorded_at_micros: Option<i64>) -> Option<i64> {
 }
 
 fn attach_compact_branch_summary(
-    ctx: &McpToolContext<'_>,
+    branch_diagnostics: &BranchDiagnostics,
     output: &mut Value,
     retrieval_serving: &CodeIndexRetrievalServingV1,
 ) {
-    // Compact CLI status only needs the already-resolved serving identity
-    // retained on the admitted project bundle.
+    // Both status shapes consume the serving identity reconciled with the
+    // ready generation source below.
     // Do not alias open/active into current/live: those are distinct under drift.
-    if let Some(active) = ctx.active_branch() {
+    if let Some(active) = branch_diagnostics.open_active_branch.as_deref() {
         output["active_branch"] = json!(active);
     }
     let branch_servable = retrieval_serving.attach(output);
-    if branch_servable && let Some(serving) = ctx.serving_branch() {
+    if branch_servable && let Some(serving) = branch_diagnostics.serving_branch.as_deref() {
         output["serving_branch"] = json!(serving);
     }
 }
 
 fn attach_full_branch_status(
-    ctx: &McpToolContext<'_>,
+    branch_diagnostics: BranchDiagnostics,
     output: &mut Value,
     retrieval_serving: &CodeIndexRetrievalServingV1,
 ) {
-    let branch_diagnostics = ctx.branch_diagnostics();
     output["branch_diagnostics"] = json!(&branch_diagnostics);
     if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
         output["active_branch"] = json!(open_branch);
@@ -280,6 +279,28 @@ pub async fn handle_status(
             CodeIndexRetrievalServingV1::AuthorityUnattached,
         ),
     };
+    let ready_serving_source = freshness_payload
+        .as_ref()
+        .and_then(|payload| payload.worktrees.first())
+        .filter(|freshness| {
+            freshness.latest_generation_id.is_some()
+                && matches!(
+                    freshness.code_graph_serving,
+                    Some(
+                        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+                    )
+                )
+        })
+        .and_then(|freshness| {
+            freshness
+                .source_reference
+                .as_deref()
+                .zip(freshness.source_revision.as_deref())
+        });
+    let branch_diagnostics = ctx.branch_diagnostics_for_serving_source(
+        ready_serving_source.map(|(reference, _)| reference),
+        ready_serving_source.map(|(_, revision)| revision),
+    );
     output["code_index_freshness"] = code_index_freshness;
     if include_storage_health {
         let mut storage_health = serde_json::to_value(
@@ -302,9 +323,9 @@ pub async fn handle_status(
     }
 
     if include_branch_diagnostics {
-        attach_full_branch_status(ctx, &mut output, &retrieval_serving);
+        attach_full_branch_status(branch_diagnostics, &mut output, &retrieval_serving);
     } else {
-        attach_compact_branch_summary(ctx, &mut output, &retrieval_serving);
+        attach_compact_branch_summary(&branch_diagnostics, &mut output, &retrieval_serving);
     }
 
     // Session-transcript ingest health (recall trust): last ingest time and

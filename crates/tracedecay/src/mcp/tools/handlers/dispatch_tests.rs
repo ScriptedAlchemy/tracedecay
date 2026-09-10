@@ -759,6 +759,117 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         "a serving census restores the branch claim: {serving}",
     );
 
+    // A branch publication can finish after the drift-triggered graph reopen
+    // already froze the startup fallback. The ready generation source is the
+    // serving authority in that window, including when its ref is the private
+    // tracking ref rather than the user-visible branch name.
+    let mut branch_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
+        .expect("main branch metadata");
+    branch_meta.add_branch(
+        "feature",
+        tracedecay_runtime_core::config::DB_FILENAME,
+        "main",
+    );
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branch_meta)
+        .unwrap();
+    run_git_in(&project, &["checkout", "-b", "feature"]);
+    let feature_revision = git_stdout_in(&project, &["rev-parse", "HEAD"]);
+    let feature_reference = "refs/heads/tracedecay/track/feature";
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &layout.data_root,
+        "feature",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "project.mcp-status-serving-truth".to_owned(),
+            repository_id: "repository.status-serving-truth".to_owned(),
+            worktree_id: "worktree.status-serving-truth".to_owned(),
+            worktree_root: project.display().to_string(),
+            reference: feature_reference.to_owned(),
+            source_oid: feature_revision.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        published,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+    ));
+    let feature_reference = feature_reference.to_owned();
+    let feature_reader:
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+            let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: worktree_root.display().to_string(),
+                source_reference: Some(feature_reference.clone()),
+                source_revision: Some(feature_revision.clone()),
+                latest_generation_id: Some("generation.status-serving-truth.feature".to_owned()),
+                code_graph_serving: Some(
+                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+                ),
+                staleness_state: Some("fresh".to_owned()),
+                ..Default::default()
+            };
+            Box::pin(async move { Some(freshness) })
+        });
+    let published_feature = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(feature_reader.clone()),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("status answers after branch publication");
+    let published_feature = status_output(published_feature);
+    assert_eq!(published_feature["active_branch"], json!("feature"));
+    assert_eq!(published_feature["serving_branch"], json!("feature"));
+    assert_eq!(published_feature["branch_drifted"], json!(false));
+    assert_eq!(published_feature["branch_resolution"], json!("exact"));
+    assert_eq!(
+        published_feature["branch_diagnostics"]["open_active_branch"],
+        json!("feature")
+    );
+    assert_eq!(
+        published_feature["branch_diagnostics"]["serving_branch"],
+        json!("feature")
+    );
+    let feature_row = published_feature["branch_diagnostics"]["branches"]
+        .as_array()
+        .and_then(|branches| {
+            branches
+                .iter()
+                .find(|branch| branch["name"] == json!("feature"))
+        })
+        .expect("published feature branch diagnostics");
+    assert_eq!(feature_row["is_open_active"], json!(true));
+    assert_eq!(feature_row["is_serving"], json!(true));
+    assert_eq!(feature_row["is_ready"], json!(true));
+    assert!(published_feature.get("branch_warnings").is_none());
+
+    let compact_feature = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json", "include_branch_diagnostics": false}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(feature_reader),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("compact status answers after branch publication");
+    let compact_feature = status_output(compact_feature);
+    assert_eq!(compact_feature["active_branch"], json!("feature"));
+    assert_eq!(compact_feature["serving_branch"], json!("feature"));
+
     let rebuilding = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
