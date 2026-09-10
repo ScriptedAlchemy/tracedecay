@@ -8,7 +8,7 @@
 //!
 //! The parser is intentionally lenient: it scans line-by-line and silently
 //! skips anything it doesn't recognise. Diagnostics that don't carry a
-//! `--> file:line:col` span (e.g. summary errors, "could not compile" tails)
+//! source location (e.g. summary errors, "could not compile" tails)
 //! are dropped — they have no source location to map.
 
 use serde::{Deserialize, Serialize};
@@ -50,15 +50,42 @@ pub struct Diagnostic {
 
 /// Parses raw cargo / rustc / clippy stderr text into structured diagnostics.
 ///
-/// Diagnostics without a `--> file:line:col` span are dropped — they cannot
+/// Diagnostics without a primary source location are dropped — they cannot
 /// be mapped to a graph node and would only add noise. Filtering of which
 /// severities to keep is the caller's responsibility.
 pub fn parse_cargo_output(text: &str) -> Vec<Diagnostic> {
+    // Rustc colors both headers and short-format locations with SGR sequences.
+    let text: String = text
+        .split_inclusive('m')
+        .map(|part| match part.split_once("\u{1b}[") {
+            Some((plain, style))
+                if style.ends_with('m')
+                    && style[..style.len() - 1]
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b == b';') =>
+            {
+                plain
+            }
+            _ => part,
+        })
+        .collect();
     let mut out = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     while i < lines.len() {
-        if let Some((severity, code, message)) = parse_header(lines[i]) {
+        if let Some((location, header)) = lines[i].split_once(": ")
+            && let Some((severity, code, message)) = parse_header(header)
+            && let Some((file, line, column)) = parse_location(location)
+        {
+            out.push(Diagnostic {
+                severity,
+                code,
+                message,
+                file,
+                line,
+                column,
+            });
+        } else if let Some((severity, code, message)) = parse_header(lines[i]) {
             // Look for the next `--> file:line:col` within the diagnostic
             // block. Bound the search to ~12 lines so we don't accidentally
             // attach a span from an unrelated downstream diagnostic.
@@ -94,11 +121,6 @@ pub fn parse_cargo_output(text: &str) -> Vec<Diagnostic> {
 ///   `warning: unused variable`
 ///   `error: useless conversion ...`
 fn parse_header(line: &str) -> Option<(Severity, Option<String>, String)> {
-    // ANSI escapes can appear when cargo is run with `--color=always`; strip
-    // a leading reset sequence if present. We don't bother with full ANSI
-    // stripping — the typical input is plain text.
-    let line = line.trim_start_matches("\u{1b}[0m");
-
     // Find the first colon. Severity is everything before it (optionally
     // followed by `[CODE]`). Message is everything after.
     let (head, rest) = line.split_once(": ")?;
@@ -122,7 +144,10 @@ fn parse_header(line: &str) -> Option<(Severity, Option<String>, String)> {
 /// secondary spans which we ignore here).
 fn parse_span(line: &str) -> Option<(String, u32, u32)> {
     let trimmed = line.trim_start();
-    let rest = trimmed.strip_prefix("--> ")?;
+    parse_location(trimmed.strip_prefix("--> ")?)
+}
+
+fn parse_location(rest: &str) -> Option<(String, u32, u32)> {
     // Split on the last two `:`s — the file path itself may contain `:`
     // on Windows (drive letter), so working from the right is safer.
     let (file_and_line, col_str) = rest.rsplit_once(':')?;
@@ -207,4 +232,25 @@ note: For more information about this error, try `rustc --explain E0308`.
         let diags = parse_cargo_output(input);
         assert!(diags.is_empty());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn parses_colored_short_cargo_diagnostic() {
+    let diagnostics = parse_cargo_output(
+        "\u{1b}[1m\u{1b}[92m    Checking\u{1b}[0m tracedecay-daemon-service v0.1.0 (/fast/tmp/td-feedback-positive-pr1195-current-WqlOE1/crates/tracedecay-daemon-service)\ncrates/tracedecay-daemon-service/src/invocation/source_edit.rs:29:5: \u{1b}[1m\u{1b}[91merror[E0425]\u{1b}[0m: cannot find function `feedback_positive_proof_missing_symbol` in this scope: not found in this scope\n\u{1b}[1m\u{1b}[91merror\u{1b}[0m: could not compile `tracedecay-daemon-service` (lib) due to 1 previous error\n",
+    );
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code.as_deref(), Some("E0425"));
+    assert_eq!(
+        diagnostic.file,
+        "crates/tracedecay-daemon-service/src/invocation/source_edit.rs"
+    );
+    assert_eq!((diagnostic.line, diagnostic.column), (29, 5));
+    assert!(
+        diagnostic
+            .message
+            .contains("feedback_positive_proof_missing_symbol")
+    );
 }
