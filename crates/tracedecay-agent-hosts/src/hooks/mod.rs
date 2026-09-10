@@ -250,14 +250,9 @@ pub(crate) async fn write_hook_output(
                 );
                 return false;
             };
-            let Some(deadline) = Instant::now().checked_add(Duration::from_micros(
-                tracedecay_hooks::HookSynchronousDeadlineV1::start().remaining_micros(),
-            )) else {
-                return false;
-            };
-            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_until(
+            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_within(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
-                deadline,
+                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
             ) {
                 Ok(writer) => Some(writer),
                 Err(error) => {
