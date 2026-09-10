@@ -21,14 +21,14 @@
 //!    fall through similarity, cosine, then names and node ids), and return
 //!    the top N pairs plus their connected duplicate groups.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{Value, json};
 
 use tracedecay_code_extraction::redundancy::{
-    Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
-    redundancy_match_score, round4,
+    Fingerprint, RedundancyMatchScore, body_token_count, body_token_window, compute_fingerprint,
+    parse_file, redundancy_match_score, round4,
 };
 use tracedecay_domain::SourceSpan;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -212,27 +212,30 @@ impl<'a> RedundancyPairScan<'a> {
     }
 
     fn finish(self) -> Vec<RedundantPair<'a>> {
-        let mut found = self.found;
-        found.sort_by(|left, right| {
-            right
-                .score
-                .ranking_score
-                .total_cmp(&left.score.ranking_score)
-                .then_with(|| right.score.similarity.total_cmp(&left.score.similarity))
-                .then_with(|| {
-                    right
-                        .score
-                        .vector_cosine
-                        .total_cmp(&left.score.vector_cosine)
-                })
-                .then_with(|| left.node_a.name.cmp(&right.node_a.name))
-                .then_with(|| left.node_b.name.cmp(&right.node_b.name))
-                .then_with(|| left.node_a.id.cmp(&right.node_a.id))
-                .then_with(|| left.node_b.id.cmp(&right.node_b.id))
-        });
-        found.truncate(self.max_pairs);
-        found
+        rank_pairs(self.found, self.max_pairs)
     }
+}
+
+fn rank_pairs(mut found: Vec<RedundantPair<'_>>, max_pairs: usize) -> Vec<RedundantPair<'_>> {
+    found.sort_by(|left, right| {
+        right
+            .score
+            .ranking_score
+            .total_cmp(&left.score.ranking_score)
+            .then_with(|| right.score.similarity.total_cmp(&left.score.similarity))
+            .then_with(|| {
+                right
+                    .score
+                    .vector_cosine
+                    .total_cmp(&left.score.vector_cosine)
+            })
+            .then_with(|| left.node_a.name.cmp(&right.node_a.name))
+            .then_with(|| left.node_b.name.cmp(&right.node_b.name))
+            .then_with(|| left.node_a.id.cmp(&right.node_a.id))
+            .then_with(|| left.node_b.id.cmp(&right.node_b.id))
+    });
+    found.truncate(max_pairs);
+    found
 }
 
 fn redundant_pair<'a>(
@@ -400,7 +403,7 @@ pub async fn redundancy_scan(
 
     // 2. Compute fresh, request-owned fingerprints. The final graph authority
     // intentionally has no parallel SQLite fingerprint or pair cache.
-    let fingerprints = ensure_fingerprints(graph.project_root()?, &nodes).await?;
+    let fingerprints = ensure_fingerprints(graph.project_root()?, &nodes, None).await?;
     let scanned = fingerprints.len();
 
     // 3. Bucket by token count and score every in-window pair.
@@ -429,6 +432,57 @@ pub async fn redundancy_scan(
         pairs: pair_views(&pairs),
         groups: group_views(&groups),
     })
+}
+
+/// Structural matches involving the requested symbols. Unlike a project audit,
+/// a diagnostic needs no comparisons between two unrelated functions.
+#[hotpath::measure(label = "graph.redundancy_scan.selected", future = true)]
+pub async fn redundancy_for_symbols(
+    graph: &VerifiedGraphQuery,
+    options: &RedundancyOptions<'_>,
+    targets: &HashSet<String>,
+) -> Result<Vec<RedundancyPairViewV1>> {
+    let nodes = collect_candidates(
+        graph,
+        options.path_prefix,
+        options.min_lines,
+        options.include_generated,
+    )?;
+    let fingerprints = ensure_fingerprints(graph.project_root()?, &nodes, Some(targets)).await?;
+    let scoped = scoped_fingerprints(&nodes, &fingerprints);
+    let mut pairs = Vec::new();
+    let mut compared = 0usize;
+    for &(anchor, anchor_fp) in &scoped {
+        if !targets.contains(&anchor.id) {
+            continue;
+        }
+        for &(other, other_fp) in &scoped {
+            if anchor.id == other.id || (targets.contains(&other.id) && other.id < anchor.id) {
+                continue;
+            }
+            let small = anchor_fp.body_tokens.min(other_fp.body_tokens);
+            let large = anchor_fp.body_tokens.max(other_fp.body_tokens);
+            if large > body_token_window(small).1 {
+                continue;
+            }
+            if let Some(pair) = redundant_pair(
+                anchor,
+                anchor_fp,
+                other,
+                other_fp,
+                options.threshold,
+                options.include_naming,
+            ) {
+                pairs.push(pair);
+            }
+            compared += 1;
+            if compared % REDUNDANCY_PAIR_SLICE == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    hotpath::gauge!("graph.redundancy_scan.selected_pairs_compared_total").inc(compared as u64);
+    Ok(pair_views(&rank_pairs(pairs, options.max_pairs)))
 }
 
 /// Pairwise comparison: buckets by token count to keep the scan
@@ -1036,15 +1090,19 @@ fn is_generated_path(path: &str) -> bool {
 async fn ensure_fingerprints(
     project_root: &Path,
     candidates: &[RedundancyCandidate],
+    targets: Option<&HashSet<String>>,
 ) -> Result<HashMap<String, Fingerprint>> {
     let project_root = project_root.to_path_buf();
     let candidates = candidates.to_vec();
-    let load =
-        tokio::task::spawn_blocking(move || compute_fingerprints(&project_root, &candidates))
-            .await
-            .map_err(|error| {
-                redundancy_graph_problem(&format!("fingerprint worker did not complete: {error}"))
-            })??;
+    let targets = targets.cloned();
+    let load = tokio::task::spawn_blocking(move || match targets.as_ref() {
+        Some(targets) => compute_selected_fingerprints(&project_root, &candidates, Some(targets)),
+        None => compute_fingerprints(&project_root, &candidates),
+    })
+    .await
+    .map_err(|error| {
+        redundancy_graph_problem(&format!("fingerprint worker did not complete: {error}"))
+    })??;
     Ok(load.fingerprints)
 }
 
@@ -1062,6 +1120,14 @@ fn compute_fingerprints(
     project_root: &Path,
     candidates: &[RedundancyCandidate],
 ) -> Result<FingerprintLoad> {
+    compute_selected_fingerprints(project_root, candidates, None)
+}
+
+fn compute_selected_fingerprints(
+    project_root: &Path,
+    candidates: &[RedundancyCandidate],
+    targets: Option<&HashSet<String>>,
+) -> Result<FingerprintLoad> {
     let registry = tracedecay_code_extraction::LanguageRegistry::new();
 
     // Group candidates by file so we parse each file at most once.
@@ -1069,15 +1135,26 @@ fn compute_fingerprints(
     for n in candidates {
         by_file.entry(n.file_path.clone()).or_default().push(n);
     }
-    let file_count = by_file.len();
 
     let mut out: HashMap<String, Fingerprint> = HashMap::new();
-    #[cfg(test)]
     let mut parsed_files = 0usize;
     #[cfg(test)]
     let mut computed_fingerprints = 0usize;
 
+    let mut by_file = by_file.into_iter().collect::<Vec<_>>();
+    by_file.sort_by_key(|(_, nodes)| {
+        !nodes
+            .iter()
+            .any(|node| targets.is_some_and(|ids| ids.contains(&node.id)))
+    });
+    let mut token_windows = Vec::new();
     for (file_path, file_nodes) in by_file {
+        let target_file = file_nodes
+            .iter()
+            .any(|node| targets.is_some_and(|ids| ids.contains(&node.id)));
+        if targets.is_some() && !target_file && token_windows.is_empty() {
+            break;
+        }
         let Some(extractor) = registry.extractor_for_file(&file_path) else {
             return Err(redundancy_graph_problem(
                 "verified redundancy symbol has no registered extractor",
@@ -1108,10 +1185,7 @@ fn compute_fingerprints(
                 "verified redundancy source `{file_path}` could not be parsed"
             ))
         })?;
-        #[cfg(test)]
-        {
-            parsed_files += 1;
-        }
+        parsed_files += 1;
 
         for node in file_nodes {
             let Ok(start_byte) = usize::try_from(node.source_span.start_byte) else {
@@ -1143,7 +1217,23 @@ fn compute_fingerprints(
                     "verified redundancy source span does not resolve to a syntax node",
                 ));
             };
-            out.insert(node.id.clone(), compute_fingerprint(&source, ts_node));
+            if targets.is_some() && !target_file {
+                let body = ts_node.utf8_text(source.as_bytes()).map_err(|error| {
+                    redundancy_graph_problem(&format!("fingerprint source is invalid: {error}"))
+                })?;
+                let count = body_token_count(body);
+                if !token_windows
+                    .iter()
+                    .any(|(low, high)| (*low..=*high).contains(&count))
+                {
+                    continue;
+                }
+            }
+            let fingerprint = compute_fingerprint(&source, ts_node);
+            if targets.is_some_and(|ids| ids.contains(&node.id)) {
+                token_windows.push(body_token_window(fingerprint.body_tokens));
+            }
+            out.insert(node.id.clone(), fingerprint);
             #[cfg(test)]
             {
                 computed_fingerprints += 1;
@@ -1151,7 +1241,7 @@ fn compute_fingerprints(
         }
     }
 
-    hotpath::gauge!("graph.redundancy_scan.files_parsed_total").inc(file_count as u64);
+    hotpath::gauge!("graph.redundancy_scan.files_parsed_total").inc(parsed_files as u64);
     hotpath::gauge!("graph.redundancy_scan.fingerprints_total").inc(out.len() as u64);
     Ok(FingerprintLoad {
         fingerprints: out,
@@ -1223,12 +1313,14 @@ fn duplicate_groups(groups: &[Vec<&RedundancyCandidate>]) -> Vec<Value> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use serde_json::Value;
+    use std::collections::HashSet;
 
     use super::{
         RedundancyCandidate, RedundancyOptions, RedundancyPairScan, RedundantPair, SemanticPair,
         SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
-        augment_redundancy_output, canonical_pair_ids, compute_fingerprints, connected_node_groups,
-        find_redundant_pairs, is_generated_path, nodes_overlap, redundancy_output, semantic_cosine,
+        augment_redundancy_output, canonical_pair_ids, compute_fingerprints,
+        compute_selected_fingerprints, connected_node_groups, find_redundant_pairs,
+        is_generated_path, nodes_overlap, redundancy_output, scoped_fingerprints, semantic_cosine,
         semantic_pairs,
     };
     use tracedecay_code_extraction::redundancy::{Fingerprint, RedundancyMatchScore};
@@ -1842,6 +1934,50 @@ mod tests {
         assert_eq!(load.fingerprints.len(), 2);
         assert_eq!(load.fingerprints["alpha-id"].source_hash.len(), 16);
         assert_eq!(load.fingerprints["beta-id"].source_hash.len(), 16);
+    }
+
+    #[test]
+    fn selected_fingerprints_preserve_matches_without_hashing_unrelated_bodies() {
+        let temp = tempfile::tempdir().unwrap();
+        let body = after_secret_body();
+        let huge = format!(
+            "fn unrelated() {{\n{}\n}}",
+            "    consume(1, 2, 3);\n".repeat(100)
+        );
+        let sources = [
+            ("anchor", body.to_owned()),
+            ("duplicate", body.to_owned()),
+            ("unrelated", huge),
+        ];
+        let mut nodes = Vec::new();
+        for (id, source) in &sources {
+            let path = format!("{id}.rs");
+            std::fs::write(temp.path().join(&path), source).unwrap();
+            let mut node = candidate_node(id, id, &path, source.lines().count() as u32);
+            node.source_span.end_byte = source.trim_end().len() as u64;
+            nodes.push(node);
+        }
+        let targets = HashSet::from(["anchor".to_owned()]);
+        let full = compute_fingerprints(temp.path(), &nodes).unwrap();
+        let selected = compute_selected_fingerprints(temp.path(), &nodes, Some(&targets)).unwrap();
+        assert_eq!(full.computed_fingerprints, 3);
+        assert_eq!(selected.computed_fingerprints, 2);
+        assert_eq!(selected.parsed_files, 3);
+        assert!(!selected.fingerprints.contains_key("unrelated"));
+        let full_pairs = find_redundant_pairs(
+            scoped_fingerprints(&nodes, &full.fingerprints),
+            0.6,
+            false,
+            usize::MAX,
+        );
+        let selected_pairs = find_redundant_pairs(
+            scoped_fingerprints(&nodes, &selected.fingerprints),
+            0.6,
+            false,
+            usize::MAX,
+        );
+        assert_eq!(full_pairs.len(), 1, "the duplicate must be found");
+        assert_eq!(pair_identity(&selected_pairs), pair_identity(&full_pairs));
     }
 
     /// The indexer extracts from privacy-sanitized bytes. Credential
