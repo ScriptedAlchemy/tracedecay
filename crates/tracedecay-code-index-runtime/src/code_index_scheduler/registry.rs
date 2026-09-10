@@ -6949,8 +6949,59 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
+#[derive(Clone)]
+pub struct ScopedFeedbackDocumentIdentityV1 {
+    registry: CodeIndexSchedulerRegistryV1,
+    project_root: PathBuf,
+    scope: tracedecay_contracts::ResolvedScope,
+}
+
+impl CodeIndexSchedulerRegistryV1 {
+    pub async fn latest_feedback_generation_for_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<LatestCodeTextGenerationV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted_root = {
+            let mounted = self.mounted.lock().await;
+            let (mounted_root, _) = unique_mounted_for_scope(&mounted, scope).unique()?;
+            mounted_root.clone()
+        };
+        if mounted_root != project_root {
+            return None;
+        }
+        if let Some(generation) = self
+            .latest_complete_ready_decoded_for_root_scope(&project_root, scope)
+            .await
+        {
+            return Some(generation.text_generation_handle());
+        }
+        if let Some(generation) = self.latest_complete_ready_for_scope(scope).await {
+            return Some(generation.text_generation_handle());
+        }
+        self.latest_text_serving_freshness_for_scope(scope)
+            .await
+            .and_then(|(generation, current)| current.then_some(generation))
+    }
+}
+
+impl ScopedFeedbackDocumentIdentityV1 {
+    pub fn new(
+        registry: CodeIndexSchedulerRegistryV1,
+        project_root: &Path,
+        scope: tracedecay_contracts::ResolvedScope,
+    ) -> Option<Self> {
+        Some(Self {
+            registry,
+            project_root: project_root.canonicalize().ok()?,
+            scope,
+        })
+    }
+}
+
 impl tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityPort
-    for CodeIndexSchedulerRegistryV1
+    for ScopedFeedbackDocumentIdentityV1
 {
     fn resolve(
         &self,
@@ -6958,55 +7009,72 @@ impl tracedecay_application::feedback::cycle_production::ProductionFeedbackDocum
         document_uri: Option<String>,
     ) -> tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityFuture
     {
-        let registry = self.clone();
+        let owner = self.clone();
         Box::pin(async move {
-            let root = project_root
+            let requested_root = project_root
                 .canonicalize()
                 .map_err(|_| LspRuntimeFailure::new("feedback-code-index-root-unavailable"))?;
-            let current = registry.latest_complete_ready(&root).await.ok_or_else(|| {
-                LspRuntimeFailure::new("feedback-code-index-generation-unavailable")
-            })?;
-            let generation = &current.generation;
-            let snapshot = generation.snapshot();
-            let file = match document_uri {
-                Some(uri) => {
-                    let logical_path = feedback_document_logical_path(&root, &uri)?;
-                    snapshot
-                        .files
-                        .iter()
-                        .find(|file| file.logical_path == logical_path)
-                        .ok_or_else(|| {
-                            LspRuntimeFailure::new("feedback-code-index-document-unavailable")
-                        })?
-                }
-                None => snapshot
-                    .files
-                    .iter()
-                    .find(|file| {
-                        Path::new(&file.logical_path)
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            == Some("rs")
-                    })
-                    .ok_or_else(|| {
-                        LspRuntimeFailure::new("feedback-code-index-rust-document-unavailable")
-                    })?,
-            };
-            let generation_digest =
-                ManifestDigest::new(generation.manifest().snapshot_digest.as_str().to_owned())
-                    .map_err(|_| {
-                        LspRuntimeFailure::new("feedback-code-index-generation-invalid")
-                    })?;
-            Ok(
-                tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1 {
-                    generation_id: generation.manifest().generation_id.clone(),
-                    generation_digest,
-                    file: file.file_occurrence_id.clone(),
-                    content_digest: file.content_digest.clone(),
-                },
+            if requested_root != owner.project_root {
+                return Err(LspRuntimeFailure::new("feedback-code-index-root-mismatch"));
+            }
+            let selection = owner
+                .registry
+                .latest_feedback_generation_for_scope(&owner.project_root, &owner.scope)
+                .await
+                .ok_or_else(|| {
+                    LspRuntimeFailure::new("feedback-code-index-generation-unavailable")
+                })?;
+            feedback_document_identity_from_generation(
+                selection,
+                &owner.project_root,
+                document_uri.as_deref(),
             )
         })
     }
+}
+
+pub fn feedback_document_identity_from_generation(
+    generation: LatestCodeTextGenerationV1,
+    project_root: &Path,
+    document_uri: Option<&str>,
+) -> Result<
+    tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1,
+    LspRuntimeFailure,
+> {
+    let snapshot = generation.metadata().snapshot();
+    let file = match document_uri {
+        Some(uri) => {
+            let logical_path = feedback_document_logical_path(project_root, uri)?;
+            snapshot
+                .files
+                .iter()
+                .find(|file| file.logical_path == logical_path)
+                .ok_or_else(|| LspRuntimeFailure::new("feedback-code-index-document-unavailable"))?
+        }
+        None => snapshot
+            .files
+            .iter()
+            .find(|file| {
+                Path::new(&file.logical_path)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    == Some("rs")
+            })
+            .ok_or_else(|| {
+                LspRuntimeFailure::new("feedback-code-index-rust-document-unavailable")
+            })?,
+    };
+    let manifest = generation.metadata().manifest();
+    let generation_digest = ManifestDigest::new(manifest.snapshot_digest.as_str().to_owned())
+        .map_err(|_| LspRuntimeFailure::new("feedback-code-index-generation-invalid"))?;
+    Ok(
+        tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1 {
+            generation_id: manifest.generation_id.clone(),
+            generation_digest,
+            file: file.file_occurrence_id.clone(),
+            content_digest: file.content_digest.clone(),
+        },
+    )
 }
 
 /// The registry is the single mint for file and generation identity, so every

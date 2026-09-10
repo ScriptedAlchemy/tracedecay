@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::code_index_scheduler::feedback_document_identity_from_generation;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_contracts::retrieval::{
@@ -8184,6 +8185,47 @@ async fn proven_seated_generation_serves_verified_reads_while_reconcile_owns_the
     release_tx.send(()).expect("release the held scheduler");
     holder.join().expect("scheduler holder thread");
     registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn selected_generation_mints_feedback_identity_after_registry_lookup_closes() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let selected = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready.text_generation_handle();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("selected generation");
+    let expected_generation = selected.metadata().manifest().generation_id.clone();
+    let foreign_root = TempDir::new().expect("foreign root");
+    assert!(
+        registry
+            .latest_feedback_generation_for_scope(foreign_root.path(), &scope)
+            .await
+            .is_none(),
+        "a matching scope must not select a generation for a different root"
+    );
+
+    registry.shutdown().await;
+    assert!(
+        registry
+            .latest_complete_ready(fixture.path())
+            .await
+            .is_none(),
+        "the root-level current lookup must be unavailable after shutdown"
+    );
+    let identity = feedback_document_identity_from_generation(selected, fixture.path(), None)
+        .expect("the already-selected generation remains an identity authority");
+    assert_eq!(identity.generation_id, expected_generation);
 }
 
 /// Fail-closed half of the busy-read witness: a seated generation whose

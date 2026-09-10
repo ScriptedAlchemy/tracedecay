@@ -552,20 +552,36 @@ struct ProjectOpenScoutProducerV1 {
 /// resolved per cycle. The one-time project-open census is never retained, so
 /// files sealed by later generations map saved-edit hooks and mount providers
 /// without a project reopen. `None` is the typed no-sealed-generation state.
-async fn current_indexed_files(producer: &ProjectOpenScoutProducerV1) -> Option<Vec<String>> {
-    let generation = producer
+async fn current_indexed_files(
+    producer: &ProjectOpenScoutProducerV1,
+) -> Option<(
+    tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1,
+    Vec<String>,
+)> {
+    let selection = producer
         .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(&producer.project_root, &producer.scope)
+        .latest_feedback_generation_for_scope(&producer.project_root, &producer.scope)
         .await?;
-    let mut indexed_files = generation
-        .generation()
+    let mut indexed_files = selection
+        .metadata()
         .snapshot()
         .files
         .iter()
         .map(|file| file.logical_path.clone())
         .collect::<Vec<_>>();
     indexed_files.sort();
-    Some(indexed_files)
+    Some((selection, indexed_files))
+}
+
+async fn selected_feedback_generation(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> Option<tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1> {
+    invocation
+        .code_index_schedulers
+        .latest_feedback_generation_for_scope(project_root, scope)
+        .await
 }
 
 async fn refresh_feedback_cycle(
@@ -595,7 +611,7 @@ async fn refresh_feedback_cycle(
             return Ok(());
         }
     }
-    let indexed_files = current_indexed_files(producer)
+    let (indexed_generation, indexed_files) = current_indexed_files(producer)
         .await
         .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-census"))?;
     let mounted_providers = producer
@@ -603,6 +619,19 @@ async fn refresh_feedback_cycle(
         .lock()
         .await
         .mounted_providers_for_files(&indexed_files);
+    let provider_seed =
+        tracedecay_code_index_runtime::code_index_scheduler::feedback_document_identity_from_generation(
+            indexed_generation,
+            &producer.project_root,
+            None,
+        )?;
+    let document_identity =
+        tracedecay_code_index_runtime::code_index_scheduler::ScopedFeedbackDocumentIdentityV1::new(
+            producer.code_index_schedulers.clone(),
+            &producer.project_root,
+            producer.scope.clone(),
+        )
+        .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-identity"))?;
     let configuration_digest = current.snapshot.effective_behavior_digest.clone();
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
@@ -631,7 +660,8 @@ async fn refresh_feedback_cycle(
         code_graph: Arc::clone(&producer.code_graph),
         project_runtime_db: producer.session_db.clone(),
         runtime_state,
-        document_identity: Arc::new(producer.code_index_schedulers.clone()),
+        provider_seed,
+        document_identity: Arc::new(document_identity),
         code_index_identity: Arc::new(producer.code_index_schedulers.clone()),
         test_attribution: Arc::new(producer.code_index_schedulers.clone()),
         mounted_providers,
@@ -719,7 +749,7 @@ async fn run_production_hook_cycle(
         .registration
         .host_delivery
         .source_observations;
-    let Some(indexed_files) = current_indexed_files(&producer).await else {
+    let Some((_, indexed_files)) = current_indexed_files(&producer).await else {
         observe_hook_feedback_cycle_terminal(
             observations,
             &request,
@@ -1015,9 +1045,11 @@ pub(super) async fn register_production_feedback_and_advisory(
     project_root: &Path,
     state: &mut ProjectOpenDependentOwnerState,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
+    indexed_generation: tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1,
 ) -> Result<()> {
     let (feedback_cycle, feedback_scope) =
-        register_production_feedback_cycle(invocation, project_root, state).await?;
+        register_production_feedback_cycle(invocation, project_root, state, indexed_generation)
+            .await?;
     register_production_advisory_owner(
         invocation,
         project_root,
@@ -1095,12 +1127,17 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         return Ok(());
     }
     register_project_delivery_read_authority(invocation, project_root, &state).await?;
-    if let Some(lsp_session_factory) = state.lsp_session_factory.clone() {
+    let indexed_generation =
+        selected_feedback_generation(invocation, project_root, &state.scope).await;
+    if let (Some(lsp_session_factory), Some(indexed_generation)) =
+        (state.lsp_session_factory.clone(), indexed_generation)
+    {
         if let Err(error) = register_production_feedback_and_advisory(
             invocation,
             project_root,
             &mut state,
             lsp_session_factory,
+            indexed_generation,
         )
         .await
         {
@@ -1190,6 +1227,7 @@ async fn register_production_feedback_cycle(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &mut ProjectOpenDependentOwnerState,
+    indexed_generation: tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1,
 ) -> Result<(Arc<FeedbackCycleRuntime>, FeedbackScopeV1)> {
     refresh_project_open_feedback_configuration(state).await?;
     let configuration_digest = &state.scout_configuration.snapshot.effective_behavior_digest;
@@ -1213,6 +1251,24 @@ async fn register_production_feedback_cycle(
             scope: state.scope.clone(),
             configuration: Arc::clone(state.graph.configuration_runtime()),
         });
+    let provider_seed =
+        tracedecay_code_index_runtime::code_index_scheduler::feedback_document_identity_from_generation(
+            indexed_generation,
+            project_root,
+            None,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open provider code-index identity failed: {}", error.class()),
+        })?;
+    let document_identity =
+        tracedecay_code_index_runtime::code_index_scheduler::ScopedFeedbackDocumentIdentityV1::new(
+            invocation.code_index_schedulers.clone(),
+            project_root,
+            state.scope.clone(),
+        )
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open feedback document identity is unavailable".to_owned(),
+        })?;
     let parts = resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
         project_root: project_root.to_path_buf(),
         scope: state.scope.clone(),
@@ -1222,7 +1278,8 @@ async fn register_production_feedback_cycle(
         code_graph: Arc::clone(&state.code_graph),
         project_runtime_db: state.session_db.clone(),
         runtime_state,
-        document_identity: Arc::new(invocation.code_index_schedulers.clone()),
+        provider_seed,
+        document_identity: Arc::new(document_identity),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         test_attribution: Arc::new(invocation.code_index_schedulers.clone()),
         mounted_providers: state.mounted_providers.clone(),
