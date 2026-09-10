@@ -60,6 +60,13 @@ pub(crate) fn shutdown_exit_bound() -> Duration {
 }
 
 static ARMED: AtomicBool = AtomicBool::new(false);
+static ARMED_AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Milliseconds since the daemon committed to exiting (0 before arming), so
+/// operator lines without a wall clock still order against the TERM grace.
+pub(super) fn shutdown_elapsed_ms() -> u128 {
+    ARMED_AT.get().map_or(0, |at| at.elapsed().as_millis())
+}
 
 #[cfg(feature = "hotpath")]
 type HotpathShutdownFinalizer = Box<dyn FnOnce() + Send + 'static>;
@@ -136,6 +143,7 @@ fn drain_bound_exceeded(bound: Duration) -> ! {
     hotpath::measure(label = "daemon.shutdown_watchdog.arm")
 )]
 pub(super) fn arm_shutdown_exit_bound() {
+    let _ = ARMED_AT.set(std::time::Instant::now());
     if ARMED.swap(true, Ordering::AcqRel) {
         return;
     }
