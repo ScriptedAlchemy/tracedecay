@@ -65,6 +65,9 @@ pub struct RegisteredWorkApplicationServicesV1 {
     attempts: tracedecay_contracts::WorkAttemptService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    attempt_effects: tracedecay_contracts::WorkAttemptEffectServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
     run_control: tracedecay_contracts::WorkRunControlService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
@@ -200,6 +203,7 @@ impl RegisteredWorkApplicationServicesV1 {
             commands: tracedecay_contracts::WorkService::new(storage.clone()),
             projections: tracedecay_contracts::WorkProjectionReadService::new(storage.clone()),
             attempts: tracedecay_contracts::WorkAttemptService::new(storage.clone()),
+            attempt_effects: tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage.clone()),
             run_control: tracedecay_contracts::WorkRunControlService::new(storage.clone()),
             placement: tracedecay_contracts::WorkPlacementService::new(storage.clone()),
             artifact_hydration: tracedecay_contracts::WorkArtifactHydrationService::new(
@@ -232,6 +236,14 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.attempts
+    }
+
+    pub const fn attempt_effects(
+        &self,
+    ) -> &tracedecay_contracts::WorkAttemptEffectServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.attempt_effects
     }
 
     /// The run-level pause/resume authority.
