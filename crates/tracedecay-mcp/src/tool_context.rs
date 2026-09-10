@@ -22,9 +22,10 @@
 //! missing or unauthorized verdict into an apparent capability.
 //!
 //! Absence stays typed. An authority the daemon never admitted is `None` here
-//! and each handler turns that into its own unavailable state. With no
-//! admitted scope no scoped authority may be admitted at all, and graph
-//! verification refuses rather than waving a query through.
+//! and each handler turns that into its own unavailable state. Every binding
+//! carries an admitted project; a call that never published a checkout is a
+//! typed root failure, not a second binding shape. Graph verification refuses
+//! rather than waving a query through.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -210,6 +211,9 @@ pub struct McpAdmittedProjectV1 {
     pub store_runtime: Option<Arc<DaemonSessionRuntimeRegistryV1>>,
     pub configuration_runtime: Option<Arc<ProjectConfigurationRuntime>>,
     pub project_session_store: Option<RegisteredGlobalDbLeaseV1>,
+    /// The root's verdict for reading `project_session_store`. Bind reports
+    /// this verbatim and never upgrades it to [`ValidatedAuthorization::Authorized`].
+    pub project_session_authorization: ValidatedAuthorization,
 }
 
 impl McpAdmittedProjectV1 {
@@ -226,7 +230,7 @@ impl McpAdmittedProjectV1 {
         graph_db_path: PathBuf,
         store_runtime: Option<Arc<DaemonSessionRuntimeRegistryV1>>,
         configuration_runtime: Option<Arc<ProjectConfigurationRuntime>>,
-        project_session_store: Option<RegisteredGlobalDbLeaseV1>,
+        project_session_store: Option<(RegisteredGlobalDbLeaseV1, ValidatedAuthorization)>,
     ) -> std::result::Result<Self, McpToolBindingError> {
         if !identity.project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
@@ -247,12 +251,16 @@ impl McpAdmittedProjectV1 {
                 });
             }
         }
-        if let Some(lease) = project_session_store.as_ref() {
-            verify_store_lease(
-                &identity.scope,
-                AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized),
-            )?;
-        }
+        let (project_session_store, project_session_authorization) = match project_session_store {
+            Some((lease, authorization)) => {
+                verify_store_lease(
+                    &identity.scope,
+                    AdmittedProjectStore::new(&lease, authorization),
+                )?;
+                (Some(lease), authorization)
+            }
+            None => (None, ValidatedAuthorization::Unauthorized),
+        };
         Ok(Self {
             identity,
             store_layout,
@@ -261,6 +269,7 @@ impl McpAdmittedProjectV1 {
             store_runtime,
             configuration_runtime,
             project_session_store,
+            project_session_authorization,
         })
     }
 
@@ -299,6 +308,10 @@ impl std::fmt::Debug for McpAdmittedProjectV1 {
             .field(
                 "has_project_session_store",
                 &self.project_session_store.is_some(),
+            )
+            .field(
+                "project_session_authorization",
+                &self.project_session_authorization,
             )
             .finish()
     }
@@ -350,27 +363,16 @@ pub struct McpRequestAuthoritiesV1<'a> {
 
 /// Everything the composition root admits for one MCP tool call.
 ///
-/// Two real serving shapes, not one struct with `Option` fallbacks. An
-/// [`Admitted`](Self::Admitted) route carries root, scope, branch, and
-/// session store only on the project snapshot — there is no second label a
-/// caller can set beside it. An [`Unprojected`](Self::Unprojected) standalone
-/// or core-server call carries the loose checkout fields and cannot also
-/// present a snapshot.
+/// One serving shape: the route published a project snapshot, and root,
+/// scope, branch, and session store live only on that snapshot — there is
+/// no second label a caller can set beside it. A call that never published
+/// a checkout is a typed root failure, not a second variant.
 #[derive(Clone, Copy)]
 pub enum McpToolBinding<'a> {
     /// The serving route published a project snapshot for this call.
     Admitted {
         project: &'a McpAdmittedProjectV1,
         request: McpRequestAuthoritiesV1<'a>,
-    },
-    /// Standalone server, or the core server before project-open publication
-    /// resolves a route. No snapshot, so no second root/scope/store.
-    Unprojected {
-        project_root: &'a Path,
-        active_branch: Option<&'a str>,
-        request: McpRequestAuthoritiesV1<'a>,
-        scope: Option<&'a ResolvedScope>,
-        project_session_store: Option<AdmittedProjectStore<'a>>,
     },
 }
 
@@ -380,14 +382,14 @@ pub enum McpToolBinding<'a> {
 /// the handler family only reads them, so no handler can outlive the
 /// admission that produced them.
 pub struct McpToolContext<'a> {
-    project: Option<&'a McpAdmittedProjectV1>,
+    project: &'a McpAdmittedProjectV1,
     request: McpRequestAuthoritiesV1<'a>,
     project_root: &'a Path,
     active_branch: Option<&'a str>,
     deadline: Option<&'a Deadline>,
     cancellation: Option<&'a CancellationSignal>,
     /// The one checkout every admitted authority in this binding belongs to.
-    admitted_scope: Option<&'a ResolvedScope>,
+    admitted_scope: &'a ResolvedScope,
     project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     /// The root's verdict for reading `project_session_db`, carried verbatim.
     project_session_authorization: Option<ValidatedAuthorization>,
@@ -406,64 +408,32 @@ impl<'a> McpToolContext<'a> {
     /// it. Nothing is defaulted or repaired: a binding that does not prove one
     /// coherent request scope is refused whole.
     pub fn bind(binding: McpToolBinding<'a>) -> std::result::Result<Self, McpToolBindingError> {
-        let (project, project_root, active_branch, request, admitted_scope, project_session_store) =
-            match binding {
-                McpToolBinding::Admitted { project, request } => {
-                    let project_session_store =
-                        project.project_session_store.as_ref().map(|lease| {
-                            AdmittedProjectStore::new(lease, ValidatedAuthorization::Authorized)
-                        });
-                    (
-                        Some(project),
-                        project.identity.project_root.as_path(),
-                        project.identity.active_branch.as_deref(),
-                        request,
-                        Some(&project.identity.scope),
-                        project_session_store,
-                    )
-                }
-                McpToolBinding::Unprojected {
-                    project_root,
-                    active_branch,
-                    request,
-                    scope,
-                    project_session_store,
-                } => (
-                    None,
-                    project_root,
-                    active_branch,
-                    request,
-                    scope,
-                    project_session_store,
-                ),
-            };
+        let McpToolBinding::Admitted { project, request } = binding;
+        let project_root = project.identity.project_root.as_path();
+        let admitted_scope = &project.identity.scope;
+        let project_session_store = project
+            .project_session_store
+            .as_ref()
+            .map(|lease| AdmittedProjectStore::new(lease, project.project_session_authorization));
         if !project_root.is_absolute() {
             return Err(McpToolBindingError::RelativeProjectRoot {
                 root: project_root.display().to_string(),
             });
         }
-        if let Some(scope) = admitted_scope
-            && let Err(error) = scope.validate()
-        {
+        if let Err(error) = admitted_scope.validate() {
             return Err(McpToolBindingError::ScopeInvalid {
                 detail: error.to_string(),
             });
         }
         if let Some(store) = project_session_store {
-            verify_store_lease(
-                require_scope(admitted_scope, "project session store")?,
-                store,
-            )?;
-        }
-        if request.code_index.is_some() {
-            require_scope(admitted_scope, "code index")?;
+            verify_store_lease(admitted_scope, store)?;
         }
 
         Ok(Self {
             project,
             request,
             project_root,
-            active_branch,
+            active_branch: project.identity.active_branch.as_deref(),
             deadline: request.controls.deadline,
             cancellation: request.controls.cancellation,
             admitted_scope,
@@ -478,7 +448,7 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn project(&self) -> Option<&'a McpAdmittedProjectV1> {
+    pub fn project(&self) -> &'a McpAdmittedProjectV1 {
         self.project
     }
 
@@ -488,37 +458,33 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn store_layout(&self) -> Option<&'a StoreLayout> {
-        self.project.map(|project| &project.store_layout)
+    pub fn store_layout(&self) -> &'a StoreLayout {
+        &self.project.store_layout
     }
 
     #[must_use]
     pub fn graph_database(&self) -> Option<&'a Database> {
-        self.project
-            .and_then(|project| project.graph_database.as_ref())
+        self.project.graph_database.as_ref()
     }
 
     #[must_use]
-    pub fn graph_db_path(&self) -> Option<&'a Path> {
-        self.project.map(|project| project.graph_db_path.as_path())
+    pub fn graph_db_path(&self) -> &'a Path {
+        self.project.graph_db_path.as_path()
     }
 
     #[must_use]
     pub fn store_runtime(&self) -> Option<&'a DaemonSessionRuntimeRegistryV1> {
-        self.project
-            .and_then(|project| project.store_runtime.as_deref())
+        self.project.store_runtime.as_deref()
     }
 
     #[must_use]
     pub fn configuration_runtime(&self) -> Option<&'a ProjectConfigurationRuntime> {
-        self.project
-            .and_then(|project| project.configuration_runtime.as_deref())
+        self.project.configuration_runtime.as_deref()
     }
 
     #[must_use]
     pub fn serving_branch(&self) -> Option<&'a str> {
-        self.project
-            .and_then(|project| project.identity.serving_branch.as_deref())
+        self.project.identity.serving_branch.as_deref()
     }
 
     /// Reads scheduler freshness now. Search and context must call this after
@@ -545,10 +511,8 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn branch_diagnostics(
-        &self,
-    ) -> Option<tracedecay_application::tracedecay::BranchDiagnostics> {
-        self.project.map(McpAdmittedProjectV1::branch_diagnostics)
+    pub fn branch_diagnostics(&self) -> tracedecay_application::tracedecay::BranchDiagnostics {
+        self.project.branch_diagnostics()
     }
 
     #[must_use]
@@ -571,9 +535,9 @@ impl<'a> McpToolContext<'a> {
         self.cancellation
     }
 
-    /// The one checkout this call is admitted for, when the daemon resolved one.
+    /// The one checkout this call is admitted for.
     #[must_use]
-    pub fn admitted_scope(&self) -> Option<&'a ResolvedScope> {
+    pub fn admitted_scope(&self) -> &'a ResolvedScope {
         self.admitted_scope
     }
 
@@ -615,7 +579,7 @@ impl<'a> McpToolContext<'a> {
     /// admitted scope there is nothing to isolate against and the query is
     /// refused rather than trusted.
     pub fn verify_graph_scope(&self, graph: &VerifiedGraphQuery) -> Result<()> {
-        verify_scope_isolation(self.admitted_scope, graph.request_context().scope())
+        verify_scope_isolation(Some(self.admitted_scope), graph.request_context().scope())
     }
 }
 
@@ -626,7 +590,7 @@ impl std::fmt::Debug for McpToolContext<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("McpToolContext")
-            .field("has_project_snapshot", &self.project.is_some())
+            .field("project_id", &self.project.identity.scope.project_id)
             .field("has_freshness_reader", &self.request.freshness.is_some())
             .field(
                 "has_generation_census",
@@ -664,19 +628,6 @@ impl std::fmt::Debug for McpToolContext<'_> {
             )
             .finish()
     }
-}
-
-/// The admitted scope a scoped authority needs, or a typed refusal.
-///
-/// An authority the daemon scoped cannot be admitted into a request that never
-/// resolved a checkout: there would be nothing to isolate it against, and a
-/// handler reading it would answer from whatever project the authority happens
-/// to hold.
-fn require_scope<'a>(
-    scope: Option<&'a ResolvedScope>,
-    authority: &'static str,
-) -> std::result::Result<&'a ResolvedScope, McpToolBindingError> {
-    scope.ok_or(McpToolBindingError::UnscopedAuthority { authority })
 }
 
 /// The project a shard is the *session* store for, if it is one at all.
@@ -816,25 +767,6 @@ pub(crate) mod tests {
         .expect("scope")
     }
 
-    fn binding<'a>(root: &'a Path, scope: Option<&'a ResolvedScope>) -> McpToolBinding<'a> {
-        unprojected(root, scope, McpRequestAuthoritiesV1::default(), None)
-    }
-
-    fn unprojected<'a>(
-        root: &'a Path,
-        scope: Option<&'a ResolvedScope>,
-        request: McpRequestAuthoritiesV1<'a>,
-        project_session_store: Option<AdmittedProjectStore<'a>>,
-    ) -> McpToolBinding<'a> {
-        McpToolBinding::Unprojected {
-            project_root: root,
-            active_branch: None,
-            request,
-            scope,
-            project_session_store,
-        }
-    }
-
     fn test_store_layout(root: &Path, project_id: &str) -> StoreLayout {
         StoreLayout {
             identity: tracedecay_runtime_core::storage::ProjectIdentity {
@@ -875,6 +807,19 @@ pub(crate) mod tests {
         admitted: &ResolvedScope,
         lease: Option<RegisteredGlobalDbLeaseV1>,
     ) -> McpAdmittedProjectV1 {
+        let authorization = if lease.is_some() {
+            ValidatedAuthorization::Authorized
+        } else {
+            ValidatedAuthorization::Unauthorized
+        };
+        project_bundle_with(root, admitted, lease.zip(Some(authorization)))
+    }
+
+    pub(crate) fn project_bundle_with(
+        root: &Path,
+        admitted: &ResolvedScope,
+        project_session_store: Option<(RegisteredGlobalDbLeaseV1, ValidatedAuthorization)>,
+    ) -> McpAdmittedProjectV1 {
         McpAdmittedProjectV1::new(
             project_identity(root, admitted),
             test_store_layout(root, admitted.project_id.as_str()),
@@ -882,9 +827,39 @@ pub(crate) mod tests {
             root.join("graph.db"),
             None,
             None,
-            lease,
+            project_session_store,
         )
         .expect("coherent project bundle")
+    }
+
+    /// Test-only admitted snapshot for a worktree root. Git family tests use
+    /// this instead of a production `Unprojected` binding — every served
+    /// route is admitted.
+    pub(crate) fn fixture_project(
+        root: &Path,
+        active_branch: Option<&str>,
+    ) -> McpAdmittedProjectV1 {
+        let admitted = scope("git-fixture");
+        let mut identity = project_identity(root, &admitted);
+        identity.active_branch = active_branch.map(str::to_owned);
+        McpAdmittedProjectV1::new(
+            identity,
+            test_store_layout(root, admitted.project_id.as_str()),
+            None,
+            root.join("graph.db"),
+            None,
+            None,
+            None,
+        )
+        .expect("fixture project")
+    }
+
+    pub(crate) fn fixture_context(project: &McpAdmittedProjectV1) -> McpToolContext<'_> {
+        McpToolContext::bind(McpToolBinding::Admitted {
+            project,
+            request: McpRequestAuthoritiesV1::default(),
+        })
+        .expect("admitted fixture binds")
     }
 
     fn authority() -> CodeIndexSearchAuthorityV1 {
@@ -896,15 +871,6 @@ pub(crate) mod tests {
             )
             .expect("revision"),
         }
-    }
-
-    /// A relative root cannot anchor path resolution or identity, so it is
-    /// refused instead of silently joined against the process directory.
-    #[test]
-    fn a_relative_project_root_is_refused() {
-        let error = McpToolContext::bind(binding(Path::new("relative/root"), None))
-            .expect_err("relative root must be refused");
-        assert_eq!(error.reason_code(), "mcp_tool_binding_root_not_absolute");
     }
 
     /// A code-index admission with no executor is an empty capability claim:
@@ -921,32 +887,6 @@ pub(crate) mod tests {
             error.reason_code(),
             "mcp_tool_binding_code_index_without_executor"
         );
-    }
-
-    /// A request that resolved no checkout has nothing to isolate a scoped
-    /// authority against, so admitting one fails closed rather than reading
-    /// whatever project the authority happens to hold.
-    #[test]
-    fn a_code_index_cannot_be_admitted_without_a_resolved_scope() {
-        let temp = tempfile::tempdir().expect("temp root");
-        let authority = authority();
-        let search: CodeIndexSearchExecutor =
-            std::sync::Arc::new(|_| unreachable!("binding must be refused before any search runs"));
-
-        let error = McpToolContext::bind(unprojected(
-            temp.path(),
-            None,
-            McpRequestAuthoritiesV1 {
-                code_index: Some(
-                    AdmittedCodeIndex::new(&authority, Some(&search), None).expect("admission"),
-                ),
-                ..McpRequestAuthoritiesV1::default()
-            },
-            None,
-        ))
-        .expect_err("an unscoped code index admission must be refused");
-
-        assert_eq!(error.reason_code(), "mcp_tool_binding_scope_unresolved");
     }
 
     /// A graph admitted for another checkout is refused before a handler reads
@@ -995,16 +935,15 @@ pub(crate) mod tests {
             registered_project_store(home.path(), "foreign").await;
         let admitted = scope("admitted");
 
-        let error = McpToolContext::bind(unprojected(
-            home.path(),
-            Some(&admitted),
-            McpRequestAuthoritiesV1::default(),
-            Some(AdmittedProjectStore::new(
-                &foreign_lease,
-                ValidatedAuthorization::Authorized,
-            )),
-        ))
-        .map(|_| ())
+        let error = McpAdmittedProjectV1::new(
+            project_identity(home.path(), &admitted),
+            test_store_layout(home.path(), admitted.project_id.as_str()),
+            None,
+            home.path().join("graph.db"),
+            None,
+            None,
+            Some((foreign_lease, ValidatedAuthorization::Authorized)),
+        )
         .expect_err("another project's real lease must be refused");
         assert_eq!(
             error.reason_code(),
@@ -1012,16 +951,8 @@ pub(crate) mod tests {
         );
         assert!(error.to_string().contains("project.foreign"), "got {error}");
 
-        let bound = McpToolContext::bind(unprojected(
-            home.path(),
-            Some(&admitted),
-            McpRequestAuthoritiesV1::default(),
-            Some(AdmittedProjectStore::new(
-                &admitted_lease,
-                ValidatedAuthorization::Authorized,
-            )),
-        ))
-        .expect("the admitted project's own lease must bind");
+        let project = project_bundle(home.path(), &admitted, Some(admitted_lease.clone()));
+        let bound = fixture_context(&project);
         let (bound_lease, authorization) = bound
             .authorized_project_session_db()
             .expect("the bound store is reported");
@@ -1048,16 +979,15 @@ pub(crate) mod tests {
         )
         .await;
 
-        let error = McpToolContext::bind(unprojected(
-            home.path(),
-            Some(&admitted),
-            McpRequestAuthoritiesV1::default(),
-            Some(AdmittedProjectStore::new(
-                &lease,
-                ValidatedAuthorization::Authorized,
-            )),
-        ))
-        .map(|_| ())
+        let error = McpAdmittedProjectV1::new(
+            project_identity(home.path(), &admitted),
+            test_store_layout(home.path(), admitted.project_id.as_str()),
+            None,
+            home.path().join("graph.db"),
+            None,
+            None,
+            Some((lease, ValidatedAuthorization::Authorized)),
+        )
         .expect_err("a non-session-family lease must be refused");
         assert_eq!(
             error.reason_code(),
@@ -1124,28 +1054,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// A request that resolved no checkout cannot admit a store either: there
-    /// would be no identity to check the lease's shard against.
-    #[tokio::test]
-    async fn a_real_lease_cannot_be_admitted_without_a_resolved_scope() {
-        let home = tempfile::tempdir().expect("temp home");
-        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
-
-        let error = McpToolContext::bind(unprojected(
-            home.path(),
-            None,
-            McpRequestAuthoritiesV1::default(),
-            Some(AdmittedProjectStore::new(
-                &lease,
-                ValidatedAuthorization::Authorized,
-            )),
-        ))
-        .map(|_| ())
-        .expect_err("an unscoped store admission must be refused");
-
-        assert_eq!(error.reason_code(), "mcp_tool_binding_scope_unresolved");
-    }
-
     /// The root's verdict is carried, not re-derived: a context bound with an
     /// unauthorized store reports exactly that, so every store-backed handler
     /// denies instead of reading it.
@@ -1154,22 +1062,41 @@ pub(crate) mod tests {
         let home = tempfile::tempdir().expect("temp home");
         let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
         let admitted = scope("admitted");
-
-        let bound = McpToolContext::bind(unprojected(
+        let project = project_bundle_with(
             home.path(),
-            Some(&admitted),
-            McpRequestAuthoritiesV1::default(),
-            Some(AdmittedProjectStore::new(
-                &lease,
-                ValidatedAuthorization::Unauthorized,
-            )),
-        ))
-        .expect("an unauthorized store is still a coherent binding");
+            &admitted,
+            Some((lease, ValidatedAuthorization::Unauthorized)),
+        );
+        let bound = fixture_context(&project);
 
         let (_, authorization) = bound
             .authorized_project_session_db()
             .expect("the store is reported with its verdict");
         assert_eq!(authorization, ValidatedAuthorization::Unauthorized);
+    }
+
+    /// An admitted snapshot that carries a denied verdict must not become an
+    /// authorized store read. Bind used to stamp `Authorized` and hide this.
+    #[tokio::test]
+    async fn an_admitted_denied_verdict_refuses_the_first_authorized_store_read() {
+        let home = tempfile::tempdir().expect("temp home");
+        let (_runtime, lease) = registered_project_store(home.path(), "admitted").await;
+        let admitted = scope("admitted");
+        let project = project_bundle_with(
+            home.path(),
+            &admitted,
+            Some((lease, ValidatedAuthorization::Unauthorized)),
+        );
+        let bound = fixture_context(&project);
+
+        let Some((_, authorization)) = bound.authorized_project_session_db() else {
+            panic!("the denied store is present; absence would hide the verdict");
+        };
+        assert_eq!(authorization, ValidatedAuthorization::Unauthorized);
+        assert!(
+            !authorization.is_authorized(),
+            "bind must not upgrade a denied snapshot verdict to Authorized"
+        );
     }
 
     /// A checkout differs from another by project, repository, or worktree —
@@ -1262,7 +1189,7 @@ pub(crate) mod tests {
             home.path().join("graph.db"),
             None,
             None,
-            Some(lease),
+            Some((lease, ValidatedAuthorization::Authorized)),
         )
         .expect_err("a non-session-family lease must be refused");
         assert_eq!(
@@ -1350,7 +1277,10 @@ pub(crate) mod tests {
             bound.project_root(),
             project.identity.project_root.as_path()
         );
-        assert_eq!(bound.admitted_scope(), Some(&project.identity.scope));
-        assert!(bound.project().is_some());
+        assert_eq!(bound.admitted_scope(), &project.identity.scope);
+        assert_eq!(
+            bound.project().identity.project_root,
+            project.identity.project_root
+        );
     }
 }

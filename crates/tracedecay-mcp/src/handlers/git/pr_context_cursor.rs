@@ -97,9 +97,7 @@ impl<'a> PrContextCursorBinding<'a> {
     ) -> Self {
         Self {
             protocol: "tracedecay.pr-context.cursor.v2",
-            scope: ctx
-                .admitted_scope()
-                .map(PrContextCursorScope::from_resolved),
+            scope: Some(PrContextCursorScope::from_resolved(ctx.admitted_scope())),
             store: ctx
                 .authorized_project_session_db()
                 .map(|(lease, _)| PrContextCursorStore::from_shard(&lease.binding().shard_id)),
@@ -414,7 +412,6 @@ mod tests {
     use std::os::unix::ffi::OsStrExt as _;
 
     use super::*;
-    use crate::tool_context::{AdmittedProjectStore, McpRequestAuthoritiesV1, McpToolBinding};
     use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
@@ -745,18 +742,12 @@ mod tests {
             maximum_symbols: 25,
             changes: &changes,
         };
-        let context_for = |authorization| {
-            McpToolContext::bind(McpToolBinding::Unprojected {
-                project_root: home.path(),
-                active_branch: None,
-                request: McpRequestAuthoritiesV1::default(),
-                scope: Some(&scope),
-                project_session_store: Some(AdmittedProjectStore::new(&lease, authorization)),
-            })
-            .expect("a real lease for the admitted project binds")
-        };
-
-        let denied_context = context_for(ValidatedAuthorization::Unauthorized);
+        let denied_project = crate::tool_context::tests::project_bundle_with(
+            home.path(),
+            &scope,
+            Some((lease.clone(), ValidatedAuthorization::Unauthorized)),
+        );
+        let denied_context = crate::tool_context::tests::fixture_context(&denied_project);
         let root = tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(
             denied_context.project_root().as_os_str(),
         );
@@ -770,7 +761,12 @@ mod tests {
             "got {refusal}"
         );
 
-        let authorized_context = context_for(ValidatedAuthorization::Authorized);
+        let authorized_project = crate::tool_context::tests::project_bundle_with(
+            home.path(),
+            &scope,
+            Some((lease, ValidatedAuthorization::Authorized)),
+        );
+        let authorized_context = crate::tool_context::tests::fixture_context(&authorized_project);
         let authorized_binding =
             PrContextCursorBinding::new(&authorized_context, &root, comparison());
         pr_context_cursor_authority(&authorized_context, &authorized_binding)

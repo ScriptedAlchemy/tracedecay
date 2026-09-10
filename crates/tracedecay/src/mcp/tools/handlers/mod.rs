@@ -242,9 +242,9 @@ pub async fn handle_tool_call(
 }
 
 /// Fixture `handle_tool_call` derives the checkout the opened project already
-/// holds so integration tests get an [`McpToolBinding::Admitted`] snapshot.
-/// Production dispatch carries `admitted_project_scope` from project-open;
-/// without it the binding is unprojected.
+/// holds so integration tests get an admitted snapshot. Production dispatch
+/// carries `admitted_project_scope` from project-open; without it the root
+/// fails closed.
 fn opened_project_scope(cg: &TraceDecay) -> Result<tracedecay_contracts::ResolvedScope> {
     let project_id = registered_project_id(cg.store_layout())?;
     tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)

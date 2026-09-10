@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_application::tracedecay::BranchDiagnostics;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
 use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
@@ -119,9 +119,7 @@ fn attach_full_branch_status(
     output: &mut Value,
     retrieval_serving: &CodeIndexRetrievalServingV1,
 ) {
-    let Some(branch_diagnostics) = ctx.branch_diagnostics() else {
-        return;
-    };
+    let branch_diagnostics = ctx.branch_diagnostics();
     output["branch_diagnostics"] = json!(&branch_diagnostics);
     if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
         output["active_branch"] = json!(open_branch);
@@ -312,10 +310,8 @@ pub async fn handle_status(
     // Session-transcript ingest health (recall trust): last ingest time and
     // any un-ingested transcript backlog from the project sessions.db.
     if include_session_ingest {
-        let session_db_path = ctx
-            .store_layout()
-            .map(|layout| layout.sessions_db_path.clone());
-        if session_db_path.as_ref().is_some_and(|path| path.exists()) {
+        let session_db_path = ctx.store_layout().sessions_db_path.clone();
+        if session_db_path.exists() {
             match ctx.authorized_project_session_db() {
                 None => {
                     // The store exists but the daemon did not retain its authority;
@@ -324,6 +320,13 @@ pub async fn handle_status(
                         "status": "unavailable",
                         "reason": "session_store_unavailable",
                         "message": "daemon project session authority is unavailable",
+                    });
+                }
+                Some((_, authorization)) if !authorization.is_authorized() => {
+                    output["session_ingest"] = json!({
+                        "status": "unavailable",
+                        "reason": "session_store_denied",
+                        "message": "this request is not authorized to read the admitted project session store",
                     });
                 }
                 Some((lease, _)) => {
@@ -572,22 +575,10 @@ fn active_project_context(
     branch: &BranchDiagnostics,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
-) -> Result<Value> {
+) -> Value {
     let project_root = ctx.project_root();
-    let layout = ctx.store_layout().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "store_layout_unavailable",
-            true,
-            "active project requires the admitted store layout",
-        )
-    })?;
-    let graph_db_path = ctx.graph_db_path().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "graph_database_path_unavailable",
-            true,
-            "active project requires the admitted graph database path",
-        )
-    })?;
+    let layout = ctx.store_layout();
+    let graph_db_path = ctx.graph_db_path();
     let mut output = json!({
         "project_root": display_path(project_root),
         "resolution_source": "active_project",
@@ -619,7 +610,7 @@ fn active_project_context(
     if let Some(stats) = server_stats {
         output["server"] = stats;
     }
-    Ok(output)
+    output
 }
 
 fn storage_mode_name(mode: &StorageMode) -> &'static str {
@@ -642,14 +633,8 @@ pub fn handle_active_project(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let branch = ctx.branch_diagnostics().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "branch_diagnostics_unavailable",
-            true,
-            "active project requires an admitted project authority bundle",
-        )
-    })?;
-    let output = active_project_context(ctx, &branch, server_stats, scope_prefix)?;
+    let branch = ctx.branch_diagnostics();
+    let output = active_project_context(ctx, &branch, server_stats, scope_prefix);
     Ok(generic_tool_result(
         Some(ctx.project_root()),
         args,

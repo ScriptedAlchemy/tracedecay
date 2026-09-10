@@ -155,13 +155,7 @@ pub async fn collect_database_snapshot(
             "runtime telemetry requires the admitted graph database",
         )
     })?;
-    let db_path = ctx.graph_db_path().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "graph_database_path_unavailable",
-            true,
-            "runtime telemetry requires the admitted graph database path",
-        )
-    })?;
+    let db_path = ctx.graph_db_path();
     let store_runtime = ctx.store_runtime().ok_or_else(|| {
         TraceDecayError::project_route(
             "store_runtime_unavailable",
@@ -268,6 +262,7 @@ pub async fn handle_runtime(
                         hotpath::future!(
                             session_temporal_health_value(
                                 ctx.authorized_project_session_db()
+                                    .filter(|(_, authorization)| authorization.is_authorized())
                                     .map(|(lease, _)| lease.as_ref()),
                             ),
                             label = "mcp.health.runtime.session_temporal"
@@ -302,6 +297,13 @@ pub async fn handle_runtime(
         .unwrap_or(false)
     {
         match ctx.authorized_project_session_db() {
+            Some((_, authorization)) if !authorization.is_authorized() => {
+                value["cursor_session_ingest"] = json!({
+                    "status": "unavailable",
+                    "reason": "session_store_denied",
+                    "message": "this request is not authorized to read the admitted project session store",
+                });
+            }
             Some((lease, _)) => {
                 let db = lease.as_ref();
                 value["cursor_session_ingest"] = match hotpath::future!(
