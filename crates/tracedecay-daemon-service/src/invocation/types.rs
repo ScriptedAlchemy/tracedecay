@@ -821,6 +821,16 @@ impl InvocationProjectRuntimeIdentityV1 {
     }
 }
 
+pub type ConfigurationRuntimeRefreshFuture =
+    Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
+pub trait ConfigurationRuntimeRefreshPort: Send + Sync {
+    fn refresh(
+        &self,
+        current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    ) -> ConfigurationRuntimeRefreshFuture;
+}
+
 #[derive(Clone)]
 pub struct RegisteredConfigurationRuntime {
     pub(super) runtime: Arc<ProjectConfigurationRuntime>,
@@ -833,6 +843,7 @@ pub struct RegisteredConfigurationRuntime {
     pub(super) semantic_evaluation_workers: Arc<
         tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
     >,
+    pub(super) feedback_refresh: Arc<RwLock<Option<Arc<dyn ConfigurationRuntimeRefreshPort>>>>,
 }
 
 impl RegisteredConfigurationRuntime {

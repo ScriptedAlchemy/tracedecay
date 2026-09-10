@@ -19,28 +19,24 @@ use std::time::Duration;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, Semaphore};
-use tracedecay_contracts::feedback::{
-    FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
-};
+use tracedecay_contracts::feedback::{FeedbackReadPort, FeedbackRouteAuthorizationPort};
 use tracedecay_contracts::{
-    AffectedTestsRetrievalPort, AnalyzerAdmittedDiagnosticProviderV1, ApplicationContractError,
-    ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
-    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
-    CancellationContext, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot,
-    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
-    DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
-    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
+    ApplicationContractError, ApplicationOperation, ApplicationOutcome, ApplicationProblem,
+    ApplicationProblemKind, ApplicationResult, AuthorityReceipt, AuthorizedScopeSet,
+    AuthorizedScopeSetAuthority, CallableCodeAuthorizationPort, CallableCodeOperationKind,
+    CallableCodeQueryService, CancellationContext, CancellationState, CapabilityGrantId,
+    CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
+    EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
+    EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
     GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
     GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
     GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
     GitIndexTransactionService, IdempotencyKey, MultiRootScopeSetCasRequestV1,
     MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, Omission, OmissionReason,
     OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
-    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestAdmission,
-    RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic, TemporalState,
-    WorkEvidenceRetrievalPortV1, callable_code_operations,
+    PolicyDecisionRef, PolicyEvaluatorCompositionV1, PreviewId, PreviewResult, ReconciliationState,
+    RequestAdmission, RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic,
+    TemporalState, WorkEvidenceRetrievalPortV1, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -69,8 +65,8 @@ use tracedecay_policy::configuration::{
     ConfigurationMutationPermissionV1,
 };
 use tracedecay_policy::{
-    AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1,
-    TruthFreshnessRequirementV1, TruthSourceStateV1,
+    CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1, TruthFreshnessRequirementV1,
+    TruthSourceStateV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
@@ -119,8 +115,7 @@ use tracedecay_application::feedback::owner::{
     FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
 };
 use tracedecay_application::feedback::{
-    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
-    ProductionFeedbackCycleProximityPortV1, open_feedback_cycle_runtime,
+    FeedbackCycleRuntime, FeedbackCycleRuntimeError, open_feedback_cycle_runtime,
 };
 use tracedecay_application::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
@@ -260,6 +255,7 @@ pub use registrars::{
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
     DaemonRetainedRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
     DaemonSourceEditOwnerRegistrationError, DaemonWorkRuntimeRegistrar,
+    FeedbackCycleRuntimeBuilderV1,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use types::{
@@ -267,6 +263,7 @@ pub use types::{
     RuntimeLspSession,
 };
 pub use types::{
+    ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
     RegisteredRetainedRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
     UnavailableFeedbackCycleRuntimeV1,
