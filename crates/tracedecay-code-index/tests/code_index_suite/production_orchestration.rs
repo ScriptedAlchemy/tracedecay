@@ -391,6 +391,24 @@ pub(super) fn request_with_source(
 fn cross_file_edges_require_path_binding_evidence() {
     let sources = [
         (
+            "file.binding.other-read",
+            "crates/other/src/read.rs",
+            "rust",
+            "pub struct CanonicalAffectedTestsProjectionV1;\n",
+        ),
+        (
+            "file.binding.feedback-mod",
+            "crates/tracedecay-contracts/src/feedback/mod.rs",
+            "rust",
+            "mod read;\npub use read::{CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1};\n",
+        ),
+        (
+            "file.binding.feedback-read",
+            "crates/tracedecay-contracts/src/feedback/read.rs",
+            "rust",
+            "pub struct CanonicalAffectedTestsProjectionV1;\npub struct CanonicalFeedbackImpactProjectionV1;\n",
+        ),
+        (
             "file.binding.model",
             "dashboard/model.tsx",
             "typescript",
@@ -476,6 +494,12 @@ fn cross_file_edges_require_path_binding_evidence() {
     let ts_var_shadowed = occurrence("dashboard/model.tsx::varShadowed");
     let rust_shadowed = occurrence("src/caller.rs::shadowed");
     let rust_locally_shadowed = occurrence("src/caller.rs::locally_shadowed");
+    let affected_tests = occurrence(
+        "crates/tracedecay-contracts/src/feedback/read.rs::CanonicalAffectedTestsProjectionV1",
+    );
+    let feedback_impact = occurrence(
+        "crates/tracedecay-contracts/src/feedback/read.rs::CanonicalFeedbackImpactProjectionV1",
+    );
     let incoming = |target: &SymbolOccurrenceId| {
         generation
             .edges()
@@ -491,6 +515,12 @@ fn cross_file_edges_require_path_binding_evidence() {
         "the explicit Rust import remains bound"
     );
     assert_eq!(incoming(&real), 1, "the qualified Rust path remains bound");
+    assert_eq!(
+        incoming(&affected_tests),
+        1,
+        "the grouped re-export makes mod.rs a dependent of read.rs",
+    );
+    assert_eq!(incoming(&feedback_impact), 1);
     assert_eq!(
         incoming(&imported),
         1,
