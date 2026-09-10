@@ -1090,9 +1090,21 @@ impl DaemonInvocationState {
 
     #[hotpath::measure(label = "daemon.invocation_state.shutdown", future = true)]
     pub(super) async fn shutdown(&self) -> ShutdownStatus {
+        let started = std::time::Instant::now();
+        let step = |outcome: &str| {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", outcome.to_string()),
+                    ("owner", "invocation".to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        };
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.cancel();
+        step("invocation_admissions_closed");
         // The bounded wait may expire while a blocking reconcile is still
         // unwinding. The registry retains its worker until a retry joins it;
         // an incomplete sweep must keep the outer shutdown receipt unclean.
@@ -1102,6 +1114,7 @@ impl DaemonInvocationState {
         )
         .await
         .is_err();
+        step("code_index_schedulers_join_returned");
         if schedulers_timed_out {
             log_daemon_event(
                 "daemon_shutdown",
@@ -1115,7 +1128,9 @@ impl DaemonInvocationState {
             );
         }
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
+        step("lsp_sessions_expired");
         let expired = self.service.expire_all().await;
+        step("invocation_service_expired");
         if !expired {
             hotpath::gauge!("daemon.invocation_state.shutdown_incomplete_total").inc(1_u64);
             ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
