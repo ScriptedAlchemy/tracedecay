@@ -124,6 +124,16 @@ fn read_rusqlite_inventory(
     Ok(inventory)
 }
 
+pub(super) fn require_admissible_final_shape_rusqlite(
+    connection: &rusqlite::Connection,
+) -> Result<()> {
+    let actual = read_rusqlite_inventory(connection).map_err(database_error)?;
+    let shipped = SHIPPED_V35_ALIAS_UPDATE_OBJECT
+        .as_ref()
+        .map_err(|error| database_error(error.clone()))?;
+    require_final_shape_inventory(&actual, Some(shipped)).map(|_| ())
+}
+
 async fn read_inventory(conn: &impl QueryExecutor) -> Result<SchemaInventory> {
     let mut rows = conn
         .query(
@@ -184,7 +194,8 @@ fn reset_required(reason: impl Into<String>) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",
         format!(
-            "{}; remove the store directory and let this binary create the exact final shape",
+            "{}; run `tracedecay storage reset-project-store` with this store's \
+             `--project-root` or `--project-id`, then let this binary create the exact final shape",
             reason.into()
         ),
     )
