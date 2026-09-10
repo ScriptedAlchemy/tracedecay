@@ -1921,6 +1921,7 @@ fn request_terminal_outcome<T>(
     }
 }
 
+#[hotpath::measure(label = "query.symbol_scan")]
 fn indexed_symbol_matches(
     latest: &LatestCodeTextGenerationV1,
     decoded: Option<&LatestCompleteCodeIndexV1>,
@@ -1933,13 +1934,32 @@ fn indexed_symbol_matches(
 > {
     let generation = latest.metadata().manifest().generation_id.clone();
     let store = match latest.interactive_graph_store() {
-        Ok(store) => store,
+        Ok(store) => {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.symbol_scan.graph_total").inc(1_u64);
+            store
+        }
         Err(_) => {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.symbol_scan.decoded_total").inc(1_u64);
             let Some(decoded) =
                 decoded.filter(|decoded| decoded.generation.manifest().generation_id == generation)
             else {
                 return Err(unavailable_for_generation(query_finished_at(), generation));
             };
+            let files = decoded
+                .generation
+                .snapshot()
+                .files
+                .iter()
+                .map(|file| (&file.file_occurrence_id, file.logical_path.as_str()))
+                .collect::<HashMap<_, _>>();
+            let mut chunks = HashMap::new();
+            for chunk in decoded.generation.chunks().chunks() {
+                if let Some(symbol) = chunk.anchor.symbol_occurrence_id.as_ref() {
+                    chunks.entry(symbol).or_insert(chunk);
+                }
+            }
             let mut matches = Vec::new();
             for (position, metadata) in decoded.generation.symbols().symbols.iter().enumerate() {
                 if position.is_multiple_of(4_096)
@@ -1948,21 +1968,47 @@ fn indexed_symbol_matches(
                 {
                     return Err(outcome);
                 }
-                let Some(path) = symbol_scope_path(decoded, &metadata.occurrence) else {
+                let Some(chunk) = chunks.get(&metadata.occurrence).copied() else {
+                    continue;
+                };
+                let Some(path) = files.get(&chunk.anchor.file_occurrence_id).copied() else {
                     continue;
                 };
                 if !path_is_in_code_query_scope(path, scope) {
                     continue;
                 }
-                let signature = symbol_signature_line(decoded, &metadata.occurrence);
+                let signature = chunk
+                    .sanitized_text
+                    .as_str()
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty());
                 let Some((rank, score)) = select(metadata, signature) else {
                     continue;
                 };
-                let Some(mut record) = symbol_record_by_id(decoded, &metadata.occurrence) else {
-                    continue;
-                };
-                record.score = score;
-                matches.push((rank, record));
+                let name = last_qualified_segment(&metadata.qualified_name).to_owned();
+                let signature = signature.map(str::to_owned);
+                let is_async = signature.as_deref().is_some_and(|signature| {
+                    signature.split_whitespace().any(|part| part == "async")
+                });
+                matches.push((
+                    rank,
+                    SymbolPrimitiveRecord {
+                        node_id: metadata.occurrence.as_str().to_owned(),
+                        name,
+                        qualified_name: metadata.qualified_name.clone(),
+                        kind: metadata.kind.clone(),
+                        file: path.to_owned(),
+                        start_line_zero_based: 0,
+                        end_line_zero_based: 0,
+                        line: 1,
+                        end_line: 1,
+                        signature,
+                        is_async,
+                        score,
+                    },
+                ));
             }
             return Ok(matches);
         }
