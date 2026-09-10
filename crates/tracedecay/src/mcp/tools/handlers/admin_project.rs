@@ -218,35 +218,22 @@ pub(super) async fn handle_admin_project(
             json,
             max_nodes,
         } => {
-            #[cfg(any(test, feature = "bench", feature = "test-helpers"))]
-            {
-                let report = crate::bench::run_bench_with_toml(
-                    cg,
-                    queries_toml
-                        .as_deref()
-                        .unwrap_or(crate::bench::DEFAULT_QUERIES_TOML),
-                    crate::bench::BenchOptions {
-                        format: crate::bench::OutputFormat::Json,
-                        max_nodes,
-                    },
-                )?;
-                let output = if json {
-                    crate::bench::format_report_json(&report)
-                } else {
-                    crate::bench::format_report_console(&report)
-                };
-                json!({ "output": output })
-            }
-            #[cfg(not(any(test, feature = "bench", feature = "test-helpers")))]
-            {
-                let _ = (queries_toml, json, max_nodes);
-                return Err(TraceDecayError::ProjectRoute {
-                    reason_code: "verified-code-context-benchmark-unavailable".to_owned(),
-                    retryable: false,
-                    detail: "the benchmark is not yet mounted on an admitted code-graph authority"
-                        .to_owned(),
-                });
-            }
+            let report = crate::bench::run_bench_with_toml(
+                cg,
+                queries_toml
+                    .as_deref()
+                    .unwrap_or(crate::bench::DEFAULT_QUERIES_TOML),
+                crate::bench::BenchOptions {
+                    format: crate::bench::OutputFormat::Json,
+                    max_nodes,
+                },
+            )?;
+            let output = if json {
+                crate::bench::format_report_json(&report)
+            } else {
+                crate::bench::format_report_console(&report)
+            };
+            json!({ "output": output })
         }
         AdminProjectAction::AutomaticFactReceiptList { state, limit } => {
             let db = cg.open_project_store_db()?;
