@@ -929,6 +929,57 @@ impl ProjectContextScoutOwnerV1 {
             }
         }
     }
+
+    pub async fn claim_delivery_request(
+        &self,
+        request: &ContextScoutClaimRequestV1,
+        now: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> ContextScoutDurableClaimOutcomeV1 {
+        let configuration = self.configuration.read().await;
+        let Some(control) = configuration
+            .as_ref()
+            .map(ContextScoutConfigurationPinV1::control)
+        else {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        };
+        let window = match request.window {
+            ContextScoutClaimWindowV1::IdleWindow => ContextScoutDeliveryWindowV1::IdleWindow,
+            ContextScoutClaimWindowV1::OnRequest => ContextScoutDeliveryWindowV1::OnRequest,
+        };
+        let Some(digest) = canonical_sha256(&(
+            "tracedecay.context-scout.delivery-lease.v1",
+            &request.idempotency_key,
+            request.address,
+            request.window,
+            control.configuration_revision,
+        ))
+        .ok() else {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        };
+        let Some(encoded) = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .and_then(|encoded| encoded.get(..32))
+        else {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        };
+        let mut lease_id = [0; 16];
+        if hex::decode_to_slice(encoded, &mut lease_id).is_err() {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        }
+        drop(configuration);
+        self.claim_delivery_exact(
+            request.address,
+            window,
+            now,
+            ContextScoutLeaseV1 {
+                lease_id,
+                expires_at,
+            },
+        )
+        .await
+    }
 }
 
 fn context_scout_state_transition_is_exact(
