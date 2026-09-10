@@ -32,7 +32,8 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
-use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
+use super::invoke_registered_http;
+use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_protocol::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
 

@@ -67,11 +67,17 @@ mod dispatch_test_support;
 )]
 mod dispatch_tests;
 pub mod edit;
-pub mod graph;
-pub mod health;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod graph_search_dispatch_tests;
 pub mod hook_runtime;
 pub mod info;
-pub mod redundancy;
 pub(crate) mod retained_catalog;
 #[cfg(test)]
 #[allow(
@@ -122,9 +128,25 @@ mod tool_definition_tests;
     clippy::uninlined_format_args
 )]
 mod verified_graph_query_authority_tests;
-mod work;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod work_dispatch_tests;
 pub mod workflow;
-mod workflow_family;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod workflow_dispatch_tests;
 
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
@@ -160,14 +182,15 @@ use retained_catalog::dispatch_profile_retained_application_tool;
 use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
+use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
 use tracedecay_contracts::ProjectRegistryReadPort;
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::handle_multi_root;
-use work::handle_work;
-use workflow_family::handle_workflow;
+use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
+use tracedecay_runtime_core::storage::registered_project_id;
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -213,9 +236,25 @@ pub async fn handle_tool_call(
         args,
         server_stats,
         scope_prefix,
-        ToolCallRegistryOptions::default(),
+        ToolCallRegistryOptions::default().admit_opened_project(cg)?,
     ))
     .await
+}
+
+/// Fixture `handle_tool_call` derives the checkout the opened project already
+/// holds so integration tests get an admitted snapshot. Production dispatch
+/// carries `admitted_project_scope` from project-open; without it the root
+/// fails closed.
+pub(crate) fn opened_project_scope(cg: &TraceDecay) -> Result<tracedecay_contracts::ResolvedScope> {
+    let project_id = registered_project_id(cg.store_layout())?;
+    tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "admitted_project_scope_unresolved",
+                false,
+                error.to_string(),
+            )
+        })
 }
 
 /// Evidence for the `code_graph_freshness` response trailer when a
@@ -292,11 +331,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor:
         Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
-    pub(crate) source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
-    pub(crate) source_edit_reconciliation_executor:
-        Option<crate::mcp::server::SourceEditReconciliationExecutor>,
-    pub(crate) source_edit_rollback_executor:
-        Option<crate::mcp::server::SourceEditRollbackExecutor>,
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     /// The checkout the serving route was admitted for. Every scoped authority
     /// a moved handler family reads binds against this one scope; absent, no
@@ -367,9 +401,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_reconcile_sink: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
-            source_edit_executor: None,
-            source_edit_reconciliation_executor: None,
-            source_edit_rollback_executor: None,
             code_index_search_authority: None,
             admitted_project_scope: None,
             code_graph_projection_read_port: None,
@@ -387,10 +418,22 @@ impl Default for ToolCallRegistryOptions<'_> {
 
 impl<'a> ToolCallRegistryOptions<'a> {
     pub fn with_session_authorities(session_authorities: SessionAuthorities<'a>) -> Self {
+        // Canonical session-store field is `registered_project_session_db`.
+        // The helper is the one place that copies the lease out of the
+        // authorities bag so dispatch never `.or()`s the two fields.
         Self {
+            registered_project_session_db: session_authorities.project.cloned(),
             session_authorities,
             ..Self::default()
         }
+    }
+
+    /// Marks this call as admitted for the opened project's checkout.
+    /// Fixture `handle_tool_call` uses this; production carries the scope
+    /// from project-open publication.
+    pub fn admit_opened_project(mut self, cg: &TraceDecay) -> Result<Self> {
+        self.admitted_project_scope = Some(opened_project_scope(cg)?);
+        Ok(self)
     }
 }
 
@@ -569,7 +612,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
             return boxed_send(handle_work(
                 tool_name,
                 args,
-                options.application_invocation_executor,
+                options.application_invocation_executor.map(|executor| {
+                    move |request| invoke_admitted_work_operation(executor, request)
+                }),
                 options.application_request_id,
                 options.application_deadline,
                 options.application_cancellation,
@@ -583,7 +628,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
             return boxed_send(handle_workflow(
                 tool_name,
                 args,
-                options.application_invocation_executor,
+                |request| {
+                    invoke_admitted_workflow_operation(
+                        options.application_invocation_executor,
+                        request,
+                    )
+                },
                 options.application_request_id,
                 options.application_deadline,
                 options.application_cancellation,
@@ -630,9 +680,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         // struct) so the dispatch arms below can take `options` by value.
         let project_session_db_lease = options.registered_project_session_db.clone();
         let served_stale_graph_generation = Arc::clone(&options.served_stale_graph_generation);
-        let project_session_db = project_session_db_lease
-            .as_ref()
-            .or(options.session_authorities.project);
+        let project_session_db = project_session_db_lease.as_ref();
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Graph) => {
@@ -791,6 +839,59 @@ fn seated_generation_age_label(sealed_at: tracedecay_domain::UtcMicros) -> Strin
     } else {
         format!("{}d", seconds / 86_400)
     }
+}
+
+/// Reads the canonical Work HTTP envelope the daemon owner already produced.
+async fn invoke_admitted_work_operation(
+    executor: &dyn DaemonInvocationExecutor,
+    request: WorkHttpRequest,
+) -> Result<Value> {
+    let response =
+        tracedecay_daemon_service::application_surface::invoke_work_operation(executor, request)
+            .await;
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "work.response_unavailable",
+                true,
+                format!("The Work application response could not be read: {error}"),
+            )
+        })?;
+    serde_json::from_slice(&body).map_err(|error| {
+        TraceDecayError::project_route(
+            "work.response_invalid",
+            true,
+            format!("The Work application response was not valid JSON: {error}"),
+        )
+    })
+}
+
+/// Reads the canonical Workflow HTTP envelope the daemon owner already produced.
+async fn invoke_admitted_workflow_operation(
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    request: WorkflowHttpRequest,
+) -> Result<Value> {
+    let response = tracedecay_daemon_service::application_surface::invoke_workflow_operation(
+        executor, request,
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "workflow.response_unavailable",
+                true,
+                format!("The Workflow application response could not be read: {error}"),
+            )
+        })?;
+    serde_json::from_slice(&body).map_err(|error| {
+        TraceDecayError::project_route(
+            "workflow.response_invalid",
+            true,
+            format!("The Workflow application response was not valid JSON: {error}"),
+        )
+    })
 }
 
 /// The single rejection every dispatch group returns for a name it does not own.

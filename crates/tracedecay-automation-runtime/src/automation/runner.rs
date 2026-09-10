@@ -34,7 +34,7 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_policy::CurationApplyAuthorityV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
-use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_session_memory::memory::{MemoryApplication, is_memory_application_cancellation};
 
 mod curation;
 mod evidence;
@@ -699,6 +699,9 @@ fn run_combined_review_for_retrieval_inner<'a>(
         )
         .await
         {
+            if is_memory_application_cancellation(&err) {
+                return Err(err);
+            }
             tracing::warn!(error = %err, "failed to refresh fact outcomes");
         }
 

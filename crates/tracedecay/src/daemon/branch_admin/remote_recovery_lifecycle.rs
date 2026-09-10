@@ -255,6 +255,10 @@ impl RemoteRecoveryProjectLifecycleV1 {
             Some(Arc::clone(&fence)),
         )
         .await?;
+        super::retire_registered_context_scout_owner(
+            project_id,
+            &data_root.join(crate::config::db_filename(data_root)),
+        );
         self.git_index_transaction_services
             .retire_project_database(project_id, database.db_path())
             .await
@@ -456,6 +460,14 @@ pub(super) async fn retire_runtime_work(
             })
             .collect::<Vec<_>>()
     };
+    if let Ok(typed_project_id) = tracedecay_domain::ProjectId::new(project_id.to_owned()) {
+        for (owner, _) in &server_retirements {
+            super::project_retirement::retire_registered_context_scout_owner(
+                &typed_project_id,
+                &owner.graph_db_path,
+            );
+        }
+    }
     for server in server_retirements.iter().flat_map(|(_, servers)| servers) {
         server.revoke_project_server_responses();
         server.abort_project_server_requests();

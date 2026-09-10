@@ -37,15 +37,20 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     let administration = engine.store_administration.clone();
     let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
     let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
-    let request = tokio::spawn(async move {
-        administration
-            .run_manual_branch_publication(|_| async move {
-                let _ = started_sender.send(());
-                let _ = release_receiver.await;
-                Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
-            })
-            .await
-    });
+    let admission = administration
+        .admit_manual_branch_publication(|_, admitted| async move {
+            let _ = admitted.send(());
+            let _ = started_sender.send(());
+            let _ = release_receiver.await;
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+        })
+        .await
+        .expect("manual branch publication is admitted");
+    assert_eq!(
+        admission,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Deferred,
+        "branch add must return while exact publication continues"
+    );
     started_receiver
         .await
         .expect("manual branch publication starts");
@@ -777,5 +782,79 @@ async fn manual_branch_publication_panic_survives_reaping_in_shutdown_receipt() 
             .await;
     assert!(
         matches!(&receipt.owners[0].status, crate::daemon::shutdown_coordination::ShutdownStatus::Failed(reason) if reason.contains("failed to join"))
+    );
+}
+
+/// The dogfood supervisor gives the daemon a 5 s TERM grace. A background
+/// code-index reconcile that is still sealing when shutdown starts must be
+/// cancelled through its fence and joined inside that grace, not abandoned
+/// at the task-abort deadline and then waited for again at runtime teardown.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_grace() {
+    let home = TempDir::new().expect("isolated home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let repository = home.join("repository");
+    std::fs::create_dir_all(repository.join("src")).expect("create repository");
+    super::bootstrap::run_git(&repository, &["init", "-b", "main", "--quiet"]);
+    for file in 0..24 {
+        std::fs::write(
+            repository.join(format!("src/module_{file}.rs")),
+            format!("pub fn sealed_{file}() -> u32 {{ {file} }}\n"),
+        )
+        .expect("fixture source");
+    }
+    super::bootstrap::run_git(&repository, &["add", "."]);
+    super::bootstrap::run_git(&repository, &["commit", "-m", "fixture", "--quiet"]);
+
+    let handshake = DaemonHandshake {
+        project_path: Some(repository.clone()),
+        allow_init: true,
+        client_identity: test_client_identity_for(home.join("client")),
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "shutdown-term-grace-test",
+    );
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("project open must publish a server");
+    let project_id = server
+        .cg()
+        .await
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("registered project identity");
+    let project_id = tracedecay_domain::ProjectId::new(project_id).expect("project id");
+    let canonical_repository = repository.canonicalize().expect("canonical repository");
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        &canonical_repository,
+        &project_id,
+    )
+    .expect("code-index scope");
+    // Demand-driven activation mounts the background worker and wakes its
+    // first reconcile pass; shutdown follows without waiting for it.
+    let _warming = engine
+        .invocation
+        .code_index_schedulers
+        .latest_complete_ready_for_scope(&scope)
+        .await;
+
+    let started = std::time::Instant::now();
+    let receipt = engine.shutdown_all().await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "engine shutdown must finish inside the 5 s TERM grace, took {elapsed:?}"
+    );
+    assert!(
+        receipt.background.unfinished().is_empty(),
+        "every background owner must join cleanly: {:?}",
+        receipt.background.unfinished()
     );
 }

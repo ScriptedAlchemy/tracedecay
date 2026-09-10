@@ -9,6 +9,7 @@ use tracedecay_contracts::doctor::{
     DoctorEvidenceStateV1, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
     DoctorStorageIncompleteReasonV1,
 };
+use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1,
@@ -782,6 +783,7 @@ async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progr
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after_restart() {
+    let compaction = CompactionThresholdConfig::default();
     let isolation = TempDir::new().expect("isolated production composition");
     let project_root = isolation.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
@@ -901,7 +903,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             schedulers,
             &observations,
             &cancellation,
-            None,
+            Some(&compaction),
             None,
         )
         .await
@@ -918,7 +920,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             schedulers,
             &observations,
             &cancellation,
-            None,
+            Some(&compaction),
             None,
         )
         .await
@@ -1014,7 +1016,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             schedulers,
             &observations,
             &cancellation,
-            None,
+            Some(&compaction),
             None,
         )
         .await
@@ -1060,7 +1062,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             restarted_schedulers,
             &restarted_observations,
             &restarted_cancellation,
-            None,
+            Some(&compaction),
             None,
         )
         .await
@@ -1257,6 +1259,7 @@ async fn run_generation_cadence(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
 ) -> bool {
+    let compaction = CompactionThresholdConfig::default();
     let resources = harness.resources.as_ref().expect("live harness resources");
     let graph = harness
         .server(project_root)
@@ -1268,7 +1271,7 @@ async fn run_generation_cadence(
         &resources.invocation.code_index_schedulers,
         &resources.store_administration.store_telemetry_sampling(),
         &tracedecay_session_memory::context::CancellationToken::new(),
-        None,
+        Some(&compaction),
         None,
     )
     .await

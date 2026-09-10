@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::Spinner;
 use crate::cli::BranchAction;
 
-use super::daemon::{daemon_tool_json, daemon_tool_json_until};
-
-const BRANCH_ADD_CLIENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(40 * 60);
+use super::daemon::daemon_tool_json;
 
 fn branch_list_rpc_args() -> serde_json::Value {
     serde_json::json!({
@@ -131,11 +129,10 @@ fn handle_branch_action_inner(
                         .and_then(serde_json::Value::as_str)
                         .map(|p| format!(" (from {p})"))
                         .unwrap_or_default();
-                    let last_synced_at = branch
-                        .get("last_synced_at")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("never");
-                    let synced = branch_meta::format_timestamp(last_synced_at);
+                    let is_ready = branch
+                        .get("is_ready")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
                     let mut flags = Vec::new();
                     if branch
                         .get("is_default")
@@ -158,6 +155,9 @@ fn handle_branch_action_inner(
                     {
                         flags.push("serving");
                     }
+                    if !is_ready {
+                        flags.push("indexing");
+                    }
                     if !db_exists {
                         flags.push("missing-db");
                     }
@@ -166,8 +166,17 @@ fn handle_branch_action_inner(
                     } else {
                         format!(" [{}]", flags.join(", "))
                     };
+                    let readiness = if is_ready {
+                        let last_synced_at = branch
+                            .get("last_synced_at")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("never");
+                        format!("synced {}", branch_meta::format_timestamp(last_synced_at))
+                    } else {
+                        "exact index pending".to_string()
+                    };
                     eprintln!(
-                        "  {}{} — {}{}, synced {}",
+                        "  {}{} — {}{}, {}",
                         branch
                             .get("name")
                             .and_then(serde_json::Value::as_str)
@@ -175,7 +184,7 @@ fn handle_branch_action_inner(
                         flags,
                         size,
                         parent,
-                        synced
+                        readiness
                     );
                 }
                 if let Some(warnings) = diagnostics
@@ -206,9 +215,8 @@ fn handle_branch_action_inner(
                 };
 
                 let spinner = Spinner::new();
-                spinner.set_message("syncing changes");
-                let response = daemon_tool_json_until(
-                    tokio::time::Instant::now() + BRANCH_ADD_CLIENT_DEADLINE,
+                spinner.set_message("admitting branch");
+                let response = daemon_tool_json(
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch_add",
                     serde_json::json!({ "branch": branch_name }),
@@ -226,8 +234,8 @@ fn handle_branch_action_inner(
                     }
                     branch::BranchAddOutcome::Deferred => {
                         spinner.done(&format!(
-                        "branch '{branch_name}' tracked; sync deferred because another process is active"
-                    ));
+                            "branch '{branch_name}' admitted; indexing continues in the background. Run `tracedecay branch list` to check readiness"
+                        ));
                     }
                 }
             }

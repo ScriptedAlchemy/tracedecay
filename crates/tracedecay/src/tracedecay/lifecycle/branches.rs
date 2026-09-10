@@ -184,6 +184,13 @@ impl TraceDecay {
                 message: format!("branch '{branch_name}' is not tracked"),
             });
         }
+        if !meta.is_query_eligible(branch_name) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "branch '{branch_name}' is still indexing; exact provenance has not been published"
+                ),
+            });
+        }
         let db_path = store_layout.graph_db_path.clone();
 
         if !db_path.exists() {
@@ -217,7 +224,7 @@ impl TraceDecay {
             tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
                 .as_deref()
                 == Some(branch_name);
-        Ok(Self {
+        let graph = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -231,11 +238,27 @@ impl TraceDecay {
             fallback_warning: None,
             read_only,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
-        })
+        };
+        if let Some(project_id) =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&graph.store_layout)
+        {
+            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                graph.db.clone(),
+                project_id,
+                tracedecay_domain::UtcMicros(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(1, |duration| {
+                            duration.as_micros().min(i64::MAX as u128) as i64
+                        }),
+                ),
+                None,
+            )
+            .await;
+        }
+        Ok(graph)
     }
 }

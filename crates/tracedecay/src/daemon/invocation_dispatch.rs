@@ -18,6 +18,7 @@ use tracedecay_daemon_service::{
     DaemonInvocationService, Lease, SemanticInvocationControlV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store::StoreShardScopeV1;
 
 fn semantic_invocation_interruption_response(

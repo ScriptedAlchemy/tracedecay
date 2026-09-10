@@ -14,20 +14,30 @@
 mod remote_status_dispatch_tests;
 mod status;
 
-pub(crate) use status::graph_statistics_value;
-pub(super) use status::{handle_active_project, handle_admin_sync, handle_status};
+pub(super) use status::handle_admin_sync;
+
+/// Snapshot + serialize the generation census for the `tracedecay://status`
+/// resource. Handler families read the already-computed snapshot from
+/// [`tracedecay_mcp::McpToolContext`]; this wrapper keeps the resource on
+/// the composition-root reader until that surface moves.
+pub(crate) async fn graph_statistics_value(
+    generation_census_reader: Option<
+        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    >,
+) -> tracedecay_domain::errors::Result<serde_json::Value> {
+    let census = match generation_census_reader {
+        Some(reader) => reader().await,
+        None => {
+            tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+            }
+        }
+    };
+    tracedecay_mcp::handlers::info::graph_statistics_value(Some(&census))
+}
 
 pub(super) use serde_json::{Value, json};
 
-pub(super) use crate::tracedecay::{BranchDiagnostics, TraceDecay};
+pub(super) use crate::tracedecay::TraceDecay;
 pub(super) use tracedecay_domain::errors::{Result, TraceDecayError};
-pub(super) use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
-pub(super) use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
-
-pub(super) use super::support::{generic_tool_result, rendered_tool_result};
 pub(super) use tracedecay_mcp::ToolResult;
-pub(super) use tracedecay_mcp::tools::render::Md;
-
-fn display_path(path: &std::path::Path) -> String {
-    path.display().to_string()
-}

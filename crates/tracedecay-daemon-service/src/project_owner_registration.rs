@@ -16,6 +16,7 @@ mod source_edit;
 pub use lsp::{production_lsp_registration, project_open_lsp_scope_grant};
 pub use source_edit::{
     ProjectSourceEditAuthorizationV1, ProjectSourceEditOwnerV1, SourceEditMutationGate,
+    SourceEditOwnerError,
 };
 
 pub fn project_owner_capabilities() -> Result<BTreeSet<CapabilityId>, ApplicationContractError> {
@@ -73,6 +74,11 @@ pub fn project_owner_capabilities() -> Result<BTreeSet<CapabilityId>, Applicatio
     {
         capabilities.insert(descriptor.operation().capability_id().clone());
     }
+    capabilities.insert(
+        tracedecay_contracts::observatory_read_operation()?
+            .capability_id()
+            .clone(),
+    );
     capabilities.extend(
         tracedecay_application::project_open_authorization::project_open_work_capabilities()?,
     );
@@ -112,6 +118,14 @@ mod tests {
         {
             assert!(capabilities.contains(descriptor.operation().capability_id()));
         }
+    }
+
+    #[test]
+    fn project_owner_capabilities_include_observatory_read() {
+        let capabilities = project_owner_capabilities().expect("project-owner capabilities");
+        let operation =
+            tracedecay_contracts::observatory_read_operation().expect("Observatory read operation");
+        assert!(capabilities.contains(operation.capability_id()));
     }
 
     #[test]

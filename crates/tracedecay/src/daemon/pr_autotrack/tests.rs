@@ -775,6 +775,7 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
     schedulers.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;

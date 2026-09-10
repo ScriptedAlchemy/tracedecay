@@ -34,12 +34,14 @@ use tracedecay_daemon_service::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
 };
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use tracedecay_store_runtime::StoreWriterGates;
 pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
+pub(crate) use project_retirement::retire_registered_context_scout_owner;
 mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
@@ -607,10 +609,10 @@ impl Default for StoreAdministration {
 
 impl StoreAdministration {
     #[cfg(unix)]
-    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+    async fn spawn_manual_branch_publication<Publication, Task>(
         &self,
         publication: Publication,
-    ) -> Result<BranchAddOutcome>
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<BranchAddOutcome>>>
     where
         Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
         Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
@@ -645,7 +647,7 @@ impl StoreAdministration {
                     self.manual_branch_publications
                         .join_failed
                         .store(true, Ordering::Release);
-                    super::log_daemon_event(
+                    log_daemon_event(
                         "manual_branch_publication",
                         &[
                             ("action", "reap".to_owned()),
@@ -660,13 +662,59 @@ impl StoreAdministration {
                 let _ = result_sender.send(publication(cancellation).await);
             });
         }
-        result_receiver.await.map_err(|error| {
-            TraceDecayError::project_route(
-                "branch_tracking_failed",
-                true,
-                format!("manual branch publication owner stopped before completion: {error}"),
-            )
-        })?
+        Ok(result_receiver)
+    }
+
+    #[cfg(all(unix, any(test, feature = "test-transport")))]
+    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        self.spawn_manual_branch_publication(publication)
+            .await?
+            .await
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before completion: {error}"),
+                )
+            })?
+    }
+
+    /// Admit exact branch publication to the daemon-owned task set. The
+    /// caller returns while activation and indexing continue under shutdown
+    /// ownership.
+    #[cfg(unix)]
+    pub(super) async fn admit_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication:
+            FnOnce(CancellationToken, tokio::sync::oneshot::Sender<()>) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        let (admitted_sender, admitted_receiver) = tokio::sync::oneshot::channel();
+        let completion = self
+            .spawn_manual_branch_publication(move |cancellation| {
+                publication(cancellation, admitted_sender)
+            })
+            .await?;
+        match admitted_receiver.await {
+            Ok(()) => Ok(BranchAddOutcome::Deferred),
+            Err(_) => completion.await.map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before admission: {error}"),
+                )
+            })?,
+        }
     }
 
     #[cfg(unix)]
@@ -691,7 +739,7 @@ impl StoreAdministration {
                 self.manual_branch_publications
                     .join_failed
                     .store(true, Ordering::Release);
-                super::log_daemon_event(
+                log_daemon_event(
                     "manual_branch_publication",
                     &[
                         ("action", "shutdown".to_owned()),

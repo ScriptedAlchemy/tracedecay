@@ -172,7 +172,7 @@ impl Default for CodexAppServerSummaryConfig {
     fn default() -> Self {
         Self {
             codex_bin: "codex".to_string(),
-            model: None,
+            model: Some("gpt-5.6-sol".to_owned()),
             timeout: Duration::from_secs(90),
         }
     }
@@ -404,7 +404,7 @@ fn run_codex_protocol(
             "threadId": thread_id,
             "input": [{"type": "text", "text": prompt}],
             "cwd": cwd.to_string_lossy(),
-            "effort": "low",
+            "effort": "medium",
             "summary": "concise"
         });
         if let Some(model) = model {

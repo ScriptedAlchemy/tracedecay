@@ -4,15 +4,15 @@
 use serde_json::{Value, json};
 use tracedecay_contracts::{
     CancellationSignal, Deadline, EffectId, IdempotencyKey, RenameSymbolSurfaceRequestV1,
-    RequestId, SourceEditKind, SourceEditReconciliationDispositionV1, SourceEditRequest,
+    RequestId, SourceEditInvocationV1, SourceEditKind, SourceEditReconciliationDispositionV1,
+    SourceEditReconciliationInvocationV1, SourceEditRequest, SourceEditRollbackInvocationV1,
+};
+use tracedecay_daemon_protocol::{
+    DaemonInvocationExecutor, DaemonInvocationOutcome, DaemonInvocationRequest,
+    InvocationCancellationPolicy, invocation_now_micros,
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::mcp::server::{
-    SourceEditExecutor, SourceEditInvocationV1, SourceEditReconciliationExecutor,
-    SourceEditReconciliationInvocationV1, SourceEditRollbackExecutor,
-    SourceEditRollbackInvocationV1,
-};
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -81,7 +81,7 @@ async fn source_edit_tool_result(
     cg: &TraceDecay,
     args: &Value,
     request: SourceEditRequest,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let idempotency_key = optional_idempotency_key(args)?;
     let expected_state = optional_expected_state(args)?;
@@ -96,7 +96,6 @@ async fn source_edit_tool_result(
         request_id,
         deadline,
         cancellation,
-        ..
     } = invocation;
     let (Some(executor), Some(request_id), Some(deadline), Some(cancellation)) =
         (executor, request_id, deadline, cancellation)
@@ -106,14 +105,22 @@ async fn source_edit_tool_result(
         });
     };
     let result = hotpath::future!(
-        executor(SourceEditInvocationV1 {
-            edit: request,
-            idempotency_key,
-            expected_state,
-            request_id,
+        invoke_source_edit(
+            executor,
+            DaemonInvocationRequest::source_edit(
+                request_id.as_str(),
+                SourceEditInvocationV1 {
+                    edit: request,
+                    idempotency_key,
+                    expected_state,
+                },
+                invocation_now_micros(),
+                deadline.clone(),
+                cancellation.context(),
+            ),
             deadline,
             cancellation,
-        }),
+        ),
         label = "mcp.edit.apply.execute"
     )
     .await?;
@@ -136,10 +143,8 @@ async fn source_edit_tool_result(
 }
 
 #[derive(Clone)]
-pub(super) struct SourceEditInvocationContext {
-    pub(super) executor: Option<SourceEditExecutor>,
-    pub(super) reconciliation_executor: Option<SourceEditReconciliationExecutor>,
-    pub(super) rollback_executor: Option<SourceEditRollbackExecutor>,
+pub(super) struct SourceEditInvocationContext<'a> {
+    pub(super) executor: Option<&'a dyn DaemonInvocationExecutor>,
     pub(super) request_id: Option<RequestId>,
     pub(super) deadline: Option<Deadline>,
     pub(super) cancellation: Option<CancellationSignal>,
@@ -149,7 +154,7 @@ pub(super) struct SourceEditInvocationContext {
 pub(super) async fn handle_source_edit_rollback(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Err(TraceDecayError::Config {
@@ -173,30 +178,37 @@ pub(super) async fn handle_source_edit_rollback(
     let expected_state = ManifestDigest::new(required_str(&args, "expected_state")?)
         .map_err(source_edit_identity_error)?;
     let SourceEditInvocationContext {
-        rollback_executor,
+        executor,
         request_id,
         deadline,
         cancellation,
-        ..
     } = invocation;
     let (Some(executor), Some(request_id), Some(deadline), Some(cancellation)) =
-        (rollback_executor, request_id, deadline, cancellation)
+        (executor, request_id, deadline, cancellation)
     else {
         return Err(TraceDecayError::Config {
             message: "daemon-owned source edit rollback authority is unavailable".to_owned(),
         });
     };
     let result = hotpath::future!(
-        executor(SourceEditRollbackInvocationV1 {
-            effect_id,
-            original_idempotency_key,
-            idempotency_key,
-            original_input_digest,
-            expected_state,
-            request_id,
+        invoke_source_edit(
+            executor,
+            DaemonInvocationRequest::source_edit_rollback(
+                request_id.as_str(),
+                SourceEditRollbackInvocationV1 {
+                    effect_id,
+                    original_idempotency_key,
+                    idempotency_key,
+                    original_input_digest,
+                    expected_state,
+                },
+                invocation_now_micros(),
+                deadline.clone(),
+                cancellation.context(),
+            ),
             deadline,
             cancellation,
-        }),
+        ),
         label = "mcp.edit.rollback.execute"
     )
     .await?;
@@ -215,7 +227,7 @@ pub(super) async fn handle_source_edit_rollback(
 pub(super) async fn handle_source_edit_reconcile(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Err(TraceDecayError::Config {
@@ -264,31 +276,38 @@ pub(super) async fn handle_source_edit_reconcile(
         }
     };
     let SourceEditInvocationContext {
-        reconciliation_executor,
+        executor,
         request_id,
         deadline,
         cancellation,
-        ..
     } = invocation;
     let (Some(executor), Some(request_id), Some(deadline), Some(cancellation)) =
-        (reconciliation_executor, request_id, deadline, cancellation)
+        (executor, request_id, deadline, cancellation)
     else {
         return Err(TraceDecayError::Config {
             message: "daemon-owned source edit reconciliation authority is unavailable".to_owned(),
         });
     };
     let result = hotpath::future!(
-        executor(SourceEditReconciliationInvocationV1 {
-            kind,
-            effect_id,
-            idempotency_key,
-            attempt_idempotency_key,
-            input_digest,
-            disposition,
-            request_id,
+        invoke_source_edit(
+            executor,
+            DaemonInvocationRequest::source_edit_reconcile(
+                request_id.as_str(),
+                SourceEditReconciliationInvocationV1 {
+                    kind,
+                    effect_id,
+                    idempotency_key,
+                    attempt_idempotency_key,
+                    input_digest,
+                    disposition,
+                },
+                invocation_now_micros(),
+                deadline.clone(),
+                cancellation.context(),
+            ),
             deadline,
             cancellation,
-        }),
+        ),
         label = "mcp.edit.reconcile.execute"
     )
     .await?;
@@ -300,6 +319,33 @@ pub(super) async fn handle_source_edit_reconcile(
         Ok(tool_result)
     } else {
         Ok(tool_result.with_failure_message(result.outcome.message()))
+    }
+}
+
+async fn invoke_source_edit(
+    executor: &dyn DaemonInvocationExecutor,
+    request: DaemonInvocationRequest,
+    deadline: Deadline,
+    cancellation: CancellationSignal,
+) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
+    let response = executor
+        .invoke_controlled(
+            request,
+            deadline,
+            cancellation,
+            InvocationCancellationPolicy::AuthoritativeEffect,
+        )
+        .await
+        .map_err(|error| error.into_application_problem().into_trace_decay_error())?;
+    match response.outcome {
+        DaemonInvocationOutcome::SourceEdit { result, .. } => Ok(result),
+        DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            Err(problem.into_trace_decay_error())
+        }
+        DaemonInvocationOutcome::Problem { problem } => Err(problem.into_trace_decay_error()),
+        _ => Err(TraceDecayError::Config {
+            message: "source edit invocation returned an unexpected outcome".to_owned(),
+        }),
     }
 }
 
@@ -348,7 +394,7 @@ fn optional_expected_state(args: &Value) -> Result<Option<ManifestDigest>> {
 pub(super) async fn handle_str_replace(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let old_str = required_str(&args, "old_str")?;
@@ -374,7 +420,7 @@ pub(super) async fn handle_str_replace(
 pub(super) async fn handle_multi_str_replace(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let replacements = required_array(&args, "replacements")?;
@@ -417,7 +463,7 @@ pub(super) async fn handle_multi_str_replace(
 pub(super) async fn handle_insert_at(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let anchor = required_str(&args, "anchor")?;
@@ -446,7 +492,7 @@ pub(super) async fn handle_insert_at(
 pub(super) async fn handle_replace_symbol(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let new_source = required_str(&args, "new_source")?;
@@ -470,7 +516,7 @@ pub(super) async fn handle_replace_symbol(
 pub(super) async fn handle_insert_at_symbol(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let content = required_str(&args, "content")?;
@@ -499,7 +545,7 @@ pub(super) async fn handle_insert_at_symbol(
 pub(super) async fn handle_move_symbol(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let dest_file = required_str(&args, "dest_file")?;
@@ -527,7 +573,7 @@ pub(super) async fn handle_move_symbol(
 pub(super) async fn handle_rename_symbol(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let request: RenameSymbolSurfaceRequestV1 = deserialize_source_edit_surface(&args)?;
     let binding = tracedecay_contracts::RenameSymbolBindingV1 {
@@ -597,7 +643,7 @@ fn move_result_md(result: &tracedecay_contracts::source_edit::MoveResult) -> Str
 pub(super) async fn handle_ast_grep_rewrite(
     cg: &TraceDecay,
     args: Value,
-    invocation: SourceEditInvocationContext,
+    invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let pattern = required_str(&args, "pattern")?;
@@ -634,6 +680,15 @@ mod tests {
     use tracedecay_contracts::source_edit::EditResult;
     use tracedecay_contracts::source_edit::{
         SourceEditSurfaceOutcomeV1, SourceEditSurfaceResultV1,
+    };
+    use tracedecay_contracts::{
+        ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
+        ApplicationProblem, ApplicationResponse, InvocationError, LegalAction, RetryDirective,
+        SafeDiagnostic,
+    };
+    use tracedecay_daemon_protocol::{
+        DaemonInvocationError, DaemonInvocationExecutorFuture, DaemonInvocationPayload,
+        DaemonInvocationProblem, DaemonInvocationResponse,
     };
 
     const EXPECTED_STATE: &str =
@@ -725,11 +780,11 @@ mod tests {
         (graph, database_scope)
     }
 
-    fn invocation_context(executor: Option<SourceEditExecutor>) -> SourceEditInvocationContext {
+    fn invocation_context(
+        executor: Option<&dyn DaemonInvocationExecutor>,
+    ) -> SourceEditInvocationContext<'_> {
         SourceEditInvocationContext {
             executor,
-            reconciliation_executor: None,
-            rollback_executor: None,
             request_id: Some(RequestId::new("request.mcp.source-edit.fixture").unwrap()),
             deadline: Some(Deadline::new(UtcMicros(i64::MAX)).unwrap()),
             cancellation: Some(
@@ -738,9 +793,53 @@ mod tests {
         }
     }
 
-    fn recording_executor(seen: Arc<Mutex<Vec<SeenInvocation>>>) -> SourceEditExecutor {
-        Arc::new(move |invocation| {
-            seen.lock().unwrap().push(SeenInvocation {
+    struct RecordingSourceEditExecutor {
+        seen: Mutex<Vec<SeenInvocation>>,
+        routed: Mutex<Vec<RoutedInvocation>>,
+    }
+
+    impl RecordingSourceEditExecutor {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(Vec::new()),
+                routed: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ApplicationInvocationExecutor for RecordingSourceEditExecutor {
+        fn invoke(
+            &self,
+            _invocation: ApplicationInvocation,
+        ) -> ApplicationInvocationFuture<
+            '_,
+            std::result::Result<ApplicationResponse, InvocationError>,
+        > {
+            Box::pin(async { Err(InvocationError::Unavailable) })
+        }
+    }
+
+    impl DaemonInvocationExecutor for RecordingSourceEditExecutor {
+        fn invoke_controlled(
+            &self,
+            request: DaemonInvocationRequest,
+            deadline: Deadline,
+            cancellation: CancellationSignal,
+            _policy: InvocationCancellationPolicy,
+        ) -> DaemonInvocationExecutorFuture<
+            '_,
+            std::result::Result<DaemonInvocationResponse, DaemonInvocationError>,
+        > {
+            let request_id = RequestId::new(request.request_id.clone())
+                .unwrap_or_else(|_| RequestId::new("request.mcp.source-edit.fixture").unwrap());
+            let DaemonInvocationPayload::SourceEdit {
+                request: invocation,
+                ..
+            } = request.payload
+            else {
+                return Box::pin(async { Err(DaemonInvocationError::Unavailable) });
+            };
+            self.seen.lock().unwrap().push(SeenInvocation {
                 dry_run: invocation.edit.dry_run(),
                 idempotency_key: invocation
                     .idempotency_key
@@ -752,108 +851,258 @@ mod tests {
                     .map(|state| state.as_str().to_owned()),
             });
             let dry_run = invocation.edit.dry_run();
-            Box::pin(async move {
-                Ok(SourceEditSurfaceResultV1 {
-                    outcome: SourceEditSurfaceOutcomeV1::Edit(EditResult {
-                        success: true,
-                        file_path: "src/lib.rs".to_owned(),
-                        matched_str: "old".to_owned(),
-                        new_str: "new".to_owned(),
-                        dry_run,
-                        message: "source edit fixture completed".to_owned(),
-                        ..EditResult::default()
-                    }),
-                    expected_state: digest(EXPECTED_STATE),
-                    predicted_state: Some(digest(PREDICTED_STATE)),
-                    verification: None,
-                    effect: None,
-                    replayed: false,
-                })
-            })
-        })
-    }
-
-    fn route_recording_executor(seen: Arc<Mutex<Vec<RoutedInvocation>>>) -> SourceEditExecutor {
-        Arc::new(move |invocation| {
-            let dry_run = invocation.edit.dry_run();
-            seen.lock().unwrap().push(RoutedInvocation {
+            self.routed.lock().unwrap().push(RoutedInvocation {
                 edit: invocation.edit,
-                request_id: invocation.request_id,
-                deadline: invocation.deadline,
-                cancellation: invocation.cancellation.context(),
+                request_id,
+                deadline,
+                cancellation: cancellation.context(),
             });
             Box::pin(async move {
-                Ok(SourceEditSurfaceResultV1 {
-                    outcome: SourceEditSurfaceOutcomeV1::Edit(EditResult {
-                        success: true,
-                        file_path: "src/lib.rs".to_owned(),
-                        dry_run,
-                        message: "source edit route fixture completed".to_owned(),
-                        ..EditResult::default()
-                    }),
-                    expected_state: digest(EXPECTED_STATE),
-                    predicted_state: Some(digest(PREDICTED_STATE)),
-                    verification: None,
-                    effect: None,
-                    replayed: false,
-                })
+                Ok(DaemonInvocationResponse::with_outcome(
+                    "request.mcp.source-edit.fixture".to_owned(),
+                    DaemonInvocationOutcome::SourceEdit {
+                        scope: tracedecay_contracts::ResolvedScope::new(
+                            tracedecay_domain::ProjectId::new("project.source-edit.fixture")
+                                .unwrap(),
+                            tracedecay_domain::RepositoryId::new("repository.source-edit.fixture")
+                                .unwrap(),
+                            tracedecay_domain::WorktreeId::new("worktree.source-edit.fixture")
+                                .unwrap(),
+                            None,
+                        )
+                        .unwrap(),
+                        result: SourceEditSurfaceResultV1 {
+                            outcome: SourceEditSurfaceOutcomeV1::Edit(EditResult {
+                                success: true,
+                                file_path: "src/lib.rs".to_owned(),
+                                matched_str: "old".to_owned(),
+                                new_str: "new".to_owned(),
+                                dry_run,
+                                message: "source edit fixture completed".to_owned(),
+                                ..EditResult::default()
+                            }),
+                            expected_state: digest(EXPECTED_STATE),
+                            predicted_state: Some(digest(PREDICTED_STATE)),
+                            verification: None,
+                            effect: None,
+                            replayed: false,
+                        },
+                    },
+                ))
             })
+        }
+
+        fn observe_feedback(
+            &self,
+            _subject_digest: ManifestDigest,
+            _observed_at: UtcMicros,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
+        ) -> DaemonInvocationExecutorFuture<'_, tracedecay_domain::errors::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct RefusingSourceEditExecutor {
+        outcome: DaemonInvocationOutcome,
+    }
+
+    impl ApplicationInvocationExecutor for RefusingSourceEditExecutor {
+        fn invoke(
+            &self,
+            _invocation: ApplicationInvocation,
+        ) -> ApplicationInvocationFuture<
+            '_,
+            std::result::Result<ApplicationResponse, InvocationError>,
+        > {
+            Box::pin(async { Err(InvocationError::Unavailable) })
+        }
+    }
+
+    impl DaemonInvocationExecutor for RefusingSourceEditExecutor {
+        fn invoke_controlled(
+            &self,
+            _request: DaemonInvocationRequest,
+            _deadline: Deadline,
+            _cancellation: CancellationSignal,
+            _policy: InvocationCancellationPolicy,
+        ) -> DaemonInvocationExecutorFuture<
+            '_,
+            std::result::Result<DaemonInvocationResponse, DaemonInvocationError>,
+        > {
+            let outcome = self.outcome.clone();
+            Box::pin(async move {
+                Ok(DaemonInvocationResponse::with_outcome(
+                    "request.mcp.source-edit.fixture".to_owned(),
+                    outcome,
+                ))
+            })
+        }
+
+        fn observe_feedback(
+            &self,
+            _subject_digest: ManifestDigest,
+            _observed_at: UtcMicros,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
+        ) -> DaemonInvocationExecutorFuture<'_, tracedecay_domain::errors::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    async fn source_edit_refusal(
+        outcome: DaemonInvocationOutcome,
+    ) -> tracedecay_domain::errors::TraceDecayError {
+        let project = tempdir().unwrap();
+        let (graph, _database_scope) = fixture_graph(project.path()).await;
+        let executor = RefusingSourceEditExecutor { outcome };
+        handle_str_replace(
+            &graph,
+            json!({"path":"src/lib.rs","old_str":"old","new_str":"new","dry_run":true}),
+            invocation_context(Some(&executor)),
+        )
+        .await
+        .expect_err("refused source edit must stay a typed failure")
+    }
+
+    #[tokio::test]
+    async fn denied_source_edit_preserves_reason_code_and_is_not_retryable() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
         })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("denial must stay a typed project-route error");
+        assert_eq!(reason_code, "not_found_or_not_authorized");
+        assert!(!retryable);
+    }
+
+    #[tokio::test]
+    async fn warming_source_edit_gate_is_retryable_unavailable() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::unavailable(
+                SafeDiagnostic::new(
+                    "application.surface.unavailable",
+                    "The project runtime for this operation is still mounting",
+                )
+                .unwrap(),
+            ),
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("warming must stay a typed project-route error");
+        assert_eq!(reason_code, "application.surface.unavailable");
+        assert!(retryable);
+    }
+
+    #[tokio::test]
+    async fn kernel_digest_mismatch_reaches_mcp_with_reason_code_and_retryability() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::stale(
+                SafeDiagnostic::new(
+                    "source_edit.expected_state_mismatch",
+                    "source edit candidate state changed while its exact preview was captured",
+                )
+                .unwrap(),
+            ),
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("digest mismatch must stay a typed project-route error");
+        assert_eq!(reason_code, "source_edit.expected_state_mismatch");
+        assert!(retryable);
+        assert_ne!(reason_code, "not_found_or_not_authorized");
+    }
+
+    #[tokio::test]
+    async fn kernel_conflict_reaches_mcp_with_reason_code_and_retryability() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::Conflict {
+                diagnostic: SafeDiagnostic::new(
+                    "source_edit.idempotency_conflict",
+                    "source edit idempotency key conflicts with a prior input",
+                )
+                .unwrap(),
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            },
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("idempotency conflict must stay a typed project-route error");
+        assert_eq!(reason_code, "source_edit.idempotency_conflict");
+        assert!(retryable);
+        assert_ne!(reason_code, "not_found_or_not_authorized");
+    }
+
+    #[tokio::test]
+    async fn source_edit_protocol_problem_stays_typed_without_debug_formatting() {
+        let error = source_edit_refusal(DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        })
+        .await;
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("protocol refusal must stay a typed project-route error");
+        assert_eq!(reason_code, "daemon_invocation.not_found_or_not_authorized");
+        assert!(!retryable);
+        assert!(!error.to_string().contains("NotFoundOrNotAuthorized"));
     }
 
     #[tokio::test]
     async fn source_edit_handlers_forward_exact_variants_defaults_and_controls() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let executor = route_recording_executor(Arc::clone(&seen));
+        let executor = RecordingSourceEditExecutor::new();
 
         handle_str_replace(
             &graph,
             json!({"path":"src/lib.rs","old_str":"old","new_str":"new","dry_run":true}),
-            invocation_context(Some(Arc::clone(&executor))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
         handle_multi_str_replace(
             &graph,
             json!({"path":"src/lib.rs","replacements":[["old","new"]],"dry_run":true}),
-            invocation_context(Some(Arc::clone(&executor))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
         handle_insert_at(
             &graph,
             json!({"path":"src/lib.rs","anchor":"1","content":"new","dry_run":true}),
-            invocation_context(Some(Arc::clone(&executor))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
         handle_ast_grep_rewrite(
             &graph,
             json!({"path":"src/lib.rs","pattern":"old","rewrite":"new","dry_run":true}),
-            invocation_context(Some(Arc::clone(&executor))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
         handle_replace_symbol(
             &graph,
             json!({"symbol":"old","new_source":"fn new() {}","dry_run":true}),
-            invocation_context(Some(Arc::clone(&executor))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
         handle_insert_at_symbol(
             &graph,
             json!({"symbol":"old","content":"fn new() {}","dry_run":true}),
-            invocation_context(Some(Arc::clone(&executor))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
         handle_move_symbol(
             &graph,
             json!({"symbol":"old","dest_file":"src/new.rs"}),
-            invocation_context(Some(Arc::clone(&executor))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
@@ -868,12 +1117,12 @@ mod tests {
                 "new_name": "renamed",
                 "__mcp_request_id": "request.mcp.source-edit.fixture"
             }),
-            invocation_context(Some(executor)),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
 
-        let seen = seen.lock().unwrap();
+        let seen = executor.routed.lock().unwrap();
         assert_eq!(
             seen.iter()
                 .map(|invocation| invocation.edit.kind())
@@ -940,7 +1189,7 @@ mod tests {
     async fn preview_accepts_no_effect_identity_and_returns_expected_state() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;
-        let seen = Arc::new(Mutex::new(Vec::new()));
+        let executor = RecordingSourceEditExecutor::new();
         let result = handle_str_replace(
             &graph,
             json!({
@@ -950,13 +1199,13 @@ mod tests {
                 "dry_run": true,
                 "format": "json"
             }),
-            invocation_context(Some(recording_executor(Arc::clone(&seen)))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
 
         assert_eq!(
-            *seen.lock().unwrap(),
+            *executor.seen.lock().unwrap(),
             vec![SeenInvocation {
                 dry_run: true,
                 idempotency_key: None,
@@ -1021,7 +1270,7 @@ mod tests {
     async fn apply_forwards_exact_idempotency_key_and_expected_state() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;
-        let seen = Arc::new(Mutex::new(Vec::new()));
+        let executor = RecordingSourceEditExecutor::new();
         handle_str_replace(
             &graph,
             json!({
@@ -1032,13 +1281,13 @@ mod tests {
                 "expected_state": EXPECTED_STATE,
                 "format": "json"
             }),
-            invocation_context(Some(recording_executor(Arc::clone(&seen)))),
+            invocation_context(Some(&executor)),
         )
         .await
         .unwrap();
 
         assert_eq!(
-            *seen.lock().unwrap(),
+            *executor.seen.lock().unwrap(),
             vec![SeenInvocation {
                 dry_run: false,
                 idempotency_key: Some("edit.mcp-exact".to_owned()),

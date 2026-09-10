@@ -320,6 +320,7 @@ impl DaemonInvocationService {
         let work_runtime = runtimes.work;
         let retained_runtime = runtimes.retained;
         let lsp_owner = runtimes.lsp_owner;
+        let source_edit_owner = runtimes.source_edit;
 
         let response = match request.payload {
             DaemonInvocationPayload::GitRead {
@@ -1020,6 +1021,54 @@ impl DaemonInvocationService {
                 }
                 Err(response) => *response,
             },
+            DaemonInvocationPayload::SourceEdit {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::SourceEditReconcile {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit_reconcile(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::SourceEditRollback {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit_rollback(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
         };
         if is_observable_operation(operation) {
             hotpath::measure_block!(

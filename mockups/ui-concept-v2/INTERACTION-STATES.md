@@ -34,46 +34,46 @@ under reduced motion, and reflow or provide focus modes at 200% browser zoom.
    that project—code graph plus graph, memory, analytics, identity, and checkout
    authorities.
 5. Return to all projects: explicit scope clear.
-6. Real activity: bloom exact `project_id`; conduct across at most one
-   evidenced, drawn relation. A shared-repository hop does not light sibling checkouts.
+6. Real activity: bloom exact `project_id`; conduct across at most one evidenced,
+   drawn relation. A shared-repository hop does not light sibling checkouts.
 7. Honest states: registry loading, empty, partial, unavailable, inconsistent,
    or truncated; stream connecting/offline; graph empty/renderer unavailable.
 
 ### Loom — accepted final target
 
-The [final manifest](03-loom/final/README.md) and its seven same-stem briefs
-own this horizontal target. The older vertical layout below is an implementation
-inventory, not permission to substitute legacy geometry for the final plates.
+The [final manifest](03-loom/final/README.md) and its eight same-stem briefs own
+the horizontal execution-weave target:
 
-1. Follow loaded tail: time runs left to right; the cursor follows the end of
-   the currently loaded LCM page. Pan or select pauses follow; return-to-tail
-   resumes it. `NOW` means the loaded page end, never a global stream.
-2. Temporal replay: seek/play a cursor within the loaded page. Future events
-   remain withheld, not merely dimmed. Playback and follow are distinct state
-   dimensions: paused playback may still follow newly admitted loaded events.
-3. Branching execution: parent → evidenced spawn → parallel agent/subagent
-   branches → evidenced handoff/rejoin. Collapse preserves counts and grades.
-4. Dense overview: deterministic workstream bundles; semantic zoom reveals
-   groups → agents → events. Unique agents and participations remain distinct.
-5. Selected event: a roomy evidence workspace with exact transcript, task,
-   diff, source identity, and graded causal neighborhood, plus exact fallbacks.
-6. Feedback continuation: local feedback and evidenced later acknowledgement,
-   action, or contradiction; no inferred acknowledgement rendered as fact.
-7. Evidence gaps: loading, empty, partial, stale, offline, denied, ambiguous,
-   unavailable sources and linked boundaries remain separate typed states.
+1. Follow loaded tail: time runs left to right and follows the newest event in
+   the loaded page. Pan or select pauses follow; return-to-tail resumes it.
+   `NOW` means the loaded page end, never a global live stream.
+2. Temporal replay: play, seek, or step through loaded evidence while
+   unrevealed future events remain hidden. Playback and follow remain distinct
+   state dimensions; paused playback may still follow newly admitted events.
+3. Branching execution: spawn, handoff, result, and rejoin paths require named
+   evidence and preserve exact tree/list fallbacks.
+4. Dense execution: semantic zoom moves from outcome or workstream group to
+   agent, episode, and event without keeping one permanent lane per agent.
+5. Selected event: exact transcript, task, code, diff, hook, and causal evidence
+   uses the available workspace rather than a permanently narrow inspector.
+6. Feedback continuation: local feedback links to later work only after a real
+   acknowledged, acted-on, or contradictory record exists.
+7. Evidence gaps: ambiguity, staleness, missing sources, and unavailable private
+   reasoning stay visible and never become invented narrative.
+8. Work proximity: the execution weave supplies a many-thread overview; a
+   selected encounter opens pair evidence. The production similarity basis and
+   threshold remain explicit and independently reviewable.
 
-Pan, fit, minimap, keyboard seek and semantic zoom retain temporal context.
-These are accepted target interactions; a shipping route must expose their
-actual availability rather than claiming integration from the concept alone.
+Pan, zoom, fit, minimap, keyboard navigation, and exact event tables preserve
+the same temporal selection and source identities.
 
 ### Loom — legacy implementation baseline
 
-The earlier weave maps measured time down and hosts across, with strand width
-by message count and recorded/open/unknown ends. Its zoom/pan/fit, selected
-thread table, canonical thread chain and loaded-page replay remain useful
-behavioral evidence. Their presence does not establish the final horizontal
-hierarchical execution layout. Preserve loaded-page bounds, separate source
-coverage, initial paused playback and 0.5–4x presentation speed during migration.
+The existing vertical host/session weave, loaded-page replay, selected thread
+chain, and typed partial states remain truthful production evidence and fallback
+surfaces while the horizontal target is implemented. They do not redefine the
+accepted final sequence. Preserve loaded-page bounds, separate source
+coverage, initial paused playback, and 0.5–4x presentation speed during migration.
 
 ## Production inventory and behavioral evidence
 
@@ -113,7 +113,7 @@ coverage, initial paused playback and 0.5–4x presentation speed during migrati
 | Work | board; projection switch; selected task; topology selection | empty board, stale generation, runtime/attempt/topology unavailable, stream offline |
 | Workflows | definitions; detail; lifecycle CAS; run lookup | empty registry, unknown, runtime unavailable, CAS conflict, concealed run |
 
-Concepts never add hover, zoom, drill-down, filters, or controls that the
-shipping product does not expose. Typed-state plates may share a composition
-when the visible distinction is fully documented, but no typed state may be
-collapsed into an empty or healthy-looking panel.
+Implementation captures never claim hover, zoom, drill-down, filters, or
+controls until the shipping product exposes them. Typed-state plates may share
+a composition when the visible distinction is fully documented, but no typed
+state may be collapsed into an empty or healthy-looking panel.

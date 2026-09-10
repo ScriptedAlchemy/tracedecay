@@ -586,7 +586,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
             CORE_RELATIONS_AFTER_CHORD,
         )
         .await,
-        Err(MemoryApplicationError::Store(
+        Err(MemoryApplicationError::Cancelled(
             FactStoreError::GraphCancelled
         ))
     ));
@@ -599,7 +599,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
             3,
         )
         .await,
-        Err(MemoryApplicationError::Store(
+        Err(MemoryApplicationError::Cancelled(
             FactStoreError::GraphCancelled
         ))
     ));

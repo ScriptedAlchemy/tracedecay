@@ -47,11 +47,11 @@ impl<T> RetrievalPortOutcome<T> {
 }
 
 pub trait SourceRetrievalPort {
-    fn source_lines(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &SourceLinesRequest,
-    ) -> RetrievalPortOutcome<SourceLinesResult>;
+    fn source_lines<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a SourceLinesRequest,
+    ) -> Pin<Box<dyn Future<Output = RetrievalPortOutcome<SourceLinesResult>> + Send + 'a>>;
 }
 
 pub trait AffectedTestsRetrievalPort {

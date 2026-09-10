@@ -188,6 +188,7 @@ where
             Ok(ResolvedSetting {
                 key: key.clone(),
                 effective_value,
+                revision_id: current.revision_id,
                 snapshot_id: current.snapshot.snapshot_id,
                 effective_behavior_digest: current.snapshot.effective_behavior_digest,
                 resolution_provenance_digest: current.snapshot.resolution_provenance_digest,

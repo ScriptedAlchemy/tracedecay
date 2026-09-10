@@ -10,13 +10,13 @@ use tracedecay_application::source_authorization::{
 };
 use tracedecay_contracts::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 use tracedecay_contracts::{
-    ApplicationOperation, CancellationContext, CancellationSignal, Deadline, EffectId,
-    IdempotencyKey, RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationAdmissionV1,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditKind,
-    SourceEditReconciliationDispositionV1, SourceEditRequest, now_micros,
+    ApplicationOperation, CancellationContext, CancellationSignal, Deadline, IdempotencyKey,
+    RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationAdmissionV1,
+    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditInvocationV1,
+    SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1, now_micros,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::CatalogSnapshotV1;
 
 use tracedecay_source_edit::{SourceEditEffectControlV1, SourceEditRuntime};
@@ -245,19 +245,35 @@ impl SourceEditMutationGate {
         self.state.store(Self::FAILED, Ordering::Release);
     }
 
-    pub fn authorize_mutation(&self, lane: &str) -> Result<()> {
+    pub fn authorize_mutation(&self) -> std::result::Result<(), SourceEditOwnerError> {
         match self.state() {
             SourceEditMutationState::Ready => Ok(()),
-            SourceEditMutationState::Warming => Err(TraceDecayError::Config {
-                message: format!("daemon-owned source edit {lane} authority is warming"),
-            }),
-            SourceEditMutationState::Failed => Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon-owned source edit {lane} authority failed to publish; reopen the project"
-                ),
-            }),
+            SourceEditMutationState::Warming => Err(SourceEditOwnerError::Warming),
+            SourceEditMutationState::Failed => Err(SourceEditOwnerError::PublicationFailed),
         }
     }
+}
+
+/// Typed refusal from the project-owned source-edit authority.
+///
+/// Dispatch matches these variants. Message text is display-only and must not
+/// be scanned to recover the outcome.
+#[derive(Debug, thiserror::Error)]
+pub enum SourceEditOwnerError {
+    #[error("daemon-owned source edit authority is warming")]
+    Warming,
+    #[error("daemon-owned source edit authority failed to publish; reopen the project")]
+    PublicationFailed,
+    #[error("source edit was not found or is not authorized")]
+    NotAuthorized,
+    #[error("source edit invocation contract is invalid")]
+    InvalidContract,
+    #[error("source edit was cancelled before admission")]
+    Cancelled,
+    #[error("source edit timed out before admission")]
+    TimedOut,
+    #[error(transparent)]
+    ExecutionFailed(TraceDecayError),
 }
 
 pub struct ProjectSourceEditOwnerV1 {
@@ -282,21 +298,30 @@ impl ProjectSourceEditOwnerV1 {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    pub fn scope(&self) -> ResolvedScope {
+        self.authorization.scope.clone()
+    }
+
     #[hotpath::measure(label = "daemon.project.source_edit", future = true)]
     pub async fn execute(
         &self,
-        edit: SourceEditRequest,
-        idempotency_key: Option<IdempotencyKey>,
-        expected_state: Option<ManifestDigest>,
         request_id: RequestId,
+        invocation: SourceEditInvocationV1,
         deadline: Deadline,
         cancellation: CancellationSignal,
-    ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
+    ) -> std::result::Result<
+        tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+        SourceEditOwnerError,
+    > {
+        let SourceEditInvocationV1 {
+            edit,
+            idempotency_key,
+            expected_state,
+        } = invocation;
         // Retain the admitted owner state once across its asynchronous phases.
         Box::pin(async move {
             if !edit.dry_run() {
-                self.mutation.authorize_mutation("mutation")?;
+                self.mutation.authorize_mutation()?;
             }
             let observed_at = now_micros();
             let operation = tracedecay_contracts::source_edit_operation(edit.kind())
@@ -329,16 +354,16 @@ impl ProjectSourceEditOwnerV1 {
                         context.request_id(),
                         &edit,
                     )
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("source edit preview identity failed: {error}"),
+                    .map_err(|error| {
+                        SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+                            message: format!("source edit preview identity failed: {error}"),
+                        })
                     })?;
                     IdempotencyKey::new(format!("preview.{preview_identity}"))
                         .map_err(source_edit_contract_error)?
                 }
                 None => {
-                    return Err(TraceDecayError::Config {
-                        message: "source edit apply requires an idempotency key".to_owned(),
-                    });
+                    return Err(SourceEditOwnerError::InvalidContract);
                 }
             };
             let expected_state = match expected_state {
@@ -348,13 +373,13 @@ impl ProjectSourceEditOwnerV1 {
                     context.request_id(),
                     &edit,
                 ))
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("source edit preview state identity failed: {error}"),
+                .map_err(|error| {
+                    SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+                        message: format!("source edit preview state identity failed: {error}"),
+                    })
                 })?,
                 None => {
-                    return Err(TraceDecayError::Config {
-                        message: "source edit apply requires an expected state".to_owned(),
-                    });
+                    return Err(SourceEditOwnerError::InvalidContract);
                 }
             };
             let request = tracedecay_contracts::SourceEditEffectRequestV1 {
@@ -376,24 +401,30 @@ impl ProjectSourceEditOwnerV1 {
             )
             .await
             .and_then(source_edit_surface_result)
+            .map_err(SourceEditOwnerError::ExecutionFailed)
         })
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.project.source_edit_rollback", future = true)]
     pub async fn rollback(
         &self,
-        effect_id: EffectId,
-        original_idempotency_key: IdempotencyKey,
-        idempotency_key: IdempotencyKey,
-        original_input_digest: ManifestDigest,
-        expected_state: ManifestDigest,
         request_id: RequestId,
+        invocation: SourceEditRollbackInvocationV1,
         deadline: Deadline,
         cancellation: CancellationSignal,
-    ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
-        self.mutation.authorize_mutation("rollback")?;
+    ) -> std::result::Result<
+        tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+        SourceEditOwnerError,
+    > {
+        let SourceEditRollbackInvocationV1 {
+            effect_id,
+            original_idempotency_key,
+            idempotency_key,
+            original_input_digest,
+            expected_state,
+        } = invocation;
+        self.mutation.authorize_mutation()?;
         let observed_at = now_micros();
         let operation = tracedecay_contracts::source_edit_rollback_operation()
             .map_err(source_edit_contract_error)?;
@@ -436,23 +467,29 @@ impl ProjectSourceEditOwnerV1 {
         )
         .await
         .and_then(source_edit_surface_result)
+        .map_err(SourceEditOwnerError::ExecutionFailed)
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.project.source_edit_reconciliation", future = true)]
     pub async fn reconcile(
         &self,
-        kind: SourceEditKind,
-        effect_id: EffectId,
-        idempotency_key: IdempotencyKey,
-        attempt_idempotency_key: IdempotencyKey,
-        input_digest: ManifestDigest,
-        disposition: SourceEditReconciliationDispositionV1,
         request_id: RequestId,
+        invocation: SourceEditReconciliationInvocationV1,
         deadline: Deadline,
         cancellation: CancellationSignal,
-    ) -> Result<tracedecay_contracts::source_edit::SourceEditSurfaceResultV1> {
-        self.mutation.authorize_mutation("reconciliation")?;
+    ) -> std::result::Result<
+        tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+        SourceEditOwnerError,
+    > {
+        let SourceEditReconciliationInvocationV1 {
+            kind,
+            effect_id,
+            idempotency_key,
+            attempt_idempotency_key,
+            input_digest,
+            disposition,
+        } = invocation;
+        self.mutation.authorize_mutation()?;
         let observed_at = now_micros();
         let operation = tracedecay_contracts::source_edit_reconciliation_operation()
             .map_err(source_edit_contract_error)?;
@@ -495,6 +532,7 @@ impl ProjectSourceEditOwnerV1 {
         )
         .await
         .and_then(source_edit_surface_result)
+        .map_err(SourceEditOwnerError::ExecutionFailed)
     }
 }
 
@@ -505,13 +543,16 @@ fn source_edit_request_context(
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
-) -> Result<RequestContext> {
-    if cancellation.is_cancelled() || deadline.is_elapsed_at(observed_at) {
-        return Err(source_edit_authority_error());
+) -> std::result::Result<RequestContext, SourceEditOwnerError> {
+    if cancellation.is_cancelled() {
+        return Err(SourceEditOwnerError::Cancelled);
+    }
+    if deadline.is_elapsed_at(observed_at) {
+        return Err(SourceEditOwnerError::TimedOut);
     }
     let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
     if expires_at.0 <= observed_at.0 {
-        return Err(source_edit_authority_error());
+        return Err(SourceEditOwnerError::TimedOut);
     }
     let grant_digest = canonical_sha256(&(
         "tracedecay.daemon.source-edit-grant.v1",
@@ -521,15 +562,17 @@ fn source_edit_request_context(
         operation.capability_id(),
         operation.use_case_id(),
     ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("source edit route grant unavailable: {error}"),
+    .map_err(|error| {
+        SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+            message: format!("source edit route grant unavailable: {error}"),
+        })
     })?;
     let grant = tracedecay_contracts::CapabilityGrantSnapshot::new(
         tracedecay_contracts::CapabilityGrantId::new(format!(
             "grant.daemon.source-edit.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))
-        .map_err(source_edit_contract_error)?,
+        .map_err(source_edit_construction_failed)?,
         POLICY_REVISION_V1,
         grant_digest,
         access.requester.clone(),
@@ -540,28 +583,30 @@ fn source_edit_request_context(
         BTreeSet::from([operation.use_case_id().clone()]),
         tracedecay_contracts::DisclosureClass::Sensitive,
     )
-    .map_err(source_edit_contract_error)?;
+    .map_err(source_edit_construction_failed)?;
     RequestContext::new(
         access.requester.clone(),
         access.scope.clone(),
         grant,
         request_id,
-        Deadline::new(expires_at).map_err(source_edit_contract_error)?,
+        Deadline::new(expires_at).map_err(source_edit_construction_failed)?,
         cancellation,
     )
-    .map_err(source_edit_contract_error)
+    .map_err(source_edit_construction_failed)
 }
 
-fn source_edit_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("source edit invocation contract is invalid: {error}"),
-    }
+fn source_edit_contract_error(_error: impl std::fmt::Display) -> SourceEditOwnerError {
+    SourceEditOwnerError::InvalidContract
 }
 
-fn source_edit_authority_error() -> TraceDecayError {
-    TraceDecayError::Config {
-        message: "source edit was not found or is not authorized".to_owned(),
-    }
+fn source_edit_construction_failed(error: impl std::fmt::Display) -> SourceEditOwnerError {
+    SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+        message: format!("source edit request construction failed: {error}"),
+    })
+}
+
+fn source_edit_authority_error() -> SourceEditOwnerError {
+    SourceEditOwnerError::NotAuthorized
 }
 
 fn source_edit_surface_result(
@@ -583,28 +628,37 @@ fn source_edit_surface_result(
 
 #[cfg(test)]
 mod tests {
-    use super::SourceEditMutationGate;
+    use super::{SourceEditMutationGate, SourceEditOwnerError};
+    use tracedecay_domain::errors::TraceDecayError;
 
     #[test]
     fn mutation_gate_distinguishes_warming_ready_and_failed_publication() {
         let gate = SourceEditMutationGate::warming();
-        assert!(
-            gate.authorize_mutation("mutation")
-                .expect_err("warming mutation must be refused")
-                .to_string()
-                .contains("warming")
-        );
+        assert!(matches!(
+            gate.authorize_mutation(),
+            Err(SourceEditOwnerError::Warming)
+        ));
 
         gate.mark_ready();
-        gate.authorize_mutation("mutation")
+        gate.authorize_mutation()
             .expect("published mutation authority");
 
         gate.mark_failed();
+        assert!(matches!(
+            gate.authorize_mutation(),
+            Err(SourceEditOwnerError::PublicationFailed)
+        ));
+    }
+
+    #[test]
+    fn source_edit_refusal_state_is_constructed_not_inferred_from_message_text() {
+        let reworded = SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+            message: "warming failed to publish not found or is not authorized invocation contract is invalid"
+                .to_owned(),
+        });
         assert!(
-            gate.authorize_mutation("mutation")
-                .expect_err("failed publication must be terminal")
-                .to_string()
-                .contains("failed to publish")
+            matches!(reworded, SourceEditOwnerError::ExecutionFailed(_)),
+            "a reworded Config message must stay ExecutionFailed, not a classified refusal"
         );
     }
 }

@@ -525,10 +525,15 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         )
         .await
         .unwrap();
-    let options = || ToolCallRegistryOptions {
-        registered_project_session_db: runtime
-            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project),
-        ..Default::default()
+    let options = || {
+        ToolCallRegistryOptions {
+            registered_project_session_db: runtime.registered_database_arc(
+                tracedecay_sessions::admission::HostAdmissionScope::Project,
+            ),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits")
     };
     let status = handle_tool_call_with_registry_options(
         &cg,
@@ -662,7 +667,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(None, Some("indexing"), true)),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while nothing serves");
@@ -691,7 +698,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 false,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while serving");
@@ -719,7 +728,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 true,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while a stale seat is rebuilding");
@@ -763,7 +774,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(aged_reader),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers for an aged seat");
@@ -1167,7 +1180,9 @@ async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_ha
                 tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
             ),
             ..ToolCallRegistryOptions::default()
-        };
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits");
         let started = std::time::Instant::now();
         let result = dispatch_git_tools(
             tool_name,
@@ -1727,7 +1742,7 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
             .expect("profile root identity"),
     );
     let profile_retained_authority =
-        crate::daemon::retained_owner::profile_retained_connection_authority(
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
             &profile_identity,
             &session_identity,
         )
@@ -1804,7 +1819,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
             .expect("profile root identity"),
     );
     let profile_retained_authority =
-        crate::daemon::retained_owner::profile_retained_connection_authority(
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
             &profile_identity,
             &session_identity,
         )
@@ -1860,7 +1875,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
                         .with_profile_retained_authority(Some(profile_retained_authority))
                         .with_profile_session_refresh(mounted.then_some(
                             refresh
-                                as &dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1,
+                                as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
                         )),
                     ..Default::default()
                 },

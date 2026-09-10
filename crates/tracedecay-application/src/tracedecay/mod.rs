@@ -34,6 +34,7 @@ pub struct TrackedBranchDiagnostic {
     pub is_current: bool,
     pub is_open_active: bool,
     pub is_serving: bool,
+    pub is_ready: bool,
     pub warnings: Vec<String>,
 }
 
@@ -52,6 +53,7 @@ pub struct BranchDiagnostics {
     pub fallback_target: Option<String>,
     pub fallback_warning: Option<String>,
     pub live_branch_tracked: bool,
+    pub live_branch_ready: bool,
     pub live_branch_db_path: Option<PathBuf>,
     pub live_branch_db_exists: Option<bool>,
     pub nearest_tracked_ancestor: Option<String>,
@@ -103,7 +105,7 @@ pub fn resolve_db_for_branch(
         );
     };
 
-    if meta.is_tracked(branch_name) {
+    if meta.is_query_eligible(branch_name) {
         return (default_db, Some(branch_name.to_string()), None);
     }
 
@@ -154,6 +156,7 @@ pub fn build_branch_diagnostics(
 
     let (
         live_branch_tracked,
+        live_branch_ready,
         live_branch_db_path,
         live_branch_db_exists,
         nearest_tracked_ancestor,
@@ -161,13 +164,14 @@ pub fn build_branch_diagnostics(
         nearest_tracked_ancestor_db_exists,
     ) = if let (Some(meta), Some(current)) = (meta.as_ref(), current_branch.as_deref()) {
         let live_branch_tracked = meta.is_tracked(current);
+        let live_branch_ready = meta.is_query_eligible(current);
         let live_branch_db_path = if live_branch_tracked {
             branch::resolve_branch_db_path(data_root, current, meta)
         } else {
             None
         };
         let live_branch_db_exists = live_branch_db_path.as_ref().map(|path| path.exists());
-        let nearest_tracked_ancestor = if live_branch_tracked {
+        let nearest_tracked_ancestor = if live_branch_ready {
             None
         } else {
             branch::find_nearest_tracked_ancestor(project_root, current, meta)
@@ -180,6 +184,7 @@ pub fn build_branch_diagnostics(
             .map(|path| path.exists());
         (
             live_branch_tracked,
+            live_branch_ready,
             live_branch_db_path,
             live_branch_db_exists,
             nearest_tracked_ancestor,
@@ -187,11 +192,11 @@ pub fn build_branch_diagnostics(
             nearest_tracked_ancestor_db_exists,
         )
     } else {
-        (false, None, None, None, None, None)
+        (false, false, None, None, None, None, None)
     };
 
     let mut warnings = Vec::new();
-    if branch_drifted {
+    if branch_drifted && !(live_branch_tracked && !live_branch_ready) {
         warnings.push(format!(
             "branch drift detected: working tree is on '{}' but this instance opened on '{}' and is still serving '{}'. Reopen the index so reads and writes target the live branch.",
             current_branch.as_deref().unwrap_or("detached HEAD"),
@@ -217,6 +222,12 @@ pub fn build_branch_diagnostics(
             path.display(),
             serving_branch.as_deref().unwrap_or("default branch"),
         ));
+    } else if live_branch_tracked && !live_branch_ready {
+        warnings.push(format!(
+            "branch '{}' was admitted and its exact index is still building; serving '{}' until publication completes.",
+            current_branch.as_deref().unwrap_or("current branch"),
+            serving_branch.as_deref().unwrap_or("default branch"),
+        ));
     } else if is_fallback {
         match (
             current_branch.as_deref(),
@@ -235,6 +246,8 @@ pub fn build_branch_diagnostics(
 
     let branch_resolution = if !tracking_enabled {
         "single_db".to_string()
+    } else if live_branch_tracked && !live_branch_ready {
+        "indexing".to_string()
     } else if branch_drifted {
         "stale_serving_branch".to_string()
     } else if current_branch.is_none() {
@@ -287,6 +300,7 @@ pub fn build_branch_diagnostics(
                 is_current: current_branch.as_deref() == Some(name.as_str()),
                 is_open_active: open_active_branch.as_deref() == Some(name.as_str()),
                 is_serving: serving_branch.as_deref() == Some(name.as_str()),
+                is_ready: meta.is_query_eligible(&name),
                 warnings: branch_warnings,
             });
         }
@@ -306,6 +320,7 @@ pub fn build_branch_diagnostics(
         fallback_target,
         fallback_warning,
         live_branch_tracked,
+        live_branch_ready,
         live_branch_db_path,
         live_branch_db_exists,
         nearest_tracked_ancestor,

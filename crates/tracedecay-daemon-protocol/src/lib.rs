@@ -46,6 +46,7 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::large_enum_variant)]
 
+pub mod application_surface;
 pub mod client;
 pub mod client_identity;
 pub mod connection;
@@ -53,9 +54,15 @@ pub mod contract;
 pub mod handshake;
 pub mod lsp_wire;
 pub mod output_format;
+pub mod request;
 pub mod surface;
 pub mod transport;
 
+pub use application_surface::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    ApplicationToolRequest, FeedbackSurfaceRequest, adapt_application_tool_request,
+    parse_application_surface_request, separate_application_tool_request,
+};
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
     CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationDelivery,

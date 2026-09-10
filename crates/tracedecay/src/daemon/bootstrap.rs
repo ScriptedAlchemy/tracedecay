@@ -16,6 +16,7 @@ use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Slice of the shutdown budget reserved for writing the terminal shutdown
 /// receipts to the daemon log after the coordinator returns.
@@ -319,15 +320,13 @@ async fn run_foreground_loopback(
         // after the producer owners settle, so nothing can admit a provider
         // process after the execution registry is emptied and leave it
         // running past shutdown.
-        vec![shutdown_coordination::ShutdownOwner::new(
+        vec![shutdown_coordination::ShutdownOwner::with_deadline_status(
             "invocation",
             {
                 let invocation_cancel = invocation.clone();
                 move || invocation_cancel.cancel_admissions()
             },
-            async move {
-                invocation_join.shutdown().await;
-            },
+            move |_| async move { invocation_join.shutdown().await },
         )],
         vec![shutdown_coordination::ShutdownOwner::new(
             "session_sync",

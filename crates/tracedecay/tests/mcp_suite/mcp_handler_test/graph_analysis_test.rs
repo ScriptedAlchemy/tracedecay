@@ -271,6 +271,130 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 }
 
 #[tokio::test]
+async fn constructors_distinguishes_explicit_update_and_missing_fields() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+#[derive(Default)]
+pub struct BuildOptions {
+    pub name: String,
+    pub retries: u8,
+    pub verbose: bool,
+}
+
+pub fn explicit() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: 3, verbose: true }
+}
+
+pub fn updated() -> BuildOptions {
+    BuildOptions { name: String::new(), ..Default::default() }
+}
+
+pub fn incomplete() -> BuildOptions {
+    BuildOptions { name: String::new() }
+}
+
+pub fn recovered() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "BuildOptions"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        4,
+        "all indexed literals must be returned: {payload}"
+    );
+    assert_eq!(payload["candidate_count"], 1);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "syntax_only_simple_name");
+
+    assert_eq!(sites[0]["fields"], json!(["name", "retries", "verbose"]));
+    assert_eq!(sites[0]["update_fields"], json!([]));
+    assert_eq!(sites[0]["missing_fields"], json!([]));
+    assert_eq!(sites[0]["field_coverage"], "complete");
+
+    assert_eq!(sites[1]["fields"], json!(["name"]));
+    assert_eq!(sites[1]["update_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[1]["missing_fields"], json!([]));
+    assert_eq!(sites[1]["field_coverage"], "complete");
+
+    assert_eq!(sites[2]["fields"], json!(["name"]));
+    assert_eq!(sites[2]["update_fields"], json!([]));
+    assert_eq!(sites[2]["missing_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[2]["field_coverage"], "complete");
+
+    assert_eq!(sites[3]["fields"], json!(["name", "retries"]));
+    assert_eq!(sites[3]["update_fields"], json!([]));
+    assert_eq!(sites[3]["missing_fields"], json!([]));
+    assert_eq!(sites[3]["field_coverage"], "unknown");
+}
+
+#[tokio::test]
+async fn constructors_marks_same_name_struct_resolution_unknown() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub mod first {
+    pub struct Options { pub one: u8 }
+    pub fn build() -> Options { Options { one: 1 } }
+}
+pub mod second {
+    pub struct Options { pub two: u8 }
+    pub fn build() -> Options { Options { two: 2 } }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "Options"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["candidate_count"], 2);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "ambiguous_simple_name");
+    assert!(payload["expected_fields"].is_null());
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        2,
+        "both syntax sites remain visible: {payload}"
+    );
+    assert!(sites.iter().all(|site| {
+        site["field_coverage"] == "unknown"
+            && site["update_fields"] == json!([])
+            && site["missing_fields"] == json!([])
+    }));
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -3124,4 +3248,120 @@ async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
         !text.contains("safe_add"),
         "safe code should produce no findings: {text}"
     );
+}
+
+#[tokio::test]
+async fn field_sites_applies_the_qualified_field_owner() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub struct Target { pub value: u32, pub enabled: bool }
+pub struct Other { pub value: u32 }
+
+impl Target {
+    pub fn read_both(&self, other: &Other) -> u32 {
+        let target_value = self.value;
+        let other_value = other.value;
+        target_value + other_value
+    }
+}
+pub fn read_both(target: &Target, other: &Other) -> u32 {
+    let target_value = target.value;
+    let other_value = other.value;
+    target_value + other_value
+}
+pub fn read_when_enabled(target: &Target) -> u32 {
+    if target.enabled { target.value } else { 0 }
+}
+pub fn write_both(target: &mut Target, other: &mut Other) {
+    target.value = 7;
+    other.value = 9;
+}
+"#,
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_field_sites",
+        json!({"field": "Target::value", "limit": 20, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(output["qualifier_applied"], true, "payload: {output}");
+    assert_eq!(output["read_count"], 3, "payload: {output}");
+    assert_eq!(output["write_count"], 1, "payload: {output}");
+    assert!(
+        output["read_sites"]
+            .as_array()
+            .is_some_and(|sites| sites.iter().all(|site| site["snippet"]
+                .as_str()
+                .is_some_and(|snippet| !snippet.contains("other.value")))),
+        "payload: {output}"
+    );
+    assert!(
+        output["write_sites"][0]["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains("target.value")),
+        "payload: {output}"
+    );
+
+    for shadow_source in [
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn closure_then_sibling(target: &Target) -> u32 {
+    let read_other = |target: Other| target.value;
+    read_other(Other { value: 3 }) + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn if_let_then_sibling(target: &Target, other: Option<Other>) -> u32 {
+    let read_other = if let Some(target) = other { target.value } else { 0 };
+    read_other + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 {
+    let mut read_other = 0;
+    while let Some(target) = other.take() { read_other += target.value; }
+    read_other + target.value
+}
+"#,
+    ] {
+        let shadow_dir = test_temp_dir();
+        let shadow_root = shadow_dir.path().join("project");
+        fs::create_dir_all(shadow_root.join("src")).unwrap();
+        fs::write(shadow_root.join("src/lib.rs"), shadow_source).unwrap();
+        let (shadow_host, _shadow_env) = init_test_project(&shadow_root).await;
+        let error = expect_tool_error(
+            handle_tool_call(
+                &shadow_host,
+                "tracedecay_field_sites",
+                json!({"field": "Target::value", "format": "json"}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            error.contains("verified-field-qualifier-unavailable"),
+            "shadowed receiver must not be attributed to the parameter owner: {error}"
+        );
+    }
 }

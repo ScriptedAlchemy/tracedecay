@@ -75,10 +75,10 @@ pub use context_headings::{
 };
 pub use handlers::{
     CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
-    handle_multi_root, rendered_tool_result, require_node_id, require_object_args,
-    require_positive_limit, retained_problem_envelope, retained_safe_diagnostic,
-    take_internal_context_memory_analytics, text_tool_result, tool_json, tool_json_with_md,
-    unique_file_paths, validated_retained_response,
+    handle_multi_root, handle_work, handle_workflow, rendered_tool_result, require_node_id,
+    require_object_args, require_positive_limit, retained_problem_envelope,
+    retained_safe_diagnostic, take_internal_context_memory_analytics, text_tool_result, tool_json,
+    tool_json_with_md, unique_file_paths, validated_retained_response,
 };
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
@@ -94,8 +94,9 @@ pub use tool_call_deadline::{
     tool_call_deadline_meta,
 };
 pub use tool_context::{
-    AdmittedCodeIndex, AdmittedProjectStore, McpToolBinding, McpToolBindingError, McpToolContext,
-    RequestControls,
+    AdmittedCodeIndex, AdmittedProjectStore, McpAdmittedProjectV1, McpDoctorReportV1,
+    McpProjectIdentityV1, McpRequestAuthoritiesV1, McpSemanticOwnerV1, McpToolBinding,
+    McpToolBindingError, McpToolContext, RequestControls,
 };
 pub use tool_errors::{
     mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,

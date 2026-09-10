@@ -5,6 +5,7 @@
 //! and a draining daemon never starts a new one.
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Bounds how long a foreground request waits for a route's background open.
 /// The open task itself is deliberately left running after the deadline.

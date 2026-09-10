@@ -71,7 +71,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
 ]
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
-production = ["tracedecay/production", "tracedecay/bench"]
+production = ["tracedecay/production"]
 # Opt-in tiered graph storage; not part of `production`.
 graph-disk-tier = ["tracedecay/graph-disk-tier"]
 graph-tiered-storage = ["tracedecay/graph-tiered-storage"]
@@ -194,6 +194,9 @@ mimalloc = { version = "0.1.52", optional = true }
 # consumed by the self-update extraction in src/upgrade.rs.
 [target.'cfg(windows)'.dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 axum = "0.8"
