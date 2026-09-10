@@ -22,7 +22,7 @@ pub use catalog::{
 pub use adapters::GenerationBoundFeedbackDiagnosticsAdapter;
 pub use advisory_surface::{
     FeedbackAdvisoryCycleSurfaceRequestV1, FeedbackAdvisoryCycleSurfaceResultV1,
-    FeedbackAdvisoryCycleWireV1, FeedbackAdvisoryFindingHandleV1,
+    FeedbackAdvisoryCycleWireV1, FeedbackAdvisoryFindingHandleV1, FeedbackAdvisoryReadHandlesV1,
 };
 pub use github_ci_proximity::{
     ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,

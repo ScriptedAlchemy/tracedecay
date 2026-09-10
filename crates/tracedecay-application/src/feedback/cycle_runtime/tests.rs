@@ -279,14 +279,14 @@ fn dirty_overlay_result_cannot_gain_durable_outputs_or_handles() {
     .unwrap();
     let execution = execution(cycle);
     assert!(
-        CanonicalFeedbackResultV1::new(execution.clone(), Vec::new()).is_ok(),
+        CanonicalFeedbackResultV1::new(execution.clone(), None, Vec::new()).is_ok(),
         "session-only results remain usable in their owner session"
     );
 
     let mut leaked = execution;
     leaked.dedupe_key =
         Some(tracedecay_domain::feedback::FeedbackDedupeKeyV1::new("dedupe.overlay").unwrap());
-    assert!(CanonicalFeedbackResultV1::new(leaked, Vec::new()).is_err());
+    assert!(CanonicalFeedbackResultV1::new(leaked, None, Vec::new()).is_err());
 }
 
 #[test]

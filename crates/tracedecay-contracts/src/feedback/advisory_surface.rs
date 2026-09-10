@@ -60,11 +60,22 @@ pub struct FeedbackAdvisoryFindingHandleV1 {
     pub expansion_handle: Option<String>,
 }
 
+/// Daemon-minted handles for reads over this exact completed publication.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackAdvisoryReadHandlesV1 {
+    pub diagnostics_handle: String,
+    pub impact_handle: String,
+    pub affected_tests_handle: String,
+    pub list_handle: String,
+}
+
 /// Exact advisory-cycle payload serialized by the mounted daemon route.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackAdvisoryCycleSurfaceResultV1 {
     pub cycle: FeedbackAdvisoryCycleWireV1,
+    pub read_handles: Option<FeedbackAdvisoryReadHandlesV1>,
     pub finding_handles: Vec<FeedbackAdvisoryFindingHandleV1>,
 }
 
@@ -78,6 +89,17 @@ mod tests {
 
         assert_json_schema::<FeedbackAdvisoryCycleSurfaceRequestV1>();
         assert_json_schema::<FeedbackAdvisoryCycleSurfaceResultV1>();
+
+        let handles = FeedbackAdvisoryReadHandlesV1 {
+            diagnostics_handle: "rh_diagnostics".to_owned(),
+            impact_handle: "rh_diagnostics".to_owned(),
+            affected_tests_handle: "rh_diagnostics".to_owned(),
+            list_handle: "rh_list".to_owned(),
+        };
+        let encoded_handles = serde_json::to_value(&handles).expect("serialize read handles");
+        assert_eq!(encoded_handles["impact_handle"], "rh_diagnostics");
+        assert_eq!(encoded_handles["affected_tests_handle"], "rh_diagnostics");
+        assert_eq!(encoded_handles["list_handle"], "rh_list");
 
         let request = FeedbackAdvisoryCycleSurfaceRequestV1 {
             document_uri: "file:///workspace/src/lib.rs".to_owned(),
