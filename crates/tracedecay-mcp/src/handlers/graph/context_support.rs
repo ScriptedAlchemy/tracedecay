@@ -286,13 +286,7 @@ fn context_memory_application<'a>(
     ctx: &'a McpToolContext<'a>,
 ) -> Result<MemoryApplication<ProjectFactStore<'a>>> {
     let project = ctx.project();
-    let database = project.graph_database.as_ref().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "project_memory_store_unavailable",
-            true,
-            "context memory requires the admitted graph database",
-        )
-    })?;
+    let database = &project.graph_database;
     let owner =
         project_memory_owner_from_layout_id(project.store_layout.identity.project_id.as_deref())?;
     let store = ProjectMemoryDbHandle::Active(database).into_fact_store();

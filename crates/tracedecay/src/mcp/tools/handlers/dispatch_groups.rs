@@ -1105,10 +1105,10 @@ fn admitted_project_authorities(
             fallback_warning: cg.fallback_warning().map(str::to_owned),
         },
         cg.store_layout().clone(),
-        Some(cg.db().clone()),
+        cg.db().clone(),
         cg.db_path(),
-        Some(cg.store_runtime_registry.clone()),
-        Some(cg.configuration_runtime().clone()),
+        cg.store_runtime_registry.clone(),
+        cg.configuration_runtime().clone(),
         options.registered_project_session_db.clone(),
     )
     .map_err(Into::into)

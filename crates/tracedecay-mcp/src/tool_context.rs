@@ -191,10 +191,10 @@ pub struct McpProjectIdentityV1 {
 /// owners (`mcp/server/lifecycle.rs`). The composition root builds this
 /// snapshot per call from the instance that request already holds.
 ///
-/// In-process handles are not wire contracts. Optional handles stay `None`
-/// when the daemon never admitted them; handlers turn that into their own
-/// typed unavailable state rather than panicking or inventing an empty
-/// success.
+/// In-process handles are not wire contracts. The graph database, store
+/// runtime, and configuration runtime are the same required `TraceDecay`
+/// handles the root already holds; a session-store lease stays `None` when
+/// the daemon never admitted one.
 ///
 /// Trimmed to what graph leftovers, status/active-project, and runtime health
 /// actually read: profile-session and diagnostics-database handles are not
@@ -202,10 +202,10 @@ pub struct McpProjectIdentityV1 {
 pub struct McpAdmittedProjectV1 {
     pub identity: McpProjectIdentityV1,
     pub store_layout: StoreLayout,
-    pub graph_database: Option<Database>,
+    pub graph_database: Database,
     pub graph_db_path: PathBuf,
-    pub store_runtime: Option<Arc<DaemonSessionRuntimeRegistryV1>>,
-    pub configuration_runtime: Option<Arc<ProjectConfigurationRuntime>>,
+    pub store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+    pub configuration_runtime: Arc<ProjectConfigurationRuntime>,
     pub project_session_store: Option<RegisteredGlobalDbLeaseV1>,
 }
 
@@ -219,10 +219,10 @@ impl McpAdmittedProjectV1 {
     pub fn new(
         identity: McpProjectIdentityV1,
         store_layout: StoreLayout,
-        graph_database: Option<Database>,
+        graph_database: Database,
         graph_db_path: PathBuf,
-        store_runtime: Option<Arc<DaemonSessionRuntimeRegistryV1>>,
-        configuration_runtime: Option<Arc<ProjectConfigurationRuntime>>,
+        store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+        configuration_runtime: Arc<ProjectConfigurationRuntime>,
         project_session_store: Option<RegisteredGlobalDbLeaseV1>,
     ) -> std::result::Result<Self, McpToolBindingError> {
         if !identity.project_root.is_absolute() {
@@ -287,12 +287,6 @@ impl std::fmt::Debug for McpAdmittedProjectV1 {
                 &self.store_layout.identity.project_id,
             )
             .field("graph_db_path", &self.graph_db_path)
-            .field("has_graph_database", &self.graph_database.is_some())
-            .field("has_store_runtime", &self.store_runtime.is_some())
-            .field(
-                "has_configuration_runtime",
-                &self.configuration_runtime.is_some(),
-            )
             .field(
                 "has_project_session_store",
                 &self.project_session_store.is_some(),
@@ -444,8 +438,8 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn graph_database(&self) -> Option<&'a Database> {
-        self.project.graph_database.as_ref()
+    pub fn graph_database(&self) -> &'a Database {
+        &self.project.graph_database
     }
 
     #[must_use]
@@ -454,13 +448,13 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn store_runtime(&self) -> Option<&'a DaemonSessionRuntimeRegistryV1> {
-        self.project.store_runtime.as_deref()
+    pub fn store_runtime(&self) -> &'a DaemonSessionRuntimeRegistryV1 {
+        self.project.store_runtime.as_ref()
     }
 
     #[must_use]
-    pub fn configuration_runtime(&self) -> Option<&'a ProjectConfigurationRuntime> {
-        self.project.configuration_runtime.as_deref()
+    pub fn configuration_runtime(&self) -> &'a ProjectConfigurationRuntime {
+        self.project.configuration_runtime.as_ref()
     }
 
     #[must_use]
@@ -691,6 +685,10 @@ fn checkout_label(scope: &ResolvedScope) -> String {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 pub(crate) mod tests {
     use super::*;
+    use tracedecay_configuration::{
+        OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, RuntimeConfigurationTarget,
+    };
+    use tracedecay_domain::configuration::ConfigurationRevisionId;
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
@@ -743,6 +741,119 @@ pub(crate) mod tests {
         .expect("scope")
     }
 
+    struct FixtureHandles {
+        graph_database: Database,
+        store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+        configuration_runtime: Arc<ProjectConfigurationRuntime>,
+    }
+
+    fn fixture_handles() -> &'static FixtureHandles {
+        static HANDLES: std::sync::OnceLock<FixtureHandles> = std::sync::OnceLock::new();
+        HANDLES.get_or_init(open_fixture_handles_blocking)
+    }
+
+    fn open_fixture_handles_blocking() -> FixtureHandles {
+        std::thread::Builder::new()
+            .name("mcp-admitted-handles".into())
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("fixture runtime");
+                let handles = runtime.block_on(open_fixture_handles());
+                std::mem::forget(runtime);
+                handles
+            })
+            .expect("spawn fixture thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    async fn open_fixture_handles() -> FixtureHandles {
+        let temp = tempfile::tempdir().expect("fixture home");
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).expect("profile root");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "mcp-admitted-handles",
+        )
+        .expect("daemon database scope");
+        let store_runtime = Arc::new(
+            DaemonSessionRuntimeRegistryV1::open(identity)
+                .await
+                .expect("store runtime"),
+        );
+        let graph_path = temp.path().join("graph.db");
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &graph_path,
+            "mcp admitted project fixture",
+        )
+        .expect("test database authority");
+        let (graph_database, _) = Database::publish_test_runtime(
+            &graph_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("graph database");
+        let project_id = ProjectId::new("project.admitted-handles".to_owned()).expect("project id");
+        let sessions = RegisteredGlobalDbTestRuntime::project(
+            profile_root.join("sessions-profile"),
+            temp.path().join("checkout"),
+            project_id.clone(),
+        )
+        .await
+        .expect("configuration store");
+        let lease = sessions
+            .project_database_arc()
+            .expect("configuration lease");
+        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
+            &tracedecay_configuration::config::registry::ConfigurationRegistry::core()
+                .expect("configuration registry"),
+            &[],
+        )
+        .expect("default configuration")
+        .snapshot;
+        let pinned = PinnedRuntimeConfiguration::new(
+            RuntimeConfigurationTarget {
+                project_id,
+                project_root: temp.path().to_path_buf(),
+            },
+            ConfigurationRevisionId::new("configuration.revision.mcp-admitted-handles")
+                .expect("revision"),
+            snapshot,
+        )
+        .expect("pinned configuration");
+        let (configuration_runtime, _) =
+            ProjectConfigurationRuntime::open(OpenedRuntimeConfiguration::new(pinned, lease))
+                .expect("configuration runtime");
+        std::mem::forget(temp);
+        std::mem::forget(scope);
+        std::mem::forget(sessions);
+        FixtureHandles {
+            graph_database,
+            store_runtime,
+            configuration_runtime: Arc::new(configuration_runtime),
+        }
+    }
+
+    fn runtime_handles() -> (
+        Database,
+        Arc<DaemonSessionRuntimeRegistryV1>,
+        Arc<ProjectConfigurationRuntime>,
+    ) {
+        let handles = fixture_handles();
+        (
+            handles.graph_database.clone(),
+            Arc::clone(&handles.store_runtime),
+            Arc::clone(&handles.configuration_runtime),
+        )
+    }
+
     fn test_store_layout(root: &Path, project_id: &str) -> StoreLayout {
         StoreLayout {
             identity: tracedecay_runtime_core::storage::ProjectIdentity {
@@ -778,18 +889,33 @@ pub(crate) mod tests {
         }
     }
 
+    fn admit_project(
+        identity: McpProjectIdentityV1,
+        store_layout: StoreLayout,
+        graph_db_path: PathBuf,
+        lease: Option<RegisteredGlobalDbLeaseV1>,
+    ) -> std::result::Result<McpAdmittedProjectV1, McpToolBindingError> {
+        let (graph_database, store_runtime, configuration_runtime) = runtime_handles();
+        McpAdmittedProjectV1::new(
+            identity,
+            store_layout,
+            graph_database,
+            graph_db_path,
+            store_runtime,
+            configuration_runtime,
+            lease,
+        )
+    }
+
     pub(crate) fn project_bundle(
         root: &Path,
         admitted: &ResolvedScope,
         lease: Option<RegisteredGlobalDbLeaseV1>,
     ) -> McpAdmittedProjectV1 {
-        McpAdmittedProjectV1::new(
+        admit_project(
             project_identity(root, admitted),
             test_store_layout(root, admitted.project_id.as_str()),
-            None,
             root.join("graph.db"),
-            None,
-            None,
             lease,
         )
         .expect("coherent project bundle")
@@ -805,13 +931,10 @@ pub(crate) mod tests {
         let admitted = scope("git-fixture");
         let mut identity = project_identity(root, &admitted);
         identity.active_branch = active_branch.map(str::to_owned);
-        McpAdmittedProjectV1::new(
+        admit_project(
             identity,
             test_store_layout(root, admitted.project_id.as_str()),
-            None,
             root.join("graph.db"),
-            None,
-            None,
             None,
         )
         .expect("fixture project")
@@ -898,13 +1021,10 @@ pub(crate) mod tests {
             registered_project_store(home.path(), "foreign").await;
         let admitted = scope("admitted");
 
-        let error = McpAdmittedProjectV1::new(
+        let error = admit_project(
             project_identity(home.path(), &admitted),
             test_store_layout(home.path(), admitted.project_id.as_str()),
-            None,
             home.path().join("graph.db"),
-            None,
-            None,
             Some(foreign_lease),
         )
         .expect_err("another project's real lease must be refused");
@@ -942,13 +1062,10 @@ pub(crate) mod tests {
         )
         .await;
 
-        let error = McpAdmittedProjectV1::new(
+        let error = admit_project(
             project_identity(home.path(), &admitted),
             test_store_layout(home.path(), admitted.project_id.as_str()),
-            None,
             home.path().join("graph.db"),
-            None,
-            None,
             Some(lease),
         )
         .expect_err("a non-session-family lease must be refused");
@@ -1075,7 +1192,7 @@ pub(crate) mod tests {
     #[test]
     fn a_relative_root_is_refused_by_the_project_bundle() {
         let admitted = scope("admitted");
-        let error = McpAdmittedProjectV1::new(
+        let error = admit_project(
             McpProjectIdentityV1 {
                 project_root: PathBuf::from("relative/root"),
                 scope: admitted.clone(),
@@ -1084,10 +1201,7 @@ pub(crate) mod tests {
                 fallback_warning: None,
             },
             test_store_layout(Path::new("/tmp/admitted"), admitted.project_id.as_str()),
-            None,
             PathBuf::from("relative/root/graph.db"),
-            None,
-            None,
             None,
         )
         .expect_err("a relative project root must be refused");
@@ -1101,13 +1215,10 @@ pub(crate) mod tests {
     fn a_store_layout_for_another_project_is_refused() {
         let temp = tempfile::tempdir().expect("temp root");
         let admitted = scope("admitted");
-        let error = McpAdmittedProjectV1::new(
+        let error = admit_project(
             project_identity(temp.path(), &admitted),
             test_store_layout(temp.path(), "project.foreign"),
-            None,
             temp.path().join("graph.db"),
-            None,
-            None,
             None,
         )
         .expect_err("a foreign store-layout project id must be refused");
@@ -1131,13 +1242,10 @@ pub(crate) mod tests {
         )
         .await;
 
-        let error = McpAdmittedProjectV1::new(
+        let error = admit_project(
             project_identity(home.path(), &admitted),
             test_store_layout(home.path(), admitted.project_id.as_str()),
-            None,
             home.path().join("graph.db"),
-            None,
-            None,
             Some(lease),
         )
         .expect_err("a non-session-family lease must be refused");
@@ -1177,18 +1285,6 @@ pub(crate) mod tests {
         assert!(
             matches!(bound.doctor_report(), McpDoctorReportV1::NotAttached),
             "doctor-report absence must stay NotAttached"
-        );
-        assert!(
-            bound.store_runtime().is_none(),
-            "store-runtime absence must stay None"
-        );
-        assert!(
-            bound.configuration_runtime().is_none(),
-            "configuration-runtime absence must stay None"
-        );
-        assert!(
-            bound.graph_database().is_none(),
-            "graph-database absence must stay None"
         );
         assert!(
             bound.authorized_project_session_db().is_none(),

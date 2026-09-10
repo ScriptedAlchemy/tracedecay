@@ -148,21 +148,9 @@ pub async fn collect_database_snapshot(
         &tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot,
     >,
 ) -> Result<tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot> {
-    let database = ctx.graph_database().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "graph_database_unavailable",
-            true,
-            "runtime telemetry requires the admitted graph database",
-        )
-    })?;
+    let database = ctx.graph_database();
     let db_path = ctx.graph_db_path();
-    let store_runtime = ctx.store_runtime().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "store_runtime_unavailable",
-            true,
-            "runtime telemetry requires the admitted store-runtime registry",
-        )
-    })?;
+    let store_runtime = ctx.store_runtime();
     let collected = tracedecay_runtime_core::store_telemetry::collect_store_telemetry(
         database,
         ctx.project_root().to_path_buf(),
@@ -353,21 +341,18 @@ pub async fn handle_runtime(
     {
         attach_doctor_report(&mut value, ctx.doctor_report());
     }
-    let semantic_configuration = match ctx.configuration_runtime() {
-        Some(runtime) => hotpath::future!(
-            runtime.client().current(),
-            label = "mcp.health.runtime.semantic"
+    let semantic_configuration = hotpath::future!(
+        ctx.configuration_runtime().client().current(),
+        label = "mcp.health.runtime.semantic"
+    )
+    .await
+    .ok()
+    .and_then(|pinned| {
+        tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
+            &pinned.into_current_state(),
         )
-        .await
         .ok()
-        .and_then(|pinned| {
-            tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
-                &pinned.into_current_state(),
-            )
-            .ok()
-        }),
-        None => None,
-    };
+    });
     value["semantic_runtime"] = serde_json::to_value(
         tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
             Some(ctx.project_root()),
