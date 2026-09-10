@@ -931,7 +931,7 @@ fn hash16(value: &[u8]) -> [u8; 16] {
 pub(super) async fn register_production_feedback_and_advisory(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    state: &ProjectOpenDependentOwnerState,
+    state: &mut ProjectOpenDependentOwnerState,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
 ) -> Result<()> {
     let (feedback_cycle, feedback_scope) =
@@ -947,6 +947,25 @@ pub(super) async fn register_production_feedback_and_advisory(
     .await
 }
 
+async fn refresh_project_open_feedback_configuration(
+    state: &mut ProjectOpenDependentOwnerState,
+) -> Result<()> {
+    let configuration = state
+        .graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open feedback configuration is unavailable: {error}"),
+        })?;
+    state.scout_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
+        revision_id: configuration.revision_id().clone(),
+        snapshot: configuration.snapshot().clone(),
+    };
+    Ok(())
+}
+
 /// Registers owners whose exact authority depends on a mounted code index.
 #[hotpath::measure(label = "daemon.project.owners.dependent", future = true)]
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
@@ -955,7 +974,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
     server: &McpServer,
     state: ProjectOpenDependentOwnerState,
 ) -> Result<()> {
-    let state = state;
+    let mut state = state;
     if !matches!(
         tracedecay_application::git_intelligence::NativeGitIntelligence::new(
             project_root,
@@ -984,12 +1003,12 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         return Ok(());
     }
     register_project_delivery_read_authority(invocation, project_root, &state).await?;
-    if let Some(lsp_session_factory) = state.lsp_session_factory.as_ref() {
+    if let Some(lsp_session_factory) = state.lsp_session_factory.clone() {
         if let Err(error) = register_production_feedback_and_advisory(
             invocation,
             project_root,
-            &state,
-            Arc::clone(lsp_session_factory),
+            &mut state,
+            lsp_session_factory,
         )
         .await
         {
@@ -1078,8 +1097,9 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
 async fn register_production_feedback_cycle(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    state: &ProjectOpenDependentOwnerState,
+    state: &mut ProjectOpenDependentOwnerState,
 ) -> Result<(Arc<FeedbackCycleRuntime>, FeedbackScopeV1)> {
+    refresh_project_open_feedback_configuration(state).await?;
     let configuration_digest = &state.scout_configuration.snapshot.effective_behavior_digest;
     let policy_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
