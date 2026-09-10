@@ -2838,6 +2838,67 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
+#[tokio::test]
+async fn typescript_interface_extends_drives_hierarchy_and_depth() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/settings.ts"),
+        r#"
+interface SettingsEditable { draft: string }
+interface SettingsUnderReview extends SettingsEditable { review: string }
+const unrelated = 1;
+function helper() { return unrelated; }
+"#,
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(&project_root).await;
+    let parent_id = find_node_id(&cg, "SettingsEditable").await;
+
+    let hierarchy = handle_tool_call(
+        &cg,
+        "tracedecay_type_hierarchy",
+        json!({"node_id": parent_id, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+    assert!(
+        hierarchy["tree"]
+            .as_str()
+            .unwrap()
+            .contains("extends SettingsUnderReview"),
+        "interface child missing from hierarchy: {hierarchy}"
+    );
+
+    let depth = handle_tool_call(
+        &cg,
+        "tracedecay_inheritance_depth",
+        json!({"path": "src", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let depth: Value = serde_json::from_str(extract_text(&depth.value)).unwrap();
+    let ranking = depth["ranking"].as_array().unwrap();
+    assert_eq!(
+        ranking
+            .iter()
+            .find(|item| item["name"] == "SettingsUnderReview")
+            .and_then(|item| item["depth"].as_u64()),
+        Some(1),
+        "unexpected interface depth ranking: {ranking:?}"
+    );
+    assert!(
+        ranking.iter().all(|item| item["kind"] == "interface"),
+        "non-hierarchy symbols leaked into inheritance depth: {ranking:?}"
+    );
+}
+
 /// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear
 /// in more than one cycle entry. Cycles "sharing long tails" mean the SCC
 /// condensation step is broken. This stress test wires up many disjoint
