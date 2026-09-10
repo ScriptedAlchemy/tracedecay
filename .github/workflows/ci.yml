@@ -135,11 +135,20 @@ jobs:
       # the workspace crates are exactly what a push changes, so caching
       # their outputs per run re-saved ~1 GB per push for a restore that hit
       # nothing.
+      #
+      # `cache-directories` and the step after it hold the prebuilt ONNX
+      # Runtime beside the graph that links it, for the reason the Linux test
+      # partitions carry at length below; this is a link build of the same
+      # `semantic-fastembed` graph, so it has the same hole.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-dev-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: true
+          cache-directories: ~/.cache/ort.pyke.io
+
+      - name: Re-arm the ort-sys download when its cache is absent
+        run: '[ -d ~/.cache/ort.pyke.io ] || rm -rf target/*/build/ort-sys-*'
 
       - name: Build tracedecay binary
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
@@ -338,12 +347,23 @@ jobs:
       # differently and recompile a few small dependency units against it
       # every run, as the lower Linux partitions do. Restored before the first
       # `cargo metadata` below so the registry index comes from the cache too.
+      #
+      # `cache-directories` and the step after it hold the prebuilt ONNX
+      # Runtime beside the graph that links it, for the reason the Linux
+      # partitions carry at length below. This lane resolves the same
+      # `semantic-fastembed` graph, so a restored `target/` without the
+      # download breaks it the same way; only the directory differs, since
+      # macOS keeps the download under `~/Library/Caches`.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test-full-${{ runner.os }}
           save-if: ${{ matrix.group == 'root-suites' }}
           cache-on-failure: true
+          cache-directories: ~/Library/Caches/ort.pyke.io
+
+      - name: Re-arm the ort-sys download when its cache is absent
+        run: '[ -d ~/Library/Caches/ort.pyke.io ] || rm -rf target/*/build/ort-sys-*'
 
       # Every group job re-proves the cover and the grouping before it
       # compiles anything: a gap found here fails the lane rather than passing
@@ -542,12 +562,39 @@ jobs:
       # minutes inside jobs that are far from the critical path, cheaper than
       # three more cache entries. Restored before the first `cargo metadata`
       # below so the registry index comes from the cache too.
+      #
+      # `cache-directories` carries the prebuilt ONNX Runtime beside the
+      # dependency graph. `ort-sys` (through `fastembed`, under the root
+      # crate's `semantic-fastembed`) downloads it into
+      # `~/.cache/ort.pyke.io/dfbin/<target>/<hash>` — 87 MB extracted, the
+      # only path GitHub-hosted images leave to `XDG_CACHE_HOME` being unset —
+      # and records that absolute path in its build-script output, which lives
+      # under `target/`. rust-cache saved `target/` and not the download, so
+      # every restore told rustc to link `libonnxruntime.a` out of a directory
+      # this runner never had: `could not find native static library
+      # onnxruntime`, and with it no Linux test at all, from the first Arm run
+      # that saved a `ci-test-full-Linux-ARM64` entry onwards — a state
+      # `cache-on-failure` then re-saved from every failing run.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test-full-Linux-${{ runner.arch }}
           save-if: ${{ matrix.partition == 'root-journeys' }}
           cache-on-failure: true
+          cache-directories: ~/.cache/ort.pyke.io
+
+      # The safety net for the line above, and what recovers the entries
+      # already poisoned: if the download did not come back with the cache — a
+      # miss, an eviction, or a runner image that does set `XDG_CACHE_HOME`
+      # and moves the directory — drop `ort-sys`'s recorded build-script
+      # output so the script re-runs and re-downloads (~3 s) instead of
+      # linking against a path that is gone. Costs one `ort-sys`, `ort` and
+      # `fastembed` rebuild on that run only. Adding `cache-directories`
+      # changes the cache version actions/cache derives from its paths, so
+      # the next run of each lane restores nothing and takes the cold build
+      # its budget already allows for.
+      - name: Re-arm the ort-sys download when its cache is absent
+        run: '[ -d ~/.cache/ort.pyke.io ] || rm -rf target/*/build/ort-sys-*'
 
       # Every partition job re-proves the cover before it compiles anything:
       # the manifest is consumed here, and a gap found here fails the lane
