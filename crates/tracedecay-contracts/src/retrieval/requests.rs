@@ -103,6 +103,8 @@ impl RetrievalRequestMeta {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceLinesRequest {
+    /// Canonical file occurrence from `code_exact_occurrence` at
+    /// `items[].occurrence.file`; a logical path is not a file occurrence identity.
     pub file: FileOccurrenceId,
     pub span: SourceSpan,
     pub meta: RetrievalRequestMeta,
