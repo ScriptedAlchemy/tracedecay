@@ -1142,16 +1142,11 @@ struct AdmittedRequestSnapshotsV1 {
     doctor_report: DoctorReportSnapshotV1,
 }
 
-/// Restores the product Hotpath labels on the lazy snapshot readers:
-/// `mcp.info.status.generation_census`, `runtime_ports.generation_census`,
-/// `mcp.health.runtime.doctor_report`, and (on the status handler)
-/// `mcp.info.status.code_index_freshness`.
 async fn admitted_generation_census(
     options: &ToolCallRegistryOptions<'_>,
-    label: &'static str,
 ) -> Option<GenerationCensusSnapshot> {
     match options.generation_census_reader.as_ref() {
-        Some(reader) => Some(hotpath::future!(reader(), label = label).await),
+        Some(reader) => Some(reader().await),
         None => None,
     }
 }
@@ -1194,8 +1189,11 @@ async fn admitted_status_snapshots(
     options: &ToolCallRegistryOptions<'_>,
 ) -> AdmittedRequestSnapshotsV1 {
     AdmittedRequestSnapshotsV1 {
-        generation_census: admitted_generation_census(options, "mcp.info.status.generation_census")
-            .await,
+        generation_census: hotpath::future!(
+            admitted_generation_census(options),
+            label = "mcp.info.status.generation_census"
+        )
+        .await,
         semantic_owner: admitted_semantic_owner(cg, options).await,
         ..AdmittedRequestSnapshotsV1::default()
     }
@@ -1208,8 +1206,11 @@ async fn admitted_runtime_snapshots(
     include_doctor: bool,
 ) -> AdmittedRequestSnapshotsV1 {
     AdmittedRequestSnapshotsV1 {
-        generation_census: admitted_generation_census(options, "runtime_ports.generation_census")
-            .await,
+        generation_census: hotpath::future!(
+            admitted_generation_census(options),
+            label = "runtime_ports.generation_census"
+        )
+        .await,
         doctor_report: if include_doctor {
             admitted_doctor_report(options).await
         } else {

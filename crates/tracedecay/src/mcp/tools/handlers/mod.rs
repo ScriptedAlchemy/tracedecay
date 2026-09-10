@@ -688,9 +688,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         // struct) so the dispatch arms below can take `options` by value.
         let project_session_db_lease = options.registered_project_session_db.clone();
         let served_stale_graph_generation = Arc::clone(&options.served_stale_graph_generation);
-        let project_session_db = project_session_db_lease
-            .as_ref()
-            .or(options.session_authorities.project);
+        let project_session_db = project_session_db_lease.as_ref();
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Graph) => {
