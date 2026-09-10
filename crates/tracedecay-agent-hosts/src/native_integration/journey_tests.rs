@@ -92,21 +92,14 @@ fn prepare_pair(root: &Path, mode: MechanicalIntegrationModeV1) {
 fn exact_pair_scopes() -> (ResolvedScope, ResolvedScope) {
     let project = ProjectId::new("project.native.journey").expect("project id");
     let repository = RepositoryId::new("repository.native.journey").expect("repository id");
-    let source = ResolvedScope::new(
-        project.clone(),
-        repository.clone(),
-        WorktreeId::new("worktree.native.source").expect("source worktree id"),
-        Some(RefId::new("refs/heads/main").expect("source authority ref")),
-    )
-    .expect("source scope");
-    let destination = ResolvedScope::new(
+    let authority = ResolvedScope::new(
         project,
         repository,
-        WorktreeId::new("worktree.native.destination").expect("destination worktree id"),
-        Some(RefId::new("refs/heads/source").expect("destination authority ref")),
+        WorktreeId::new("worktree.native.authority").expect("authority worktree id"),
+        Some(RefId::new("refs/heads/main").expect("authority ref")),
     )
-    .expect("destination scope");
-    (source, destination)
+    .expect("authority scope");
+    (authority.clone(), authority)
 }
 
 fn operation_authority(
@@ -160,13 +153,18 @@ fn authorized_scope_set(
 ) -> AuthorizedScopeSet {
     let (capability, use_case) =
         operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
-    AuthorizedScopeSetAuthority::authorize(
-        ScopeSetId::new(format!("scope-set.native.journey.{request_id}")).expect("scope set id"),
-        ScopeSetRevision::new(1).expect("scope set revision"),
+    let contexts = if source == destination {
+        vec![context(source, &format!("{request_id}.authority"))]
+    } else {
         vec![
             context(source, &format!("{request_id}.source")),
             context(destination, &format!("{request_id}.destination")),
-        ],
+        ]
+    };
+    AuthorizedScopeSetAuthority::authorize(
+        ScopeSetId::new(format!("scope-set.native.journey.{request_id}")).expect("scope set id"),
+        ScopeSetRevision::new(1).expect("scope set revision"),
+        contexts,
         &capability,
         &use_case,
         OBSERVED_AT,

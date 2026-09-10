@@ -123,10 +123,18 @@ impl NativeIntegrationStackResolutionRequestV1 {
         self.policy_digest.validate()?;
         if self.source.project_id != self.destination.project_id
             || self.source.repository_id != self.destination.repository_id
-            || self.source.worktree_id == self.destination.worktree_id
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "native integration exact root pair",
+            });
+        }
+        if matches!(
+            self.selection,
+            NativeIntegrationSelectionBindingV1::DeclaredStackEdge { .. }
+        ) && (self.source.worktree_id == self.destination.worktree_id
             || self.source.reference.is_none()
             || self.destination.reference.is_none()
-            || self.source.reference == self.destination.reference
+            || self.source.reference == self.destination.reference)
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "native integration exact root pair",
