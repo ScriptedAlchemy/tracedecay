@@ -1,8 +1,11 @@
 use super::*;
 
-use tracedecay_domain::EdgeAuthorityV1;
+use std::path::{Component, Path, PathBuf};
 
-use crate::chunks::{CROSS_FILE_REFERENCE_BLOCKLIST, relation_target_kind_is_compatible};
+use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
+use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1};
+
+use crate::chunks::relation_target_kind_is_compatible;
 use crate::lineage::LineageSymbolRecordV1;
 
 pub(crate) struct StagedGenerationV1 {
@@ -227,12 +230,10 @@ where
 /// derived; incremental generations re-run it over their full carried +
 /// re-extracted file set, so an edge disappears with either endpoint.
 ///
-/// Binding is deliberately conservative, mirroring the same-file binder:
-/// a reference binds only when exactly one kind-compatible symbol matches
-/// its simple name across the generation, and never when its own file also
-/// defines a compatible candidate (local ambiguity or suppression owns those).
-/// Everything else stays truthfully unresolved. Bound edges carry the
-/// `NameResolved` authority class, not `SyntaxExact`.
+/// Binding requires a qualified reference or an exact parser-attested,
+/// project-relative import, plus exactly one kind-compatible symbol. Other
+/// bare names have no cross-file authority and stay unresolved. Bound edges
+/// carry the `NameResolved` authority class, not `SyntaxExact`.
 fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
@@ -249,18 +250,20 @@ where
     let mut edges = Vec::new();
     for (index, file) in files.iter().enumerate() {
         for reference in &file.as_ref().artifacts.unresolved_references {
-            let simple_name = reference
-                .reference_name
-                .rsplit("::")
-                .next()
+            let import = if reference.reference_name.contains("::") {
+                None
+            } else {
+                unique_project_import(file.as_ref(), &reference.reference_name, reference.kind)
+            };
+            if !reference.reference_name.contains("::") && import.is_none() {
+                continue;
+            }
+            let simple_name = import
+                .and_then(|binding| binding.imported_name.as_deref())
+                .or_else(|| reference.reference_name.rsplit("::").next())
                 .unwrap_or(reference.reference_name.as_str());
             let crate_qualified = reference.reference_name.strip_prefix("crate::");
-            // Carried artifacts outlive policy revisions, so reapply the
-            // unqualified-name blocklist at every seal.
-            if simple_name.is_empty()
-                || (crate_qualified.is_none()
-                    && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
-            {
+            if simple_name.is_empty() {
                 continue;
             }
             let Some(candidates) = by_simple_name.get(simple_name) else {
@@ -268,19 +271,32 @@ where
             };
             let source_path = &file.as_ref().authority.logical_path;
             let mut compatible = candidates.iter().filter(|(candidate_index, symbol)| {
-                relation_target_kind_is_compatible(reference.kind, &symbol.kind)
-                    && crate_qualified.map_or_else(
+                files[*candidate_index].as_ref().extraction.language
+                    == file.as_ref().extraction.language
+                    && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                    && import.map_or_else(
                         || {
-                            !reference.reference_name.contains("::")
-                                || file_qualified_name_matches(
-                                    &reference.reference_name,
-                                    &files[*candidate_index].as_ref().authority.logical_path,
-                                    &symbol.qualified_name,
-                                )
+                            crate_qualified.map_or_else(
+                                || {
+                                    file_qualified_name_matches(
+                                        &reference.reference_name,
+                                        &files[*candidate_index].as_ref().authority.logical_path,
+                                        &symbol.qualified_name,
+                                    )
+                                },
+                                |qualified| {
+                                    rust_crate_qualified_name_matches(
+                                        qualified,
+                                        source_path,
+                                        &files[*candidate_index].as_ref().authority.logical_path,
+                                        &symbol.qualified_name,
+                                    )
+                                },
+                            )
                         },
-                        |qualified| {
-                            rust_crate_qualified_name_matches(
-                                qualified,
+                        |binding| {
+                            project_import_matches(
+                                binding,
                                 source_path,
                                 &files[*candidate_index].as_ref().authority.logical_path,
                                 &symbol.qualified_name,
@@ -306,6 +322,87 @@ where
     edges.sort_by(edge_order);
     edges.dedup();
     edges
+}
+
+fn unique_project_import<'a>(
+    file: &'a FileGenerationArtifactsV1,
+    local_name: &str,
+    relation: RelationEdgeKindV1,
+) -> Option<&'a CodeIndexImportEvidenceV1> {
+    let mut matches = file.artifacts.imports.iter().filter(|binding| {
+        binding.module_kind == ImportModuleKindV1::ProjectRelative
+            && binding.local_name.as_deref() == Some(local_name)
+            && match relation {
+                RelationEdgeKindV1::Calls => binding.namespace == ImportNamespaceV1::Value,
+                RelationEdgeKindV1::Implements
+                | RelationEdgeKindV1::Extends
+                | RelationEdgeKindV1::TypeOf => binding.namespace == ImportNamespaceV1::Type,
+                _ => true,
+            }
+    });
+    let binding = matches.next()?;
+    matches.next().is_none().then_some(binding)
+}
+
+fn project_import_matches(
+    binding: &CodeIndexImportEvidenceV1,
+    source_path: &str,
+    target_path: &str,
+    target_qualified_name: &str,
+) -> bool {
+    if let Some(module) = binding.module_specifier.strip_prefix("crate::") {
+        let Some(imported_name) = binding.imported_name.as_deref() else {
+            return false;
+        };
+        let qualified = format!("{module}::{imported_name}");
+        return rust_crate_qualified_name_matches(
+            &qualified,
+            source_path,
+            target_path,
+            target_qualified_name,
+        );
+    }
+    let Some(parent) = Path::new(&binding.logical_path).parent() else {
+        return false;
+    };
+    let Some(module) = normalize_project_path(&parent.join(&binding.module_specifier)) else {
+        return false;
+    };
+    let target = Path::new(target_path);
+    module_file_matches(&module, target)
+        || (target.parent() == Some(module.as_path())
+            && target.file_stem().is_some_and(|stem| stem == "index"))
+}
+
+fn module_file_matches(module: &Path, target: &Path) -> bool {
+    if target == module {
+        return true;
+    }
+    let same_stem = target.parent() == module.parent() && target.file_stem() == module.file_stem();
+    if !same_stem {
+        return false;
+    }
+    match module.extension().and_then(|extension| extension.to_str()) {
+        None => true,
+        Some("js" | "jsx" | "mjs" | "cjs") => target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts")),
+        Some(_) => false,
+    }
+}
+
+fn normalize_project_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir if normalized.pop() => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
 }
 
 fn file_qualified_name_matches(
