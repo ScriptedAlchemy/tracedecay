@@ -625,6 +625,7 @@ pub struct CodeIndexPublishedGenerationV1 {
     imports: Vec<CodeIndexImportEvidenceV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
+    statistics: CodeIndexGenerationStatisticsV1,
     coverage: CoverageSummaryV1,
     capability: CodeIndexCapabilityManifestV1,
     projection: ProjectionPublicationHandoffV1,
@@ -1701,6 +1702,11 @@ where
                 "code_index.build.assemble.edge_evidence",
                 collect_edge_evidence(&staged.files)
             );
+            let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
+                &staged.files,
+                staged.symbols.symbols.len(),
+                edges.len(),
+            )?;
             let candidate = CodeIndexPublishedGenerationV1 {
                 manifest,
                 snapshot: validated.snapshot,
@@ -1713,6 +1719,7 @@ where
                 imports,
                 edges,
                 edge_abstentions,
+                statistics,
                 coverage,
                 capability,
                 projection,
