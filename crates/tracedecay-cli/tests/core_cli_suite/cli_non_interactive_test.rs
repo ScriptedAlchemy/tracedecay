@@ -929,7 +929,7 @@ fn install_codex_automation_enables_daemon_owned_project_configuration_nonintera
     assert_eq!(config["effective"]["enabled"], true);
     assert_eq!(config["effective"]["backend"], "codex_app_server");
     assert_eq!(config["effective"]["host_mode"], "standalone");
-    assert!(config["effective"]["model_id"].is_null());
+    assert_eq!(config["effective"]["model_id"], "gpt-5.6-sol");
     assert_eq!(
         config["effective"]["tasks"]["memory_curator"]["enabled"],
         true
@@ -1014,7 +1014,7 @@ fn automation_config_enable_writes_canonical_project_setting_noninteractively() 
         .expect("automation config enable should print JSON");
     assert_eq!(payload["effective"]["enabled"], true);
     assert_eq!(payload["effective"]["backend"], "codex_app_server");
-    assert!(payload["effective"]["model_id"].is_null());
+    assert_eq!(payload["effective"]["model_id"], "gpt-5.6-sol");
     assert_eq!(payload["source"], "daemon_pinned_snapshot");
     assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
     assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
@@ -1159,7 +1159,7 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("project set should print JSON");
     assert_eq!(payload["effective"]["backend"], "codex_app_server");
-    assert!(payload["effective"]["model_id"].is_null());
+    assert_eq!(payload["effective"]["model_id"], "gpt-5.6-sol");
     assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
     assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
     assert_eq!(
