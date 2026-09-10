@@ -5,7 +5,7 @@ use super::super::mutation::{
 };
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
-    ConfigurationRevisionStore, ConfigurationStoreError, Executor,
+    ConfigurationRevisionStore, ConfigurationStoreError, Executor, params,
 };
 use super::{
     ConfigurationAuditEventKindV1, ConfigurationSqlStore, ConfigurationValueV1,
