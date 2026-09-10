@@ -12,6 +12,7 @@ use super::super::{
 use super::{
     DaemonInvocationState, ProjectOpenDependentOwnerState, register_production_advisory_owner,
     register_production_feedback_and_advisory, register_production_feedback_cycle,
+    selected_feedback_generation,
 };
 use tracedecay_contracts::doctor::{
     SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
@@ -302,11 +303,17 @@ async fn try_mount(
     state: &mut ProjectOpenDependentOwnerState,
 ) -> Attempt {
     if let Some(lsp_session_factory) = state.lsp_session_factory.clone() {
+        let Some(indexed_generation) =
+            selected_feedback_generation(invocation, project_root, &state.scope).await
+        else {
+            return Attempt::AwaitNextPublication;
+        };
         return match register_production_feedback_and_advisory(
             invocation,
             project_root,
             state,
             lsp_session_factory,
+            indexed_generation,
         )
         .await
         {
@@ -314,42 +321,19 @@ async fn try_mount(
             Err(_) => classify_failure(invocation, project_root, state).await,
         };
     }
-    // Two lookups, in this order, because passive waiting alone deadlocks a
-    // fresh project. The decoded-for-root-scope probe is the cheap arm: it
+    // The shared selection ladder prevents passive waiting from deadlocking a
+    // fresh project. Its decoded-for-root-scope probe is the cheap arm: it
     // reads an already-seated complete generation and asks the scheduler for
     // nothing. When nothing is seated it answers `None` and demands nothing,
     // so a deferred owner that only ever took this arm waited for a
     // publication that only demand produces — the project then served
     // indefinitely with the typed-unavailable feedback cycle.
-    // `latest_complete_ready_for_scope` is the authenticated demand boundary
-    // every other first-generation consumer resolves through, so take it
-    // before giving up and going back to sleep.
-    let indexed = match invocation
+    // Its demand and recovered-text arms both require current source evidence
+    // before this owner may admit their generation.
+    let indexed = invocation
         .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(project_root, &state.scope)
-        .await
-    {
-        Some(generation) => Some(generation.text_generation_handle()),
-        None => match invocation
-            .code_index_schedulers
-            .latest_complete_ready_for_scope(&state.scope)
-            .await
-        {
-            Some(generation) => Some(generation.text_generation_handle()),
-            // A clean restart that recovered its retained revision-7 graph
-            // head serves through the text projection and never seats the
-            // sealed slot, so no publication edge follows for a quiet
-            // checkout. Feedback, session and LSP availability must not wait
-            // on full code-index publication: take that recovered level,
-            // which carries the same sealed snapshot this owner reads.
-            None => {
-                invocation
-                    .code_index_schedulers
-                    .latest_text_serving_for_scope(&state.scope)
-                    .await
-            }
-        },
-    };
+        .latest_feedback_generation_for_scope(project_root, &state.scope)
+        .await;
     // Deliberately unlogged: the poll in `spawn` re-enters here once a second
     // while a cold project indexes, and one event per second per warming
     // project is noise, not evidence. `spawn` records the wait once instead.
@@ -379,7 +363,9 @@ async fn try_mount(
     // go. The cycle depends only on the sealed generation this attempt already
     // holds, not on the session factory — only the advisory owner needs that.
     let (feedback_cycle, feedback_scope) =
-        match register_production_feedback_cycle(invocation, project_root, state).await {
+        match register_production_feedback_cycle(invocation, project_root, state, indexed.clone())
+            .await
+        {
             Ok(mounted) => mounted,
             Err(error) => {
                 tracing::warn!(
