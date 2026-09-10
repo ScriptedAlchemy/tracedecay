@@ -1304,6 +1304,65 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
             .await,
         ["occurrence-common-user"]
     );
+
+    let mut direct_params = params(1);
+    direct_params.push(SqlValue::Text(
+        "text : (\"common\") AND role : user".to_string(),
+    ));
+    assert_eq!(
+        read.text_column(
+            ROOT_DIRECT_USER_OCCURRENCE_FTS_QUERY,
+            direct_params.clone(),
+            0,
+        )
+        .await,
+        ["occurrence-common-user"]
+    );
+    let direct_plan = read
+        .explain_query_plan(ROOT_DIRECT_USER_OCCURRENCE_FTS_QUERY, direct_params)
+        .await;
+    assert!(
+        direct_plan
+            .iter()
+            .any(|line| line.contains("MATERIALIZE DIRECT_USER_MESSAGES")),
+        "direct-user retrieval must bound occurrence FTS from matching messages: {direct_plan:?}"
+    );
+    assert!(
+        direct_plan
+            .iter()
+            .any(|line| line.contains("IDX_SESSION_OCCURRENCES_MESSAGE")),
+        "direct-user retrieval must join occurrences by message identity: {direct_plan:?}"
+    );
+
+    let direct_exact_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Text("common".to_string()),
+        SqlValue::Text(fts_phrase("common")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(1),
+        SqlValue::Integer(1),
+        SqlValue::Integer(40),
+        SqlValue::Integer(50),
+        SqlValue::Text("text : (\"common\") AND role : user".to_string()),
+    ];
+    assert_eq!(
+        read.text_column(
+            ROOT_DIRECT_USER_EXACT_CANDIDATE_QUERY,
+            direct_exact_params,
+            0,
+        )
+        .await,
+        ["occurrence-common-user"]
+    );
 }
 
 #[tokio::test]
