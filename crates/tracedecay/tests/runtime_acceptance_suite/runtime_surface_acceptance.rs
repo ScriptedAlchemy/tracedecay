@@ -2331,15 +2331,19 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let projected_root = projection["result"]["rootUri"]
         .as_str()
         .expect("projected root URI");
+    // The expectation is the root's identity, not `canonicalize`: a file URL
+    // never carries the `\\?\` verbatim prefix Windows canonicalization
+    // returns, so comparing against that spelling would refuse the very root
+    // the daemon published. The alias the client spelled is still refused —
+    // it is a different name for this directory, not this name.
+    let projected_path = url::Url::parse(projected_root)
+        .ok()
+        .and_then(|url| url.to_file_path().ok());
     assert_eq!(
-        url::Url::parse(projected_root)
-            .ok()
-            .and_then(|url| url.to_file_path().ok()),
+        projected_path.as_deref(),
         Some(
-            fixture
-                .project
-                .canonicalize()
-                .expect("canonical admitted project root")
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&fixture.project)
+                .as_path()
         ),
         "the projection must name the admitted root, got {projected_root}"
     );

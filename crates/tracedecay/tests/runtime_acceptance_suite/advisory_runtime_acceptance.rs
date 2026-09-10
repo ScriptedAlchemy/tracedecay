@@ -1104,7 +1104,11 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     );
 
     let advisory_args = json!({
-        "document_uri": format!("file://{}", project.join("src/lib.rs").display()),
+        // Serialized as a file URL rather than concatenated: a Windows native
+        // path pasted after `file://` is not a file URI at all.
+        "document_uri": url::Url::from_file_path(project.join("src/lib.rs"))
+            .expect("advisory document URI")
+            .to_string(),
     })
     .to_string();
     // Feedback/advisory registration is a deferred background upgrade keyed
