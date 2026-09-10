@@ -61,8 +61,9 @@ use tracedecay_application::observability::{
     record_work_operation_resource,
 };
 use tracedecay_contracts::{
-    WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1, WorkProviderAvailabilityV1,
-    WorkProviderFallbackRecordV1,
+    WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
+    WorkAttemptEffectStoragePortV1, WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1,
+    WorkProviderAvailabilityV1, WorkProviderFallbackRecordV1,
 };
 use tracedecay_domain::configuration::TopologyPolicyDigestV1;
 use tracedecay_domain::{
@@ -486,6 +487,7 @@ async fn run_attempt(
         }
     };
     let attempts = services.attempts();
+    let attempt_effects = services.attempt_effects();
     let identity = attempt.identity().clone();
     // The registration-pinned work topology policy carries the concurrency
     // policy this attempt was admitted under; its canonical digest is the
@@ -507,6 +509,7 @@ async fn run_attempt(
             WorkProviderProtocol::CodexAppServerJsonRpc => {
                 execute_app_server(
                     attempts,
+                    attempt_effects,
                     &context,
                     &attempt,
                     &selection,
@@ -521,6 +524,7 @@ async fn run_attempt(
             _ => {
                 execute_provider_with_environment(
                     attempts,
+                    attempt_effects,
                     &context,
                     &attempt,
                     &selection,
@@ -762,6 +766,74 @@ fn settle_unstarted<S>(
     }
 }
 
+enum EffectDispatchAdmission {
+    Recorded,
+    Replayed,
+    Unavailable,
+}
+
+fn record_effect_dispatch<S>(
+    effects: &WorkAttemptEffectServiceV1<S>,
+    context: &RequestContext,
+    attempt: &WorkAttemptV1,
+) -> EffectDispatchAdmission
+where
+    S: WorkAttemptEffectStoragePortV1,
+{
+    match effects.record_dispatch(
+        context,
+        attempt.identity().clone(),
+        attempt.execution().effect_state(),
+        current_micros(),
+        attempt.execution().deadline(),
+    ) {
+        Ok(WorkAttemptEffectDispatchOutcomeV1::Recorded(_)) => EffectDispatchAdmission::Recorded,
+        Ok(WorkAttemptEffectDispatchOutcomeV1::Replayed(_)) => {
+            tracing::warn!(
+                task = attempt.identity().task_id().as_str(),
+                "work attempt dispatch receipt already exists; provider was not relaunched"
+            );
+            EffectDispatchAdmission::Replayed
+        }
+        Err(problem) => {
+            tracing::warn!(
+                task = attempt.identity().task_id().as_str(),
+                ?problem,
+                "work attempt dispatch receipt could not be recorded; provider was not launched"
+            );
+            EffectDispatchAdmission::Unavailable
+        }
+    }
+}
+
+fn settle_effect_dispatch<S>(
+    effects: &WorkAttemptEffectServiceV1<S>,
+    context: &RequestContext,
+    attempt: &WorkAttemptV1,
+    provider_started: bool,
+) -> bool
+where
+    S: WorkAttemptEffectStoragePortV1,
+{
+    let resolution = if !provider_started
+        || attempt.execution().effect_state() == tracedecay_domain::WorkEffectStateV1::Observational
+    {
+        WorkAttemptEffectResolutionV1::NoEffect
+    } else {
+        WorkAttemptEffectResolutionV1::Unknown
+    };
+    if let Err(problem) = effects.settle(context, attempt.identity(), resolution, current_micros())
+    {
+        tracing::warn!(
+            task = attempt.identity().task_id().as_str(),
+            ?problem,
+            "work attempt effect receipt could not be settled"
+        );
+        return false;
+    }
+    true
+}
+
 /// Resolves the values of exactly the keys the durable snapshot admits.
 ///
 /// This map exists only for one child launch: an initial spawn captures the
@@ -783,6 +855,7 @@ fn admitted_provider_environment(
 #[hotpath::measure(label = "daemon.service.work_attempt.provider", future = true)]
 async fn execute_provider_with_environment<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
+    attempt_effects: &WorkAttemptEffectServiceV1<S>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -792,7 +865,7 @@ async fn execute_provider_with_environment<S>(
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) where
-    S: tracedecay_contracts::WorkAttemptStoragePort,
+    S: tracedecay_contracts::WorkAttemptStoragePort + WorkAttemptEffectStoragePortV1,
 {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
@@ -812,6 +885,25 @@ async fn execute_provider_with_environment<S>(
         command.env(key, value);
     }
 
+    match record_effect_dispatch(attempt_effects, context, attempt) {
+        EffectDispatchAdmission::Recorded => {}
+        EffectDispatchAdmission::Replayed => return,
+        EffectDispatchAdmission::Unavailable => {
+            settle_unstarted(
+                attempts,
+                context,
+                &identity,
+                attempt,
+                WorkAttemptProviderOutcomeV1::ProviderUnavailable {
+                    state: WorkProviderAvailabilityV1::Unavailable,
+                },
+                selection.fallback.clone(),
+                observability_producer,
+            );
+            return;
+        }
+    }
+
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -820,6 +912,9 @@ async fn execute_provider_with_environment<S>(
                 ?error,
                 "work attempt provider process could not be spawned"
             );
+            if !settle_effect_dispatch(attempt_effects, context, attempt, false) {
+                return;
+            }
             settle_unstarted(
                 attempts,
                 context,
@@ -845,6 +940,7 @@ async fn execute_provider_with_environment<S>(
             );
             terminate(&mut child, TerminationSignal::Kill);
             let _ = child.wait().await;
+            settle_effect_dispatch(attempt_effects, context, attempt, true);
             return;
         }
     };
@@ -948,6 +1044,9 @@ async fn execute_provider_with_environment<S>(
         provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };
+    if !settle_effect_dispatch(attempt_effects, context, attempt, true) {
+        return;
+    }
     match attempts.settle_with_artifacts(context, &identity, &evidence, artifacts) {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
@@ -999,6 +1098,7 @@ struct AppServerSessionOutput {
 #[hotpath::measure(label = "daemon.service.work_attempt.app_server", future = true)]
 async fn execute_app_server<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
+    attempt_effects: &WorkAttemptEffectServiceV1<S>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -1008,11 +1108,30 @@ async fn execute_app_server<S>(
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) where
-    S: tracedecay_contracts::WorkAttemptStoragePort,
+    S: tracedecay_contracts::WorkAttemptStoragePort + WorkAttemptEffectStoragePortV1,
 {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
     let snapshot = envelope.execution_snapshot();
+
+    match record_effect_dispatch(attempt_effects, context, attempt) {
+        EffectDispatchAdmission::Recorded => {}
+        EffectDispatchAdmission::Replayed => return,
+        EffectDispatchAdmission::Unavailable => {
+            settle_unstarted(
+                attempts,
+                context,
+                &identity,
+                attempt,
+                WorkAttemptProviderOutcomeV1::ProviderUnavailable {
+                    state: WorkProviderAvailabilityV1::Unavailable,
+                },
+                selection.fallback.clone(),
+                observability_producer,
+            );
+            return;
+        }
+    }
 
     // The launch and the protocol session are one indivisible blocking call
     // here, so the attempt is marked Running before it starts; a launch that
@@ -1025,6 +1144,7 @@ async fn execute_app_server<S>(
                 ?problem,
                 "work attempt could not be marked running; app-server was not started"
             );
+            settle_effect_dispatch(attempt_effects, context, attempt, false);
             return;
         }
     };
@@ -1040,6 +1160,9 @@ async fn execute_app_server<S>(
     };
     let prompt = envelope.instructions().to_owned();
     let cwd = PathBuf::from(envelope.worktree_root());
+    let approval = snapshot.approval();
+    let filesystem = snapshot.filesystem();
+    let egress = snapshot.egress();
     let session_cancellation = cancellation.clone();
     let admitted_environment = admitted_environment.clone();
     let provider_id = running
@@ -1061,6 +1184,9 @@ async fn execute_app_server<S>(
                 timeout: wall,
                 admitted_environment: &admitted_environment,
                 launch_receipt: &blocking_launch_receipt,
+                approval,
+                filesystem,
+                egress,
             },
         )
         .and_then(|summary| {
@@ -1174,6 +1300,14 @@ async fn execute_app_server<S>(
         provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };
+    if !settle_effect_dispatch(
+        attempt_effects,
+        context,
+        attempt,
+        launch_receipt.started_at().is_some(),
+    ) {
+        return;
+    }
     match attempts.settle(context, &identity, &evidence) {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
