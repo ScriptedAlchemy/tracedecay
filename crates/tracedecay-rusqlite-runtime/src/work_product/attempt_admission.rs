@@ -10,7 +10,8 @@ use tracedecay_contracts::{
     WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionPortV1,
     WorkProductAttemptAdmissionV1, WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1,
     WorkProductEventPortErrorV1, WorkProductRetryAdmissionV1, WorkProductSynthesisAdmissionV1,
-    WorkRetryAttemptOutcomeV1, WorkSynthesisInsertOutcome,
+    WorkRetryAttemptOutcomeV1, WorkSynthesisInsertOutcome, WorkflowRunAppendOutcome,
+    WorkflowRunStorageError,
 };
 use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1};
 
@@ -187,16 +188,35 @@ fn admit_retry_in_transaction(
         &admission.admission.concurrency,
     )
     .map_err(map_attempt_error)?;
-    match (product, retry) {
+    let workflow = admission
+        .workflow_rebind
+        .as_ref()
+        .map(|request| crate::workflow::run_journal::append_in_transaction(transaction, request))
+        .transpose()
+        .map_err(map_workflow_error)?;
+    match (product, retry, workflow) {
         (
             WorkProductEventCommitOutcomeV1::Appended(product),
             retry @ WorkRetryAttemptOutcomeV1::Created { .. },
+            None | Some(WorkflowRunAppendOutcome::Appended(_)),
         ) => Ok((product, retry)),
         (
             WorkProductEventCommitOutcomeV1::Replayed(product),
             retry @ WorkRetryAttemptOutcomeV1::Replayed { .. },
+            None | Some(WorkflowRunAppendOutcome::Replayed(_)),
         ) => Ok((product, retry)),
         _ => Err(AdmissionError::IdentityConflict),
+    }
+}
+
+fn map_workflow_error(error: WorkflowRunStorageError) -> AdmissionError {
+    match error {
+        WorkflowRunStorageError::NotFound => AdmissionError::NotFoundOrNotAuthorized,
+        WorkflowRunStorageError::VersionConflict => AdmissionError::VersionConflict,
+        WorkflowRunStorageError::IdempotencyConflict => AdmissionError::IdempotencyConflict,
+        WorkflowRunStorageError::InvalidHistory | WorkflowRunStorageError::Unavailable => {
+            AdmissionError::Unavailable
+        }
     }
 }
 

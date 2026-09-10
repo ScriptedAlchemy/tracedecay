@@ -603,7 +603,7 @@ fn provider_unavailability_is_a_typed_terminal_journey() {
     );
     let identity = leased.identity().clone();
     let fenced = attempts
-        .mark_provider_unavailable(&context, &identity)
+        .mark_provider_unavailable(&context, &identity, UtcMicros(31))
         .unwrap();
     assert_eq!(fenced.state(), WorkAttemptStateV1::RecoveryRequired);
     let evidence = WorkAttemptEvidenceRecordV1 {

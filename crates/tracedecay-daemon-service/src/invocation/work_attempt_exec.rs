@@ -789,7 +789,8 @@ fn settle_unstarted<S>(
 ) where
     S: tracedecay_contracts::WorkAttemptStoragePort,
 {
-    if let Err(problem) = attempts.mark_provider_unavailable(context, identity) {
+    let observed_at = current_micros();
+    if let Err(problem) = attempts.mark_provider_unavailable(context, identity, observed_at) {
         tracing::warn!(
             task = identity.task_id().as_str(),
             ?problem,
@@ -806,7 +807,7 @@ fn settle_unstarted<S>(
         stderr: None,
         provider_session: None,
         provider_fallback,
-        observed_at: current_micros(),
+        observed_at,
     };
     match attempts.fail_recovery(context, identity, &evidence) {
         Ok(settled) => {

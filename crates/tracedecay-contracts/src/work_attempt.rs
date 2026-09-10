@@ -350,10 +350,10 @@ pub struct ResumeWorkAttemptsCommand {
 /// What restart recovery did to each open attempt.
 ///
 /// This report never claims that a provider resumed. An attempt in
-/// `recovery_required` remains fenced under its original identity. It does not
-/// authorize another launch; the outcome must be resolved to terminal failure
-/// evidence before the current `retry_attempt` contract can admit a new
-/// identity.
+/// `recovery_required` remains fenced under its original identity. This report
+/// does not authorize another launch; an explicit `retry_attempt` must verify
+/// the exact recovery fence and effect safety before it can atomically admit a
+/// new identity.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkAttemptRecoveryReportV1 {
@@ -638,6 +638,7 @@ where
                         &authority,
                         &attempt,
                         WorkRestartReasonV1::ProcessLost,
+                        command.occurred_at,
                     )?;
                     recovery_required.push(fenced);
                 }
@@ -683,6 +684,7 @@ where
                 WorkRecoveryStateV1::RecoveryRequired {
                     source_attempt_id: Some(source),
                     reason,
+                    ..
                 } => WorkRecoveryStateV1::Restarted {
                     source_attempt_id: source.clone(),
                     reason: *reason,
@@ -715,6 +717,7 @@ where
         &self,
         context: &RequestContext,
         identity: &WorkAttemptIdentityV1,
+        observed_at: UtcMicros,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
         let authority = work_authority(context)?;
         let attempt = self
@@ -725,6 +728,7 @@ where
             &authority,
             &attempt,
             WorkRestartReasonV1::ProviderUnavailable,
+            observed_at,
         )?;
         Ok(fenced)
     }
@@ -910,6 +914,7 @@ where
         authority: &WorkAuthority,
         attempt: &WorkAttemptV1,
         reason: WorkRestartReasonV1,
+        observed_at: UtcMicros,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
         let epoch = self
             .attempts
@@ -927,6 +932,7 @@ where
                 WorkRecoveryStateV1::RecoveryRequired {
                     source_attempt_id: None,
                     reason,
+                    observed_at,
                 },
                 attempt.actual_route().cloned(),
                 None,

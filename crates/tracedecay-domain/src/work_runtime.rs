@@ -769,6 +769,7 @@ pub enum WorkRecoveryStateV1 {
         #[serde(default)]
         source_attempt_id: Option<AttemptId>,
         reason: WorkRestartReasonV1,
+        observed_at: UtcMicros,
     },
 }
 
