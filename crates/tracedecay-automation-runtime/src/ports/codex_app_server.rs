@@ -26,7 +26,7 @@ use serde_json::Value;
 pub struct SummaryConfig {
     /// The `codex` executable to spawn.
     pub codex_bin: String,
-    /// Model override, or `None` to accept the host default.
+    /// Model selected for TraceDecay-owned turns.
     pub model: Option<String>,
     /// Hard wall-clock budget for the run.
     pub timeout: Duration,
@@ -36,7 +36,7 @@ impl Default for SummaryConfig {
     fn default() -> Self {
         Self {
             codex_bin: "codex".to_string(),
-            model: None,
+            model: Some("gpt-5.6-sol".to_owned()),
             timeout: Duration::from_mins(2),
         }
     }
