@@ -82,6 +82,16 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         Ok(records)
     }
 
+    async fn diagnostics_for_publication(
+        &self,
+        generation: &CodeGenerationId,
+        publication_revision: u64,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.clone())
+            .diagnostics_for_publication(generation, publication_revision)
+            .await
+    }
+
     #[hotpath::measure(label = "usecases.diagnostics.current", future = true)]
     async fn current_diagnostics(
         &self,

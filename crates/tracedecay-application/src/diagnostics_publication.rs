@@ -472,17 +472,18 @@ impl CleanGenerationDiagnosticSnapshotBuilderV1 {
         self.records.values().cloned().collect()
     }
 
-    /// Publishes the aggregated snapshot as this clean generation's single
-    /// atomic publication. Returns `(inserted, cleared)`.
+    /// Publishes the aggregated snapshot atomically. Returns
+    /// `(inserted, cleared, publication_revision)`.
     ///
     /// Republishing an identical snapshot converges (the store treats it as a
     /// no-op), so a repeated production cycle over an unchanged generation is
     /// safe.
     #[hotpath::measure(label = "usecases.diagnostics.publish_snapshot", future = true)]
-    pub async fn publish(&self, store: &DiagnosticsStore<'_>) -> Result<(u64, u64)> {
-        store
-            .publish_clean_generation(&self.scope.generation_id, &self.records())
-            .await
+    pub async fn publish(&self, store: &DiagnosticsStore<'_>) -> Result<(u64, u64, u64)> {
+        let (inserted, cleared, _exact_replay, revision) = store
+            .publish_clean_generation_with_disposition(&self.scope.generation_id, &self.records())
+            .await?;
+        Ok((inserted, cleared, revision))
     }
 }
 
@@ -576,8 +577,9 @@ pub struct ResolvedCompilerDiagnosticV1 {
 }
 
 /// Outcome of one production compiler-diagnostic publication.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticPublicationReportV1 {
+    pub publication_revision: u64,
     pub inserted: u64,
     pub cleared: u64,
     pub rejected: Vec<DiagnosticContributionRejectionV1>,
@@ -813,8 +815,9 @@ pub async fn publish_compiler_diagnostics_v1(
             Err(rejection) => rejected.push(rejection),
         }
     }
-    let (inserted, cleared) = builder.publish(store).await?;
+    let (inserted, cleared, publication_revision) = builder.publish(store).await?;
     Ok(DiagnosticPublicationReportV1 {
+        publication_revision,
         inserted,
         cleared,
         rejected,
@@ -1237,7 +1240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_compiler_publication_converges_on_generation_seal_time() {
+    async fn changed_compiler_observation_revises_same_code_generation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let project_root = temp.path().join("project");
         tokio::fs::create_dir_all(project_root.join("src"))
@@ -1253,29 +1256,105 @@ mod tests {
             &[("src/lib.rs", "file.daemon.repeat", content_digest.as_str())],
         ));
         let parsed = crate::diagnose::parse_cargo_output(
-            "error[E0308]: mismatched types\n  --> src/lib.rs:2:18\n",
+            "error[E0425]: cannot find value `missing` in this scope\n  --> src/lib.rs:2:18\n",
         );
         let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
             &temp.path().join("diagnostics.db"),
         );
         let store = DiagnosticsStore::new_runtime(&conn);
 
-        for attempt in 0..2 {
-            let outcome = publish_compiler_diagnostics_through_code_index_v1(
-                &project_root,
-                Some(&resolver),
-                &store,
-                &parsed,
-                id("analyzer.v1"),
-                id("config.v1"),
-            )
-            .await;
-            let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = outcome else {
-                panic!("publication attempt {attempt} failed: {outcome:?}");
-            };
-            assert_eq!(report.inserted, u64::from(attempt == 0));
-            assert_eq!(report.cleared, 0);
-        }
+        let empty = publish_compiler_diagnostics_through_code_index_v1(
+            &project_root,
+            Some(&resolver),
+            &store,
+            &[],
+            id("analyzer.v1"),
+            id("config.no-diagnostics"),
+        )
+        .await;
+        let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = empty else {
+            panic!("empty compiler observation failed: {empty:?}");
+        };
+        assert_eq!(report.publication_revision, 1);
+        assert_eq!(report.inserted, 0);
+
+        let observed = publish_compiler_diagnostics_through_code_index_v1(
+            &project_root,
+            Some(&resolver),
+            &store,
+            &parsed,
+            id("analyzer.v1"),
+            id("config.with-diagnostics"),
+        )
+        .await;
+        let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = observed else {
+            panic!("changed compiler observation failed: {observed:?}");
+        };
+        assert_eq!(report.publication_revision, 2);
+        assert_eq!(report.inserted, 1);
+        assert!(
+            store
+                .records_for_publication(resolver.0.generation_id(), 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let current = store
+            .records_for_generation(resolver.0.generation_id())
+            .await
+            .unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].code, "E0425");
+        assert_eq!(
+            current[0].provenance.configuration_revision.as_str(),
+            "config.with-diagnostics"
+        );
+
+        let changed_configuration = publish_compiler_diagnostics_through_code_index_v1(
+            &project_root,
+            Some(&resolver),
+            &store,
+            &parsed,
+            id("analyzer.v1"),
+            id("config.with-diagnostics.v2"),
+        )
+        .await;
+        let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } =
+            changed_configuration
+        else {
+            panic!("changed compiler configuration failed: {changed_configuration:?}");
+        };
+        assert_eq!(report.publication_revision, 3);
+        assert_eq!(report.inserted, 1);
+        let prior = store
+            .records_for_publication(resolver.0.generation_id(), 2)
+            .await
+            .unwrap();
+        assert_eq!(prior, current, "revision 2 must remain immutable");
+        let latest = store
+            .records_for_generation(resolver.0.generation_id())
+            .await
+            .unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(
+            latest[0].provenance.configuration_revision.as_str(),
+            "config.with-diagnostics.v2"
+        );
+
+        let replay = publish_compiler_diagnostics_through_code_index_v1(
+            &project_root,
+            Some(&resolver),
+            &store,
+            &parsed,
+            id("analyzer.v1"),
+            id("config.with-diagnostics.v2"),
+        )
+        .await;
+        let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = replay else {
+            panic!("exact compiler replay failed: {replay:?}");
+        };
+        assert_eq!(report.publication_revision, 3);
+        assert_eq!(report.inserted, 0);
     }
 
     #[tokio::test]
@@ -1503,7 +1582,8 @@ mod tests {
                 contribution("anchor.published.1"),
             )
             .expect("contribution accepted");
-        let (inserted, _cleared) = builder.publish(&store).await.expect("publish snapshot");
+        let (inserted, _cleared, _revision) =
+            builder.publish(&store).await.expect("publish snapshot");
         assert_eq!(inserted, 1);
 
         let record = store

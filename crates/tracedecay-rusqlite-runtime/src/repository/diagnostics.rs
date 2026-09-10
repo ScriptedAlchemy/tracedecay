@@ -32,12 +32,14 @@ impl DiagnosticExecutor {
         snapshot: &SanitizedCleanDiagnosticSnapshotV1,
     ) -> rusqlite::Result<()> {
         let generation = snapshot.generation_id();
-        if let Some(state) = savepoint
+        let publication_revision = if let Some((revision, state)) = savepoint
             .query_row(
-                "SELECT record_state FROM diagnostic_generation_publications
-                 WHERE generation_id = ?1",
+                "SELECT publication_revision, record_state
+                 FROM diagnostic_generation_publications
+                 WHERE generation_id = ?1
+                 ORDER BY publication_revision DESC LIMIT 1",
                 [generation.as_str()],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
         {
@@ -48,33 +50,57 @@ impl DiagnosticExecutor {
             }
             let existing = read_records(
                 savepoint,
-                "WHERE generation_id = ?1 AND record_state = 'current'
+                "WHERE generation_id = ?1 AND publication_revision = ?2
                  ORDER BY diagnostic_anchor",
-                [generation.as_str()],
+                params![generation.as_str(), revision],
             )?;
-            return if existing == snapshot.records() {
-                Ok(())
+            if existing == snapshot.records() {
+                return Ok(());
             } else {
-                Err(invalid(
-                    "diagnostic generation conflicts with immutable publication",
-                ))
-            };
+                revision
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("diagnostic publication revision overflow"))?
+            }
+        } else {
+            1
+        };
+
+        for record in snapshot.records() {
+            if savepoint
+                .query_row(
+                    "SELECT 1 FROM generation_diagnostics
+                     WHERE diagnostic_anchor = ?1 AND generation_id != ?2 LIMIT 1",
+                    params![record.diagnostic_anchor.as_str(), generation.as_str()],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                return Err(invalid(
+                    "diagnostic anchor is already bound to another generation",
+                ));
+            }
         }
 
         savepoint.execute(
             "UPDATE generation_diagnostics
              SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3 AND generation_id != ?2",
+             WHERE record_state = ?3 AND generation_id != ?2
+             AND (generation_id, publication_revision) IN (
+               SELECT generation_id, publication_revision
+               FROM diagnostic_generation_publications
+               WHERE record_state = ?3
+             )",
             params![CLEARED, generation.as_str(), CURRENT],
         )?;
         savepoint.execute(
             "UPDATE diagnostic_generation_publications
              SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3 AND generation_id != ?2",
+             WHERE record_state = ?3",
             params![CLEARED, generation.as_str(), CURRENT],
         )?;
         for record in snapshot.records() {
-            insert_record(savepoint, record)?;
+            insert_record(savepoint, publication_revision, record)?;
         }
         let published_at = snapshot
             .records()
@@ -84,9 +110,15 @@ impl DiagnosticExecutor {
             .unwrap_or(0);
         savepoint.execute(
             "INSERT INTO diagnostic_generation_publications (
-                generation_id, record_state, state_generation, published_at
-             ) VALUES (?1, ?2, NULL, ?3)",
-            params![generation.as_str(), CURRENT, published_at],
+                generation_id, publication_revision, record_state,
+                state_generation, published_at
+             ) VALUES (?1, ?2, ?3, NULL, ?4)",
+            params![
+                generation.as_str(),
+                publication_revision,
+                CURRENT,
+                published_at
+            ],
         )?;
         Ok(())
     }
@@ -117,7 +149,11 @@ impl DiagnosticExecutor {
         let transitioned = savepoint.execute(
             "UPDATE generation_diagnostics
              SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3 AND generation_id = ?4",
+             WHERE record_state = ?3 AND generation_id = ?4
+             AND publication_revision = (
+               SELECT publication_revision FROM diagnostic_generation_publications
+               WHERE generation_id = ?4 AND record_state = ?3
+             )",
             params![SUPERSEDED, successor, CURRENT, prior],
         )?;
         savepoint.execute(
@@ -152,17 +188,40 @@ impl DiagnosticExecutor {
             }
             DiagnosticReadOperationV1::Generation(generation) => read_records(
                 snapshot,
-                "WHERE generation_id = ?1 ORDER BY diagnostic_anchor",
+                "WHERE generation_id = ?1 AND publication_revision = (
+                    SELECT MAX(publication_revision) FROM diagnostic_generation_publications
+                    WHERE generation_id = ?1
+                 ) ORDER BY diagnostic_anchor",
                 [generation.as_str()],
             )
             .map(DiagnosticReadResultV1::Records),
+            DiagnosticReadOperationV1::Publication {
+                generation_id,
+                publication_revision,
+            } => {
+                if *publication_revision == 0 {
+                    return Err(invalid("diagnostic publication revision must be positive"));
+                }
+                let revision = i64::try_from(*publication_revision)
+                    .map_err(|_| invalid("diagnostic publication revision exceeds SQLite range"))?;
+                read_records(
+                    snapshot,
+                    "WHERE generation_id = ?1 AND publication_revision = ?2
+                     ORDER BY diagnostic_anchor",
+                    params![generation_id.as_str(), revision],
+                )
+                .map(DiagnosticReadResultV1::Records)
+            }
             DiagnosticReadOperationV1::CurrentForFile {
                 generation_id,
                 file_occurrence_id,
             } => read_records(
                 snapshot,
                 "WHERE generation_id = ?1 AND file_occurrence_id = ?2
-                   AND record_state = 'current'
+                   AND record_state = 'current' AND publication_revision = (
+                     SELECT publication_revision FROM diagnostic_generation_publications
+                     WHERE generation_id = ?1 AND record_state = 'current'
+                   )
                  ORDER BY diagnostic_anchor",
                 [generation_id.as_str(), file_occurrence_id.as_str()],
             )
@@ -177,6 +236,8 @@ impl DiagnosticExecutor {
             DiagnosticReadOperationV1::Stale(generation) => read_records(
                 snapshot,
                 "WHERE generation_id = ?1 AND record_state != 'current'
+                 AND publication_revision = (SELECT MAX(publication_revision)
+                   FROM diagnostic_generation_publications WHERE generation_id = ?1)
                  ORDER BY diagnostic_anchor",
                 [generation.as_str()],
             )
@@ -236,7 +297,9 @@ fn read_logical_successor(
     successor_generation: &CodeGenerationId,
 ) -> rusqlite::Result<Option<GenerationDiagnosticV1>> {
     let sql = format!(
-        "{SELECT_RECORDS} WHERE generation_id = ?1 AND repository = ?2 \
+        "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = (\
+         SELECT MAX(publication_revision) FROM diagnostic_generation_publications \
+         WHERE generation_id = ?1) AND repository = ?2 \
          AND producer = ?3 AND code = ?4 AND file_occurrence_id = ?5 \
          AND span_start = ?6 AND span_end = ?7 AND message_digest = ?8 \
          ORDER BY diagnostic_anchor"
@@ -268,13 +331,15 @@ fn read_logical_successor(
 
 fn insert_record(
     savepoint: &Savepoint<'_>,
+    publication_revision: i64,
     record: &GenerationDiagnosticV1,
 ) -> rusqlite::Result<()> {
     record.validate().map_err(invalid)?;
     let (state, state_generation) = state_columns(&record.state);
     savepoint.execute(
         "INSERT INTO generation_diagnostics (
-            diagnostic_anchor, generation_id, repository, worktree, reference,
+            diagnostic_anchor, generation_id, publication_revision,
+            repository, worktree, reference,
             source_revision, file_occurrence_id, content_digest, symbol_occurrence_id,
             span_start, span_end, code, severity, message, message_digest,
             producer_kind, producer, analyzer_revision, configuration_revision,
@@ -282,11 +347,12 @@ fn insert_record(
             state_generation, persisted_at
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+            ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
          )",
         params![
             record.diagnostic_anchor.as_str(),
             record.generation_id.as_str(),
+            publication_revision,
             record.repository.as_str(),
             record.worktree.as_ref().map(|value| value.as_str()),
             record.reference.as_ref().map(|value| value.as_str()),
@@ -326,23 +392,29 @@ fn read_record_by_anchor(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorId,
 ) -> rusqlite::Result<Option<GenerationDiagnosticV1>> {
-    let sql = format!("{SELECT_RECORDS} WHERE diagnostic_anchor = ?1");
+    let sql = format!(
+        "{SELECT_RECORDS} WHERE diagnostic_anchor = ?1 \
+         ORDER BY CASE WHEN EXISTS (SELECT 1 FROM \
+         diagnostic_generation_publications AS publication WHERE \
+         publication.generation_id = generation_diagnostics.generation_id AND \
+         publication.publication_revision = generation_diagnostics.publication_revision AND \
+         publication.record_state = 'current') THEN 0 ELSE 1 END, \
+         publication_revision DESC LIMIT 1"
+    );
     connection
         .prepare_cached(&sql)?
         .query_row([anchor.as_str()], record_from_row)
         .optional()
 }
 
-fn read_records<const N: usize>(
+fn read_records<P: rusqlite::Params>(
     connection: &rusqlite::Connection,
     clause: &str,
-    parameters: [&str; N],
+    parameters: P,
 ) -> rusqlite::Result<Vec<GenerationDiagnosticV1>> {
     let sql = format!("{SELECT_RECORDS} {clause}");
     let mut statement = connection.prepare_cached(&sql)?;
-    statement
-        .query_map(rusqlite::params_from_iter(parameters), record_from_row)?
-        .collect()
+    statement.query_map(parameters, record_from_row)?.collect()
 }
 
 const SELECT_RECORDS: &str = "SELECT diagnostic_anchor, generation_id, repository, worktree,
