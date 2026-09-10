@@ -802,6 +802,12 @@ pub(crate) mod tests {
         let temp = tempfile::tempdir().expect("fixture home");
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).expect("profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("private profile root");
+        }
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("profile identity");
         let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
