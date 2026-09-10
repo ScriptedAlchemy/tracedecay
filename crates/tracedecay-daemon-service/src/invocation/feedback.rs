@@ -408,6 +408,14 @@ pub fn advisory_cycle_invocation_result(
                     })
                 })
                 .collect::<Vec<_>>();
+            let read_handles = cycle.read_handles.as_ref().map(|handles| {
+                tracedecay_contracts::feedback::FeedbackAdvisoryReadHandlesV1 {
+                    diagnostics_handle: handles.diagnostics_handle.clone(),
+                    impact_handle: handles.diagnostics_handle.clone(),
+                    affected_tests_handle: handles.diagnostics_handle.clone(),
+                    list_handle: handles.list_handle.clone(),
+                }
+            });
             let mut cycle_wire = serde_json::to_value(&cycle.execution.cycle)
                 .map_err(|_| advisory_cycle_contract_problem())?;
             cycle_wire["published"] =
@@ -427,6 +435,7 @@ pub fn advisory_cycle_invocation_result(
                 page,
                 Some(serde_json::json!({
                     "cycle": cycle_wire,
+                    "read_handles": read_handles,
                     "finding_handles": finding_handles,
                 })),
             )
