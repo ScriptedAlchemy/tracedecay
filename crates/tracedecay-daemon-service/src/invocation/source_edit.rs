@@ -216,20 +216,65 @@ const SOURCE_EDIT_IDEMPOTENCY_CONFLICT: &str = "source_edit.idempotency_conflict
 const SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE: &str = "source-edit-symbol-evidence-unavailable";
 const SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE: &str = "source_edit_diagnostics_unavailable";
 
+fn sanitize_safe_diagnostic_text(value: &str, limit: usize) -> String {
+    let collapsed: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut end = trimmed.len().min(limit);
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].trim_end().to_owned()
+}
+
+fn source_edit_kernel_cause(error: &TraceDecayError) -> (String, String) {
+    match error.project_route_context() {
+        Some((code, _, detail)) => (code.to_owned(), detail.to_owned()),
+        None => match error {
+            TraceDecayError::Io(io) => (
+                "source_edit.execution_failed".to_owned(),
+                format!("source edit I/O failed ({})", io.kind()),
+            ),
+            _ => ("source_edit.execution_failed".to_owned(), error.to_string()),
+        },
+    }
+}
+
+fn source_edit_safe_diagnostic(
+    code: String,
+    message: String,
+) -> Result<SafeDiagnostic, tracedecay_contracts::ApplicationContractError> {
+    let code = sanitize_safe_diagnostic_text(&code, 128);
+    let code = if code.is_empty() {
+        "source_edit.execution_failed".to_owned()
+    } else {
+        code
+    };
+    let message = sanitize_safe_diagnostic_text(&message, 512);
+    let message = if message.is_empty() {
+        "Source edit execution failed".to_owned()
+    } else {
+        message
+    };
+    SafeDiagnostic::new(code, message)
+}
+
 fn source_edit_execution_problem(
     error: TraceDecayError,
 ) -> Result<ApplicationProblem, tracedecay_contracts::ApplicationContractError> {
-    let (code, message) = match error.project_route_context() {
-        Some((code, _, detail)) => (code.to_owned(), detail.to_owned()),
-        None => ("source_edit.execution_failed".to_owned(), error.to_string()),
-    };
-    let diagnostic = match SafeDiagnostic::new(code.clone(), message) {
-        Ok(diagnostic) => diagnostic,
-        Err(_) => SafeDiagnostic::new(
-            "source_edit.execution_failed",
-            "Source edit execution failed",
-        )?,
-    };
+    let (code, message) = source_edit_kernel_cause(&error);
+    let diagnostic = source_edit_safe_diagnostic(code, message)?;
     match diagnostic.code.as_str() {
         SOURCE_EDIT_EXPECTED_STATE_MISMATCH => Ok(ApplicationProblem::stale(diagnostic)),
         SOURCE_EDIT_IDEMPOTENCY_CONFLICT => Ok(ApplicationProblem::Conflict {
@@ -366,5 +411,45 @@ mod tests {
         assert_eq!(problem.kind(), ApplicationProblemKind::TimedOut);
         assert_eq!(problem.retry(), RetryDirective::Never);
         assert_eq!(problem.reason_code(), "timed_out");
+    }
+
+    #[test]
+    fn source_edit_multiline_kernel_cause_survives_as_a_safe_diagnostic() {
+        let problem = classified_problem(SourceEditOwnerError::ExecutionFailed(
+            TraceDecayError::Config {
+                message: "sqlx execute failed\nUNIQUE constraint\nwhile writing the journal"
+                    .to_owned(),
+            },
+        ));
+        assert_eq!(problem.kind(), ApplicationProblemKind::ExecutionFailed);
+        assert_eq!(problem.reason_code(), "source_edit.execution_failed");
+        let message = problem.safe_message();
+        assert!(
+            message.contains("sqlx execute failed") && message.contains("UNIQUE constraint"),
+            "sanitized diagnostic must keep the kernel cause, got {message:?}"
+        );
+        assert!(
+            !message.chars().any(char::is_control),
+            "safe diagnostic must not retain control characters"
+        );
+    }
+
+    #[test]
+    fn source_edit_io_failure_omits_filesystem_paths() {
+        let problem = classified_problem(SourceEditOwnerError::ExecutionFailed(
+            TraceDecayError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "/secret/path/db.sqlite",
+            )),
+        ));
+        let message = problem.safe_message();
+        assert!(
+            message.contains("source edit I/O failed") && message.contains("permission denied"),
+            "I/O failures must name the kind, got {message:?}"
+        );
+        assert!(
+            !message.contains("/secret") && !message.contains("db.sqlite"),
+            "safe diagnostics must not carry filesystem paths, got {message:?}"
+        );
     }
 }
