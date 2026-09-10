@@ -13,17 +13,17 @@ use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1,
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthDeltaRequest,
     HealthDeltaResult, HealthReadRequest, HealthReadResult, OperationalRetrievalPort,
-    RankedAffectedTestV1, RetrievalPortContext, RetrievalPortOutcome, SourceLinesRequest,
-    SourceLinesResult, SourceReference, SourceRetrievalPort, SymbolPrimitiveRecord,
-    TemporalRetrievalPort, TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1,
-    TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
-    TestReferenceV1, UncoveredSourceV1,
+    RankedAffectedTestV1, ResultProjection, RetrievalPortContext, RetrievalPortOutcome,
+    SourceLinesRequest, SourceLinesResult, SourceReference, SourceRetrievalPort,
+    SymbolPrimitiveRecord, TemporalRetrievalPort, TestMapCoverageV1, TestMapPrimitiveRequest,
+    TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture,
+    TestPrimitivePortOutcome, TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_contracts::{
-    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
-    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
-    ResolvedScope, RetrievalEvidence, TemporalState, now_micros,
+    ApplicationContractError, CoverageCompleteness, CoverageDomainState, DisclosureClass,
+    EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState,
+    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor, PageState,
+    RequestAdmission, RequestContext, ResolvedScope, RetrievalEvidence, TemporalState, now_micros,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
@@ -67,7 +67,8 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_code_index::grep_search::{
-    GrepSearchQuery, search_tree_with_cancel as lexical_search_tree_with_cancel,
+    GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
+    search_tree_with_cancel as lexical_search_tree_with_cancel,
 };
 use tracedecay_code_index::provider::{
     GenerationProviderCoverageV1, GenerationProviderReadV1, GenerationTestAttributionJoinReadPort,
@@ -1068,9 +1069,22 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
                 let finished_at = now_observed();
                 let unavailable =
                     |reason| evidence_unavailable(EvidenceDomain::Source, finished_at, reason, 0);
-                if request.span.validate().is_err() {
+                if request.span.validate().is_err()
+                    || request.span.len() > MAX_INTERACTIVE_SOURCE_BYTES
+                {
                     return failed(EvidenceDomain::Source, finished_at);
                 }
+                let disclose_source = match request.meta.projection {
+                    ResultProjection::Evidence
+                        if context.request.grant().disclosure >= DisclosureClass::Evidence =>
+                    {
+                        true
+                    }
+                    ResultProjection::Evidence => {
+                        return unavailable(OmissionReason::Redacted);
+                    }
+                    ResultProjection::Summary | ResultProjection::ReferencesOnly => false,
+                };
                 let Some(identity) = self
                     .code_index_identity
                     .resolve_current_for_scope(
@@ -1104,6 +1118,9 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
                 if end > bytes.len() || start > end {
                     return failed(EvidenceDomain::Source, finished_at);
                 }
+                let Ok(body) = std::str::from_utf8(&bytes[start..end]) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
                 let Ok(digest) = canonical_sha256(&(
                     "tracedecay.primitive.source-lines.v1",
                     relative,
@@ -1121,6 +1138,8 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
                 };
                 completed(
                     SourceLinesResult {
+                        file: disclose_source.then(|| relative.to_owned()),
+                        body: disclose_source.then(|| body.to_owned()),
                         references: vec![SourceReference {
                             anchor,
                             span: request.span,
