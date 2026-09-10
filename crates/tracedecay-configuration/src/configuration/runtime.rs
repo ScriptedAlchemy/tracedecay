@@ -23,8 +23,8 @@ use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 use super::ports::{
-    ConfigurationClock, ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationClock, ConfigurationCurrentStateV1, ConfigurationMutationAuthorizationPort,
+    ConfigurationOperationFuture, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 use super::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -99,19 +99,11 @@ impl ProjectConfigurationRuntime {
         ))
     }
 
-    /// Immutable routing identity only. Desired values and revisions are read
-    /// from [`Self::client`]; runtime consumers use
-    /// [`Self::activated_configuration`] so restart-gated revisions cannot be
-    /// mistaken for installed state.
+    /// Immutable routing identity only. Effective values and revisions must be
+    /// read from [`Self::client`] so the retained store remains the sole
+    /// runtime configuration authority.
     pub fn configuration_target(&self) -> &RuntimeConfigurationTarget {
         &self.target
-    }
-
-    /// Returns the exact configuration snapshot currently installed for
-    /// runtime consumers. It may trail [`Self::client`] after a committed
-    /// change whose registry definition requires a daemon restart.
-    pub fn activated_configuration(&self) -> Result<PinnedRuntimeConfiguration> {
-        crate::config::cached_pinned_runtime_configuration(&self.target.project_root)
     }
 
     pub fn registered_database(&self) -> RegisteredGlobalDbLeaseV1 {
@@ -152,6 +144,17 @@ impl ProjectConfigurationRuntime {
             activation_error_code,
             occurred_at,
         )
+    }
+
+    /// Resolves the runtime component's durable observed revision through the
+    /// canonical configuration history. A missing value means this component
+    /// has never recorded activation.
+    pub fn observed_runtime_configuration(
+        &self,
+    ) -> ConfigurationOperationFuture<'_, Option<ConfigurationCurrentStateV1>> {
+        self.client
+            .store
+            .observed_component_configuration(RUNTIME_CONFIGURATION_COMPONENT.to_owned())
     }
 
     /// First-wins type-erased semantic activation payload. Callers in
