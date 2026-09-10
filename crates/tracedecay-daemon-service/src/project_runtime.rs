@@ -605,7 +605,7 @@ impl RegisteredDeliveryReadAuthorityV1 {
         &self,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<tracedecay_application::source_authorization::ProjectSourceAccessSnapshot> {
-        let current = self.configuration.activated_configuration().ok()?;
+        let current = self.configuration.client().current().await.ok()?;
         self.source_access
             .source_access_at(&self.scope, &self.project_root, &current, observed_at)
             .ok()
