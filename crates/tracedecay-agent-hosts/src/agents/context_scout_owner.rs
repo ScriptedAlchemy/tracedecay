@@ -918,8 +918,16 @@ impl ProjectContextScoutOwnerV1 {
         if claim.entry.envelope.configuration_revision == control.configuration_revision {
             return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
         }
-        let _ = self.store.requeue(claim).await;
-        ContextScoutDurableClaimOutcomeV1::Empty
+        match self.store.requeue(claim).await {
+            ContextScoutDurableStoreOutcomeV1::Unavailable => {
+                ContextScoutDurableClaimOutcomeV1::Unavailable
+            }
+            ContextScoutDurableStoreOutcomeV1::Stored
+            | ContextScoutDurableStoreOutcomeV1::Duplicate
+            | ContextScoutDurableStoreOutcomeV1::Superseded => {
+                ContextScoutDurableClaimOutcomeV1::Empty
+            }
+        }
     }
 }
 
