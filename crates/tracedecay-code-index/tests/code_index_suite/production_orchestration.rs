@@ -3169,7 +3169,6 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                     evidence_buffer_address.set(Some(address));
                 }
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
-                largest_evidence_read.set(largest_evidence_read.get().max(end - start));
             }
             segment_reads.set(segment_reads.get() + 1);
             Ok(())
