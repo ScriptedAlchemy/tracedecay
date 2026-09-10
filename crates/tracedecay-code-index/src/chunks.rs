@@ -3898,6 +3898,72 @@ pub fn real_symbol() {}
         );
     }
 
+    /// #1199: a qualified reference whose namespace is not defined in the file
+    /// must stay unresolved even when the file defines a symbol with the same
+    /// short name. Extraction runs for real here: the hand-built rows in the
+    /// sibling tests cannot show whether the extractor also emits a bare
+    /// `Result` duplicate that would bind the local type through `by_name`.
+    #[test]
+    fn a_foreign_namespace_never_binds_a_local_homonym_through_extraction() {
+        let source = concat!(
+            "use std::fmt;\n",
+            "\n",
+            "pub struct Result;\n",
+            "\n",
+            "pub fn render(f: &mut fmt::Formatter<'_>) -> fmt::Result {\n",
+            "    write!(f, \"rendered\")\n",
+            "}\n",
+        );
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let registry = tracedecay_code_extraction::LanguageRegistry::new();
+        let extractor = registry
+            .extractor_for_file("probe.rs")
+            .expect("the Rust extractor is registered");
+        let mut artifact = extractor.extract_artifact(&file.file.logical_path, source);
+        artifact.result.sanitize();
+        artifact.result.canonicalize_order();
+
+        let offsets = line_offsets(source.as_bytes());
+        let chunker = chunker();
+        let file_identity = chunker
+            .file_identity(&file.file.logical_path)
+            .expect("fixture path is canonical");
+        let symbol_rows = chunker
+            .symbol_rows(
+                &file.file.file_occurrence_id,
+                &file_identity,
+                &artifact.result.nodes,
+                &artifact.result.unresolved_refs,
+                &offsets,
+                source.len() as u64,
+            )
+            .expect("symbol rows");
+        let local_result = symbol_rows
+            .iter()
+            .find(|symbol| symbol.name == "Result")
+            .expect("the fixture defines a local Result");
+
+        let (resolved, retained) = resolve_file_references(
+            source,
+            &offsets,
+            &artifact.result.unresolved_refs,
+            &symbol_rows,
+        );
+
+        assert!(
+            !resolved
+                .iter()
+                .any(|edge| edge.to_occurrence == local_result.occurrence),
+            "fmt::Result bound the file's own Result: {resolved:?}"
+        );
+        assert!(
+            !retained
+                .iter()
+                .any(|reference| reference.reference_name == "Result"),
+            "a namespace miss must not be retained under its short name: {retained:?}"
+        );
+    }
+
     #[test]
     fn qualified_reference_selects_its_namespace_and_bare_name_stays_ambiguous() {
         let source = "namespace left { interface Base {} }\nnamespace right { interface Base {} }\ninterface Child extends right::Base {}\n";
