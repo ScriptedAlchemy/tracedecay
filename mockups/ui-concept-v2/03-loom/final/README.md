@@ -4,7 +4,7 @@ design_status: current
 
 # Loom final state set
 
-These seven plates are the authoritative Loom concept sequence. Together they define a horizontal, temporal execution weave for following recorded or currently loaded work, replaying it, expanding agent branches, inspecting exact evidence, and attaching local feedback.
+These eight plates are the authoritative Loom concept sequence. Together they define a horizontal, temporal execution weave for following recorded or currently loaded work, replaying it, expanding agent branches, inspecting exact evidence, attaching local feedback, and investigating concurrent work proximity.
 
 All pictured data is **CONCEPT / SYNTHETIC DATA**. The plates specify product behavior and information hierarchy; they are not proof that the production dashboard currently serves the pictured data.
 
@@ -19,6 +19,7 @@ All pictured data is **CONCEPT / SYNTHETIC DATA**. The plates specify product be
 | 05 | [Selected event evidence](05-selected-event-evidence.png) | [Product brief](05-selected-event-evidence.md) | Inspect exact hook, transcript, task, code, and causal-neighborhood evidence in a roomy workspace. |
 | 06 | [Feedback continuation](06-feedback-continuation.png) | [Product brief](06-feedback-continuation.md) | Attach local TraceDecay feedback and see later work that acknowledges, acts on, or contradicts it. |
 | 07 | [Evidence gaps](07-evidence-gaps.png) | [Product brief](07-evidence-gaps.md) | Distinguish ambiguity, staleness, missing data, and unavailable private reasoning without invention. |
+| 08 | [Work proximity](08-work-proximity.png) | [Product brief](08-work-proximity.md) · [Concept application](../../app/README.md) | Scan concurrent work proximity, then inspect one exact pair without replacing the execution weave. |
 
 ## Shared interaction contract
 
@@ -27,6 +28,18 @@ All pictured data is **CONCEPT / SYNTHETIC DATA**. The plates specify product be
 - Agent and subagent branches diverge at evidenced spawn events, carry their own events, and reconnect only through evidenced handoffs or result/rejoin events. Inferred relations look different from exact relations.
 - Branches collapse into deterministic workstream bundles at overview scale. Exact agent trees, event tables, and transcripts remain available; the visualization never becomes the sole evidence surface.
 - Cross-page pivots preserve selection and time context when opening Sessions, Agents, Work, Code, Delivery, or exact evidence.
+
+## Retained proximity exploration
+
+Code proximity remains an approved Loom view option. The normal execution weave
+provides the overview; a selected encounter opens pair evidence. Candidate
+proximity, confirmed content conflict, shared work, delegation, and causal
+continuation remain distinct.
+
+Production evidence must retain path/range access intervals, worktree and head
+identity, symbol neighborhood, source coverage, observation and expiry times,
+and exact pivots. The concept chooses no similarity algorithm or threshold.
+Exact-blob equality and temporal proximity do not establish semantic duplication.
 
 ## Evidence ladder
 

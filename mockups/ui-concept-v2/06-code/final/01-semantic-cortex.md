@@ -11,12 +11,19 @@ Find a symbol or subsystem, understand how it is connected, assess what a change
 
 ## Product behavior
 
+- Exact Files retains the measured structural atlas/treemap as a peer view to
+  Cortex, Trace, and Core. Stable source-containment geometry, exact paths, and
+  pinned revisions remain available while lenses change.
 - Cortex is the broad semantic topology. Trace narrows to a selected symbol's callers, callees, uses, and data or control relationships. Core focuses the smallest causally relevant neighborhood.
 - Search accepts symbols, files, paths, and qualified names. Results retain project, repository snapshot, language, and symbol identity.
 - Selecting a node focuses its causal neighborhood and opens its exact path, range, kind, owning module, callers, callees, references, diagnostics, impact, and mapped tests.
 - Hover previews identity and relationship type without changing selection. Click pins selection; double-click or Enter drills into the next semantic lens. Back returns to the prior graph camera.
 - Filters cover symbol kind, language, module, relationship, diagnostic state, and freshness. URL state preserves project, lens, query, selection, and camera.
 - Graph layout and luminosity communicate topology, kind, selection, and freshness; neither visual prominence nor rank is evidence of importance on its own.
+- Structural lenses may show measured dependencies, changes, cycles,
+  forwarding, churn, byte-identical duplicate groups, and coverage only with
+  their exact basis. They do not imply semantic duplication, code quality,
+  defect risk, or runtime reachability.
 
 ## Production authorities
 
