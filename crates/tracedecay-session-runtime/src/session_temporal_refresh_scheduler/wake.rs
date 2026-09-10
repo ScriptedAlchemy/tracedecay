@@ -815,9 +815,13 @@ impl SessionTemporalRefreshWake {
             .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(state);
     }
 
+    pub(crate) fn shares_route_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.route, &other.route)
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn same_route(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.route, &other.route)
+        self.shares_route_with(other)
     }
 
     /// Delivers a wake to the currently bound production worker.

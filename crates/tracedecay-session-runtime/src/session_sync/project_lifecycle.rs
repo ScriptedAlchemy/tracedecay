@@ -48,6 +48,25 @@ pub struct SessionSyncTaskV1 {
 }
 
 impl SessionSyncProjectContext {
+    fn matches_live_registration(&self, config: &DaemonSessionSyncConfig) -> bool {
+        self.brain_id == config.brain_id
+            && self.profile_id == config.profile_id
+            && self.project_id == config.project_id
+            && self.profile_root == config.profile_root
+            && self.project_root == config.project_root
+            && self.transcript_source_home == config.transcript_source_home
+            && Arc::ptr_eq(&self.background_cpu, &config.background_cpu)
+            && self
+                .project_refresh
+                .shares_route_with(&config.project_refresh)
+            && self.user_refresh.shares_route_with(&config.user_refresh)
+            && self
+                .project_sessions()
+                .is_ok_and(|database| database.shares_client_with(&config.project_sessions))
+            && self.user_sessions.shares_client_with(&config.user_sessions)
+            && self.registry.shares_client_with(&config.registry)
+    }
+
     pub fn project_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1, String> {
         self.project_sessions
             .read()
@@ -291,11 +310,26 @@ impl DaemonSessionSyncService {
     #[hotpath::skip]
     pub async fn register_project(
         &self,
-        config: DaemonSessionSyncConfig,
+        mut config: DaemonSessionSyncConfig,
     ) -> tracedecay_domain::errors::Result<()> {
+        if let Some(repository_root) =
+            tracedecay_runtime_core::worktree::repository_identity_root(&config.project_root)
+        {
+            config.project_root = repository_root;
+        }
         let scope = SessionSyncScopeV1::new(config.project_id.clone(), config.profile_id.clone());
         let project_gate = self.project_gate(&scope);
         let project = project_gate.lock().await;
+        if let Some(context) = self.context_for(&scope)
+            && context.matches_live_registration(&config)
+        {
+            if config.startup_import {
+                let project_sessions = context.project_sessions().map_err(contract_error)?;
+                self.schedule_startup_import(&context, &project_sessions, scope)
+                    .await?;
+            }
+            return Ok(());
+        }
         let project_sessions = config.project_sessions.clone();
         let project_sessions_locator = project_sessions.verified_locator().clone();
         let context = Arc::new(SessionSyncProjectContext {

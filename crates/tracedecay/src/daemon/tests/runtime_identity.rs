@@ -134,6 +134,37 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&primary, &client_identity).await;
+    let transcript_dir = root.join(".codex/sessions/2026/09/10");
+    std::fs::create_dir_all(&transcript_dir).expect("native transcript directory");
+    let mut transcript = serde_json::json!({
+        "timestamp": "2026-09-10T00:00:00.000Z",
+        "type": "session_meta",
+        "payload": {
+            "id": "session.linked-open-active-import",
+            "cwd": primary.display().to_string()
+        }
+    })
+    .to_string();
+    for index in 0..20_000 {
+        transcript.push('\n');
+        transcript.push_str(
+            &serde_json::json!({
+                "timestamp": "2026-09-10T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": format!("linked startup import {index}")
+                }
+            })
+            .to_string(),
+        );
+    }
+    transcript.push('\n');
+    std::fs::write(
+        transcript_dir.join("rollout-2026-09-10T00-00-00-session.linked-open-active-import.jsonl"),
+        transcript,
+    )
+    .expect("native transcript");
     // A user leftover from before the working-tree cutover: a stale legacy
     // enrollment file inside the linked worktree. Nothing writes these
     // anymore; routing must ignore it because the repository identity
@@ -159,15 +190,34 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         ..test_handshake_defaults()
     };
 
-    save_scheduled_automation(&engine, &primary_handshake, true).await;
-
-    let (primary_server, linked_server) = tokio::join!(
-        engine.project_server(&primary_handshake),
-        engine.project_server(&linked_handshake),
+    let session_sync = engine.store_administration.session_sync_service();
+    let mut linked_open = Box::pin(engine.project_server(&linked_handshake));
+    loop {
+        if tracedecay_session_runtime::session_sync::test_harness::task_count(&session_sync) > 0 {
+            break;
+        }
+        tokio::select! {
+            _ = &mut linked_open => {
+                panic!("linked route finished opening before its native startup import became observable");
+            }
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    let (linked_server, primary_server) =
+        tokio::join!(linked_open, engine.project_server(&primary_handshake),);
+    let linked_server =
+        linked_server.expect("linked worktree must open first through the primary authority");
+    assert!(
+        linked_server.project_session_db().is_some(),
+        "the linked route must publish its full server before the primary opens"
     );
-    let primary_server = primary_server.expect("primary project must open");
-    let linked_server = linked_server
-        .expect("linked worktree must concurrently open through the primary authority");
+    let primary_server = primary_server
+        .expect("primary project must open while the linked startup import is active");
+    assert!(
+        primary_server.project_session_db().is_some(),
+        "same-project startup work must not degrade the primary route to its core server"
+    );
+    save_scheduled_automation(&engine, &primary_handshake, true).await;
 
     assert!(
         !Arc::ptr_eq(&primary_server, &linked_server),
