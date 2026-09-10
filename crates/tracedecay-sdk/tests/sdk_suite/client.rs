@@ -650,10 +650,9 @@ fn callable_code_uses_the_mounted_http_route_without_an_mcp_transport() {
                 "path_prefix": "crates/tracedecay-contracts"
             },
             "meta": {
-                "temporal": {"kind": "current"},
-                "page": {"page_size": 10, "cursor": null},
                 "projection": "evidence",
-                "order": "relevance"
+                "order": "relevance",
+                "cursor": null
             }
         }))
         .expect("canonical callable-code request");
