@@ -479,6 +479,15 @@ fn issue_memory_graph_operation(
 }
 
 pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
+    // This pass runs in the write's detached task, not the scheduled worker.
+    // Admitting it through the coordinator lets daemon shutdown cancel and
+    // join it before closing the graph owner it publishes through; a refused
+    // admission (shutdown or retirement in progress) leaves the pass to the
+    // ordinary schedule, which reports the same closed/retiring outcome.
+    let Some(_inline_pass) = db.begin_inline_memory_graph_reconciliation_pass() else {
+        schedule_project_memory_graph_reconciliation(db);
+        return;
+    };
     match reconcile_project_memory_graph_pass(&db, None).await {
         Ok(_) => {}
         Err(error) => {

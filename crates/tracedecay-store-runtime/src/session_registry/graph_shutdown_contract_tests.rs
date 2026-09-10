@@ -204,3 +204,71 @@ async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
         "unexpected terminal transition error: {error}"
     );
 }
+
+/// A fact write publishes its memory graph inline in a detached task, outside
+/// the scheduled worker. That pass holds the retained graph runtime and a
+/// graph lease, so the terminal shutdown join must wait for it after
+/// cancellation; closing while it is in flight is the
+/// `registry.reserve_close.leased` conflict this contract forbids.
+#[tokio::test]
+async fn shutdown_joins_an_inline_post_write_pass_before_closing_the_graph() {
+    let temp = TempDir::new().expect("shutdown inline pass fixture root");
+    let profile_root = temp.path().join("profile");
+    let project_id = ProjectId::new("project.graph-shutdown-inline-pass").expect("project id");
+    let project_root = enrolled_root(temp.path(), &project_id);
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        61,
+        "graph shutdown inline pass",
+    )
+    .expect("daemon database scope");
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("daemon registry");
+    let project_memory = registry
+        .project_memory(project_id, [project_root])
+        .await
+        .expect("project memory authority");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while project_memory.memory_graph_runtime().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("project memory graph attaches in the background");
+
+    // Model the post-write pass at its blocking point: admitted through the
+    // coordinator and holding the graph runtime it publishes through.
+    let inline_pass = project_memory
+        .begin_inline_memory_graph_reconciliation_pass()
+        .expect("inline pass is admitted before shutdown");
+    let operation = project_memory
+        .issue_memory_graph_runtime_operation()
+        .expect("graph runtime operation");
+
+    registry.cancel_memory_graph_reconciliation_tasks();
+    let mut join = std::pin::pin!(registry.shutdown_memory_graph_reconciliation_tasks());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut join)
+            .await
+            .is_err(),
+        "the reconciliation join must wait for the in-flight inline pass"
+    );
+    assert!(
+        project_memory
+            .begin_inline_memory_graph_reconciliation_pass()
+            .is_none(),
+        "no inline pass may start once shutdown has cancelled reconciliation"
+    );
+
+    drop(operation);
+    drop(inline_pass);
+    join.await
+        .expect("reconciliation join settles once the inline pass releases the runtime");
+    drop(project_memory);
+    registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("retained graph runtimes close without a shutdown Conflict");
+}

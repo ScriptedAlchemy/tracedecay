@@ -26,6 +26,7 @@ pub enum MemoryGraphReconciliationRetirementBlockerV1 {
     Pending,
     Running,
     InFlightWeakUpgrade,
+    InlinePass,
     RetainedJoinWork,
     Retiring,
     Closed,
@@ -226,6 +227,10 @@ struct MemoryGraphReconciliationTaskStateV1 {
     pending: bool,
     running: bool,
     in_flight_weak_upgrades: usize,
+    /// Post-write reconciliation passes running outside the worker. They hold
+    /// the verified graph runtime and a graph lease, so shutdown must join
+    /// them like workers before the retained graph owner can close.
+    inline_passes: usize,
     current_identity: Option<Arc<()>>,
     current: Option<JoinHandle<()>>,
     retired: Vec<JoinHandle<()>>,
@@ -376,6 +381,45 @@ impl MemoryGraphReconciliationCoordinatorV1 {
             + state.retired.len()
             + state.joining_task_count
             + usize::from(state.retirement_task_running)
+    }
+
+    /// Admits one reconciliation pass that runs inline in a caller-owned task
+    /// (the post-write publication) instead of the scheduled worker. `None`
+    /// once admission is closed or a retirement fence is held: the pass must
+    /// not start, exactly like a refused schedule.
+    pub(super) fn begin_inline_pass(&self) -> Option<MemoryGraphReconciliationInlinePassV1> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting || state.retirement_reserved {
+            return None;
+        }
+        state.inline_passes = state.inline_passes.saturating_add(1);
+        Some(MemoryGraphReconciliationInlinePassV1 {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+}
+
+/// One admitted inline reconciliation pass. Dropping it (normal completion,
+/// error, or the owning task being aborted) releases the join blocker and
+/// wakes a shutdown join waiting on it.
+pub struct MemoryGraphReconciliationInlinePassV1 {
+    shared: Arc<MemoryGraphReconciliationSharedV1>,
+}
+
+impl Drop for MemoryGraphReconciliationInlinePassV1 {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.inline_passes = state.inline_passes.saturating_sub(1);
+        drop(state);
+        self.shared.joined.notify_waiters();
     }
 }
 
@@ -600,6 +644,9 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         if state.in_flight_weak_upgrades != 0 {
             return Err(MemoryGraphReconciliationRetirementBlockerV1::InFlightWeakUpgrade);
         }
+        if state.inline_passes != 0 {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::InlinePass);
+        }
         if state.joining || !state.retired.is_empty() || state.joining_task_count != 0 {
             return Err(MemoryGraphReconciliationRetirementBlockerV1::RetainedJoinWork);
         }
@@ -746,6 +793,22 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
             }
         }
         drop(lease);
+        // Admission is already closed, so no new inline pass can start; wait
+        // for the ones admitted before cancellation to release their graph
+        // runtime. The owner's deadline still bounds this like the task joins.
+        loop {
+            let released = self.shared.joined.notified();
+            let inline_passes = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .inline_passes;
+            if inline_passes == 0 {
+                break;
+            }
+            released.await;
+        }
         if worker_panicked {
             MemoryGraphReconciliationRetirementTerminalV1::WorkerPanicked
         } else {
@@ -1254,6 +1317,38 @@ mod tests {
             owner.reserve_retirement(),
             Err(MemoryGraphReconciliationRetirementBlockerV1::Closed)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_joins_an_admitted_inline_pass_before_reporting_terminal() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, cancelled) = task_owner(&coordinator);
+        let pass = coordinator
+            .begin_inline_pass()
+            .expect("inline pass is admitted while accepting");
+        assert_eq!(
+            owner.reserve_retirement().err(),
+            Some(MemoryGraphReconciliationRetirementBlockerV1::InlinePass)
+        );
+
+        let mut shutdown = std::pin::pin!(owner.shutdown());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must not report terminal while an inline pass holds the runtime"
+        );
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(
+            coordinator.begin_inline_pass().is_none(),
+            "no inline pass may start after cancellation"
+        );
+
+        drop(pass);
+        assert_eq!(
+            shutdown.await.expect("shutdown starts"),
+            MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
+        );
     }
 
     #[tokio::test]
