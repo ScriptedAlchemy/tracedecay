@@ -1415,26 +1415,20 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     init_project_with_cli(&home_path, &project_path);
     let daemon = spawn_tracedecay_daemon(&home_path);
 
-    let observed = configuration_tool_success(
-        &home_path,
-        &project_path,
-        "configuration_observed_state",
-        json!({}),
-    );
-    let project_id = observed["scope"]["project_id"]
-        .as_str()
-        .expect("configuration scope project id")
-        .to_owned();
-    let initial_revision = observed["outcome"]["value"]["payload"][0]["desired_revision_id"]
-        .as_str()
-        .expect("initial configuration revision")
-        .to_owned();
     let initial = configuration_tool_success(
         &home_path,
         &project_path,
         "configuration_get",
         json!({ "key": "diagnostics.prewarm.v1" }),
     );
+    let project_id = initial["scope"]["project_id"]
+        .as_str()
+        .expect("configuration scope project id")
+        .to_owned();
+    let initial_revision = initial["outcome"]["value"]["payload"]["revision_id"]
+        .as_str()
+        .expect("configuration get revision")
+        .to_owned();
     let initial_value = initial["outcome"]["value"]["payload"]["effective_value"]["value"]
         .as_bool()
         .expect("initial diagnostics prewarm value");
@@ -1482,6 +1476,10 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     assert_eq!(
         reloaded["outcome"]["value"]["payload"]["effective_value"]["value"], next_value,
         "the CLI mutation must survive a daemon restart and affect the resolved setting"
+    );
+    assert_eq!(
+        reloaded["outcome"]["value"]["payload"]["revision_id"], advanced_revision,
+        "configuration get must return the revision accepted by the next mutation CAS"
     );
 
     let stale_mutation = json!({
