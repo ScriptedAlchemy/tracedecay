@@ -7,8 +7,8 @@ use tracedecay_domain::canonical_sha256;
 
 use super::candidate_output::{
     CandidateWorkloadV1, EvaluationExecutionContractV1, GenerateCandidateOutputsResultV1,
-    OptionalStageMeasurementsV1, ProductionCandidateOutputV1, compute_corpus_digest,
-    compute_workload_digest,
+    OptionalStageMeasurementsV1, ProductionCandidateOutputV1, ResourceSampleV1,
+    compute_corpus_digest, compute_workload_digest,
 };
 use super::evaluate::{
     DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus,
@@ -302,9 +302,10 @@ impl DirectEvaluationReportV1 {
             )));
         }
         if self.status != DirectEvaluationStatusV1::Pass {
-            return Err(SearchEvalError::Contract(
-                "only a passing direct evaluation report can activate semantics".to_owned(),
-            ));
+            return Err(SearchEvalError::Contract(format!(
+                "only a passing direct evaluation report can activate semantics: {}",
+                self.pending_diagnostic()
+            )));
         }
         for output in &self.raw_outputs {
             let requirements = native_profile_requirements(workload, &output.profile_id)
@@ -408,6 +409,45 @@ impl DirectEvaluationReportV1 {
             }
         }
         Ok(())
+    }
+
+    /// Names the concrete resource observation a non-`Pass` report is still
+    /// missing.
+    ///
+    /// `resource_status=pending` on its own does not say which observation is
+    /// absent, and assuming it is peak RSS hides an unmeasured latency run or
+    /// an eligible-chunk mismatch. Report the exact retained sample, the
+    /// fields it lacks, and the typed reason the producer recorded, so an
+    /// operator reading a CI log can tell absent evidence from a measured
+    /// quality failure.
+    pub fn pending_diagnostic(&self) -> String {
+        for output in &self.raw_outputs {
+            for (scale, sample) in &output.resources {
+                let missing = missing_resource_fields(sample);
+                if missing.is_empty() {
+                    continue;
+                }
+                return format!(
+                    "{}:{} resource sample '{scale}' is incomplete: status={:?} missing=[{}] \
+                     eligible_chunks={} measured_queries={} latency_samples={} reason={}",
+                    output.profile_id,
+                    output.partition,
+                    sample.status,
+                    missing.join(", "),
+                    sample.eligible_chunks,
+                    sample.measured_queries,
+                    sample.latency_samples_us.len(),
+                    sample
+                        .pending_reason
+                        .as_deref()
+                        .unwrap_or("<none retained>"),
+                );
+            }
+        }
+        format!(
+            "status={:?} while every retained resource sample is complete",
+            self.status
+        )
     }
 
     fn failure_diagnostic(&self) -> String {
@@ -957,6 +997,25 @@ pub(super) fn profile_material_digests(
         }
     }
     Ok(digests)
+}
+
+/// The required resource observations one sample does not carry.
+///
+/// A zero peak RSS counts as missing on purpose: every supported sampler
+/// filters its own non-positive reading, so a zero that reaches here is an
+/// unavailable observation wearing a measured label.
+fn missing_resource_fields(sample: &ResourceSampleV1) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !sample.peak_rss_bytes.is_some_and(|bytes| bytes > 0) {
+        missing.push("peak_rss_bytes");
+    }
+    if sample.latency_samples_us.is_empty() {
+        missing.push("latency_samples_us");
+    }
+    if sample.eligible_chunks == 0 {
+        missing.push("eligible_chunks");
+    }
+    missing
 }
 
 pub(super) fn raw_output_digest(
