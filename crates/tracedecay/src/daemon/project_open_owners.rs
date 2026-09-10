@@ -318,8 +318,6 @@ pub(super) async fn register_project_open_production_owners(
             &access,
         )
         .await?;
-    let work_evidence_retrieval =
-        server.work_evidence_retrieval(&scope, invocation.work_federated_query_authority())?;
     let configuration_profile_id = server
         .profile_identity()
         .ok_or_else(|| TraceDecayError::Config {
@@ -416,16 +414,6 @@ pub(super) async fn register_project_open_production_owners(
             message: format!("project-open Work grant is invalid: {error}"),
         }
     })?;
-    let work_authority = tracedecay_domain::WorkAuthority::new(
-        scope.project_id.clone(),
-        scope.repository_id.clone(),
-        scope.worktree_id.clone(),
-        requester.clone(),
-        work_grant.digest.clone(),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open Work authority is invalid: {error}"),
-    })?;
     let work_topology_policy =
         tracedecay_configuration::config::topology::resolved_work_topology_policy(
             configuration.snapshot(),
@@ -434,15 +422,6 @@ pub(super) async fn register_project_open_production_owners(
             message: format!("project-open work topology policy is unavailable: {error}"),
         })?
         .clone();
-    let work_proposal_routing = DaemonWorkProposalRoutingAuthorityV1::mount(
-        scope.clone(),
-        &configuration,
-        &access.configuration_digest,
-        &work_grant,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open Work proposal routing is unavailable: {error}"),
-    })?;
     // Project-open has no authenticated GitHub response or persisted source
     // record. It mounts policy and delivery only; the review refresh owner is
     // the sole producer of canonical provider observations and anchors.
@@ -481,8 +460,30 @@ pub(super) async fn register_project_open_production_owners(
             );
         }
     }
-    hotpath::future!(
-        async {
+    if let Some(work_grant) = work_grant {
+        let work_authority = tracedecay_domain::WorkAuthority::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            requester.clone(),
+            work_grant.digest.clone(),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open Work authority is invalid: {error}"),
+        })?;
+        let work_proposal_routing = DaemonWorkProposalRoutingAuthorityV1::mount(
+            scope.clone(),
+            &configuration,
+            &access.configuration_digest,
+            &work_grant,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open Work proposal routing is unavailable: {error}"),
+        })?;
+        let work_evidence_retrieval =
+            server.work_evidence_retrieval(&scope, invocation.work_federated_query_authority())?;
+        hotpath::future!(
+            async {
             invocation
                 .work_runtime_registrar()
                 .register(
@@ -521,10 +522,11 @@ pub(super) async fn register_project_open_production_owners(
                 });
             }
             Ok::<_, TraceDecayError>(())
-        },
-        label = "daemon.project.open.owners.work"
-    )
-    .await?;
+            },
+            label = "daemon.project.open.owners.work"
+        )
+        .await?;
+    }
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),

@@ -120,9 +120,31 @@ fn production_project_owner_grants_every_work_operation() {
 }
 
 #[test]
+fn work_grant_is_absent_for_partial_access_but_expiry_still_fails_closed() {
+    let mut access = access_snapshot();
+    access.effective_capabilities.remove(
+        &CapabilityId::new("capability.work.generate_proposal")
+            .expect("generate proposal capability"),
+    );
+
+    assert!(
+        project_open_work_grant(&access, UtcMicros(10))
+            .expect("partial Work access is valid")
+            .is_none(),
+        "a denied Work operation must leave the Work owner unmounted"
+    );
+    assert!(
+        project_open_work_grant(&access, access.grant_expires_at).is_err(),
+        "an expired project-open authority must still fail closed"
+    );
+}
+
+#[test]
 fn work_grant_identity_tracks_access_authority_not_configuration_state() {
     let access = access_snapshot();
-    let original = project_open_work_grant(&access, UtcMicros(10)).expect("original Work grant");
+    let original = project_open_work_grant(&access, UtcMicros(10))
+        .expect("original Work grant")
+        .expect("complete Work access");
 
     let mut reconfigured = access.clone();
     reconfigured.configuration_revision =
@@ -131,8 +153,9 @@ fn work_grant_identity_tracks_access_authority_not_configuration_state() {
         canonical_sha256(&"work-grant-configuration-2").expect("reconfigured digest");
     reconfigured.configuration_provenance_digest =
         canonical_sha256(&"work-grant-provenance-2").expect("reconfigured provenance");
-    let reconfigured =
-        project_open_work_grant(&reconfigured, UtcMicros(10)).expect("reconfigured Work grant");
+    let reconfigured = project_open_work_grant(&reconfigured, UtcMicros(10))
+        .expect("reconfigured Work grant")
+        .expect("complete Work access");
     assert_eq!(
         reconfigured.digest, original.digest,
         "ordinary configuration changes must not abandon durable Work rows"
@@ -140,7 +163,9 @@ fn work_grant_identity_tracks_access_authority_not_configuration_state() {
 
     let mut rebound = access.clone();
     rebound.binding = source_binding(&access.scope.project_id, "binding.work-grant.rebound", 'b');
-    let rebound = project_open_work_grant(&rebound, UtcMicros(10)).expect("rebound Work grant");
+    let rebound = project_open_work_grant(&rebound, UtcMicros(10))
+        .expect("rebound Work grant")
+        .expect("complete Work access");
     assert_ne!(
         rebound.digest, original.digest,
         "a different admitted source binding must change Work authority"
@@ -150,7 +175,9 @@ fn work_grant_identity_tracks_access_authority_not_configuration_state() {
     expanded
         .effective_capabilities
         .insert(CapabilityId::new("capability.test.work-grant-extra").expect("extra capability"));
-    let expanded = project_open_work_grant(&expanded, UtcMicros(10)).expect("expanded Work grant");
+    let expanded = project_open_work_grant(&expanded, UtcMicros(10))
+        .expect("expanded Work grant")
+        .expect("complete Work access");
     assert_ne!(
         expanded.digest, original.digest,
         "a different effective capability set must change Work authority"

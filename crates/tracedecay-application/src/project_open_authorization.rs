@@ -200,16 +200,18 @@ pub fn project_open_work_capabilities() -> Result<BTreeSet<CapabilityId>, Applic
 pub fn project_open_work_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
-) -> Result<CapabilityGrantSnapshot, ApplicationContractError> {
+) -> Result<Option<CapabilityGrantSnapshot>, ApplicationContractError> {
     let capabilities = project_open_work_capabilities()?;
-    if observed_at >= access.grant_expires_at
-        || !capabilities
-            .iter()
-            .all(|capability| access.effective_capabilities.contains(capability))
-    {
+    if observed_at >= access.grant_expires_at {
         return Err(ApplicationContractError::Inconsistent {
             field: "project-open Work capability grant",
         });
+    }
+    if !capabilities
+        .iter()
+        .all(|capability| access.effective_capabilities.contains(capability))
+    {
+        return Ok(None);
     }
     let use_cases = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
@@ -247,6 +249,7 @@ pub fn project_open_work_grant(
         use_cases,
         tracedecay_contracts::DisclosureClass::Sensitive,
     )
+    .map(Some)
 }
 
 #[cfg(test)]
