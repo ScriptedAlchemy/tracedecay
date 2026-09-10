@@ -408,7 +408,7 @@ pub struct PrimitiveNotFoundV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum NodeResultV1 {
-    Found(NodeDetailsV1),
+    Found(Box<NodeDetailsV1>),
     NotFound(PrimitiveNotFoundV1),
 }
 
