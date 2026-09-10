@@ -891,7 +891,7 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     first_file_offset: u64,
     files_end_offset: u64,
     file_ranges: Vec<(u64, u64)>,
-    total_lexical_bytes: u64,
+    total_lexical_units: u64,
     maximum_file_bytes: u64,
     source_state_digest: ManifestDigest,
     format_revision: u32,
@@ -1037,13 +1037,18 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             SealedLexicalFilesV1::Partitioned(source) => source.maximum_file_bytes(),
         };
         let cursor = VerifiedSealedLexicalCursorV1::initial(source_state_digest.clone(), 0)?;
+        // Published and partitioned file records are separate durable objects,
+        // not a contiguous files-array byte range, so this source's whole
+        // offset domain — cursor, ranges, and span — is file ordinals. That is
+        // why the span is named in units rather than bytes: `Self::open` fills
+        // the same fields with a genuine byte span (issue #1205).
         Ok(Self {
             reader,
             file_count,
             first_file_offset: 0,
             files_end_offset: file_count,
             file_ranges,
-            total_lexical_bytes: file_count,
+            total_lexical_units: file_count,
             maximum_file_bytes,
             source_state_digest,
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -1080,7 +1085,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             layout.state_digest.clone(),
             layout.first_file_offset,
         )?;
-        let total_lexical_bytes = layout
+        let total_lexical_units = layout
             .files_end_offset
             .checked_sub(layout.first_file_offset)
             .ok_or_else(|| {
@@ -1095,7 +1100,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             first_file_offset: layout.first_file_offset,
             files_end_offset: layout.files_end_offset,
             file_ranges: layout.file_ranges,
-            total_lexical_bytes,
+            total_lexical_units,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
@@ -1172,7 +1177,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             layout.state_digest.clone(),
             layout.first_file_offset,
         )?;
-        let total_lexical_bytes = layout
+        let total_lexical_units = layout
             .files_end_offset
             .checked_sub(layout.first_file_offset)
             .ok_or_else(|| {
@@ -1187,7 +1192,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             first_file_offset: layout.first_file_offset,
             files_end_offset: layout.files_end_offset,
             file_ranges: layout.file_ranges,
-            total_lexical_bytes,
+            total_lexical_units,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
@@ -1363,9 +1368,18 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         self.file_count
     }
 
-    /// Authenticated files-array byte span available to the lexical source.
-    pub fn total_lexical_bytes(&self) -> u64 {
-        self.total_lexical_bytes
+    /// Authenticated lexical span available to this source, in its own advance
+    /// unit.
+    ///
+    /// A source opened over a sealed layout advances by files-array bytes; one
+    /// opened over published or partitioned parts advances by file ordinals,
+    /// because its file records are separate durable objects rather than a
+    /// contiguous byte range. Callers may only compare this with
+    /// [`Self::completed_lexical_units`] from the same source — it is not a
+    /// byte count on every path, and reporting it as one is what issue #1205
+    /// was (`total_lexical_bytes: 772` for a 772-file generation).
+    pub fn total_lexical_units(&self) -> u64 {
+        self.total_lexical_units
     }
 
     /// Fully completed file records at the durable source cursor.
@@ -1373,10 +1387,11 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         self.cursor.next_file_ordinal()
     }
 
-    /// Authenticated files-array bytes fully passed by the durable source
-    /// cursor. A partially consumed file counts only after its final chunk and
-    /// imports are committed, matching `completed_files`.
-    pub fn completed_lexical_bytes(&self) -> Result<u64, CodeIndexProductionErrorV1> {
+    /// Lexical span fully passed by the durable source cursor, in the same unit
+    /// as [`Self::total_lexical_units`]. A partially consumed file counts only
+    /// after its final chunk and imports are committed, matching
+    /// `completed_files`.
+    pub fn completed_lexical_units(&self) -> Result<u64, CodeIndexProductionErrorV1> {
         self.cursor
             .next_file_offset
             .checked_sub(self.first_file_offset)
