@@ -6980,6 +6980,58 @@ impl tracedecay_application::feedback::cycle_production::ProductionFeedbackDocum
 /// published record with `ImpactTargetFileMismatch` / `GenerationMismatch`,
 /// because the saved-edit cycle's impact target is minted here as
 /// `file.daemon.<digest>` under this generation.
+impl CodeIndexSchedulerRegistryV1 {
+    async fn resolve_current_publication_identity(
+        &self,
+        project_root: PathBuf,
+        scope: Option<tracedecay_contracts::ResolvedScope>,
+    ) -> Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>
+    {
+        let root = project_root.canonicalize().ok()?;
+        let root_generation = self.latest_text_serving_for_root(&root).await?;
+        let scope = match scope {
+            Some(scope) => scope,
+            None => {
+                let metadata = root_generation.metadata();
+                let snapshot = metadata.snapshot();
+                tracedecay_contracts::ResolvedScope::new(
+                    metadata.manifest().project_id.clone(),
+                    snapshot.repository.clone(),
+                    snapshot.worktree.clone()?,
+                    snapshot.reference.clone(),
+                )
+                .ok()?
+            }
+        };
+        let (current, fresh) = self.latest_text_serving_freshness_for_scope(&scope).await?;
+        if !fresh
+            || root_generation.metadata().manifest().generation_id
+                != current.metadata().manifest().generation_id
+        {
+            return None;
+        }
+        let metadata = current.metadata();
+        let snapshot = metadata.snapshot();
+        Some(
+            tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
+                metadata.manifest().generation_id.clone(),
+                metadata.manifest().seal.sealed_at,
+                snapshot.repository.clone(),
+                snapshot.worktree.clone(),
+                snapshot.reference.clone(),
+                snapshot.source_revision.clone(),
+                snapshot.files.iter().map(|file| {
+                    (
+                        file.logical_path.clone(),
+                        file.file_occurrence_id.clone(),
+                        file.content_digest.clone(),
+                    )
+                }),
+            ),
+        )
+    }
+}
+
 impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1
     for CodeIndexSchedulerRegistryV1
 {
@@ -6990,26 +7042,9 @@ impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdenti
     {
         let registry = self.clone();
         Box::pin(async move {
-            let root = project_root.canonicalize().ok()?;
-            let current = registry.latest_complete_fresh(&root).await?;
-            let snapshot = current.generation.snapshot();
-            Some(
-                tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
-                    current.generation.manifest().generation_id.clone(),
-                    current.generation.manifest().seal.sealed_at,
-                    snapshot.repository.clone(),
-                    snapshot.worktree.clone(),
-                    snapshot.reference.clone(),
-                    snapshot.source_revision.clone(),
-                    snapshot.files.iter().map(|file| {
-                        (
-                            file.logical_path.clone(),
-                            file.file_occurrence_id.clone(),
-                            file.content_digest.clone(),
-                        )
-                    }),
-                ),
-            )
+            registry
+                .resolve_current_publication_identity(project_root, None)
+                .await
         })
     }
 
@@ -7021,36 +7056,9 @@ impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdenti
     {
         let registry = self.clone();
         Box::pin(async move {
-            let root = project_root.canonicalize().ok()?;
-            let root_generation = registry.latest_text_serving_for_root(&root).await?;
-            let (current, fresh) = registry
-                .latest_text_serving_freshness_for_scope(&scope)
-                .await?;
-            if !fresh
-                || root_generation.metadata().manifest().generation_id
-                    != current.metadata().manifest().generation_id
-            {
-                return None;
-            }
-            let metadata = current.metadata();
-            let snapshot = metadata.snapshot();
-            Some(
-                tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
-                    metadata.manifest().generation_id.clone(),
-                    metadata.manifest().seal.sealed_at,
-                    snapshot.repository.clone(),
-                    snapshot.worktree.clone(),
-                    snapshot.reference.clone(),
-                    snapshot.source_revision.clone(),
-                    snapshot.files.iter().map(|file| {
-                        (
-                            file.logical_path.clone(),
-                            file.file_occurrence_id.clone(),
-                            file.content_digest.clone(),
-                        )
-                    }),
-                ),
-            )
+            registry
+                .resolve_current_publication_identity(project_root, Some(scope))
+                .await
         })
     }
 }

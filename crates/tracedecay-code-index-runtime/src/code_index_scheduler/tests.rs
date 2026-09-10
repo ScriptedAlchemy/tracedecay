@@ -15490,6 +15490,87 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopened_current_text_generation_resolves_publication_identity_without_graph_seat() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (generation, scope) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        let generation =
+            published(scheduler.reconcile_now().expect("seed generation")).generation_id;
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        let scope = ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope");
+        (generation, scope)
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("reopen retained generation");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some((current, true)) = registry
+            .latest_text_serving_freshness_for_scope(&scope)
+            .await
+            && current.query_owners_are_warm()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "reopened text generation did not become current"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "configured graph refusal must leave the full generation unavailable"
+    );
+
+    let root_identity = tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1::resolve(
+        &registry,
+        fixture.path().to_path_buf(),
+    )
+    .await
+    .expect("current reopened text generation resolves by root");
+    let scoped_identity = tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1::resolve_current_for_scope(
+        &registry,
+        fixture.path().to_path_buf(),
+        scope,
+    )
+    .await
+    .expect("current reopened text generation resolves by scope");
+    assert_eq!(root_identity.generation_id(), &generation);
+    assert_eq!(scoped_identity.generation_id(), &generation);
+    registry.shutdown().await;
+}
+
 /// A retained seal is only a candidate for activation. If source-authority
 /// verification fails after the seal decodes, the worker must not copy that
 /// unverified generation into the serving slot. The failed arrival remains
