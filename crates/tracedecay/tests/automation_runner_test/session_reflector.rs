@@ -547,7 +547,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             },
             {
                 "content": "Use the fact-store workflow only when the user explicitly asks to memorize or remember a subject",
-                "category": "tool_guidance",
+                "category": "tool",
                 "tags": ["memory", "workflow"],
                 "entities": ["TraceDecay"],
                 "trust": 0.74,
@@ -714,7 +714,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     ));
     assert!(has_quarantine_reason("reason is required"));
     assert!(has_quarantine_reason(
-        "confidence is not supported; use trust"
+        "fact proposal contains an unsupported field"
     ));
     assert_eq!(
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
@@ -803,7 +803,11 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(11));
+    assert_eq!(
+        eval_payload["summary"]["eval_count"],
+        json!(4),
+        "evals come from applied receipt ids plus the sanitized rejection summary"
+    );
     assert!(
         eval_payload["eval_definitions"]
             .as_array()
