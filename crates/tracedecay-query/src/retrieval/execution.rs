@@ -70,6 +70,10 @@ pub struct NativeSymbolRecordV1 {
     pub kind: String,
     pub path: String,
     pub span: SourceSpan,
+    pub start_line_zero_based: u32,
+    pub end_line_zero_based: u32,
+    pub line: u32,
+    pub end_line: u32,
     pub signature: Option<String>,
     pub is_async: bool,
 }
@@ -569,6 +573,10 @@ mod tests {
                     start_byte: 10,
                     end_byte: 20,
                 },
+                start_line_zero_based: 4,
+                end_line_zero_based: 6,
+                line: 5,
+                end_line: 7,
                 signature: Some("pub fn callee()".to_owned()),
                 is_async: false,
             })

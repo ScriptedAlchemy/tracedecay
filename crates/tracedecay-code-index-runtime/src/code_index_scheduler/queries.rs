@@ -1160,6 +1160,22 @@ impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
             .next()
             .unwrap_or(&qualified_name)
             .to_owned();
+        let end_line_zero_based = lineage
+            .start_line
+            .checked_add(
+                lineage
+                    .line_span
+                    .checked_sub(1)
+                    .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?,
+            )
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
+        let line = lineage
+            .start_line
+            .checked_add(1)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
+        let end_line = end_line_zero_based
+            .checked_add(1)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         Ok(NativeSymbolRecordV1 {
             occurrence: symbol.clone(),
             name,
@@ -1173,6 +1189,10 @@ impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
                 },
                 |chunk| chunk.anchor.source_span,
             ),
+            start_line_zero_based: lineage.start_line,
+            end_line_zero_based,
+            line,
+            end_line,
             signature: lineage.signature.clone(),
             is_async: lineage.is_async,
         })
@@ -1249,10 +1269,10 @@ fn application_symbol_record(record: NativeSymbolRecordV1) -> SymbolPrimitiveRec
         qualified_name: record.qualified_name,
         kind: record.kind,
         file: record.path,
-        start_line_zero_based: 0,
-        end_line_zero_based: 0,
-        line: 1,
-        end_line: 1,
+        start_line_zero_based: record.start_line_zero_based,
+        end_line_zero_based: record.end_line_zero_based,
+        line: record.line,
+        end_line: record.end_line,
         signature: record.signature,
         is_async: record.is_async,
         score: None,
