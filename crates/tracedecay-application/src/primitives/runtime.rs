@@ -914,7 +914,8 @@ async fn dispatch_admitted(
             let outcome = runtime
                 .project_runtime
                 .source_lines
-                .source_lines(&retrieval_context(&context, &operation), &request);
+                .source_lines(retrieval_context(&context, &operation), &request)
+                .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
         PrimitiveRequest::SourceBody(request) => dispatch_extended!(
