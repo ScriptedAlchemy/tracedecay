@@ -273,6 +273,8 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                         start_line: 0,
                         signature: None,
                         docstring: None,
+                        is_async: false,
+                        derives: Vec::new(),
                         skip_test_coverage: false,
                         file_identity: id::<FileIdentityDigest>(&format!(
                             "sha256:{}",

@@ -237,9 +237,6 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
             let mut unavailable_fields = vec![
                 "assertions",
                 "attrs_start_line",
-                "derives",
-                "docstring",
-                "is_async",
                 "returns",
                 "unchecked_calls",
                 "unsafe_blocks",
@@ -265,6 +262,9 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
                     start_line: user_line(metadata.start_line),
                     end_line: user_line(end_line),
                     signature: metadata.signature.clone(),
+                    docstring: metadata.docstring.clone(),
+                    is_async: metadata.is_async,
+                    derives: metadata.derives.clone(),
                     visibility: metadata.visibility.clone(),
                     branches: complexity.map(|complexity| complexity.branches),
                     loops: complexity.map(|complexity| complexity.loops),
@@ -438,11 +438,13 @@ pub async fn handle_signature(graph: &VerifiedGraphQuery, args: Value) -> Result
             "kind": metadata.kind,
             "visibility": metadata.visibility,
             "signature": metadata.signature,
+            "docstring": metadata.docstring,
+            "is_async": metadata.is_async,
             "file": file_path,
             "start_line": user_line(metadata.start_line),
             "end_line": user_line(end_line),
             "cost_to_expand": cost_to_expand_verified(metadata, file_size_bytes)?,
-            "unavailable_fields": ["attrs_start_line", "docstring", "is_async"],
+            "unavailable_fields": ["attrs_start_line"],
         }));
     }
 
@@ -566,9 +568,8 @@ pub async fn handle_impls(graph: &VerifiedGraphQuery, args: Value) -> Result<Too
     ))
 }
 
-/// Derive annotations are not published in the
-/// verified code graph generation, so a matched symbol reports a typed
-/// evidence-unavailable route error. Accepts `node_id` or `qualified_name`.
+/// Derive annotations attached to a symbol. Accepts `node_id` or
+/// `qualified_name`. Macro expansion is outside the retained syntax evidence.
 #[hotpath::measure(label = "mcp.graph.derives.total")]
 pub async fn handle_derives(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
     let nodes = hotpath::measure_block!(
@@ -578,12 +579,41 @@ pub async fn handle_derives(graph: &VerifiedGraphQuery, args: Value) -> Result<T
     if nodes.is_empty() {
         return Ok(text_tool_result("No matching symbol found.", Vec::new()));
     }
-    Err(TraceDecayError::ProjectRoute {
-        reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
-        retryable: false,
-        detail: "derive annotations are not published in the verified code graph generation"
-            .to_owned(),
-    })
+
+    let touched_files = graph_symbol_paths(&nodes)?;
+    let mut items = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        let metadata = required_graph_metadata(node)?;
+        let file_path = required_graph_file_path(node)?;
+        let derives = metadata
+            .derives
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "evidence_class": "syntax_exact",
+                    "unavailable_fields": ["generated_trait_impl", "generated_methods"],
+                })
+            })
+            .collect::<Vec<_>>();
+        items.push(json!({
+            "node_id": node.occurrence.as_str(),
+            "name": metadata.simple_name,
+            "qualified_name": metadata.qualified_name,
+            "kind": metadata.kind,
+            "file": file_path,
+            "line": user_line(metadata.start_line),
+            "derives": derives,
+        }));
+    }
+
+    let output = hotpath::measure_block!("mcp.graph.derives.serialize", json!(items));
+    Ok(generic_tool_result(
+        Some(graph.project_root()?),
+        &args,
+        &output,
+        touched_files,
+    ))
 }
 
 /// Trait / method implementor lookup.

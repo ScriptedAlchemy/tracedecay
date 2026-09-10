@@ -1154,20 +1154,6 @@ impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
         let chunk = index
             .chunk_position_for_file_symbol(file, symbol)
             .map(|position| &self.generation.chunks().chunks()[position]);
-        let signature = chunk
-            .and_then(|chunk| {
-                chunk
-                    .sanitized_text
-                    .as_str()
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-            })
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned);
-        let is_async = signature
-            .as_deref()
-            .is_some_and(|line| line.split_whitespace().any(|part| part == "async"));
         let qualified_name = lineage.qualified_name.clone();
         let name = qualified_name
             .rsplit("::")
@@ -1187,8 +1173,8 @@ impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
                 },
                 |chunk| chunk.anchor.source_span,
             ),
-            signature,
-            is_async,
+            signature: lineage.signature.clone(),
+            is_async: lineage.is_async,
         })
     }
 }
@@ -2533,9 +2519,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     {
                         return None;
                     }
-                    if request.is_async.is_some_and(|is_async| {
-                        signature.split_whitespace().any(|part| part == "async") != is_async
-                    }) {
+                    if request
+                        .is_async
+                        .is_some_and(|is_async| symbol.is_async != is_async)
+                    {
                         return None;
                     }
                     symbol_record_by_id(&prepared.latest, &symbol.occurrence)

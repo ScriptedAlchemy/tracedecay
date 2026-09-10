@@ -134,6 +134,8 @@ fn impact_reader() -> CodeGraphInteractiveReader {
                 start_line: 1,
                 signature: None,
                 docstring: None,
+                is_async: false,
+                derives: Vec::new(),
                 skip_test_coverage: false,
                 file_identity: FileIdentityDigest::new(format!(
                     "sha256:{}",

@@ -350,6 +350,8 @@ mod tests {
                 start_line,
                 signature: signature.map(str::to_owned),
                 docstring: None,
+                is_async: false,
+                derives: Vec::new(),
                 skip_test_coverage: false,
                 file_identity: digest('e'),
                 content_digest: digest('d'),
