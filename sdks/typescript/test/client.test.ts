@@ -828,7 +828,6 @@ describe("TraceDecayClient generated operation bindings", () => {
       "configuration_set",
       "configuration_unset",
       "configuration_batch",
-      "configuration_write_credential",
       "configuration_observed_state",
       "configuration_protected_preview",
       "configuration_protected_apply",

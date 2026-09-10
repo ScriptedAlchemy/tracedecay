@@ -12,9 +12,8 @@ pub use tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, CredentialKindV1,
-    CredentialReferenceId, ProtectedChange, RestartRequirementV1, RollbackModeV1, SettingKey,
-    SettingSensitivityV1,
+    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange,
+    RestartRequirementV1, RollbackModeV1, SettingKey, SettingSensitivityV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -88,16 +87,6 @@ pub struct ConfigurationUnsetRequestV1 {
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationBatchRequestV1 {
     pub mutations: Vec<ConfigurationDirectMutationRequestV1>,
-    pub expected_revision: ConfigurationRevisionId,
-    pub idempotency_key: ConfigurationIdempotencyKey,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationWriteCredentialRequestV1 {
-    pub expected_reference_id: Option<CredentialReferenceId>,
-    pub kind: CredentialKindV1,
-    pub write_handle: String,
     pub expected_revision: ConfigurationRevisionId,
     pub idempotency_key: ConfigurationIdempotencyKey,
 }
@@ -206,7 +195,6 @@ pub enum ConfigurationWireRequestV1 {
     Set(ConfigurationSetRequestV1),
     Unset(ConfigurationUnsetRequestV1),
     Batch(ConfigurationBatchRequestV1),
-    WriteCredential(ConfigurationWriteCredentialRequestV1),
     ObservedState(ConfigurationObservedStateRequestV1),
     ProtectedPreview(ConfigurationProtectedPreviewRequestV1),
     ProtectedApply(ConfigurationProtectedApplyRequestV1),
@@ -238,9 +226,6 @@ pub fn configuration_wire_request_from_invocation_payload(
         }
         "configuration_batch" => {
             wrap_configuration_inner(payload, ConfigurationWireRequestV1::Batch)
-        }
-        "configuration_write_credential" => {
-            wrap_configuration_inner(payload, ConfigurationWireRequestV1::WriteCredential)
         }
         "configuration_observed_state" => {
             wrap_configuration_inner(payload, ConfigurationWireRequestV1::ObservedState)
@@ -295,7 +280,7 @@ const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
-const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
+const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 12] = [
     ConfigurationSurfaceSpec {
         name: "configuration_list",
         summary: "List configuration settings",
@@ -351,16 +336,6 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         summary: "Apply configuration batch",
         description: "Apply one authorized atomic batch of typed configuration mutations.",
         example: "Apply these project configuration changes together",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "configuration_write_credential",
-        summary: "Write credential reference",
-        description: "Resolve an opaque credential handle into write-only reference metadata.",
-        example: "Rotate this configuration credential reference",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
         maximum_deadline_millis: 15_000,
@@ -536,11 +511,6 @@ fn configuration_executable_schemas(
         "configuration_batch",
         ConfigurationBatchRequestV1,
         ConfigurationMutationReceipt
-    );
-    add!(
-        "configuration_write_credential",
-        ConfigurationWriteCredentialRequestV1,
-        tracedecay_domain::configuration::CredentialReferenceMetadataV1
     );
     add!(
         "configuration_observed_state",

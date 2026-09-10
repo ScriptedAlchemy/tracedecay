@@ -246,49 +246,6 @@ pub(super) async fn execute_configuration(
                 )
             }
             (
-                ApplicationSurfaceOperation::ConfigurationWriteCredential,
-                ConfigurationWireRequestV1::WriteCredential(request),
-            ) => {
-                let idempotency_key = request.idempotency_key;
-                let mutation_authority = issue_configuration_mutation_authority(
-                    &registered,
-                    &wire_request_id,
-                    Some(idempotency_key.clone()),
-                    ConfigurationMutationOperationV1::CredentialWrite,
-                    registered.scope.scope_digest.clone(),
-                    request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::CredentialStore,
-                    ConfigurationMutationEffectV1::WriteCredentialReference,
-                    deadline.expires_at,
-                    observed_at,
-                )?;
-                let metadata = Box::pin(client.write_credential(
-                    mutation_authority,
-                    WriteOnlyCredentialMutation {
-                        expected_reference_id: request.expected_reference_id,
-                        kind: request.kind,
-                        write_handle: CredentialWriteHandleV1::new(request.write_handle)?,
-                    },
-                    request.expected_revision.clone(),
-                ))
-                .await?;
-                let payload =
-                    serde_json::to_value(&metadata).map_err(|_| ConfigurationError::Unavailable)?;
-                configuration_effect(
-                    payload,
-                    authority,
-                    &registered.actor,
-                    &registered.scope,
-                    surface_operation,
-                    &idempotency_key,
-                    &request.expected_revision,
-                    metadata.operation_digest,
-                    metadata.settlement_authority,
-                    metadata.created_at,
-                    metadata.effective_deadline_at,
-                )
-            }
-            (
                 ApplicationSurfaceOperation::ConfigurationProtectedPreview,
                 ConfigurationWireRequestV1::ProtectedPreview(request),
             ) => {

@@ -180,7 +180,6 @@ application_surface_operations! {
     ConfigurationSet => "configuration_set";
     ConfigurationUnset => "configuration_unset";
     ConfigurationBatch => "configuration_batch";
-    ConfigurationWriteCredential => "configuration_write_credential";
     ConfigurationObservedState => "configuration_observed_state";
     ConfigurationProtectedPreview => "configuration_protected_preview";
     ConfigurationProtectedApply => "configuration_protected_apply";

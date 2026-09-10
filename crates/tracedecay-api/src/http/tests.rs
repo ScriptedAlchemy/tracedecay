@@ -218,10 +218,6 @@ fn configuration_operation_parser_is_exact_and_closed() {
             ApplicationSurfaceOperation::ConfigurationBatch,
         ),
         (
-            "configuration_write_credential",
-            ApplicationSurfaceOperation::ConfigurationWriteCredential,
-        ),
-        (
             "configuration_observed_state",
             ApplicationSurfaceOperation::ConfigurationObservedState,
         ),
