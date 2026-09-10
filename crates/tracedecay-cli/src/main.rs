@@ -854,10 +854,7 @@ async fn run_startup_preamble(command: &Commands) {
     // Check first-run before any config save creates the file.
     let is_first_run = !tracedecay_session_memory::user_config::UserConfig::exists();
 
-    let is_force_flush = matches!(
-        command,
-        Commands::Init { .. } | Commands::Sync { .. } | Commands::Status { .. }
-    );
+    let is_force_flush = matches!(command, Commands::Sync { .. } | Commands::Status { .. });
     let mut user_config = tracedecay_session_memory::user_config::UserConfig::load();
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
     // makes a synchronous HTTP call which can add seconds to
@@ -868,9 +865,11 @@ async fn run_startup_preamble(command: &Commands) {
     // command turned the daemon's transient "runtime still mounting" state
     // into per-command stderr noise. A failed lookup on an ordinary command
     // is deferred (the next command retries); the flush-bearing commands
-    // (`init`, `sync`, `status`) still surface it, so a persistent failure
+    // (`sync`, `status`) still surface it, so a persistent failure
     // stays visible exactly where the flush is expected to happen.
-    if startup_policy.runs_startup_maintenance()
+    // `init` cannot resolve this setting until it creates the requested
+    // project, which may differ from the current directory.
+    if runs_worldwide_counter_flush(command)
         && user_config.pending_upload > 0
         && let Ok(cwd) = std::env::current_dir()
         && let Some(project_root) =
@@ -2062,6 +2061,11 @@ impl CommandStartupPolicy {
     fn runs_agent_install_check(self) -> bool {
         matches!(self, Self::Full)
     }
+}
+
+fn runs_worldwide_counter_flush(command: &Commands) -> bool {
+    !matches!(command, Commands::Init { .. })
+        && CommandStartupPolicy::for_command(command).runs_startup_maintenance()
 }
 
 #[cfg(test)]
