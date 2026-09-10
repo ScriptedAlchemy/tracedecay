@@ -86,7 +86,7 @@ impl ProjectRuntimeRegistryV1 {
                 )
                 .await;
                 clean &= shut_down_observability(&mut runtimes).await;
-                shut_down_runtimes(runtimes);
+                drop(shut_down_runtimes(runtimes));
                 clean
             }
             Err(_) => false,
@@ -174,6 +174,10 @@ impl ProjectRuntimeRegistryV1 {
                     }))
                 })
                 .await;
+                tracedecay_runtime_core::logging::log_daemon_event(
+                    "daemon_shutdown",
+                    &[("outcome", "project_runtimes_drained".to_string())],
+                );
                 let state = match drained {
                     Ok(Ok(runtimes)) => {
                         if registry.finish_drained_runtimes(runtimes).await {
@@ -218,7 +222,7 @@ impl ProjectRuntimeRegistryV1 {
 
     fn force_drop_failed_shutdown_runtimes(&self) {
         let runtimes = std::mem::take(&mut *self.lock_runtimes());
-        shut_down_runtimes(runtimes);
+        drop(shut_down_runtimes(runtimes));
     }
 
     #[hotpath::skip]
@@ -283,11 +287,27 @@ impl ProjectRuntimeRegistryV1 {
     ) -> bool {
         let deadline =
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+        let started = std::time::Instant::now();
+        let step = |outcome: &str| {
+            tracedecay_runtime_core::logging::log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", outcome.to_string()),
+                    ("owner", "project_runtimes".to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        };
         let mut clean = shut_down_advisory(&runtimes).await;
+        step("advisory_shut_down");
         clean &= shut_down_feedback(&runtimes).await;
+        step("feedback_shut_down");
         clean &= shut_down_semantic(&mut runtimes, deadline).await;
+        step("semantic_shut_down");
         clean &= shut_down_observability(&mut runtimes).await;
-        shut_down_runtimes(runtimes);
+        step("observability_shut_down");
+        release_drained_runtimes(shut_down_runtimes(runtimes));
+        step("runtimes_release_detached");
         clean
     }
 }
@@ -390,7 +410,13 @@ async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime
 /// Terminal teardown for a set of drained runtimes. Shared by full daemon
 /// shutdown and by targeted retirement (`retire_roots`), so a deletion cleanup
 /// tears a project's runtimes down exactly the way shutdown does.
-fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
+///
+/// Returns the torn-down runtimes instead of dropping them: the caller decides
+/// whether their deallocation may run inline (targeted retirement, where the
+/// next mount must observe every handle released) or off the shutdown path.
+fn shut_down_runtimes(
+    mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
+) -> BTreeMap<PathBuf, ProjectRuntime> {
     for runtime in runtimes.values() {
         let (Some(router), Some(feedback)) = (&runtime.feedback_cycle_input, &runtime.feedback)
         else {
@@ -402,12 +428,38 @@ fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
         )));
     }
 
-    for (project_root, runtime) in runtimes {
-        tracedecay_application::semantic_runtime::unregister_project_semantic_runtime(
-            &project_root,
-        );
-        if let Some(semantic) = runtime.semantic {
+    for (project_root, runtime) in runtimes.iter_mut() {
+        tracedecay_application::semantic_runtime::unregister_project_semantic_runtime(project_root);
+        if let Some(semantic) = runtime.semantic.as_ref() {
             semantic.cancel();
         }
     }
+    runtimes
+}
+
+/// Free the drained runtimes off the daemon shutdown path.
+///
+/// A project runtime holds the last references to generation-sized owners
+/// (code-index generations, feedback and evidence readers, semantic caches).
+/// Dropping them frees millions of small allocations and on a repository-sized
+/// corpus that took several seconds — inside the invocation owner's join,
+/// after its bounded code-index sweep had already spent its abort deadline,
+/// which is exactly what outlived the supervisor's TERM grace. Every handle
+/// was already cancelled, joined, and unregistered by `shut_down_runtimes`;
+/// the blocking pool releases the memory while shutdown proceeds, and process
+/// exit reclaims whatever is still being freed.
+fn release_drained_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
+    let count = runtimes.len();
+    let started = std::time::Instant::now();
+    drop(tokio::task::spawn_blocking(move || {
+        drop(runtimes);
+        tracedecay_runtime_core::logging::log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "project_runtimes_released".to_string()),
+                ("runtimes", count.to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
+    }));
 }
