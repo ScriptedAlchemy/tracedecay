@@ -226,8 +226,8 @@ fn handle_branch_action_inner(
                     }
                     branch::BranchAddOutcome::Deferred => {
                         spinner.done(&format!(
-                        "branch '{branch_name}' tracked; sync deferred because another process is active"
-                    ));
+                            "branch '{branch_name}' admitted; indexing continues in the background. Run `tracedecay branch list` to check readiness"
+                        ));
                     }
                 }
             }
