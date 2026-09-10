@@ -50,6 +50,7 @@ use crate::git::native_integration::{
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationStackResolutionOutcomeV1,
     NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
 };
+use crate::git::stack_signal_expand::GitHubStackSignalExpandSurfaceRequest;
 use crate::git::worktree::{
     NativeWorktreeSurfaceResultV1, WorktreeCleanupConfirmRequestV1,
     WorktreeCleanupInspectRequestV1, WorktreeCleanupReconcileRequestV1, WorktreeCleanupRemovalV1,
@@ -287,6 +288,8 @@ pub struct NativeIntegrationPreviewProjectionV1 {
     pub ordered_commit_count: u32,
     pub created_at: UtcMicros,
     pub expires_at: UtcMicros,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_stack_signal: Option<GitHubStackSignalExpandSurfaceRequest>,
 }
 
 impl NativeIntegrationPreviewProjectionV1 {
@@ -303,6 +306,7 @@ impl NativeIntegrationPreviewProjectionV1 {
             })?,
             created_at: preview.created_at,
             expires_at: preview.expires_at,
+            github_stack_signal: None,
         })
     }
 }
@@ -386,6 +390,8 @@ pub struct NativeIntegrationReceiptProjectionV1 {
     pub final_tree: String,
     pub completed_at: UtcMicros,
     pub receipt_digest: ManifestDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_stack_signal: Option<GitHubStackSignalExpandSurfaceRequest>,
 }
 
 impl NativeIntegrationReceiptProjectionV1 {
@@ -404,6 +410,7 @@ impl NativeIntegrationReceiptProjectionV1 {
             final_tree: receipt.final_tree.as_str().to_owned(),
             completed_at: receipt.completed_at,
             receipt_digest: receipt.receipt_digest.clone(),
+            github_stack_signal: None,
         })
     }
 }
@@ -1012,6 +1019,52 @@ fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
 mod tests {
     use super::*;
     use NativeIntegrationSurfaceUnavailableV1 as Reason;
+    use tracedecay_domain::{StackDeliveryWatermarkId, StackSignalId};
+
+    fn digest(seed: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("digest")
+    }
+
+    #[test]
+    fn preflight_projection_carries_the_exact_guarded_expansion_request() {
+        let handle = GitHubStackSignalExpandSurfaceRequest {
+            signal_id: StackSignalId::new("signal.stack.preview").expect("signal"),
+            expected_watermark_id: Some(
+                StackDeliveryWatermarkId::new("watermark.stack.preview").expect("watermark"),
+            ),
+        };
+        let result =
+            NativeIntegrationSurfaceResultV1::Preview(NativeIntegrationPreviewProjectionV1 {
+                preview_id: NativeIntegrationPreviewId::new("preview.stack.handle")
+                    .expect("preview"),
+                preview_digest: digest('a'),
+                selection: NativeIntegrationSnapshotProjectionV1 {
+                    selection_digest: digest('b'),
+                    project_id: ProjectId::new("project.stack.handle").expect("project"),
+                    repository_id: RepositoryId::new("repository.stack.handle")
+                        .expect("repository"),
+                    source_ref: RefId::new("refs/heads/dependency").expect("source ref"),
+                    destination_ref: RefId::new("refs/heads/dependent").expect("destination ref"),
+                    inventory_epoch: WorktreeInventoryEpoch::new(1).expect("epoch"),
+                    frozen_at: UtcMicros(1),
+                },
+                disposition: NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
+                    MechanicalIntegrationModeV1::FastForward,
+                ),
+                ordered_commit_count: 1,
+                created_at: UtcMicros(1),
+                expires_at: UtcMicros(2),
+                github_stack_signal: Some(handle.clone()),
+            });
+
+        let encoded = serde_json::to_value(&result).expect("serialize result");
+        let decoded: NativeIntegrationSurfaceResultV1 =
+            serde_json::from_value(encoded).expect("deserialize result");
+        let NativeIntegrationSurfaceResultV1::Preview(preview) = decoded else {
+            panic!("expected preview");
+        };
+        assert_eq!(preview.github_stack_signal, Some(handle));
+    }
 
     #[test]
     fn stack_snapshot_schema_requires_exact_registered_scope_set_identity() {

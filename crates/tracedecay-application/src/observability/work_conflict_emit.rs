@@ -478,6 +478,7 @@ mod tests {
             ordered_commit_count: 1,
             created_at: UtcMicros(12),
             expires_at: UtcMicros(1_000),
+            github_stack_signal: None,
         })
     }
 
@@ -507,6 +508,7 @@ mod tests {
             final_tree: "private-final-tree".to_owned(),
             completed_at,
             receipt_digest: digest('9'),
+            github_stack_signal: None,
         })
     }
 

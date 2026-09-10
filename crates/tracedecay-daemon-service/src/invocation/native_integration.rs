@@ -31,9 +31,10 @@ use tracedecay_application::stack_coordinator::StackCoordinatorErrorV1;
 use tracedecay_contracts::NATIVE_INTEGRATION_APPLY_OPERATION;
 use tracedecay_contracts::git::NativeIntegrationApprovalProjectionV1;
 use tracedecay_contracts::git::{
-    NativeWorktreeSurfaceRequest, NativeWorktreeSurfaceResultV1, WorktreeCleanupReconciliationV1,
-    WorktreeCleanupRemovalV1, WorktreeConfirmationOutcomeV1, WorktreeContractError,
-    WorktreeInspectionOutcomeV1, WorktreeInventoryOutcomeV1,
+    GitHubStackSignalExpandSurfaceRequest, NativeWorktreeSurfaceRequest,
+    NativeWorktreeSurfaceResultV1, WorktreeCleanupReconciliationV1, WorktreeCleanupRemovalV1,
+    WorktreeConfirmationOutcomeV1, WorktreeContractError, WorktreeInspectionOutcomeV1,
+    WorktreeInventoryOutcomeV1,
 };
 use tracedecay_contracts::{
     CancellationSignal, CancellationState, NativeIntegrationApplyRequestV1,
@@ -383,6 +384,7 @@ async fn execute_with_owner(
                             .map_err(stack_coordinator_contract_error),
                         None => owner.service().preflight(application_request, &signal),
                     };
+                    let mut github_stack_signal = None;
                     if let (
                         Some(runtime),
                         Ok(NativeIntegrationPreflightOutcomeV1::Preview(preview)),
@@ -390,18 +392,23 @@ async fn execute_with_owner(
                         && let Some(stack_signal) = signal_from_preflight(&signal_scope, preview)
                             .map_err(stack_coordinator_contract_error)?
                     {
+                        let expansion_handle = GitHubStackSignalExpandSurfaceRequest {
+                            signal_id: stack_signal.signal_id.clone(),
+                            expected_watermark_id: Some(stack_signal.watermark_id.clone()),
+                        };
                         runtime
                             .enqueue_from_preflight(stack_signal, &signal_context)
                             .map_err(stack_coordinator_contract_error)?;
+                        github_stack_signal = Some(expansion_handle);
                     }
-                    outcome
+                    outcome.map(|outcome| (outcome, github_stack_signal))
                 }),
                 label = "daemon.service.native_integration.preflight"
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
             match outcome {
-                Ok(outcome) => {
+                Ok((outcome, github_stack_signal)) => {
                     let owner_preview = match &outcome {
                         NativeIntegrationPreflightOutcomeV1::Preview(preview) => {
                             Some((**preview).clone())
@@ -409,6 +416,13 @@ async fn execute_with_owner(
                         _ => None,
                     };
                     NativeIntegrationSurfaceResultV1::from_preflight(&outcome)
+                        .map(|mut result| {
+                            if let NativeIntegrationSurfaceResultV1::Preview(preview) = &mut result
+                            {
+                                preview.github_stack_signal = github_stack_signal;
+                            }
+                            result
+                        })
                         .map(|result| NativeIntegrationExecutionV1 {
                             result,
                             owner_preview,
@@ -566,11 +580,16 @@ async fn execute_with_owner(
                     );
                     match apply_outcome {
                         Ok(receipt) => {
+                            let mut github_stack_signal = None;
                             if let Some(runtime) = stack_runtime.as_ref()
                                 && let Some(stack_signal) =
                                     signal_from_receipt(&signal_scope, &signal_preview, &receipt)
                                         .map_err(|_| unavailable_native_integration())?
                             {
+                                let expansion_handle = GitHubStackSignalExpandSurfaceRequest {
+                                    signal_id: stack_signal.signal_id.clone(),
+                                    expected_watermark_id: Some(stack_signal.watermark_id.clone()),
+                                };
                                 runtime
                                     .enqueue_from_approval(
                                         stack_signal,
@@ -578,8 +597,13 @@ async fn execute_with_owner(
                                         &signal_context,
                                     )
                                     .map_err(|_| unavailable_native_integration())?;
+                                github_stack_signal = Some(expansion_handle);
                             }
                             NativeIntegrationReceiptProjectionV1::project(&receipt)
+                                .map(|mut receipt| {
+                                    receipt.github_stack_signal = github_stack_signal;
+                                    receipt
+                                })
                                 .map(NativeIntegrationSurfaceResultV1::Receipt)
                                 .map(|result| {
                                     NativeIntegrationExecutionV1::with_preview(
