@@ -98,13 +98,41 @@ pub fn lookup_registered_context_scout_owners(
         .unwrap_or_default()
 }
 
-/// Drops the process-global owner for one project identity. Project close
-/// and isolated tests call this; branch reopen must not.
-pub fn unregister_registered_context_scout_owner(project_id: [u8; 16]) -> bool {
+/// What one conditional unregister did to the project's owner slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextScoutOwnerUnregisterOutcomeV1 {
+    /// The slot held the owner bound to `database_path` and it was removed.
+    Removed,
+    /// No owner is registered for the project.
+    Vacant,
+    /// The slot holds an owner bound to a different database identity (a
+    /// replacement that outlived the retiring runtime); it was left in place.
+    StaleIdentity,
+}
+
+/// Drops the process-global owner for one project identity, but only when the
+/// registered owner still binds `database_path`. Retirement of a runtime whose
+/// owner was already replaced by a newer database identity is a typed no-op
+/// rather than a removal of the live replacement. Project close and isolated
+/// tests call this; branch reopen must not.
+pub fn unregister_registered_context_scout_owner(
+    project_id: [u8; 16],
+    database_path: &std::path::Path,
+) -> ContextScoutOwnerUnregisterOutcomeV1 {
     let Ok(mut owners) = registered_context_scout_owners().lock() else {
-        return false;
+        return ContextScoutOwnerUnregisterOutcomeV1::Vacant;
     };
-    owners.remove(&project_id).is_some()
+    let Some(existing) = owners.get(&project_id) else {
+        return ContextScoutOwnerUnregisterOutcomeV1::Vacant;
+    };
+    if !tracedecay_runtime_core::path_safety::same_canonical_path(
+        existing.store.database().canonical_database_path(),
+        database_path,
+    ) {
+        return ContextScoutOwnerUnregisterOutcomeV1::StaleIdentity;
+    }
+    owners.remove(&project_id);
+    ContextScoutOwnerUnregisterOutcomeV1::Removed
 }
 
 impl ProjectContextScoutOwnerV1 {
@@ -1110,10 +1138,19 @@ mod tests {
 
     async fn test_owner(project_id: [u8; 16]) -> Arc<ProjectContextScoutOwnerV1> {
         let (_temporary, database) = test_database().await;
-        unregister_registered_context_scout_owner(project_id);
         ProjectContextScoutOwnerV1::startup(database, project_id, UtcMicros(1), None)
             .await
             .expect("owner")
+    }
+
+    fn unregister(
+        project_id: [u8; 16],
+        owner: &ProjectContextScoutOwnerV1,
+    ) -> ContextScoutOwnerUnregisterOutcomeV1 {
+        unregister_registered_context_scout_owner(
+            project_id,
+            owner.store().database().canonical_database_path(),
+        )
     }
 
     fn claim_id<T: TryFrom<String>>(value: &str) -> T
@@ -1263,9 +1300,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_retirement_of_replaced_owner_keeps_the_live_owner() {
+        let project_id = [44; 16];
+        let (_first_temporary, first_database) = test_database().await;
+        let first =
+            ProjectContextScoutOwnerV1::startup(first_database, project_id, UtcMicros(1), None)
+                .await
+                .expect("owner A");
+        let (_second_temporary, second_database) = test_database().await;
+        let second =
+            ProjectContextScoutOwnerV1::startup(second_database, project_id, UtcMicros(2), None)
+                .await
+                .expect("owner B replaces A");
+        assert!(!Arc::ptr_eq(&first, &second));
+
+        // Late retirement of runtime A must not evict B.
+        assert_eq!(
+            unregister(project_id, &first),
+            ContextScoutOwnerUnregisterOutcomeV1::StaleIdentity
+        );
+        let registered = lookup_registered_context_scout_owners(project_id);
+        assert_eq!(registered.len(), 1);
+        assert!(
+            Arc::ptr_eq(&registered[0], &second),
+            "stale retirement must leave the replacement owner registered"
+        );
+
+        assert_eq!(
+            unregister(project_id, &second),
+            ContextScoutOwnerUnregisterOutcomeV1::Removed
+        );
+        assert!(lookup_registered_context_scout_owners(project_id).is_empty());
+        assert_eq!(
+            unregister(project_id, &second),
+            ContextScoutOwnerUnregisterOutcomeV1::Vacant
+        );
+    }
+
+    #[tokio::test]
     async fn startup_replaces_owner_when_database_identity_differs() {
         let project_id = [43; 16];
-        unregister_registered_context_scout_owner(project_id);
         let (_first_temporary, first_database) = test_database().await;
         let first =
             ProjectContextScoutOwnerV1::startup(first_database, project_id, UtcMicros(1), None)
@@ -1288,13 +1362,12 @@ mod tests {
             second.store().database().canonical_database_path(),
             second_database.canonical_database_path()
         );
-        unregister_registered_context_scout_owner(project_id);
+        unregister(project_id, &second);
     }
 
     #[tokio::test]
     async fn startup_reuses_the_live_owner_for_the_same_project() {
         let project_id = [41; 16];
-        unregister_registered_context_scout_owner(project_id);
         let (_temporary, database) = test_database().await;
         let first =
             ProjectContextScoutOwnerV1::startup(database.clone(), project_id, UtcMicros(1), None)
@@ -1304,7 +1377,7 @@ mod tests {
             .await
             .expect("reused owner");
         assert!(Arc::ptr_eq(&first, &again));
-        unregister_registered_context_scout_owner(project_id);
+        unregister(project_id, &again);
     }
 
     #[tokio::test]
@@ -1367,6 +1440,6 @@ mod tests {
                 .await,
             ContextScoutClaimAdmissionV1::DeniedAtCapacity
         );
-        unregister_registered_context_scout_owner(project_id);
+        unregister(project_id, &owner);
     }
 }

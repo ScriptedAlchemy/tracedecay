@@ -158,12 +158,10 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
         .expect("write isolated profile payload");
 
     let hook_id = tracedecay_hooks::envelope_identity_hash16("project", "proj_remote_scout");
-    tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
-        hook_id,
-    );
     tracedecay_store_runtime::register_registered_schema_installer();
-    let owner_root = TempDir::new().expect("scout owner database");
-    let owner_path = owner_root.path().join("graph.db");
+    // The owner binds the project's own graph database identity: deletion
+    // only unregisters the owner whose database it is tearing down.
+    let owner_path = layout.graph_db_path.clone();
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &owner_path,
         "remote-deleted Context Scout owner",
@@ -186,6 +184,9 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
         )
         .await
         .expect("register Context Scout owner");
+    // The remote peer already removed the graph file; the runtime owner is
+    // what still pins it.
+    std::fs::remove_file(&layout.graph_db_path).expect("remove graph file after owner startup");
     assert_eq!(
         tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
             hook_id
@@ -254,5 +255,6 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
     );
     tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
         hook_id,
+        replacement.canonical_database_path(),
     );
 }

@@ -5,11 +5,18 @@ use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt, Shutdow
 
 /// Drops the process-global Context Scout owner when this project's other
 /// owners are torn down. A retired or remotely-deleted project must not keep
-/// a strong `Database` handle for the process lifetime.
-pub(crate) fn retire_registered_context_scout_owner(project_id: &tracedecay_domain::ProjectId) {
+/// a strong `Database` handle for the process lifetime. `graph_db_path` is the
+/// database the retiring runtime bound: a late retirement of a runtime whose
+/// owner was already replaced by a newer database identity leaves the live
+/// replacement registered.
+pub(crate) fn retire_registered_context_scout_owner(
+    project_id: &tracedecay_domain::ProjectId,
+    graph_db_path: &std::path::Path,
+) {
     let hook_id = tracedecay_hooks::envelope_identity_hash16("project", project_id.as_str());
     let _ = tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
         hook_id,
+        graph_db_path,
     );
 }
 
@@ -581,7 +588,7 @@ mod tests {
             1
         );
 
-        retire_registered_context_scout_owner(&project_id);
+        retire_registered_context_scout_owner(&project_id, &graph.db_path());
         assert!(
             tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
                 hook_id
@@ -625,6 +632,7 @@ mod tests {
         );
         tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
             hook_id,
+            replacement.canonical_database_path(),
         );
     }
 

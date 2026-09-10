@@ -212,9 +212,6 @@ async fn test_scout_owner(
     .await
     .expect("project database")
     .0;
-    tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
-        [8; 16],
-    );
     tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
         database,
         [8; 16],
