@@ -472,6 +472,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(latest)
     }
 
+    #[hotpath::measure(future = true, label = "query.text_generation.resolve")]
     async fn resolve_text_serving_generation(
         &self,
         request: &RequestContext,
@@ -1490,6 +1491,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(PreparedCallableQueryV1 { latest, query })
     }
 
+    #[hotpath::measure(future = true, label = "query.text.prepare")]
     async fn prepare_text_callable_query(
         &self,
         context: &RetrievalPortContext<'_>,
