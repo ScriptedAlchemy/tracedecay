@@ -70,6 +70,7 @@ pub use dto::{
 };
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) use dto::{GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1, RestReviewV1};
+pub use gh_cli::public_repository_read_credential_v1;
 #[cfg(test)]
 pub(crate) use network::ci_fixture_client;
 pub use network::{
