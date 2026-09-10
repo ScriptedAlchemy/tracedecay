@@ -410,7 +410,14 @@ async fn project_store_and_root(
                 && scope.store_id == store.store.store_id
                 // Branches share a physical graph; the serving branch owns the root.
                 && serving_branch.is_none_or(|branch| scope.branch_name == branch)
-                && profile_root.join(&scope.db_relpath) == serving_db
+                // The registry's profile root has been through `canonicalize`
+                // while the serving path is the one its caller built, so the
+                // two name one file in two spellings wherever an ancestor is
+                // an alias (macOS `/var` -> `/private/var`, Windows `\\?\`).
+                && tracedecay_runtime_core::path_safety::same_canonical_path(
+                    &profile_root.join(&scope.db_relpath),
+                    serving_db,
+                )
             {
                 if selected.is_some() {
                     return None;

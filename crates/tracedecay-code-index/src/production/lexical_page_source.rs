@@ -898,7 +898,7 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     files_end_offset: u64,
     file_ranges: Vec<(u64, u64)>,
     partitioned_lexical_byte_offsets: Option<Vec<u64>>,
-    total_lexical_bytes: u64,
+    total_lexical_units: u64,
     maximum_file_bytes: u64,
     source_state_digest: ManifestDigest,
     format_revision: u32,
@@ -1020,7 +1020,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             .map(|file| (file, file.saturating_add(1)))
             .collect::<Vec<_>>();
         let partitioned_lexical_byte_offsets = source.lexical_byte_offsets()?;
-        let total_lexical_bytes = partitioned_lexical_byte_offsets
+        let total_lexical_units = partitioned_lexical_byte_offsets
             .last()
             .copied()
             .ok_or_else(|| {
@@ -1037,7 +1037,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             files_end_offset: file_count,
             file_ranges,
             partitioned_lexical_byte_offsets: Some(partitioned_lexical_byte_offsets),
-            total_lexical_bytes,
+            total_lexical_units,
             maximum_file_bytes,
             source_state_digest,
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -1074,7 +1074,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             layout.state_digest.clone(),
             layout.first_file_offset,
         )?;
-        let total_lexical_bytes = layout
+        let total_lexical_units = layout
             .files_end_offset
             .checked_sub(layout.first_file_offset)
             .ok_or_else(|| {
@@ -1090,7 +1090,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             files_end_offset: layout.files_end_offset,
             file_ranges: layout.file_ranges,
             partitioned_lexical_byte_offsets: None,
-            total_lexical_bytes,
+            total_lexical_units,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
@@ -1167,7 +1167,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             layout.state_digest.clone(),
             layout.first_file_offset,
         )?;
-        let total_lexical_bytes = layout
+        let total_lexical_units = layout
             .files_end_offset
             .checked_sub(layout.first_file_offset)
             .ok_or_else(|| {
@@ -1183,7 +1183,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             files_end_offset: layout.files_end_offset,
             file_ranges: layout.file_ranges,
             partitioned_lexical_byte_offsets: None,
-            total_lexical_bytes,
+            total_lexical_units,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
@@ -1360,8 +1360,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     }
 
     /// Authenticated files-array byte span available to the lexical source.
-    pub fn total_lexical_bytes(&self) -> u64 {
-        self.total_lexical_bytes
+    pub fn total_lexical_units(&self) -> u64 {
+        self.total_lexical_units
     }
 
     /// Fully completed file records at the durable source cursor.
@@ -1372,7 +1372,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// Authenticated files-array bytes fully passed by the durable source
     /// cursor. A partially consumed file counts only after its final chunk and
     /// imports are committed, matching `completed_files`.
-    pub fn completed_lexical_bytes(&self) -> Result<u64, CodeIndexProductionErrorV1> {
+    pub fn completed_lexical_units(&self) -> Result<u64, CodeIndexProductionErrorV1> {
         if let Some(offsets) = &self.partitioned_lexical_byte_offsets {
             let completed = usize::try_from(self.cursor.next_file_ordinal()).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
@@ -3462,9 +3462,9 @@ mod lexical_page_source_tests {
         .expect("partitioned source opens")
         .expect("partitioned format");
         let total_segment_bytes = segment_sizes.iter().sum::<u64>();
-        assert_eq!(source.total_lexical_bytes(), total_segment_bytes);
-        assert!(source.total_lexical_bytes() > source.total_files());
-        assert_eq!(source.completed_lexical_bytes().expect("initial bytes"), 0);
+        assert_eq!(source.total_lexical_units(), total_segment_bytes);
+        assert!(source.total_lexical_units() > source.total_files());
+        assert_eq!(source.completed_lexical_units().expect("initial bytes"), 0);
         assert_eq!(
             reads.load(Ordering::SeqCst),
             0,
@@ -3484,7 +3484,7 @@ mod lexical_page_source_tests {
                     let completed =
                         usize::try_from(source.completed_files()).expect("completed file count");
                     let completed_bytes =
-                        source.completed_lexical_bytes().expect("completed bytes");
+                        source.completed_lexical_units().expect("completed bytes");
                     assert_eq!(
                         completed_bytes,
                         segment_sizes[..completed].iter().sum::<u64>()
@@ -3497,7 +3497,7 @@ mod lexical_page_source_tests {
                         .verify_completion(Some(source.cursor()))
                         .expect("verified completion");
                     assert_eq!(
-                        source.completed_lexical_bytes().expect("completed bytes"),
+                        source.completed_lexical_units().expect("completed bytes"),
                         total_segment_bytes
                     );
                     assert!(observed_encoded_byte_progress);

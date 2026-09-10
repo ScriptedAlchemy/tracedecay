@@ -359,13 +359,6 @@ mod tests {
             .expect("valid manifest digest")
     }
 
-    fn material() -> InstalledSemanticModelMaterialV1 {
-        InstalledSemanticModelMaterialV1 {
-            artifact_digest: "a".repeat(64),
-            install_path: PathBuf::from("/models/jina"),
-        }
-    }
-
     /// Host-absolute fixture path: `artifact_path` validation requires
     /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
     fn absolute_fixture_path(posix: &str) -> PathBuf {
@@ -373,6 +366,18 @@ mod tests {
             PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
         } else {
             PathBuf::from(posix)
+        }
+    }
+
+    /// The installed model every fixture activates. `install_path` becomes the
+    /// composed `artifact_path`, so it must carry the same host-absolute
+    /// spelling [`selection`] uses: otherwise the composed selection fails
+    /// `SemanticConfig::validate` on Windows, and the "is this the profile
+    /// already active?" comparison sees two spellings of one path.
+    fn material() -> InstalledSemanticModelMaterialV1 {
+        InstalledSemanticModelMaterialV1 {
+            artifact_digest: "a".repeat(64),
+            install_path: absolute_fixture_path("/models/jina"),
         }
     }
 
@@ -394,7 +399,7 @@ mod tests {
                 model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
                 revision: "rev".to_owned(),
                 artifact_digest: "a".repeat(64),
-                install_path: PathBuf::from("/models/jina"),
+                install_path: absolute_fixture_path("/models/jina"),
             }),
             remediation: SemanticModelRemediationV1 {
                 retry: false,
@@ -411,7 +416,7 @@ mod tests {
         let material =
             semantic_activation_material(Some(&status)).expect("installed model material");
         assert_eq!(material.artifact_digest, "a".repeat(64));
-        assert_eq!(material.install_path, PathBuf::from("/models/jina"));
+        assert_eq!(material.install_path, absolute_fixture_path("/models/jina"));
     }
 
     #[test]

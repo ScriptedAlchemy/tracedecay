@@ -95,7 +95,7 @@ pub(super) fn acquire_lease_bounded(
         expires_at,
     };
     let path = lease_path(root);
-    validate_regular_or_missing(&path)?;
+    let lease_file_existed = validate_regular_or_missing(&path)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -117,9 +117,18 @@ pub(super) fn acquire_lease_bounded(
         None => file.try_lock().map_err(map_try_lock_error)?,
     }
     write_lease_file(&mut file, candidate)?;
-    hotpath::measure_block!("hooks.spool.fsync.directory", {
-        shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
-    })?;
+    // Only a newly created lease file needs its directory entry made durable;
+    // re-syncing an entry that already survived a crash buys nothing and is
+    // paid inside the exclusive section every sibling hook is queued behind.
+    // The cost is not uniform: `File::sync_all` is `fcntl(F_FULLFSYNC)` on
+    // macOS, a device-level barrier rather than the page-cache flush the same
+    // call makes on Linux. A creator that has not yet reached this line still
+    // holds the lock, so it performs the sync before any waiter proceeds.
+    if !lease_file_existed {
+        hotpath::measure_block!("hooks.spool.fsync.directory", {
+            shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
+        })?;
+    }
     Ok((candidate, file))
 }
 

@@ -154,6 +154,8 @@ mod tests {
         };
         assert!(read_file_churn(root, 90, &expired).is_err());
         #[cfg(unix)]
+        if non_utf8_file_names_supported(root)
+            .expect("probe non-UTF-8 file-name support without hiding storage failures")
         {
             use std::os::unix::ffi::OsStrExt;
             let path = std::ffi::OsStr::from_bytes(b"invalid-\xff.rs");
@@ -161,6 +163,34 @@ mod tests {
             git(&["add", "."]);
             git(&["commit", "-m", "invalid path"]);
             assert!(read_file_churn(root, 90, &GitCommandBounds::default()).is_err());
+        }
+    }
+
+    /// Report whether `directory`'s filesystem accepts a name that is not
+    /// valid UTF-8.
+    ///
+    /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS
+    /// refuses such a name outright with `EILSEQ`, so a macOS run failed at
+    /// the fixture instead of exercising the churn refusal. Probing keeps the
+    /// coverage everywhere the bytes are accepted while propagating unrelated
+    /// storage failures.
+    #[cfg(unix)]
+    fn non_utf8_file_names_supported(directory: &std::path::Path) -> std::io::Result<bool> {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                std::fs::remove_file(&probe)?;
+                Ok(true)
+            }
+            // Darwin exposes an invalid byte sequence as EILSEQ. Rust
+            // deliberately leaves that errno uncategorized, so keep this
+            // capability exception local to the one platform whose filesystem
+            // rejects the probe name.
+            #[cfg(target_os = "macos")]
+            Err(error) if error.raw_os_error() == Some(92) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 }

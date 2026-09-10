@@ -30,6 +30,8 @@ use tracedecay_domain::{
 };
 use tracedecay_lsp::LspRuntimeFailure;
 
+use tracedecay_application::semantic_runtime::SavedGenerationScheduleOutcomeV1;
+
 use super::graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1};
 use super::reconcile_panic_guard::{
     ReconcileCapacityRetryV1, ReconcilePanicDecisionV1, ReconcilePanicGuardV1,
@@ -5426,14 +5428,23 @@ impl CodeIndexSchedulerRegistryV1 {
         label = "daemon.code_index.semantic_generation_reschedule",
         future = true
     )]
-    pub async fn reschedule_semantic_generation(&self, project_root: &Path) -> bool {
+    pub async fn reschedule_semantic_generation(
+        &self,
+        project_root: &Path,
+    ) -> SavedGenerationScheduleOutcomeV1 {
         let Ok(project_root) = project_root.canonicalize() else {
-            return false;
+            return Self::record_reschedule_decline(
+                project_root,
+                SavedGenerationScheduleOutcomeV1::SchedulerUnavailable,
+            );
         };
         let (scheduler, shutting_down, generation) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
-                return false;
+                return Self::record_reschedule_decline(
+                    &project_root,
+                    SavedGenerationScheduleOutcomeV1::SchedulerUnavailable,
+                );
             };
             let generation = worktree
                 .serving_generation
@@ -5448,17 +5459,43 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let Some(generation) = generation else {
-            return false;
+            return Self::record_reschedule_decline(
+                &project_root,
+                SavedGenerationScheduleOutcomeV1::NoServingGeneration,
+            );
         };
-        tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             let scheduler =
                 Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down).ok()?;
             Some(scheduler.schedule_semantic_generation(generation))
         })
         .await
         .ok()
-        .flatten()
-        .unwrap_or(false)
+        .flatten();
+        match outcome {
+            // `schedule_semantic_generation` already recorded this outcome.
+            Some(outcome) => outcome,
+            None => Self::record_reschedule_decline(
+                &project_root,
+                SavedGenerationScheduleOutcomeV1::SchedulerUnavailable,
+            ),
+        }
+    }
+
+    /// Name a re-offer that never reached the scheduler. Without this the
+    /// activation reconciler's retry produced no evidence at all, so a runtime
+    /// that stopped scheduling looked identical to one with nothing to do.
+    fn record_reschedule_decline(
+        project_root: &Path,
+        outcome: SavedGenerationScheduleOutcomeV1,
+    ) -> SavedGenerationScheduleOutcomeV1 {
+        tracing::warn!(
+            event = "code_index_semantic_schedule_declined",
+            outcome = outcome.as_str(),
+            project = %project_root.display(),
+            "code-index could not re-offer a serving generation to semantic projection"
+        );
+        outcome
     }
 
     /// Exact bounded dashboard projection for one mounted worktree.
