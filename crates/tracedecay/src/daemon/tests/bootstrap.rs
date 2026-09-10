@@ -2282,6 +2282,99 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let project = root.join("project");
+    let profile_root = root.join("profile");
+    std::fs::create_dir_all(&project).expect("project directory");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    let layout = initialize_test_project(&project, &client_identity).await;
+    std::fs::remove_file(&layout.graph_db_path).expect("remove generated project database");
+    let missing_graph_db_path = layout.graph_db_path.clone();
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "registered missing-db init retry");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let ordinary_handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: client_identity.clone(),
+        allow_init: false,
+        ..test_handshake_defaults()
+    };
+    let init_handshake = DaemonHandshake {
+        allow_init: true,
+        ..ordinary_handshake.clone()
+    };
+    let (_, route) =
+        super::super::DaemonEngine::project_route(&ordinary_handshake).expect("project route");
+    let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let claim = tasks.start_cancellable(route, move |_| async move {
+        blocked.await.expect("release ordinary open");
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "no TraceDecay database found at '{}'; run 'tracedecay init' first",
+                missing_graph_db_path.display()
+            ),
+        })
+    });
+    assert!(
+        matches!(claim, super::super::ProjectOpenTaskClaim::InFlight(_)),
+        "ordinary warmup must own the route first"
+    );
+
+    let ordinary_request = engine.project_server_for_request(
+        &ordinary_handshake,
+        super::super::ProjectServerRequirement::Core,
+    );
+    let init_request = engine.project_server_for_request(
+        &init_handshake,
+        super::super::ProjectServerRequirement::Core,
+    );
+    tokio::pin!(ordinary_request);
+    tokio::pin!(init_request);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut ordinary_request)
+            .await
+            .is_err(),
+        "ordinary request must join its in-flight open"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut init_request)
+            .await
+            .is_err(),
+        "explicit init must join the in-flight ordinary open"
+    );
+    release.send(()).expect("release ordinary open");
+
+    let ordinary_error = match ordinary_request.await {
+        Ok(_) => panic!("ordinary open must not initialize a missing database"),
+        Err(error) => error,
+    };
+    assert!(super::super::is_missing_index_error(&ordinary_error));
+    assert!(
+        !layout.graph_db_path.is_file(),
+        "ordinary open must leave the missing generated database absent"
+    );
+    let server = tokio::time::timeout(std::time::Duration::from_secs(10), init_request)
+        .await
+        .expect("explicit init retry timed out")
+        .expect("explicit init must retry with its own authorization");
+    assert!(
+        server.cg().await.store_layout().graph_db_path.is_file(),
+        "authorized retry must recreate the generated project database"
+    );
+    let receipt = engine.shutdown_all().await;
+    assert!(
+        receipt.background.unfinished().is_empty(),
+        "project owners must shut down cleanly: {:?}",
+        receipt.background.unfinished()
+    );
+}
+
 #[tokio::test]
 async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
     let tasks = super::super::ProjectOpenTasks::default();
@@ -3316,6 +3409,7 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
     let project_path = std::path::PathBuf::from("/projects/uncontended");
     let published = super::super::project_open_orchestration::wait_for_project_open_publication(
         &project_path,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
         async { Ok::<(), tracedecay_domain::errors::TraceDecayError>(()) },
     )
     .await;
@@ -3326,6 +3420,7 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
 
     let warming = super::super::project_open_orchestration::wait_for_project_open_publication(
         &project_path,
+        tokio::time::Instant::now() + super::super::PROJECT_OPEN_REQUEST_DEADLINE,
         std::future::pending::<tracedecay_domain::errors::Result<()>>(),
     )
     .await
