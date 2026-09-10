@@ -340,14 +340,14 @@ fn progress_snapshot_for_generation(
         committed_payload_bytes: committed_pages,
         completed_files: committed_pages,
         total_files: 100,
-        completed_lexical_bytes: committed_pages,
-        total_lexical_bytes: 100,
+        completed_lexical_units: committed_pages,
+        total_lexical_units: 100,
         current_batch_pages: 0,
         current_batch_payload_bytes: 0,
         elapsed_micros: 1,
         last_commit_latency_micros: None,
         files_per_second: None,
-        lexical_bytes_per_second: None,
+        lexical_units_per_second: None,
         estimated_remaining_seconds: None,
         last_progress_micros: 1,
         blocked_reason: None,
@@ -4743,23 +4743,23 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         completed_before_restart.total_files
     );
     assert_eq!(
-        completed_after_restart.completed_lexical_bytes,
-        completed_before_restart.completed_lexical_bytes
+        completed_after_restart.completed_lexical_units,
+        completed_before_restart.completed_lexical_units
     );
     assert_eq!(
-        completed_after_restart.total_lexical_bytes,
-        completed_before_restart.total_lexical_bytes
+        completed_after_restart.total_lexical_units,
+        completed_before_restart.total_lexical_units
     );
     assert_eq!(
         completed_after_restart.completed_files,
         completed_after_restart.total_files
     );
     assert_eq!(
-        completed_after_restart.completed_lexical_bytes,
-        completed_after_restart.total_lexical_bytes
+        completed_after_restart.completed_lexical_units,
+        completed_after_restart.total_lexical_units
     );
     assert_eq!(completed_after_restart.files_per_second, None);
-    assert_eq!(completed_after_restart.lexical_bytes_per_second, None);
+    assert_eq!(completed_after_restart.lexical_units_per_second, None);
     assert_eq!(completed_after_restart.estimated_remaining_seconds, None);
 
     let generation = latest.generation().manifest().generation_id.clone();
@@ -4897,8 +4897,8 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
         scan.phase,
         tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::SourceScan
     );
-    assert!(scan.total_lexical_bytes > 0);
-    assert_eq!(scan.completed_lexical_bytes, scan.total_lexical_bytes);
+    assert!(scan.total_lexical_units > 0);
+    assert_eq!(scan.completed_lexical_units, scan.total_lexical_units);
     assert_eq!(
         reopened.sealed_decode_count(),
         0,
@@ -6406,18 +6406,18 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
     state.observe_committed(CodeIndexCommittedProgressSampleV1 {
         observed_at: first,
         completed_files: 20,
-        completed_lexical_bytes: 4_000_000,
+        completed_lexical_units: 4_000_000,
     });
     assert_eq!(state.rates_and_eta(29_000_000), (None, None, None));
 
     state.observe_committed(CodeIndexCommittedProgressSampleV1 {
         observed_at: first + Duration::from_secs(2),
         completed_files: 21,
-        completed_lexical_bytes: 14_000_000,
+        completed_lexical_units: 14_000_000,
     });
-    let (files_per_second, lexical_bytes_per_second, eta_seconds) = state.rates_and_eta(29_000_000);
+    let (files_per_second, lexical_units_per_second, eta_seconds) = state.rates_and_eta(29_000_000);
     assert_eq!(files_per_second, Some(0.5));
-    assert_eq!(lexical_bytes_per_second, Some(5_000_000.0));
+    assert_eq!(lexical_units_per_second, Some(5_000_000.0));
     assert_eq!(
         eta_seconds,
         Some(3),
@@ -6580,7 +6580,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         "a prepared but cancelled batch must not publish staged pages as committed"
     );
     assert_eq!(
-        dashboard_after.completed_lexical_bytes, dashboard_before.completed_lexical_bytes,
+        dashboard_after.completed_lexical_units, dashboard_before.completed_lexical_units,
         "a cancelled batch must retain the prior exact sealed-source boundary"
     );
     assert!(latest.text_serving_needs_work());
@@ -6627,7 +6627,7 @@ fn reopen_reconstructs_exact_committed_progress_without_fabricating_rate() {
         let progress = build_progress_snapshot(&scheduler);
         assert!(progress.committed_pages > 0);
         assert_eq!(progress.files_per_second, None);
-        assert_eq!(progress.lexical_bytes_per_second, None);
+        assert_eq!(progress.lexical_units_per_second, None);
         assert_eq!(progress.estimated_remaining_seconds, None);
         progress
     };
@@ -6650,11 +6650,11 @@ fn reopen_reconstructs_exact_committed_progress_without_fabricating_rate() {
     );
     assert_eq!(reconstructed.completed_files, committed.completed_files);
     assert_eq!(
-        reconstructed.completed_lexical_bytes,
-        committed.completed_lexical_bytes
+        reconstructed.completed_lexical_units,
+        committed.completed_lexical_units
     );
     assert_eq!(reconstructed.files_per_second, None);
-    assert_eq!(reconstructed.lexical_bytes_per_second, None);
+    assert_eq!(reconstructed.lexical_units_per_second, None);
     assert_eq!(reconstructed.estimated_remaining_seconds, None);
 }
 

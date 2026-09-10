@@ -3055,7 +3055,7 @@ fn try_publish_build_progress(
 struct CodeIndexCommittedProgressSampleV1 {
     observed_at: Instant,
     completed_files: u64,
-    completed_lexical_bytes: u64,
+    completed_lexical_units: u64,
 }
 
 struct CodeIndexBuildProgressStateV1 {
@@ -3074,7 +3074,7 @@ impl CodeIndexBuildProgressStateV1 {
     fn observe_committed(&mut self, sample: CodeIndexCommittedProgressSampleV1) {
         if self.committed_samples.back().is_some_and(|previous| {
             previous.completed_files == sample.completed_files
-                && previous.completed_lexical_bytes == sample.completed_lexical_bytes
+                && previous.completed_lexical_units == sample.completed_lexical_units
         }) {
             return;
         }
@@ -3088,7 +3088,7 @@ impl CodeIndexBuildProgressStateV1 {
         u64::try_from(self.started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
-    fn rates_and_eta(&self, total_lexical_bytes: u64) -> (Option<f64>, Option<f64>, Option<u64>) {
+    fn rates_and_eta(&self, total_lexical_units: u64) -> (Option<f64>, Option<f64>, Option<u64>) {
         let Some(previous) = self.committed_samples.front() else {
             return (None, None, None);
         };
@@ -3110,20 +3110,20 @@ impl CodeIndexBuildProgressStateV1 {
             .checked_sub(previous.completed_files)
             .filter(|delta| *delta > 0)
             .map(|delta| delta as f64 / elapsed_seconds);
-        let lexical_bytes_per_second = current
-            .completed_lexical_bytes
-            .checked_sub(previous.completed_lexical_bytes)
+        let lexical_units_per_second = current
+            .completed_lexical_units
+            .checked_sub(previous.completed_lexical_units)
             .filter(|delta| *delta > 0)
             .map(|delta| delta as f64 / elapsed_seconds);
-        let estimated_remaining_seconds = lexical_bytes_per_second.and_then(|lexical_rate| {
-            let remaining = total_lexical_bytes.saturating_sub(current.completed_lexical_bytes);
+        let estimated_remaining_seconds = lexical_units_per_second.and_then(|lexical_rate| {
+            let remaining = total_lexical_units.saturating_sub(current.completed_lexical_units);
             let estimate = (remaining as f64 / lexical_rate).ceil();
             (estimate.is_finite() && estimate >= 0.0 && estimate <= u64::MAX as f64)
                 .then_some(estimate as u64)
         });
         (
             files_per_second,
-            lexical_bytes_per_second,
+            lexical_units_per_second,
             estimated_remaining_seconds,
         )
     }
@@ -4488,11 +4488,11 @@ impl LatestCodeTextGenerationV1 {
             ));
         }
         let completed_files = build.source.completed_files();
-        let completed_lexical_bytes = build
+        let completed_lexical_units = build
             .source
-            .completed_lexical_bytes()
+            .completed_lexical_units()
             .map_err(map_sealed_page_source_error)?;
-        let total_lexical_bytes = build.source.total_lexical_bytes();
+        let total_lexical_units = build.source.total_lexical_units();
         let observed_at = Instant::now();
         let observed_micros = now_micros().0;
         let last_commit_latency_micros = last_commit_latency_micros.or_else(|| {
@@ -4513,18 +4513,18 @@ impl LatestCodeTextGenerationV1 {
             state.observe_committed(CodeIndexCommittedProgressSampleV1 {
                 observed_at,
                 completed_files,
-                completed_lexical_bytes,
+                completed_lexical_units,
             });
             #[cfg(feature = "hotpath")]
             {
                 hotpath::gauge!("query.artifact.progress.committed_pages")
                     .set(progress.next_page_ordinal);
-                hotpath::gauge!("query.artifact.progress.committed_lexical_bytes")
-                    .set(completed_lexical_bytes);
+                hotpath::gauge!("query.artifact.progress.committed_lexical_units")
+                    .set(completed_lexical_units);
             }
         }
-        let (files_per_second, lexical_bytes_per_second, estimated_remaining_seconds) =
-            state.rates_and_eta(total_lexical_bytes);
+        let (files_per_second, lexical_units_per_second, estimated_remaining_seconds) =
+            state.rates_and_eta(total_lexical_units);
         let snapshot = CodeIndexBuildProgressV1 {
             generation_id: self.metadata.manifest().generation_id.as_str().to_owned(),
             daemon_incarnation: self.text_progress_daemon_incarnation,
@@ -4538,14 +4538,14 @@ impl LatestCodeTextGenerationV1 {
             committed_payload_bytes: progress.completed_payload_bytes,
             completed_files,
             total_files: build.source.total_files(),
-            completed_lexical_bytes,
-            total_lexical_bytes,
+            completed_lexical_units,
+            total_lexical_units,
             current_batch_pages,
             current_batch_payload_bytes,
             elapsed_micros: state.elapsed_micros(),
             last_commit_latency_micros,
             files_per_second,
-            lexical_bytes_per_second,
+            lexical_units_per_second,
             estimated_remaining_seconds,
             last_progress_micros: observed_micros,
             blocked_reason: None,
@@ -4584,14 +4584,14 @@ impl LatestCodeTextGenerationV1 {
             committed_payload_bytes: artifact.total_payload_bytes(),
             completed_files: source.total_files(),
             total_files: source.total_files(),
-            completed_lexical_bytes: source.total_lexical_bytes(),
-            total_lexical_bytes: source.total_lexical_bytes(),
+            completed_lexical_units: source.total_lexical_units(),
+            total_lexical_units: source.total_lexical_units(),
             current_batch_pages: 0,
             current_batch_payload_bytes: 0,
             elapsed_micros,
             last_commit_latency_micros: None,
             files_per_second: None,
-            lexical_bytes_per_second: None,
+            lexical_units_per_second: None,
             estimated_remaining_seconds: None,
             last_progress_micros: now_micros().0,
             blocked_reason: None,
@@ -5026,9 +5026,9 @@ impl LatestCodeTextGenerationV1 {
             )
             .map_err(map_sealed_page_source_error)?;
             #[cfg(feature = "hotpath")]
-            let completed_lexical_bytes_before = artifact_build
+            let completed_lexical_units_before = artifact_build
                 .source
-                .completed_lexical_bytes()
+                .completed_lexical_units()
                 .map_err(map_sealed_page_source_error)?;
             self.publish_text_progress_phase(CodeIndexBuildPhaseV1::SourceScan, 0, 0);
             let mut durable_progress = None;
@@ -5153,13 +5153,13 @@ impl LatestCodeTextGenerationV1 {
                     )?;
                     #[cfg(feature = "hotpath")]
                     {
-                        let committed_lexical_bytes = artifact_build
+                        let committed_lexical_units = artifact_build
                             .source
-                            .completed_lexical_bytes()
+                            .completed_lexical_units()
                             .map_err(map_sealed_page_source_error)?
-                            .saturating_sub(completed_lexical_bytes_before);
-                        hotpath::gauge!("query.artifact.batch.committed_lexical_bytes_total")
-                            .inc(committed_lexical_bytes);
+                            .saturating_sub(completed_lexical_units_before);
+                        hotpath::gauge!("query.artifact.batch.committed_lexical_units_total")
+                            .inc(committed_lexical_units);
                         if let Some(latency_micros) = commit_latency_micros {
                             hotpath::gauge!("query.artifact.progress.latest_commit_latency_micros")
                                 .set(latency_micros);
@@ -7341,14 +7341,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                                 committed_payload_bytes: 0,
                                 completed_files: 0,
                                 total_files: 0,
-                                completed_lexical_bytes: scanned,
-                                total_lexical_bytes: total,
+                                completed_lexical_units: scanned,
+                                total_lexical_units: total,
                                 current_batch_pages: 0,
                                 current_batch_payload_bytes: 0,
                                 elapsed_micros,
                                 last_commit_latency_micros: None,
                                 files_per_second: None,
-                                lexical_bytes_per_second: None,
+                                lexical_units_per_second: None,
                                 estimated_remaining_seconds: None,
                                 last_progress_micros: now_micros().0,
                                 blocked_reason: None,
