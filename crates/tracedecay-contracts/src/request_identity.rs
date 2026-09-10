@@ -112,6 +112,7 @@ pub enum LogicalEffectIdempotencyDomain {
     FeedbackObservation,
     FeedbackSourceEvent,
     ConfigurationEffect,
+    ContextScoutEffect,
 }
 
 impl LogicalEffectIdempotencyDomain {
@@ -122,6 +123,7 @@ impl LogicalEffectIdempotencyDomain {
             Self::FeedbackObservation => "tracedecay.feedback.observation.v1",
             Self::FeedbackSourceEvent => "tracedecay.feedback.source-event.v1",
             Self::ConfigurationEffect => "tracedecay.configuration.effect-idempotency.v1",
+            Self::ContextScoutEffect => "tracedecay.context-scout.effect-idempotency.v1",
         }
     }
 }
