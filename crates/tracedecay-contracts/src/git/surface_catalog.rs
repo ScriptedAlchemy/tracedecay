@@ -145,7 +145,7 @@ const SURFACE_SPECS: [SurfaceSpec; 8] = [
         operation: GITHUB_STACK_SIGNAL_EXPAND_OPERATION,
         effect: EffectClass::Read,
         summary: "Expand one admitted GitHub stack signal",
-        description: "Authorize and expand one durable GitHub stack signal through its exact signal identity and optional delivery-watermark guard.",
+        description: "Authorize and expand an exact durable GitHub stack signal, or select the oldest pending signal for the admitted actor and scope, with an optional delivery-watermark guard.",
         example: "Expand this admitted GitHub stack signal",
         surfaces: &TRANSPORT_SURFACES,
     },
