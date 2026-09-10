@@ -59,7 +59,6 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::SourceBody
         | ApplicationSurfaceOperation::SourceOutline
         | ApplicationSurfaceOperation::ModuleApi
-        | ApplicationSurfaceOperation::FileMetadata
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

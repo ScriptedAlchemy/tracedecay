@@ -28,11 +28,10 @@ use crate::retrieval::primitive_surface::{
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
     DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
-    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, HealthDeltaRequest,
-    HealthDeltaResult, HealthReadRequest, HealthReadResult, ModuleApiPrimitiveRequest,
-    ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
-    SessionLookupRequest, SessionLookupResult, SourceBodyPrimitiveRequest,
-    SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
+    HealthDeltaRequest, HealthDeltaResult, HealthReadRequest, HealthReadResult,
+    ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest,
+    QualifiedNamePrimitiveResult, SessionLookupRequest, SessionLookupResult,
+    SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest,
     StorageStatusPrimitiveResult,
 };
@@ -146,7 +145,7 @@ fn primitive_lsp_methods(operation: &str) -> &'static [&'static str] {
     }
 }
 
-const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 27] = [
+const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     primitive_spec("code_signature_search"),
     primitive_spec("code_implementations"),
     primitive_spec("code_type_hierarchy"),
@@ -169,7 +168,6 @@ const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 27] = [
     primitive_spec("source_body"),
     primitive_spec("source_outline"),
     primitive_spec("module_api"),
-    primitive_spec("file_metadata"),
     primitive_spec("health_read"),
     primitive_spec("health_delta"),
     primitive_spec("storage_status"),
@@ -283,7 +281,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             })
             .sum(),
     );
-    for spec in &PRIMITIVE_READ_SPECS {
+    for spec in PRIMITIVE_READ_SPECS {
         let capability_id = CapabilityId::new(format!(
             "capability.application.primitive.{}",
             spec.capability.replace('_', "-")
@@ -450,11 +448,6 @@ fn primitive_executable_schemas(
         "module_api",
         ModuleApiPrimitiveRequest,
         ModuleApiPrimitiveResult
-    );
-    add!(
-        "file_metadata",
-        FileMetadataPrimitiveRequest,
-        FileMetadataPrimitiveResult
     );
     add!(
         "storage_status",

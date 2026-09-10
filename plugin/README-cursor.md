@@ -182,7 +182,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_feedback_list",
     "tracedecay:tracedecay_field_sites",
     "tracedecay:tracedecay_file_dependents",
-    "tracedecay:tracedecay_file_metadata",
     "tracedecay:tracedecay_files",
     "tracedecay:tracedecay_find_exact_symbol",
     "tracedecay:tracedecay_gini",

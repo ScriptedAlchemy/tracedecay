@@ -1075,7 +1075,6 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::SourceBody
             | ApplicationSurfaceOperation::SourceOutline
             | ApplicationSurfaceOperation::ModuleApi
-            | ApplicationSurfaceOperation::FileMetadata
             | ApplicationSurfaceOperation::HealthRead
             | ApplicationSurfaceOperation::HealthDelta
             | ApplicationSurfaceOperation::StorageStatus
@@ -1265,10 +1264,6 @@ impl DaemonInvocationRequest {
             | (
                 surface_operation @ ApplicationSurfaceOperation::ModuleApi,
                 request @ PrimitiveRequest::ModuleApi(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::FileMetadata,
-                request @ PrimitiveRequest::FileMetadata(_),
             )
             | (
                 surface_operation @ ApplicationSurfaceOperation::HealthRead,

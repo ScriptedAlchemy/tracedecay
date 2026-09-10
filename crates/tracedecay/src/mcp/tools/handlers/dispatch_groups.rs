@@ -1,6 +1,9 @@
 use serde_json::Value;
 use tracedecay_code_index::intake::content_digest;
-use tracedecay_contracts::{ApplicationProblem, ResultContractRef, RetainedSurfaceOperation};
+use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_contracts::{
+    ApplicationOperation, ApplicationProblem, ResultContractRef, RetainedSurfaceOperation,
+};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
@@ -180,6 +183,21 @@ async fn admitted_graph_query(
     options: &ToolCallRegistryOptions<'_>,
     operation_name: &str,
 ) -> Result<tracedecay_graph_query::VerifiedGraphQuery> {
+    let operation =
+        tracedecay_contracts::retrieval::catalog::primitive_read_operation(operation_name)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("invalid graph read operation: {error}"),
+            })?
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("unregistered graph read operation: {operation_name}"),
+            })?;
+    admitted_graph_query_for_operation(options, &operation).await
+}
+
+async fn admitted_graph_query_for_operation(
+    options: &ToolCallRegistryOptions<'_>,
+    operation: &ApplicationOperation,
+) -> Result<tracedecay_graph_query::VerifiedGraphQuery> {
     let Some(port) = options.verified_graph_query_port.as_deref() else {
         return Err(graph_read_unavailable(
             "the exact project verified graph query is not mounted",
@@ -197,21 +215,13 @@ async fn admitted_graph_query(
         .application_cancellation
         .as_ref()
         .ok_or_else(|| graph_read_unavailable("the caller cancellation signal is unavailable"))?;
-    let operation =
-        tracedecay_contracts::retrieval::catalog::primitive_read_operation(operation_name)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("invalid graph read operation: {error}"),
-            })?
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("unregistered graph read operation: {operation_name}"),
-            })?;
     // Admission wait is measured apart from handler execution: every
     // graph-backed tool in the graph/info/analysis/git/health groups funnels
     // through this one open, so a slow span here is admission contention or a
     // stale generation, never handler work.
     let query = hotpath::future!(
         port.open(VerifiedGraphQueryRequest::new(
-            &operation,
+            operation,
             request_id,
             deadline,
             cancellation,
@@ -558,7 +568,11 @@ fn dispatch_info_tools_inner<'a>(
                 .await
             }
             "tracedecay_files" => {
-                let graph = admitted_graph_query(cg, &options, "file_metadata").await?;
+                let operation = callable_code_operation(CallableCodeOperationKind::SourceMetadata)
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("invalid source metadata operation: {error}"),
+                    })?;
+                let graph = admitted_graph_query_for_operation(&options, &operation).await?;
                 portable_info::handle_files(&graph, args, selected_scope_prefix).await
             }
             "tracedecay_admin_sync" => {

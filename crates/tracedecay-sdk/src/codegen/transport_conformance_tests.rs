@@ -54,7 +54,6 @@ fn generated_feedback_and_non_session_primitive_operations_use_live_http_routes(
         ("source_body", "/application/primitives/source_body"),
         ("source_outline", "/application/primitives/source_outline"),
         ("module_api", "/application/primitives/module_api"),
-        ("file_metadata", "/application/primitives/file_metadata"),
         ("health_read", "/application/primitives/health_read"),
         ("health_delta", "/application/primitives/health_delta"),
         ("storage_status", "/application/primitives/storage_status"),

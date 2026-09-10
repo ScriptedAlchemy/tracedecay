@@ -42,7 +42,6 @@ use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, ExtendedPrimitiveFuture,
     ExtendedPrimitivePort, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
-    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, FileMetadataRecord,
     ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
     ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
     PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
@@ -1811,45 +1810,6 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 )
             },
             label = "usecases.primitives.module_api"
-        ))
-    }
-
-    fn file_metadata<'a>(
-        &'a self,
-        _context: RetrievalPortContext<'a>,
-        request: &'a FileMetadataPrimitiveRequest,
-    ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult> {
-        Box::pin(hotpath::future!(
-            async move {
-                let root = self.source_runtime.project_root().to_path_buf();
-                let mut handles = Vec::with_capacity(request.files.len());
-                for file in &request.files {
-                    let path = root.join(file);
-                    let file = file.clone();
-                    handles.push(tokio::spawn(async move {
-                        let meta = tokio::fs::metadata(path).await.ok();
-                        FileMetadataRecord {
-                            file,
-                            language: None,
-                            indexed_at: None,
-                            byte_size: meta.map(|value| value.len()),
-                        }
-                    }));
-                }
-                let mut files = Vec::with_capacity(handles.len());
-                for handle in handles {
-                    match handle.await {
-                        Ok(record) => files.push(record),
-                        Err(_) => return failed(EvidenceDomain::Source, now_observed()),
-                    }
-                }
-                completed(
-                    FileMetadataPrimitiveResult { files },
-                    EvidenceDomain::Source,
-                    now_observed(),
-                )
-            },
-            label = "usecases.primitives.file_metadata"
         ))
     }
 

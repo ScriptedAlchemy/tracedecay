@@ -21,9 +21,8 @@ use tracedecay_contracts::git::{
 };
 use tracedecay_contracts::retrieval::{
     CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
-    FileMetadataPrimitiveRequest, HealthDeltaRequest, ModuleApiPrimitiveRequest, PrimitiveRequest,
-    QualifiedNamePrimitiveRequest, SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest,
-    StorageStatusPrimitiveRequest,
+    HealthDeltaRequest, ModuleApiPrimitiveRequest, PrimitiveRequest, QualifiedNamePrimitiveRequest,
+    SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest, StorageStatusPrimitiveRequest,
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationResult, CallableCodeSurfaceRequest,
@@ -322,10 +321,6 @@ impl ApplicationSurfaceRequest {
                 | (
                     Self::Primitive(PrimitiveRequest::ModuleApi(_)),
                     ApplicationSurfaceOperation::ModuleApi
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::FileMetadata(_)),
-                    ApplicationSurfaceOperation::FileMetadata
                 )
                 | (
                     Self::Primitive(PrimitiveRequest::HealthRead(_)),
@@ -672,12 +667,6 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::ModuleApi => {
             serde_json::from_value::<ModuleApiPrimitiveRequest>(value)
                 .map(PrimitiveRequest::ModuleApi)
-                .map(ApplicationSurfaceRequest::Primitive)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
-        }
-        ApplicationSurfaceOperation::FileMetadata => {
-            serde_json::from_value::<FileMetadataPrimitiveRequest>(value)
-                .map(PrimitiveRequest::FileMetadata)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
