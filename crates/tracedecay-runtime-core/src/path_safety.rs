@@ -75,6 +75,25 @@ pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
         || canonicalize_path_or_existing_parent(left) == canonicalize_path_or_existing_parent(right)
 }
 
+/// The filesystem identity a root is stored under and compared through.
+///
+/// [`same_canonical_path`] answers "are these one directory"; this answers
+/// "what is that directory called", which is what a caller needs when it has
+/// to `strip_prefix` a root off a descendant or hand the root to a serializer.
+/// Both sides of such a pair routinely arrive spelled differently — a macOS
+/// `/var` alias against a `/private/var` root, a native `C:\` document against
+/// a `\\?\C:\` root — and a raw `strip_prefix` reports the descendant as
+/// outside its own root.
+///
+/// Existing ancestors are resolved so those aliases collapse to one name, and
+/// the result is spelled plainly (see [`plain_host_path`]) so it can cross
+/// into a file URL, YAML, TOML, or a child process without the verbatim prefix
+/// leaking.
+#[must_use]
+pub fn canonical_root_identity(path: &Path) -> PathBuf {
+    plain_host_path(&canonicalize_path_or_existing_parent(path))
+}
+
 /// Rewrites a Windows extended-length (`\\?\`) *disk* path to its ordinary
 /// form, so it can be handed to a tool that does not understand the verbatim
 /// prefix.
@@ -189,7 +208,7 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_existing_prefix, collapse_relative_components,
+        canonical_root_identity, canonicalize_existing_prefix, collapse_relative_components,
         normalize_source_edit_relative_path, plain_git_args, plain_host_path, same_canonical_path,
     };
     use std::path::{Path, PathBuf};
@@ -328,5 +347,35 @@ mod tests {
                 "'{rejected}' must not be addressable"
             );
         }
+    }
+
+    /// The property every root check depends on: a descendant a client built
+    /// from its own spelling of the root strips cleanly off the root's
+    /// identity, including when the suffix does not exist yet, while a sibling
+    /// of the root still does not.
+    #[test]
+    fn root_identity_lets_a_caller_built_descendant_strip_off_a_resolved_root() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let built = temp.path().join("project");
+        std::fs::create_dir(&built).expect("create project root");
+        let resolved = built.canonicalize().expect("canonical project root");
+
+        let identity = canonical_root_identity(&resolved);
+        assert!(same_canonical_path(&identity, &built));
+        assert_eq!(identity, plain_host_path(&resolved));
+        assert!(!identity.to_string_lossy().starts_with(r"\\?\"));
+
+        let unsaved = canonical_root_identity(&built.join("new/nested/overlay.rs"));
+        assert_eq!(
+            unsaved.strip_prefix(&identity).ok(),
+            Some(Path::new("new/nested/overlay.rs")),
+            "an overlay that does not exist yet must stay beneath the root identity"
+        );
+        assert!(
+            canonical_root_identity(&temp.path().join("project-other/lib.rs"))
+                .strip_prefix(&identity)
+                .is_err(),
+            "a sibling of the root must stay outside it"
+        );
     }
 }
