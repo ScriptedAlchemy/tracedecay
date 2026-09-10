@@ -297,7 +297,7 @@ tool.
 
 ### Tool Categories
 
-The 37 MCP tools fall into several categories:
+The MCP tools fall into several categories:
 
 | Category        | Tools                                                    |
 |-----------------|----------------------------------------------------------|
@@ -308,7 +308,7 @@ The 37 MCP tools fall into several categories:
 | Quality         | doc_coverage, unused_imports, recursion                  |
 | Refactoring     | rename_preview, similar, module_api                      |
 | Git/CI          | changelog, commit_context, pr_context                    |
-| Quality Scan    | simplify_scan, test_map, type_hierarchy                  |
+| Testing & types | test_map, type_hierarchy                                 |
 | Porting         | port_status, port_order                                  |
 | Branching       | branch_search, branch_diff                               |
 | Status          | status                                                   |
