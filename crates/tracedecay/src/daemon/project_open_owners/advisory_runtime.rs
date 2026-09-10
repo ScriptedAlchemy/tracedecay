@@ -182,7 +182,7 @@ impl Drop for ScoutHookRegistrationV1 {
 }
 
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
-    /// Resolves the cycle input from the current configuration revision and
+    /// Resolves the cycle input from the installed configuration revision and
     /// the current sealed code-index generation on every invocation. A
     /// settings PATCH landing after project open (for example enabling the
     /// Context Scout checkbox) therefore remounts the producer path on the
@@ -475,9 +475,7 @@ impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthor
         Box::pin(async move {
             let current = self
                 .configuration
-                .client()
-                .current()
-                .await
+                .activated_configuration()
                 .map_err(|_| LspRuntimeFailure::new("feedback-cycle-authorization"))?;
             daemon_owned_project_source_access_at(
                 &self.scope,
@@ -565,9 +563,7 @@ async fn current_feedback_lsp_input(
     let pinned_configuration = producer
         .graph
         .configuration_runtime()
-        .client()
-        .current()
-        .await
+        .activated_configuration()
         .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-configuration"))?;
     let current_configuration = pinned_configuration.into_current_state();
     let configuration_digest = current_configuration
@@ -688,15 +684,13 @@ async fn run_production_hook_cycle(
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let observed_at = execution.observed_at;
-    // The Scout tail re-pins the current configuration: a revision that
-    // landed while the advisory half ran must not produce guidance under the
-    // superseded control state.
+    // The Scout tail re-pins the installed configuration: a live revision that
+    // activated while the advisory half ran must not produce guidance under
+    // the superseded control state.
     let Ok(pinned_configuration) = producer
         .graph
         .configuration_runtime()
-        .client()
-        .current()
-        .await
+        .activated_configuration()
     else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
@@ -955,9 +949,7 @@ async fn refresh_project_open_feedback_configuration(
     let configuration = state
         .graph
         .configuration_runtime()
-        .client()
-        .current()
-        .await
+        .activated_configuration()
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open feedback configuration is unavailable: {error}"),
         })?;
@@ -1187,9 +1179,7 @@ async fn register_production_advisory_owner(
     let configuration = state
         .graph
         .configuration_runtime()
-        .client()
-        .current()
-        .await
+        .activated_configuration()
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open automation configuration is unavailable: {error}"),
         })?;
@@ -1197,10 +1187,9 @@ async fn register_production_advisory_owner(
         revision_id: configuration.revision_id().clone(),
         snapshot: configuration.snapshot().clone(),
     };
-    // The control pin and the model configuration are read from the same
-    // current snapshot: a settings PATCH that landed after project open (a
-    // deferred mount, or the user enabling the Context Scout checkbox)
-    // mounts the updated state here instead of failing until reopen.
+    // The control pin and model configuration come from the same installed
+    // snapshot. Live changes can advance it after project open; restart-gated
+    // desired changes remain outside the running owner until restart.
     let scout_configuration = ContextScoutConfigurationPinV1::from_current(&current_configuration)
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
