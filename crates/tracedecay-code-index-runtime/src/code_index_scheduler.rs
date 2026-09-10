@@ -3759,83 +3759,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         identity: &DurableSealedCodeGenerationIdentityV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<VerifiedSealedLexicalPageSourceV1<File>, RetrievalPortError> {
-        DaemonCodeIndexPublicationStoreV1::validate_generation_file(&identity.locator)
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let path = self.publication.generations_root.join(&identity.locator);
-        let metadata = path.symlink_metadata().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                RetrievalPortError::AuthorityUnavailable(
-                    "durable sealed lexical source is missing".to_owned(),
-                )
-            } else {
-                text_artifact_unavailable(error)
-            }
-        })?;
-        if !metadata.file_type().is_file() || metadata.len() != identity.size_bytes {
-            return Err(RetrievalPortError::Contract(
-                "durable sealed lexical source identity is corrupt".to_owned(),
-            ));
-        }
-        let file = File::open(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                RetrievalPortError::AuthorityUnavailable(
-                    "durable sealed lexical source disappeared before open".to_owned(),
-                )
-            } else {
-                text_artifact_unavailable(error)
-            }
-        })?;
-        match VerifiedSealedLexicalPageSourceV1::open_content_addressed(
-            file,
-            identity.size_bytes,
-            identity.digest.clone(),
-            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-            TEXT_ARTIFACT_PAGE_BYTES_V1,
-            control,
-        ) {
-            Ok(source) => Ok(source),
-            Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("format revision is incompatible") =>
-            {
-                let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
-                if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
-                    != identity.digest.as_str()
-                {
-                    return Err(RetrievalPortError::Contract(
-                        "partitioned sealed lexical manifest digest does not verify".to_owned(),
-                    ));
-                }
-                let manifest = File::open(path).map_err(text_artifact_unavailable)?;
-                let publication = self.publication.clone();
-                let source_identity = identity.clone();
-                VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
-                    manifest,
-                    &manifest_bytes,
-                    identity.digest.clone(),
-                    move |digest, expected_size, buffer| {
-                        publication.read_retained_partitioned_segment(
-                            &source_identity,
-                            SealedGenerationSegmentReadV1::Whole {
-                                digest,
-                                size_bytes: expected_size,
-                            },
-                            buffer,
-                        )
-                    },
-                    TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-                    TEXT_ARTIFACT_PAGE_BYTES_V1,
-                )
-                .map_err(map_sealed_page_source_error)
-                .and_then(|source| {
-                    source.ok_or_else(|| {
-                        RetrievalPortError::Contract(
-                            "partitioned sealed lexical source is incompatible".to_owned(),
-                        )
-                    })
-                })
-            }
-            Err(error) => Err(map_sealed_page_source_error(error)),
-        }
+        self.open_sealed_source_with_progress(identity, control, |_, _| {})
     }
 
     fn open_sealed_source_with_progress<F>(
@@ -3856,61 +3780,44 @@ impl DaemonCodeTextArtifactStoreV1 {
                 "durable sealed lexical source identity is corrupt".to_owned(),
             ));
         }
-        let file = File::open(&path).map_err(text_artifact_unavailable)?;
-        match VerifiedSealedLexicalPageSourceV1::open_content_addressed_with_progress(
-            file,
-            identity.size_bytes,
+        checkpoint_text_artifact_control(control)?;
+        progress(0, identity.size_bytes);
+        let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
+        checkpoint_text_artifact_control(control)?;
+        if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
+            != identity.digest.as_str()
+        {
+            return Err(RetrievalPortError::Contract(
+                "partitioned sealed lexical manifest digest does not verify".to_owned(),
+            ));
+        }
+        progress(identity.size_bytes, identity.size_bytes);
+        let manifest = File::open(path).map_err(text_artifact_unavailable)?;
+        let publication = self.publication.clone();
+        let source_identity = identity.clone();
+        VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+            manifest,
+            &manifest_bytes,
             identity.digest.clone(),
+            move |digest, expected_size, buffer| {
+                publication.read_retained_partitioned_segment(
+                    &source_identity,
+                    SealedGenerationSegmentReadV1::Whole {
+                        digest,
+                        size_bytes: expected_size,
+                    },
+                    buffer,
+                )
+            },
             TEXT_ARTIFACT_PAGE_CHUNKS_V1,
             TEXT_ARTIFACT_PAGE_BYTES_V1,
-            control,
-            &mut progress,
-        ) {
-            Ok(source) => Ok(source),
-            Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("format revision is incompatible") =>
-            {
-                progress(0, identity.size_bytes);
-                let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
-                if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
-                    != identity.digest.as_str()
-                {
-                    return Err(RetrievalPortError::Contract(
-                        "partitioned sealed lexical manifest digest does not verify".to_owned(),
-                    ));
-                }
-                progress(identity.size_bytes, identity.size_bytes);
-                let manifest = File::open(&path).map_err(text_artifact_unavailable)?;
-                let publication = self.publication.clone();
-                let source_identity = identity.clone();
-                VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
-                    manifest,
-                    &manifest_bytes,
-                    identity.digest.clone(),
-                    move |digest, expected_size, buffer| {
-                        publication.read_retained_partitioned_segment(
-                            &source_identity,
-                            SealedGenerationSegmentReadV1::Whole {
-                                digest,
-                                size_bytes: expected_size,
-                            },
-                            buffer,
-                        )
-                    },
-                    TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-                    TEXT_ARTIFACT_PAGE_BYTES_V1,
-                )
-                .map_err(map_sealed_page_source_error)
-                .and_then(|source| {
-                    source.ok_or_else(|| {
-                        RetrievalPortError::Contract(
-                            "partitioned sealed lexical source is incompatible".to_owned(),
-                        )
-                    })
-                })
-            }
-            Err(error) => Err(map_sealed_page_source_error(error)),
-        }
+        )
+        .map_err(map_sealed_page_source_error)?
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "partitioned sealed lexical source is incompatible".to_owned(),
+            )
+        })
     }
 
     /// Durably publish one finalized staging artifact: content-address it,

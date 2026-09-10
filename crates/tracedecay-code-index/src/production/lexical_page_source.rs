@@ -931,6 +931,7 @@ impl SealedLexicalFilesV1 {
 pub struct VerifiedSealedTextGenerationMetadataV1 {
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
+    statistics: Option<CodeIndexGenerationStatisticsV1>,
 }
 
 impl VerifiedSealedTextGenerationMetadataV1 {
@@ -938,12 +939,14 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         Self {
             manifest: generation.manifest().clone(),
             snapshot: generation.snapshot().clone(),
+            statistics: Some(generation.statistics.clone()),
         }
     }
 
     pub(super) fn from_partitioned_manifest(
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
+        statistics: Option<CodeIndexGenerationStatisticsV1>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         if manifest.source_commitments.is_none() {
             return Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable);
@@ -962,7 +965,11 @@ impl VerifiedSealedTextGenerationMetadataV1 {
                 "partitioned sealed text metadata does not verify".to_owned(),
             ));
         }
-        Ok(Self { manifest, snapshot })
+        Ok(Self {
+            manifest,
+            snapshot,
+            statistics,
+        })
     }
 
     pub fn manifest(&self) -> &CodeGenerationManifestV1 {
@@ -980,6 +987,10 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 
     pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
         &self.snapshot
+    }
+
+    pub fn generation_statistics(&self) -> Option<&CodeIndexGenerationStatisticsV1> {
+        self.statistics.as_ref()
     }
 }
 
@@ -1001,6 +1012,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             reader,
             generation.manifest.clone(),
             generation.snapshot.clone(),
+            Some(generation.statistics.clone()),
             SealedLexicalFilesV1::Published(generation.files.clone()),
             source_state_digest,
             maximum_page_chunks,
@@ -1012,6 +1024,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         reader: R,
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
+        statistics: Option<CodeIndexGenerationStatisticsV1>,
         files: SealedLexicalFilesV1,
         source_state_digest: ManifestDigest,
         maximum_page_chunks: usize,
@@ -1022,8 +1035,9 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 "sealed lexical page bounds must be non-zero".to_owned(),
             ));
         }
-        let metadata =
-            VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(manifest, snapshot)?;
+        let metadata = VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
+            manifest, snapshot, statistics,
+        )?;
         let file_count = u64::try_from(files.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "partitioned sealed generation file count exceeds u64".to_owned(),
@@ -2847,7 +2861,7 @@ fn read_verified_text_metadata<R: Read + Seek>(
         }
         Ok::<_, CodeIndexProductionErrorV1>(())
     })?;
-    Ok(VerifiedSealedTextGenerationMetadataV1 { manifest, snapshot })
+    VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(manifest, snapshot, None)
 }
 
 fn read_file_bytes_at_range<R: Read + Seek>(
@@ -3500,6 +3514,12 @@ mod lexical_page_source_tests {
             Cursor::new(Vec::<u8>::new()),
             fixture.generation.manifest.clone(),
             fixture.generation.snapshot.clone(),
+            Some(
+                fixture
+                    .generation
+                    .generation_statistics()
+                    .expect("fixture generation statistics"),
+            ),
             SealedLexicalFilesV1::Published(files),
             fixture.state_digest.clone(),
             1,
