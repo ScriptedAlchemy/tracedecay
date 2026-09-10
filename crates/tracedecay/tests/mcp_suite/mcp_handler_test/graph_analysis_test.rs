@@ -271,6 +271,130 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 }
 
 #[tokio::test]
+async fn constructors_distinguishes_explicit_update_and_missing_fields() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+#[derive(Default)]
+pub struct BuildOptions {
+    pub name: String,
+    pub retries: u8,
+    pub verbose: bool,
+}
+
+pub fn explicit() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: 3, verbose: true }
+}
+
+pub fn updated() -> BuildOptions {
+    BuildOptions { name: String::new(), ..Default::default() }
+}
+
+pub fn incomplete() -> BuildOptions {
+    BuildOptions { name: String::new() }
+}
+
+pub fn recovered() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "BuildOptions"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        4,
+        "all indexed literals must be returned: {payload}"
+    );
+    assert_eq!(payload["candidate_count"], 1);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "syntax_only_simple_name");
+
+    assert_eq!(sites[0]["fields"], json!(["name", "retries", "verbose"]));
+    assert_eq!(sites[0]["update_fields"], json!([]));
+    assert_eq!(sites[0]["missing_fields"], json!([]));
+    assert_eq!(sites[0]["field_coverage"], "complete");
+
+    assert_eq!(sites[1]["fields"], json!(["name"]));
+    assert_eq!(sites[1]["update_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[1]["missing_fields"], json!([]));
+    assert_eq!(sites[1]["field_coverage"], "complete");
+
+    assert_eq!(sites[2]["fields"], json!(["name"]));
+    assert_eq!(sites[2]["update_fields"], json!([]));
+    assert_eq!(sites[2]["missing_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[2]["field_coverage"], "complete");
+
+    assert_eq!(sites[3]["fields"], json!(["name", "retries"]));
+    assert_eq!(sites[3]["update_fields"], json!([]));
+    assert_eq!(sites[3]["missing_fields"], json!([]));
+    assert_eq!(sites[3]["field_coverage"], "unknown");
+}
+
+#[tokio::test]
+async fn constructors_marks_same_name_struct_resolution_unknown() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub mod first {
+    pub struct Options { pub one: u8 }
+    pub fn build() -> Options { Options { one: 1 } }
+}
+pub mod second {
+    pub struct Options { pub two: u8 }
+    pub fn build() -> Options { Options { two: 2 } }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "Options"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["candidate_count"], 2);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "ambiguous_simple_name");
+    assert!(payload["expected_fields"].is_null());
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        2,
+        "both syntax sites remain visible: {payload}"
+    );
+    assert!(sites.iter().all(|site| {
+        site["field_coverage"] == "unknown"
+            && site["update_fields"] == json!([])
+            && site["missing_fields"] == json!([])
+    }));
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");

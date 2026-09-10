@@ -28,7 +28,7 @@ pub use recursion::handle_recursion;
 pub use unmounted_files::handle_unmounted_files;
 pub use unsafe_patterns::handle_unsafe_patterns;
 
-use crate::{ToolResult, is_ident_byte, line_number_at, skip_ascii_whitespace};
+use crate::{ToolResult, is_ident_byte, line_number_at};
 use crate::{
     effective_path, generic_tool_result, rendered_tool_result, require_object_args,
     require_positive_limit, unique_file_paths,
