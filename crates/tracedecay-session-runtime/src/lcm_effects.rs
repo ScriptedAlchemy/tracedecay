@@ -960,6 +960,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_native_compaction_recognizes_production_boundary_id() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-claude-prod-boundary").await;
+        let db = harness.registered.clone();
+        assert!(
+            db.upsert_session(&session("claude", "claude-native-session"))
+                .await
+        );
+        let claude_text = "production Claude compact pair body";
+        let summary_metadata = canonical_envelope(
+            "claude",
+            "claude-native-session",
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            Some("ffffffff-0000-4000-8000-000000000001"),
+            vec![
+                serde_json::json!({
+                    "kind": "message",
+                    "role": "user",
+                    "content": claude_text
+                }),
+                serde_json::json!({
+                    "kind": "compaction",
+                    "summary": {
+                        "isCompactSummary": true,
+                        "isVisibleInTranscriptOnly": true
+                    }
+                }),
+            ],
+        );
+        insert_summary_evidence(
+            (&db, "claude"),
+            "claude-native-session",
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            11,
+            claude_text,
+            "message",
+            &summary_metadata,
+        )
+        .await;
+        let boundary_envelope = canonical_envelope(
+            "claude",
+            "claude-native-session",
+            "ffffffff-0000-4000-8000-000000000001",
+            Some("pre-compact-parent"),
+            vec![serde_json::json!({
+                "kind": "compaction",
+                "summary": {
+                    "preservedSegment": {
+                        "anchorUuid": "aaaaaaaa-0000-4000-8000-000000000001"
+                    }
+                }
+            })],
+        );
+        insert_summary_evidence(
+            (&db, "claude"),
+            "claude-native-session",
+            "compact_boundary:ffffffff-0000-4000-8000-000000000001",
+            10,
+            "Claude compaction boundary",
+            "compact_boundary",
+            &serde_json::json!({
+                "source": "claude_compact_boundary",
+                "trigger": "manual",
+                "canonical_envelope": boundary_envelope
+            }),
+        )
+        .await;
+        let claude = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            "claude-native-session",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(claude.text, claude_text);
+        assert_eq!(claude.route, "claude_native_compaction");
+    }
+
+    #[tokio::test]
     async fn transcript_ingest_persists_native_compaction_raw_range() {
         let harness = RegisteredGlobalDbHarness::open("lcm-native-summary-range").await;
         let db = harness.registered.clone();

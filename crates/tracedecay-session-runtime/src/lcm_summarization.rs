@@ -308,7 +308,13 @@ async fn native_store_is_recognized(
 pub(super) fn decode_canonical_observation_metadata(
     mut metadata: Value,
 ) -> Option<CanonicalObservationEnvelopeV1> {
-    metadata.as_object_mut()?.remove("ingest_protection");
+    let object = metadata.as_object_mut()?;
+    object.remove("ingest_protection");
+    if let Some(envelope) = object.remove("canonical_envelope")
+        && let Ok(decoded) = serde_json::from_value(envelope)
+    {
+        return Some(decoded);
+    }
     serde_json::from_value(metadata).ok()
 }
 

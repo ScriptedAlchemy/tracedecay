@@ -208,15 +208,23 @@ async fn claude_summary_pair_is_exact(
     if summary_id.as_str() != summary_message_id {
         return Ok(false);
     }
+    // Production Claude ingest stores the boundary as `compact_boundary:{uuid}`
+    // while the summary parent remains the raw uuid. Accept either spelling.
+    let production_boundary_id = format!("compact_boundary:{}", boundary_id.as_str());
     let mut rows = snapshot
         .query(
             "SELECT metadata_json
              FROM session_messages
-             WHERE provider = ?1 AND message_id = ?2
-               AND session_id = ?3
+             WHERE provider = ?1 AND session_id = ?2
+               AND message_id IN (?3, ?4)
                AND kind IN ('compact_boundary', 'compaction')
              LIMIT 1",
-            params![provider, boundary_id.as_str(), session_id.as_str()],
+            params![
+                provider,
+                session_id.as_str(),
+                boundary_id.as_str(),
+                production_boundary_id.as_str(),
+            ],
         )
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
