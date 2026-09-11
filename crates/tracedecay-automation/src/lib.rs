@@ -37,7 +37,7 @@ pub mod managed_skills {
     };
 }
 
-pub use error::{AutomationError, BoxError, Result};
+pub use error::{AutomationError, Result};
 pub use ports::AutomationRunRecord;
 
 pub(crate) fn config_error(message: impl Into<String>) -> AutomationError {
