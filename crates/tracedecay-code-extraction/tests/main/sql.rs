@@ -115,6 +115,20 @@ CREATE PROCEDURE app.refresh() LANGUAGE SQL AS 'SELECT 1';",
         vec![SchemaEvidenceIssueV1::ParseError]
     );
 
+    let unmodeled = SqlExtractor.extract_artifact(
+        "migrations/index.sql",
+        "CREATE INDEX users_email ON app.users (email);",
+    );
+    let unmodeled = unmodeled
+        .schema_evidence
+        .expect("unsupported schema evidence");
+    assert!(unmodeled.facts.is_empty());
+    assert_eq!(unmodeled.status, SchemaEvidenceStatusV1::Unsupported);
+    assert_eq!(
+        unmodeled.issues,
+        vec![SchemaEvidenceIssueV1::UnsupportedSyntax]
+    );
+
     let dynamic = SqlExtractor.extract_artifact(
         "migrations/dynamic.sql",
         "EXECUTE 'CREATE TABLE app.hidden (id INT)';",

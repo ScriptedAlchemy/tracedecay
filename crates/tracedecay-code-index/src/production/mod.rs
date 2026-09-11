@@ -742,6 +742,12 @@ impl CodeIndexPublishedGenerationV1 {
         })
     }
 
+    pub fn analysis_coverage(&self) -> impl Iterator<Item = (&str, &ExtractionBatchV1)> {
+        self.files
+            .iter()
+            .map(|file| (file.authority.logical_path.as_str(), &file.extraction))
+    }
+
     pub fn edges(&self) -> &[CanonicalRelationEdgeV1] {
         &self.edges
     }

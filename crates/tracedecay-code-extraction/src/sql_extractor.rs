@@ -239,31 +239,22 @@ impl SqlExtractor {
     }
 
     fn visit_statement(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        let action = if has_direct_child(node, "keyword_create") {
-            Some(SqlSchemaActionV1::Create)
-        } else if has_direct_child(node, "keyword_alter") {
-            Some(SqlSchemaActionV1::Alter)
-        } else if has_direct_child(node, "keyword_drop") {
-            Some(SqlSchemaActionV1::Drop)
-        } else {
-            None
-        };
-        let object_kind = if has_direct_child(node, "keyword_table") {
-            Some((SqlSchemaObjectKindV1::Table, NodeKind::Class))
-        } else if has_direct_child(node, "keyword_view") {
-            Some((SqlSchemaObjectKindV1::View, NodeKind::Class))
-        } else if has_direct_child(node, "keyword_function") {
-            Some((SqlSchemaObjectKindV1::Function, NodeKind::Function))
-        } else if has_direct_child(node, "keyword_procedure") {
-            Some((SqlSchemaObjectKindV1::Procedure, NodeKind::Function))
-        } else {
-            None
-        };
-        match (action, object_kind) {
-            (Some(action), Some((object_kind, graph_kind))) => {
-                Self::emit_schema_change(state, node, action, object_kind, graph_kind);
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                let kind = child.kind();
+                if is_unmodeled_schema_statement(kind) {
+                    state
+                        .schema_issues
+                        .push(SchemaEvidenceIssueV1::UnsupportedSyntax);
+                } else {
+                    Self::visit_node(state, child);
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
             }
-            _ => Self::visit_children(state, node),
         }
     }
 
@@ -423,9 +414,20 @@ fn source_span(node: TsNode<'_>) -> tracedecay_domain::SourceSpan {
     }
 }
 
-fn has_direct_child(node: TsNode<'_>, kind: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor).any(|child| child.kind() == kind)
+fn is_unmodeled_schema_statement(kind: &str) -> bool {
+    (kind.starts_with("create_") || kind.starts_with("alter_") || kind.starts_with("drop_"))
+        && !matches!(
+            kind,
+            "create_table"
+                | "alter_table"
+                | "drop_table"
+                | "create_view"
+                | "create_materialized_view"
+                | "alter_view"
+                | "drop_view"
+                | "create_function"
+                | "drop_function"
+        )
 }
 
 fn contains_kind(node: TsNode<'_>, kind: &str) -> bool {
