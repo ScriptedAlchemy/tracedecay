@@ -18,6 +18,10 @@ pub struct LspCodeIndexProjectionIdentity {
     pub repository: RepositoryId,
     pub worktree: Option<WorktreeId>,
     pub reference: Option<RefId>,
+    /// The checkout's live HEAD when this current identity was resolved.
+    /// Distinct from `source_revision`: dirty sealed content belongs to no
+    /// commit, while a managed test run still executes under the live HEAD.
+    pub head_commit_id: Option<CommitId>,
     pub source_revision: Option<CommitId>,
     pub code_generation_id: CodeGenerationId,
     pub snapshot_digest: ManifestDigest,

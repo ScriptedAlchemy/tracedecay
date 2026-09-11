@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
+use super::super::identity::IndexingIdentityV1;
 use super::CodeIndexSchedulerRegistryV1;
 
 impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
@@ -22,11 +23,31 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             let root = project_root
                 .canonicalize()
                 .map_err(|_| LspRuntimeFailure::new("lsp-code-index-root-unavailable"))?;
+            let identity_root = root.clone();
+            let live_identity =
+                tokio::task::spawn_blocking(move || IndexingIdentityV1::resolve(&identity_root))
+                    .await
+                    .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-task-failed"))?
+                    .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-unavailable"))?;
+            // Resolve HEAD first, then cross the current-generation fence. A
+            // concurrent checkout or commit changes Git metadata, so the
+            // fence refuses instead of attaching the new HEAD to the old seat.
             let current = registry
                 .latest_complete_ready(&root)
                 .await
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
             let generation = &current.generation;
+            let snapshot = generation.snapshot();
+            if live_identity.repository_id() != &snapshot.repository
+                || snapshot.worktree.as_ref() != Some(live_identity.worktree_id())
+                || snapshot.reference.as_ref() != live_identity.head_ref()
+                || snapshot
+                    .source_revision
+                    .as_ref()
+                    .is_some_and(|revision| Some(revision) != live_identity.head_commit())
+            {
+                return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
+            }
             let document_identity = document_relative_path
                 .map(|path| path.replace('\\', "/"))
                 .map(|logical_path| {
@@ -45,14 +66,15 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             Ok(
                 tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentity {
                     project: generation.manifest().project_id.clone(),
-                    repository: generation.snapshot().repository.clone(),
-                    worktree: generation.snapshot().worktree.clone(),
-                    reference: generation.snapshot().reference.clone(),
-                    source_revision: generation.snapshot().source_revision.clone(),
+                    repository: snapshot.repository.clone(),
+                    worktree: snapshot.worktree.clone(),
+                    reference: snapshot.reference.clone(),
+                    head_commit_id: live_identity.head_commit().cloned(),
+                    source_revision: snapshot.source_revision.clone(),
                     code_generation_id: generation.manifest().generation_id.clone(),
                     snapshot_digest: generation.manifest().snapshot_digest.clone(),
                     invalidation_digest: generation.manifest().invalidation_digest.clone(),
-                    snapshot_content_digest: generation.snapshot().content_identity.clone(),
+                    snapshot_content_digest: snapshot.content_identity.clone(),
                     document_file_occurrence_id,
                     document_content_digest,
                 },
