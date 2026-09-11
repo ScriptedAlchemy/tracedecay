@@ -1153,13 +1153,13 @@ impl Drop for PendingWakeClaimV1 {
 
 /// Seat handles the ready probe validates outside the mounted-map lock.
 type ReadyProbeServingPartsV1 = (
-    Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     super::SourceFreshnessFenceV1,
     super::HistoricalCodeIndexGenerationOwnerV1,
     Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
     Arc<AtomicBool>,
-    Arc<AtomicUsize>,
+    Arc<tokio::sync::Notify>,
+    Arc<PendingWakeV1>,
 );
 
 #[derive(Clone)]
@@ -2299,6 +2299,29 @@ impl CodeIndexSchedulerRegistryV1 {
         state.trigger = Self::pack_trigger(trigger);
         drop(state);
         wake.notify_one();
+    }
+
+    /// Post one arrival through the existing coalesced per-worktree owner.
+    /// A queued arrival already supplies the same background remedy.
+    fn note_wake_if_idle(
+        pending_wake: &PendingWakeV1,
+        wake: &tokio::sync::Notify,
+        trigger: CodeIndexCadenceTriggerV1,
+    ) -> bool {
+        let wake_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.micros != 0 {
+            return false;
+        }
+        state.owner = state.next_owner();
+        state.micros = wake_micros;
+        state.trigger = Self::pack_trigger(trigger);
+        drop(state);
+        wake.notify_one();
+        true
     }
 
     /// Claim the pending wake as one reconcile's arrival, at the instant the
@@ -5767,6 +5790,8 @@ impl CodeIndexSchedulerRegistryV1 {
             hints,
             wake,
             pending_wake,
+            source_freshness,
+            shutting_down,
             first_complete_demand,
         ) = {
             let mounted = self.mounted.lock().await;
@@ -5781,29 +5806,37 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                worktree.source_freshness.clone(),
+                Arc::clone(&worktree.shutting_down),
                 first_complete_demand,
             )
         };
         // When the background worker already owns the scheduler, preserve the
         // last complete immutable generation instead of joining its work.
         let authority_root = project_root.clone();
+        let freshness_root = project_root.clone();
         let latest = crate::ports::park_admission(tokio::task::spawn_blocking(move || {
-            let mut scheduler = match scheduler.try_lock() {
+            let scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
-                    // Serve prior generation without waiting, but schedule a
-                    // follow-up verification so busy refresh cannot strand
-                    // cadence indefinitely.
-                    Self::note_wake(
-                        &pending_wake,
-                        &wake,
-                        CodeIndexCadenceTriggerV1::BusyFollowUp,
-                    );
-                    return serving_generation
+                    let serving = serving_generation
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
+                    // A still-current proof needs no follow-up. If it expired
+                    // after this pass began, leave one coalesced wake so the
+                    // worker re-observes source after releasing its ownership.
+                    if serving.is_some()
+                        && !source_freshness.ready_without_stat(&freshness_root, &shutting_down)
+                    {
+                        Self::note_wake_if_idle(
+                            &pending_wake,
+                            &wake,
+                            CodeIndexCadenceTriggerV1::BusyFollowUp,
+                        );
+                    }
+                    return serving;
                 }
             };
             // Serve-old-first, continued: winning the scheduler lock must not
@@ -5825,13 +5858,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(latest) = servable {
-                // Something is servable, so freshness is a background concern.
-                // Only record an arrival when the ladder actually asked for a
-                // reconcile; a quiet repository must not turn every read into
-                // a wake, and an unattributed arrival would fabricate a
-                // cadence sample for work that never ran.
-                if scheduler.request_fresh_for_query_background() {
-                    Self::note_wake(
+                // The bounded proof is the only source-currentness work a
+                // read performs. An expired proof leaves the immutable owner
+                // servable and hands exact verification to the retained worker.
+                if !source_freshness.ready_without_stat(&freshness_root, &shutting_down) {
+                    Self::note_wake_if_idle(
                         &pending_wake,
                         &wake,
                         CodeIndexCadenceTriggerV1::QueryAdmission,
@@ -5925,7 +5956,15 @@ impl CodeIndexSchedulerRegistryV1 {
         admission: GenerationDecodeAdmissionV1,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
-        let (source_freshness, serving_generation, shutting_down, graph_enabled) = {
+        let (
+            source_freshness,
+            serving_generation,
+            serving_source_witness,
+            shutting_down,
+            graph_enabled,
+            wake,
+            pending_wake,
+        ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             if admission == GenerationDecodeAdmissionV1::AwaitDecode
@@ -5942,19 +5981,29 @@ impl CodeIndexSchedulerRegistryV1 {
             (
                 worktree.source_freshness.clone(),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_source_witness),
                 Arc::clone(&worktree.shutting_down),
                 worktree.graph_activation.policy().is_enabled(),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         let freshness_root = project_root.clone();
         let (request_reconcile, latest) = tokio::task::spawn_blocking(move || {
-            // The cheap proof expires even when an idle checkout is unchanged.
-            // Revalidate through the same source fence before refusing its seat.
-            let source_ready = source_freshness.ready_without_stat(&freshness_root, &shutting_down)
-                || source_freshness.exact_source_is_ready(&freshness_root, &shutting_down);
             let serving = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let witness_matches_seat = serving.as_ref().is_some_and(|serving| {
+                serving_source_witness
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .is_some_and(|witness| {
+                        witness.generation_id == serving.generation().manifest().generation_id
+                    })
+            });
+            let source_ready = witness_matches_seat
+                && source_freshness.ready_without_stat(&freshness_root, &shutting_down);
             let latest = source_ready.then(|| serving.clone()).flatten();
             if latest.is_none() {
                 tracing::info!(
@@ -5976,9 +6025,11 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
         .ok()?;
         if request_reconcile && admission == GenerationDecodeAdmissionV1::AwaitDecode {
-            // This ladder retains the source-change and cancellation authority;
-            // the ready read must not serve its stale result.
-            self.latest_complete_fresh(&project_root).await;
+            Self::note_wake_if_idle(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
         }
         let latest = latest?;
         if let Ok(authority) = latest.test_attribution_authority() {
@@ -6108,25 +6159,25 @@ impl CodeIndexSchedulerRegistryV1 {
             return None;
         }
         Some((
-            Arc::clone(&worktree.scheduler),
             worktree.source_freshness.clone(),
             worktree.historical_generation_owner.clone(),
             Arc::clone(&worktree.serving_generation),
             Arc::clone(&worktree.serving_source_witness),
             Arc::clone(&worktree.shutting_down),
-            Arc::clone(&worktree.reconcile_in_progress),
+            Arc::clone(&worktree.wake),
+            Arc::clone(&worktree.pending_wake),
         ))
     }
 
     fn ready_decoded_from_serving_parts(
         (
-            scheduler,
             source_freshness,
             historical_generation_owner,
             serving_generation,
             serving_source_witness,
             shutting_down,
-            reconcile_in_progress,
+            wake,
+            pending_wake,
         ): ReadyProbeServingPartsV1,
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -6149,29 +6200,30 @@ impl CodeIndexSchedulerRegistryV1 {
                 witness.generation_id == serving.generation().manifest().generation_id
             });
         if !witness_matches_seat {
-            if reconcile_in_progress.load(Ordering::Acquire) != 0 {
-                return None;
-            }
-            match scheduler.try_lock() {
-                Ok(guard) => drop(guard),
-                Err(std::sync::TryLockError::Poisoned(error)) => drop(error.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => return None,
-            }
+            Self::note_wake_if_idle(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+            return None;
         }
-        if !source_freshness.exact_source_is_ready(project_root, &shutting_down)
-            || !historical_generation_owner
-                .active_publication_covers(serving.generation())
-                .ok()?
+        if !source_freshness.ready_without_stat(project_root, &shutting_down) {
+            Self::note_wake_if_idle(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+            return None;
+        }
+        if !historical_generation_owner
+            .active_publication_covers(serving.generation())
+            .ok()?
         {
             *serving_source_witness
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             return None;
         }
-        *serving_source_witness
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = source_freshness
-            .source_currency_witness_for(&serving.generation().manifest().generation_id);
         // Checkout-identity gate: the ready probe (or its recorded witness)
         // proved the generation current against the live worktree, and the
         // sealed reference label is attribution, not identity (see
@@ -6206,15 +6258,24 @@ impl CodeIndexSchedulerRegistryV1 {
         // sections are brief map reads, while an abstention under contention
         // here falsely demotes a proven-current answer to the stale serving
         // arm for that read.
-        let parts = {
-            let mounted = self.mounted.lock().await;
-            Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?
-        };
+        let parts = hotpath::measure_block!(
+            "daemon.code_index.query.latest_ready_decoded.mounted_wait",
+            {
+                let mounted = self.mounted.lock().await;
+                Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?
+            }
+        );
         let scope = scope.clone();
-        tokio::task::spawn_blocking(move || {
-            Self::ready_decoded_from_serving_parts(parts, &project_root, &scope)
-        })
-        .await
+        let probe = tokio::task::spawn_blocking(move || {
+            hotpath::measure_block!(
+                "daemon.code_index.query.latest_ready_decoded.execution",
+                Self::ready_decoded_from_serving_parts(parts, &project_root, &scope)
+            )
+        });
+        hotpath::measure_block!(
+            "daemon.code_index.query.latest_ready_decoded.offload_join",
+            probe.await
+        )
         .ok()
         .flatten()
     }
@@ -6355,109 +6416,48 @@ impl CodeIndexSchedulerRegistryV1 {
     /// decision made by the same scheduler observation. A ready text artifact
     /// is not inherently stale merely because native graph activation is off.
     ///
-    /// Currency is judged from source truth first: the shared freshness fence
-    /// proves, without the scheduler mutex, that the owner's sealed source is
-    /// the one the last reconcile verified and that the live tree still
-    /// carries it. Only an owner the fence cannot vouch for consults the
-    /// worker — a pending arrival or an in-flight pass then means "stale until
-    /// that pass re-observes the source", and the read leaves the coalesced
-    /// follow-up wake that pass needs. Treating every in-flight pass as
-    /// staleness made a polling reader and the worker livelock: each read
-    /// during a `Noop` pass posted a follow-up, the follow-up was another
-    /// pass, and the owner was never called current although nothing moved.
+    /// Currency is judged from the shared fence's bounded proof of the exact
+    /// sealed source. Once that proof expires, the immutable owner remains
+    /// available as stale while one coalesced wake asks the retained worker to
+    /// run the exact stat/content proof. The read never performs that work or
+    /// waits for the scheduler mutex.
     pub async fn latest_text_serving_freshness_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<(LatestCodeTextGenerationV1, bool)> {
-        let (
-            root,
-            scheduler,
-            source_freshness,
-            text_generation,
-            wake,
-            pending_wake,
-            reconcile_in_progress,
-            shutting_down,
-        ) = {
+        let (root, source_freshness, text_generation, wake, pending_wake, shutting_down) = {
             let mounted = self.mounted.lock().await;
             let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
             (
                 root.clone(),
-                Arc::clone(&worktree.scheduler),
                 worktree.source_freshness.clone(),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
-                Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&worktree.shutting_down),
             )
         };
         let scope = scope.clone();
-        tokio::task::spawn_blocking(move || {
-            if gix::open(&root).is_err() {
-                return None;
-            }
-            let latest = text_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-                .filter(|latest| {
-                    latest.text_serving_is_ready() && text_matches_scope_identity(latest, &scope)
-                })?;
-            if source_freshness.serves_current_source(
-                &latest.metadata().snapshot().content_identity,
-                &root,
-                &shutting_down,
-            ) {
-                return Some((latest, true));
-            }
-            if pending_wake.has_pending_arrival() {
-                // A pass is already queued behind the current owner work; it
-                // re-observes the source when it starts, so it also supplies
-                // this query's remedy.
-                return Some((latest, false));
-            }
-            if reconcile_in_progress.load(Ordering::Acquire) != 0 {
-                // In-flight owner work observed the source when *it* started,
-                // which may predate the change this query is asking about:
-                // after publication the same pass still owns the text
-                // projection and optional graph seating of the previous
-                // source state. Returning stale without a wake stranded that
-                // remedy until an unrelated hint arrived (issue #917). Post the
-                // coalesced follow-up the busy-lock arm below posts, so the
-                // worker re-runs the freshness ladder once this pass ends.
-                Self::note_wake(
-                    &pending_wake,
-                    &wake,
-                    CodeIndexCadenceTriggerV1::BusyFollowUp,
-                );
-                return Some((latest, false));
-            }
-            let mut scheduler = match scheduler.try_lock() {
-                Ok(scheduler) => scheduler,
-                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    Self::note_wake(
-                        &pending_wake,
-                        &wake,
-                        CodeIndexCadenceTriggerV1::BusyFollowUp,
-                    );
-                    return Some((latest, false));
-                }
-            };
-            let current = !scheduler.request_fresh_for_query_background();
-            if !current {
-                Self::note_wake(
-                    &pending_wake,
-                    &wake,
-                    CodeIndexCadenceTriggerV1::QueryAdmission,
-                );
-            }
-            Some((latest, current))
-        })
-        .await
-        .ok()
-        .flatten()
+        let latest = text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .filter(|latest| {
+                latest.text_serving_is_ready() && text_matches_scope_identity(latest, &scope)
+            })?;
+        let current = source_freshness.serves_recently_verified_source(
+            &latest.metadata().snapshot().content_identity,
+            &root,
+            &shutting_down,
+        );
+        if !current {
+            Self::note_wake_if_idle(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+        }
+        Some((latest, current))
     }
 
     pub async fn latest_complete_serving_for_scope(
@@ -6578,9 +6578,9 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Ask the background worker for a reconcile on behalf of a query admission
     /// that found nothing servable, then return whether a wake was posted.
     ///
-    /// This never reconciles inline and never parks: it runs only the ladder's
-    /// cheap checks (`request_fresh_for_query_background`) and hands the O(store)
-    /// remedy to the worker. It exists because the search path had no remedy at
+    /// This never reconciles inline and never parks: it checks only the bounded
+    /// source proof and hands exact verification or rebuild to the worker. It
+    /// exists because the search path had no remedy at
     /// all — the freshness ladder lives in `latest_complete_fresh`, which search
     /// deliberately does not call, so a search that resolved to nothing returned
     /// its typed failure forever without ever asking anyone to rebuild.
@@ -6591,9 +6591,9 @@ impl CodeIndexSchedulerRegistryV1 {
     /// duplicated — that is what keeps a rebuild window's worth of failing
     /// searches from becoming a wake storm and from each fabricating its own
     /// cadence arrival. Second, when a generation's immutable text owners are
-    /// ready, the ladder's own suppression decides, exactly as it does on the
-    /// grep/context/callers path. Authenticated metadata without those owners
-    /// is still warming and always needs the worker's next bounded slice.
+    /// ready, the shared source fence suppresses a wake while its proof is
+    /// current. Authenticated metadata without those owners is still warming
+    /// and always needs the worker's next bounded slice.
     pub async fn request_query_background_reconcile(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -6606,13 +6606,24 @@ impl CodeIndexSchedulerRegistryV1 {
         } else {
             None
         };
-        let (scheduler, serving_generation, text_generation, hints, wake, pending_wake) = {
+        let (
+            root,
+            source_freshness,
+            shutting_down,
+            serving_generation,
+            text_generation,
+            hints,
+            wake,
+            pending_wake,
+        ) = {
             let mounted = self.mounted.lock().await;
-            let Some((_, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
+            let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
                 return false;
             };
             (
-                Arc::clone(&worktree.scheduler),
+                root.clone(),
+                worktree.source_freshness.clone(),
+                Arc::clone(&worktree.shutting_down),
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.hints),
@@ -6640,61 +6651,39 @@ impl CodeIndexSchedulerRegistryV1 {
             test_control.claim_entered.notify_waiters();
             test_control.claim_release.notified().await;
         }
-        tokio::task::spawn_blocking(move || {
-            let mut scheduler = match scheduler.try_lock() {
-                Ok(scheduler) => scheduler,
-                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    // A reconcile (or another query) owns the scheduler. Never
-                    // queue on it from a query; schedule the follow-up pass
-                    // instead, exactly as the grep/context/callers ladder does,
-                    // so a busy refresh cannot strand cadence.
-                    Self::note_wake(
-                        &pending_wake,
-                        &wake,
-                        CodeIndexCadenceTriggerV1::BusyFollowUp,
-                    );
-                    wake_claim.settle();
-                    return true;
-                }
-            };
-            let nothing_servable = serving_generation
+        let nothing_servable = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+            && text_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
-                && text_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_none();
-            let text_owners_are_warming = text_generation
-                .read()
+                .is_none();
+        let text_owners_are_warming = text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(LatestCodeTextGenerationV1::text_serving_needs_work);
+        let proof_expired = !source_freshness.ready_without_stat(&root, &shutting_down);
+        if !nothing_servable && !text_owners_are_warming && !proof_expired {
+            return false;
+        }
+        if nothing_servable {
+            // This admission observed no source mutation, so it may not
+            // supersede an in-flight authoritative snapshot. The retained
+            // overflow plus pending wake guarantees a follow-up pass.
+            hints
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .is_some_and(LatestCodeTextGenerationV1::text_serving_needs_work);
-            // Nothing is servable at all, so the ladder's suppression cannot
-            // apply: a reconcile is the only thing that can ever make this scope
-            // answerable, and no other caller on this path will ask for it.
-            if nothing_servable {
-                // This admission observed no source mutation, so it may not
-                // supersede an in-flight authoritative snapshot. The retained
-                // overflow plus pending wake guarantees a follow-up pass.
-                hints
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .overflow();
-            } else if !text_owners_are_warming && !scheduler.request_fresh_for_query_background() {
-                return false;
-            }
-            Self::note_wake(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
-            wake_claim.settle();
-            true
-        })
-        .await
-        .unwrap_or(false)
+                .overflow();
+        }
+        Self::note_wake(
+            &pending_wake,
+            &wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
+        wake_claim.settle();
+        true
     }
 
     pub async fn semantic_evaluation_snapshot_for_scope(

@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
 
 use super::super::graph_activation::install_injected_activation_gate;
@@ -102,6 +103,13 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     .await
     .expect("serving installation must wake the waiter without another seal");
     assert_eq!(generation.manifest().generation_id, published.generation_id);
+    let resolved_scope = ResolvedScope::new(
+        generation.manifest().project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        generation.snapshot().reference.clone(),
+    )
+    .expect("resolved serving scope");
     assert!(
         generation
             .symbols()
@@ -123,12 +131,52 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         state.last_reconciled_at = std::time::Instant::now()
             .checked_sub(state.staleness_threshold + Duration::from_secs(1))
             .expect("age the readiness proof");
-        state.busy_witness_memo = None;
     }
-    let ready = registry
-        .latest_complete_ready(&project)
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
         .await
-        .expect("an expired cheap proof must revalidate the unchanged source");
+        .expect("hold expired-proof verification in the background");
+    changes.borrow_and_update();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            registry.latest_complete_ready(&project)
+        )
+        .await
+        .expect("expired readiness returns without walking source")
+        .is_none(),
+        "an expired proof cannot be promoted current before the worker renews it"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&resolved_scope)
+            .await
+            .is_some(),
+        "the retained immutable generation remains available to stale reads"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&resolved_scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the read coalesces one verification wake on the retained worker"
+    );
+    assert!(
+        !changes.has_changed().expect("live serving subscription"),
+        "admission cannot fabricate a renewed source proof"
+    );
+    drop(admission);
+    let ready = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            changes.changed().await.expect("source proof renewal");
+            if let Some(ready) = registry.latest_complete_ready(&project).await {
+                break ready;
+            }
+        }
+    })
+    .await
+    .expect("the worker renews the unchanged source proof");
     assert_eq!(
         ready.generation().manifest().generation_id,
         published.generation_id
@@ -223,7 +271,6 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         state.last_reconciled_at = std::time::Instant::now()
             .checked_sub(state.staleness_threshold + Duration::from_secs(1))
             .expect("age the readiness proof");
-        state.busy_witness_memo = None;
     }
     assert!(
         registry.latest_complete_ready(&project).await.is_none(),
@@ -237,8 +284,8 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .lock()
             .expect("scheduler lock")
             .pending_hint_count(),
-        None,
-        "rejected source proof must request the canonical authoritative scan"
+        Some(0),
+        "the read must leave source verification to the canonical worker without fabricating an overflow"
     );
     drop(admission);
     changes.borrow_and_update();
