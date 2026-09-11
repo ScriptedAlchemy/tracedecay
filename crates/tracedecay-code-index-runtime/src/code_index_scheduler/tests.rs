@@ -15578,22 +15578,30 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         )
         .await
         .expect("reopen retained generation");
+    let mut serving_changes = registry
+        .subscribe_serving_generation_changes(fixture.path())
+        .await
+        .expect("subscribe to retained serving changes");
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    let current = loop {
         if let Some((current, true)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
             && current.query_owners_are_warm()
         {
-            break;
+            break current;
         }
         assert!(
             Instant::now() <= deadline,
             "reopened text generation did not become current"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
+    assert!(
+        current.uses_partitioned_manifest(),
+        "the retained text owner is the partitioned generation authority"
+    );
     assert!(
         registry
             .latest_complete_serving_for_scope(&scope)
@@ -15601,6 +15609,15 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
             .is_none(),
         "configured graph refusal must leave the full generation unavailable"
     );
+    tokio::time::timeout(Duration::from_secs(5), serving_changes.changed())
+        .await
+        .expect("the current retained text owner wakes deferred consumers")
+        .expect("the serving-change channel stays open while mounted");
+    let selected = registry
+        .latest_feedback_generation_for_scope(fixture.path(), &scope)
+        .await
+        .expect("the woken consumer selects current retained text authority");
+    assert_eq!(selected.metadata().manifest().generation_id, generation);
 
     let root_identity = tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1::resolve(
         &registry,
