@@ -1266,7 +1266,12 @@ impl DeterministicCodeChunker {
             )
         })?;
         let symbols = hotpath::measure_block!("code_index.chunk.lineage", {
-            self.lineage_symbols(source, &file_identity, &symbol_rows)
+            self.lineage_symbols(
+                source,
+                &file_identity,
+                &symbol_rows,
+                &published_symbol_spans(chunks.iter()),
+            )
         })?;
         let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
         let (same_file_edges, unresolved_references) =
@@ -1475,15 +1480,22 @@ impl DeterministicCodeChunker {
         source: &str,
         file_identity: &FileIdentityDigest,
         rows: &[SymbolRow],
+        published_spans: &BTreeMap<SymbolOccurrenceId, SourceSpan>,
     ) -> Result<Vec<LineageSymbolRecordV1>, ChunkingFailureV1> {
         let mut symbols = Vec::with_capacity(rows.len());
         for row in rows {
-            let start = usize::try_from(row.span.start_byte).map_err(|error| {
+            let span = published_spans.get(&row.occurrence).ok_or_else(|| {
+                ChunkingFailureV1::NonCanonicalIdentity(format!(
+                    "symbol {} has no published source span",
+                    row.qualified_name
+                ))
+            })?;
+            let start = usize::try_from(span.start_byte).map_err(|error| {
                 ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "symbol start offset does not fit this host: {error}"
                 ))
             })?;
-            let end = usize::try_from(row.span.end_byte).map_err(|error| {
+            let end = usize::try_from(span.end_byte).map_err(|error| {
                 ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "symbol end offset does not fit this host: {error}"
                 ))
@@ -1805,6 +1817,30 @@ impl DeterministicCodeChunker {
             Ok(chunks)
         })
     }
+}
+
+/// Canonical source span recorded for each published symbol.
+///
+/// Retrieval grains may expand to absorb adjacent whitespace, so both symbol
+/// content identity and graph projection must derive their span from this
+/// post-attribution chunk set.
+pub(crate) fn published_symbol_spans<'a>(
+    chunks: impl IntoIterator<Item = &'a CodeSearchChunkV1>,
+) -> BTreeMap<SymbolOccurrenceId, SourceSpan> {
+    let mut spans = BTreeMap::<SymbolOccurrenceId, SourceSpan>::new();
+    for chunk in chunks {
+        let Some(symbol) = &chunk.anchor.symbol_occurrence_id else {
+            continue;
+        };
+        spans
+            .entry(symbol.clone())
+            .and_modify(|span| {
+                span.start_byte = span.start_byte.min(chunk.anchor.source_span.start_byte);
+                span.end_byte = span.end_byte.max(chunk.anchor.source_span.end_byte);
+            })
+            .or_insert(chunk.anchor.source_span);
+    }
+    spans
 }
 
 /// Names too ubiquitous to resolve across files by name alone: standard
@@ -3869,7 +3905,15 @@ pub fn real_symbol() {}
         ];
 
         let symbols = chunker()
-            .lineage_symbols(source, &file_identity, &rows)
+            .lineage_symbols(
+                source,
+                &file_identity,
+                &rows,
+                &rows
+                    .iter()
+                    .map(|row| (row.occurrence.clone(), row.span))
+                    .collect(),
+            )
             .expect("valid symbol lineage records");
 
         assert_eq!(

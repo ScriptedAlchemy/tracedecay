@@ -6234,6 +6234,7 @@ dependencies = [
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-privacy",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",

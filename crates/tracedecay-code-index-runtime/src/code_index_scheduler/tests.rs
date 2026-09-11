@@ -3187,7 +3187,7 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
 }
 
 #[test]
-fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v4() {
+fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v5() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let mut seed = scheduler(
@@ -3206,7 +3206,7 @@ fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v4() {
     );
     assert!(
         restarted.servable_retained_text_generation().is_none(),
-        "a retained v3 Rust extraction must not enter a v4 serving slot"
+        "a retained v3 Rust extraction must not enter a v5 serving slot"
     );
 
     let rebuilt = published(
@@ -3225,7 +3225,7 @@ fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v4() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v4")
+        Some("extractor.rust.v5")
     );
 }
 
