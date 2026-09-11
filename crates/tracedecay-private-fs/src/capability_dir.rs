@@ -73,62 +73,29 @@ pub fn rename_noreplace(
     {
         use std::os::fd::AsRawFd;
 
-        let from = component_cstring(from)?;
-        let to = component_cstring(to)?;
-        // SAFETY: both names are single-component C strings and both fds are
-        // already-open directory capabilities.
-        let result = unsafe {
-            libc::renameat2(
-                from_parent.as_raw_fd(),
-                from.as_ptr(),
-                to_parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        crate::rename_noreplace::rename_noreplace_at(
+            from_parent.as_raw_fd(),
+            from,
+            to_parent.as_raw_fd(),
+            to,
+        )
     }
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;
 
-        let from = component_cstring(from)?;
-        let to = component_cstring(to)?;
-        // SAFETY: both names are single-component C strings and RENAME_EXCL
-        // refuses an occupied destination.
-        let result = unsafe {
-            libc::renameatx_np(
-                from_parent.as_raw_fd(),
-                from.as_ptr(),
-                to_parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_EXCL,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        crate::rename_noreplace::rename_noreplace_at(
+            from_parent.as_raw_fd(),
+            from,
+            to_parent.as_raw_fd(),
+            to,
+        )
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-        let from = dir_entry_wide(from_parent, from)?;
-        let to = dir_entry_wide(to_parent, to)?;
-        // SAFETY: both UTF-16 strings are NUL-terminated. Omitting
-        // MOVEFILE_REPLACE_EXISTING makes an occupied destination fail.
-        let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-        if moved != 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        let from = dir_entry_path(from_parent, from)?;
+        let to = dir_entry_path(to_parent, to)?;
+        crate::rename_noreplace::rename_noreplace_paths(&from, &to)
     }
     #[cfg(not(any(
         all(target_os = "linux", target_env = "gnu"),
@@ -144,24 +111,9 @@ pub fn rename_noreplace(
     }
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-fn component_cstring(name: &OsStr) -> io::Result<std::ffi::CString> {
-    use std::os::unix::ffi::OsStrExt;
-
-    std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))
-}
-
 #[cfg(windows)]
-fn dir_entry_wide(parent: &Dir, name: &OsStr) -> io::Result<Vec<u16>> {
-    use std::os::windows::ffi::OsStrExt;
-
-    Ok(dir_path(parent)?
-        .join(name)
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect())
+fn dir_entry_path(parent: &Dir, name: &OsStr) -> io::Result<std::path::PathBuf> {
+    Ok(dir_path(parent)?.join(name))
 }
 
 /// Resolves an open directory capability back to its live filesystem path so
