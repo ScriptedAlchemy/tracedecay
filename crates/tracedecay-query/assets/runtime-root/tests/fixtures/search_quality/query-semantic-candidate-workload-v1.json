@@ -7,8 +7,8 @@
       "query_workers": 1
     },
     "exact_corpus_bytes": 147447,
-    "exact_eligible_chunks_10x": 21700,
-    "exact_eligible_chunks_current": 2170,
+    "exact_eligible_chunks_10x": 19650,
+    "exact_eligible_chunks_current": 1965,
     "exact_file_count": 13,
     "exact_query_count": 28,
     "fusion_revision": "CompositionKernel::compose",
@@ -133,8 +133,8 @@
     "required_offline": "no_network_and_query_fallback_available"
   },
   "expected_query_fallback_digests": {
-    "train": "sha256:ed78b0426391ac8362506d6dfce6bd5430c85acd3cd5ff6a50f6fa150eb085a8",
-    "validation": "sha256:61803f53fed00dc6fff45108d2b644015b3e23e12f7f1a1365c59f979fe81591"
+    "train": "sha256:82e096d0f32c5ac6f60fae8001f8f03ae93e436e2b79bcd07b85a69555345bfd",
+    "validation": "sha256:bb72cdd90c3386312ba1d2cd7dbab3853261e13b40bbe23cb77b276aae14ff2c"
   },
   "profile_matrix": [
     {
