@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use serde_json::{Map, Value as JsonValue, json};
 use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispositionV1};
@@ -412,6 +413,10 @@ async fn persist_raw_predecessor_range(
 /// only earlier rows are policy anchors has no predecessor, and the joins
 /// yield no row. The predicate only narrows which `current` rows are
 /// visited; every visited row is written with its own identity and relation.
+///
+/// Ingest writes one range per message, so the statement text is built once
+/// per predicate ([`PREDECESSOR_RANGE_UPSERT_BY_IDENTITY`],
+/// [`PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE`]) instead of per call.
 fn predecessor_range_upsert_sql(current_predicate: &str) -> String {
     let role_list = crate::compression_policy::policy_anchor_role_sql_in_list();
     format!(
@@ -451,6 +456,14 @@ fn predecessor_range_upsert_sql(current_predicate: &str) -> String {
     )
 }
 
+static PREDECESSOR_RANGE_UPSERT_BY_IDENTITY: LazyLock<String> = LazyLock::new(|| {
+    predecessor_range_upsert_sql("current.provider = ?1 AND current.message_id = ?2")
+});
+
+static PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE: LazyLock<String> = LazyLock::new(|| {
+    predecessor_range_upsert_sql("current.store_id > ?1 AND current.store_id <= ?2")
+});
+
 pub(crate) async fn persist_raw_predecessor_range_for_identity(
     conn: &(impl Executor + ?Sized),
     provider: &str,
@@ -458,7 +471,7 @@ pub(crate) async fn persist_raw_predecessor_range_for_identity(
 ) -> Result<(), LcmError> {
     // Capture the exact preceding raw interval in the same ingest transaction.
     conn.execute(
-        &predecessor_range_upsert_sql("current.provider = ?1 AND current.message_id = ?2"),
+        PREDECESSOR_RANGE_UPSERT_BY_IDENTITY.as_str(),
         params![provider, message_id],
     )
     .await?;
@@ -475,7 +488,7 @@ pub(crate) async fn persist_raw_predecessor_ranges_for_store_range(
     to_store_id_inclusive: i64,
 ) -> Result<(), LcmError> {
     conn.execute(
-        &predecessor_range_upsert_sql("current.store_id > ?1 AND current.store_id <= ?2"),
+        PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE.as_str(),
         params![from_store_id_exclusive, to_store_id_inclusive],
     )
     .await?;
