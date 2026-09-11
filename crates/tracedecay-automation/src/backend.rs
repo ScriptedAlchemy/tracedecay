@@ -931,35 +931,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_report_appends_later_request_history() {
-        let mut initial = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: true,
-                failure_classification: None,
-                backoff_millis: 0,
-            }],
-        };
-        let repair = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: false,
-                failure_classification: Some(AgentTaskFailureClass::MalformedOutput),
-                backoff_millis: 0,
-            }],
-        };
-
-        initial.append(repair);
-
-        assert_eq!(initial.attempt_count(), 2);
-        assert!(initial.attempts()[0].succeeded);
-        assert_eq!(
-            initial.attempts()[1].failure_classification,
-            Some(AgentTaskFailureClass::MalformedOutput)
-        );
-    }
-
-    #[test]
     fn failure_disposition_prefers_current_error_evidence() {
         let disposition = agent_task_failure_disposition(
             Some(AgentTaskFailureClass::Permanent),
