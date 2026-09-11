@@ -6435,7 +6435,6 @@ dependencies = [
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
- "tracedecay-code-index",
  "tracedecay-code-index-runtime",
  "tracedecay-configuration",
  "tracedecay-contracts",

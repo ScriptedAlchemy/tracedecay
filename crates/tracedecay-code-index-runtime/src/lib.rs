@@ -60,6 +60,11 @@ pub mod project_reads;
 pub mod semantic_activation_reconciler;
 pub(crate) mod semantic_code;
 pub mod semantic_evaluation;
+
+/// The process-wide worker plan this runtime installs and schedules against;
+/// composition roots read its status from here instead of depending on the
+/// index crate for that one call.
+pub use tracedecay_code_index::parallelism;
 pub mod semantic_evaluation_shutdown;
 
 /// Historical `crate::code_index` / `crate::query` paths from the root move.
