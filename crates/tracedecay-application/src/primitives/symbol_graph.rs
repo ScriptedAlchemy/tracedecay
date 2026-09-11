@@ -1193,6 +1193,8 @@ async fn paginate<T: Send>(
         )
         .await?;
     Ok(SymbolGraphPage::complete(
+        claim.snapshot.code_generation_id().clone(),
+        claim.snapshot.freshness(),
         page_items,
         Some(total as u64),
         next_cursor,

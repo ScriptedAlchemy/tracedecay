@@ -43,12 +43,20 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 live_identity.head_ref().cloned(),
             )
             .map_err(|_| LspRuntimeFailure::new("lsp-code-index-scope-unavailable"))?;
-            let (_, current) = registry
-                .semantic_evaluation_generation_for_scope(&root, &scope)
+            let (current, source_is_current) = registry
+                .latest_text_serving_freshness_for_scope(&scope)
                 .await
-                .map_err(|reason| {
-                    LspRuntimeFailure::new(format!("lsp-code-index-{}", reason.as_str()))
-                })?;
+                .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
+            let freshness = if source_is_current {
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current
+            } else {
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                    sealed_at: current.metadata().manifest().seal.sealed_at,
+                    rebuild_in_flight: registry
+                        .rebuild_pass_in_flight_for_root_scope(&root, &scope)
+                        .await,
+                }
+            };
             let confirmation_root = root.clone();
             let confirmed_identity = tokio::task::spawn_blocking(move || {
                 IndexingIdentityV1::resolve(&confirmation_root)
@@ -59,7 +67,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             if confirmed_identity != live_identity {
                 return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
             }
-            let generation = current.as_ref();
+            let generation = current.metadata();
             let snapshot = generation.snapshot();
             if live_identity.repository_id() != &snapshot.repository
                 || snapshot.worktree.as_ref() != Some(live_identity.worktree_id())
@@ -92,6 +100,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     repository: snapshot.repository.clone(),
                     worktree: snapshot.worktree.clone(),
                     reference: snapshot.reference.clone(),
+                    freshness,
                     head_commit_id: confirmed_identity.head_commit().cloned(),
                     source_revision: snapshot.source_revision.clone(),
                     code_generation_id: generation.manifest().generation_id.clone(),

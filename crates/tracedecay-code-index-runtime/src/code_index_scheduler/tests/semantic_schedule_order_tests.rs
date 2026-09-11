@@ -399,6 +399,24 @@ async fn retained_partitioned_generation_reaches_semantics_after_source_proof_ex
         Some("fresh".to_owned()),
         "status retains the last verified owner while its bounded source proof ages out"
     );
+    let unverified_identity = LspCodeIndexProjectionIdentityPort::current_identity(
+        &registry,
+        fixture.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("an expired source proof must retain the read-only query identity");
+    assert_eq!(
+        unverified_identity.code_generation_id, retained_generation,
+        "source verification must keep serving the retained generation"
+    );
+    assert!(
+        matches!(
+            unverified_identity.freshness,
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale { .. }
+        ),
+        "an expired source proof must be reported as stale"
+    );
     let (candidate, code) = registry
         .semantic_evaluation_generation_for_scope(fixture.path(), &scope)
         .await
@@ -440,6 +458,27 @@ async fn retained_partitioned_generation_reaches_semantics_after_source_proof_ex
             Err(SemanticEvaluationGenerationRefusalV1::SourceChanged)
         ),
         "source drift must refuse the retained semantic evaluation candidate"
+    );
+    let projection_identity = LspCodeIndexProjectionIdentityPort::current_identity(
+        &registry,
+        fixture.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("source drift must retain the read-only query identity");
+    assert_eq!(
+        projection_identity.code_generation_id, retained_generation,
+        "read-only query identity must keep serving the retained generation"
+    );
+    assert!(
+        matches!(
+            projection_identity.freshness,
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                rebuild_in_flight: true,
+                ..
+            }
+        ),
+        "read-only query identity must report the pending source refresh"
     );
     drop(reconcile_admission);
     registry.shutdown().await;

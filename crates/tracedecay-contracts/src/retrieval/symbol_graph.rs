@@ -16,6 +16,23 @@ pub const MAX_SYMBOL_GRAPH_DEPTH: u32 = 10;
 pub const MAX_SYMBOL_GRAPH_QUERY_BYTES: usize = 4_096;
 pub const MAX_SYMBOL_GRAPH_FILTERS: usize = 32;
 
+/// Freshness of the generation a verified graph read serves.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum CodeGraphReadFreshnessV1 {
+    Current,
+    LastCompleteStale {
+        sealed_at: UtcMicros,
+        rebuild_in_flight: bool,
+    },
+}
+
+impl CodeGraphReadFreshnessV1 {
+    pub fn is_stale(self) -> bool {
+        matches!(self, Self::LastCompleteStale { .. })
+    }
+}
+
 /// Optional narrowing inside the immutable project/repository/worktree scope
 /// carried by [`RequestContext`]. A path prefix never establishes identity or
 /// authorization.
@@ -147,6 +164,8 @@ impl PrimitiveSupportGap {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolGraphPage<T> {
+    pub generation: tracedecay_domain::CodeGenerationId,
+    pub freshness: CodeGraphReadFreshnessV1,
     pub items: Vec<T>,
     pub total: Option<u64>,
     /// Opaque resume token; its bounded string is the public wire form.
@@ -158,9 +177,17 @@ pub struct SymbolGraphPage<T> {
 }
 
 impl<T> SymbolGraphPage<T> {
-    pub fn complete(items: Vec<T>, total: Option<u64>, next_cursor: Option<OpaqueCursor>) -> Self {
+    pub fn complete(
+        generation: tracedecay_domain::CodeGenerationId,
+        freshness: CodeGraphReadFreshnessV1,
+        items: Vec<T>,
+        total: Option<u64>,
+        next_cursor: Option<OpaqueCursor>,
+    ) -> Self {
         let truncated = next_cursor.is_some();
         Self {
+            generation,
+            freshness,
             items,
             total,
             next_cursor,
