@@ -314,7 +314,7 @@ pub(in crate::fact_store) async fn query_fact_before_supersession_tx(
     snapshot: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactStoreResult<Option<StoredFactV1>> {
+) -> FactStoreResult<Option<(StoredFactV1, FactId)>> {
     let owner_key = OwnerKey::new(owner)?;
     let mut rows = snapshot
         .query(
@@ -330,7 +330,7 @@ pub(in crate::fact_store) async fn query_fact_before_supersession_tx(
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?;
     let mut projection = Projection::empty()?;
-    let mut superseded = false;
+    let mut superseded_by = None;
     while let Some(row) = rows
         .next()
         .await
@@ -346,23 +346,25 @@ pub(in crate::fact_store) async fn query_fact_before_supersession_tx(
                 "stored lineage event identity mismatch",
             ));
         }
-        if matches!(
-            event.kind(),
-            FactLineageEventKindV1::Curated {
-                action: tracedecay_domain::FactCurationActionV1::SupersededBy { .. },
-                ..
-            }
-        ) {
-            superseded = true;
+        if let FactLineageEventKindV1::Curated {
+            action: tracedecay_domain::FactCurationActionV1::SupersededBy { fact_id },
+            ..
+        } = event.kind()
+        {
+            superseded_by = Some(fact_id.clone());
             break;
         }
         projection.apply(&event)?;
     }
     drop(rows);
-    if !superseded {
+    let Some(superseded_by) = superseded_by else {
         return Ok(None);
-    }
-    stored_fact_from_projection_tx(snapshot, owner, fact_id, projection).await
+    };
+    Ok(
+        stored_fact_from_projection_tx(snapshot, owner, fact_id, projection)
+            .await?
+            .map(|fact| (fact, superseded_by)),
+    )
 }
 
 async fn stored_fact_from_projection_tx(
