@@ -1,8 +1,9 @@
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_session_memory::provider_usage::{
     ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
 };
+
+use crate::cost_summary::{CostSummaryPayload, TodayCostPayload};
 
 #[hotpath::measure(label = "cli.cost.read", future = true)]
 pub(crate) async fn handle_cost(
@@ -185,18 +186,6 @@ fn print_default_summary(
             None => println!("  Savings  {saved} tokens (efficiency unavailable)"),
         }
     }
-}
-
-#[derive(Deserialize)]
-struct CostSummaryPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-    tokens_saved: u64,
-    efficiency_ratio: Option<f64>,
-}
-
-#[derive(Deserialize)]
-struct TodayCostPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
 }
 
 #[hotpath::measure(label = "cli.cost.request", future = true)]
