@@ -433,6 +433,23 @@ async fn predecessor_range_rewrite_journal(
         })
 }
 
+/// Retires the role-aware predecessor-range rewrite on a store being created.
+///
+/// A fresh store never held an unfiltered interval: every range it will ever
+/// carry is written by ingest under the current role filter. Journaling the
+/// rewrite as complete at install is what keeps the background worker from
+/// paging the whole corpus to re-derive intervals that are already correct.
+pub(crate) async fn retire_predecessor_range_rewrite(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    schema::set_gc_meta(
+        conn,
+        PREDECESSOR_RANGE_ROLE_FILTER_KEY,
+        PREDECESSOR_RANGE_ROLE_FILTER_COMPLETE,
+    )
+    .await
+}
+
 /// Read-side probe: is the role-aware predecessor-range rewrite still owed?
 ///
 /// An incomplete journal always has work — either a page to rewrite or the

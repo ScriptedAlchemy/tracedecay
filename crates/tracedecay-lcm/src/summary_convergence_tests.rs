@@ -270,26 +270,9 @@ async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
 /// `first-user` owns a range it must lose (its only earlier row is an anchor)
 /// and `compact-summary` owns an interval widened past the compact boundary.
 async fn seed_preserved_role_filter_store(conn: &TestConnection) {
+    create_session_host_tables(conn).await;
     conn.execute_batch(
-        "CREATE TABLE sessions (
-            provider TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            project_key TEXT NOT NULL,
-            project_path TEXT NOT NULL,
-            PRIMARY KEY(provider, session_id)
-         );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
-         INSERT INTO sessions(provider, session_id, project_key, project_path)
+        "INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('claude', 'preserved', 'project.preserved', '/preserved');",
     )
     .await
@@ -315,9 +298,41 @@ async fn seed_preserved_role_filter_store(conn: &TestConnection) {
         .await
         .unwrap();
     }
-    // Ranges an ingest before the role filter would have written, and a
-    // journal that has never recorded the rewrite: this is the store shape a
-    // preserved profile presents on its first open under the role filter.
+    seed_pre_role_filter_ranges(conn).await;
+}
+
+/// The session tables the LCM schema's raw-identity triggers read. Store open
+/// installs LCM objects beside them, so a store without them is not a shape
+/// any profile presents.
+async fn create_session_host_tables(conn: &TestConnection) {
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         CREATE TABLE session_messages (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            timestamp INTEGER,
+            ordinal INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            metadata_json TEXT,
+            PRIMARY KEY(provider, message_id)
+         );",
+    )
+    .await
+    .unwrap();
+}
+
+/// Ranges an ingest before the role filter would have written, and a journal
+/// that has never recorded the rewrite: this is the store shape a preserved
+/// profile presents on its first open under the role filter.
+async fn seed_pre_role_filter_ranges(conn: &TestConnection) {
     conn.execute_batch(
         "INSERT INTO lcm_raw_predecessor_ranges (
              provider, message_id, session_id, from_store_id, to_store_id
@@ -1041,5 +1056,37 @@ async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// A store created after the role-aware filter owes no rewrite: ingest writes
+/// every interval under the current filter, so paging the corpus to re-derive
+/// them would be pure waste.
+#[tokio::test]
+async fn a_fresh_store_opens_with_the_range_rewrite_already_retired() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    create_session_host_tables(&conn).await;
+
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+
+    assert_eq!(
+        journaled_rewrite_cursor(&conn).await.as_deref(),
+        Some("applied"),
+        "a fresh install must journal the rewrite as already retired"
+    );
+    assert!(
+        !summary_convergence::predecessor_range_rewrite_has_work(&*conn)
+            .await
+            .unwrap(),
+        "a fresh store must not hand the background worker a corpus-wide pass"
+    );
+
+    // Reopening preserves the retirement rather than re-arming the pass.
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    assert!(
+        !summary_convergence::predecessor_range_rewrite_has_work(&*conn)
+            .await
+            .unwrap()
     );
 }
