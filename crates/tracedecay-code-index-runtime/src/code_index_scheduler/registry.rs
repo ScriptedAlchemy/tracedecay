@@ -1151,6 +1151,15 @@ impl PendingWakeClaimV1 {
     fn settle(mut self) {
         self.settled = true;
     }
+
+    fn still_owns(&self) -> bool {
+        let state = self
+            .pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.owner == self.owner && state.micros == self.claimed_micros
+    }
 }
 
 impl Drop for PendingWakeClaimV1 {
@@ -6824,6 +6833,11 @@ impl CodeIndexSchedulerRegistryV1 {
             test_control.claim_reached.store(true, Ordering::Release);
             test_control.claim_entered.notify_waiters();
             released.await;
+        }
+        // A foreign producer can overwrite the pending owner while this
+        // claim is paused. That arrival already supplies the remedy.
+        if !wake_claim.still_owns() {
+            return false;
         }
         let nothing_servable = serving_generation
             .read()
