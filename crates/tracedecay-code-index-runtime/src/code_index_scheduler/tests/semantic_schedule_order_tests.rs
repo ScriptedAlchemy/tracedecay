@@ -7,6 +7,7 @@ use std::sync::{
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use tracedecay_application::semantic_runtime::{
     SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleOutcomeV1,
 };
@@ -369,6 +370,24 @@ async fn retained_partitioned_generation_reaches_semantics_after_source_proof_ex
         snapshot.reference.clone(),
     )
     .expect("retained scope");
+    let projection_identity = LspCodeIndexProjectionIdentityPort::current_identity(
+        &registry,
+        fixture.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("retained generation provides the current query identity");
+    assert_eq!(
+        projection_identity.code_generation_id, retained_generation,
+        "query identity must use the retained generation"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "identity demand must not fabricate or install a decoded graph seat"
+    );
     registry
         .expire_source_freshness_for_test(fixture.path())
         .await;

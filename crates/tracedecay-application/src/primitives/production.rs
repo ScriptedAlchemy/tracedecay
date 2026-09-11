@@ -2140,10 +2140,13 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                 .code_index
                 .current_identity(self.project_root.clone(), None)
                 .await
-                .map_err(|_| {
+                .map_err(|failure| {
                     symbol_graph_snapshot_failure(
                         "application.symbol-graph.identity",
-                        "could not read the current symbol-graph identity",
+                        &format!(
+                            "could not read the current symbol-graph identity: {}",
+                            failure.class()
+                        ),
                     )
                 })?
                 .admit_worktree_scope(&self.scope)
@@ -3276,6 +3279,27 @@ mod affected_tests_tests {
         published: Mutex<(CodeGenerationId, ManifestDigest)>,
     }
 
+    struct RefusingCodeIndexIdentity;
+
+    impl LspCodeIndexProjectionIdentityPort for RefusingCodeIndexIdentity {
+        fn current_identity(
+            &self,
+            _project_root: PathBuf,
+            _document_relative_path: Option<String>,
+        ) -> tracedecay_lsp::LspRuntimeFuture<
+            Result<
+                crate::lsp_runtime::LspCodeIndexProjectionIdentity,
+                tracedecay_lsp::LspRuntimeFailure,
+            >,
+        > {
+            Box::pin(async {
+                Err(tracedecay_lsp::LspRuntimeFailure::new(
+                    "lsp-code-index-generation-unavailable",
+                ))
+            })
+        }
+    }
+
     impl PublishedCodeIndexIdentity {
         fn publish(&self, generation: &str, snapshot: char) {
             *self.published.lock().expect("published") = (
@@ -3368,6 +3392,33 @@ mod affected_tests_tests {
     /// bound to one could not be built, and a snapshot bound to the
     /// correlation id could never be resumed by the next request. Both
     /// contexts here carry ids minted by the real production surfaces.
+    #[tokio::test]
+    async fn symbol_graph_identity_refusal_names_the_runtime_failure() {
+        let key = SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key"),
+            version: SessionCursorVersionV1::new(1).expect("version"),
+        };
+        let (_, mut authority) = symbol_graph_cursor_authority(key);
+        authority.code_index = Arc::new(RefusingCodeIndexIdentity);
+        let context = symbol_graph_context(
+            tracedecay_contracts::request_identity::mint_global_request_id(
+                tracedecay_contracts::request_identity::GlobalRequestSurface::McpFallback,
+            )
+            .expect("mcp fallback request id"),
+        );
+
+        let failure = authority
+            .snapshot(&context, "search", now_observed())
+            .await
+            .expect_err("runtime refusal must remain typed");
+        assert!(
+            failure
+                .message
+                .contains("lsp-code-index-generation-unavailable"),
+            "the public problem must name the underlying runtime refusal: {failure:?}"
+        );
+    }
+
     #[tokio::test]
     async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
         let key = SignedCursorKeyRefV1 {
