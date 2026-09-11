@@ -4,8 +4,8 @@ use tempfile::TempDir;
 
 use super::{
     ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SharedCodeIndexBytePoolV1, published,
-    replace_scheduler_chunker_revision, scheduler, test_project_id,
-    wait_for_queryable_text_generation_change, wait_for_quiescent_owner_pass,
+    replace_scheduler_chunker_revision, rewrite_active_rust_extractor_revision, scheduler,
+    test_project_id, wait_for_queryable_text_generation_change, wait_for_quiescent_owner_pass,
 };
 use crate::code_index::production::DAEMON_CODE_INDEX_CHUNKER_REVISION;
 use crate::code_index_scheduler::scoped_code_index_store_root;
@@ -21,7 +21,7 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
     let retained_generation = {
         let mut seed = scheduler(
             &fixture,
-            scoped_store,
+            scoped_store.clone(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
         replace_scheduler_chunker_revision(
@@ -38,6 +38,18 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
         );
         generation
     };
+    rewrite_active_rust_extractor_revision(&scoped_store, "extractor.rust.v3");
+    let segment_path = std::fs::read_dir(scoped_store.join("code-generation-segments-v1"))
+        .expect("read retained segment directory")
+        .find_map(|entry| {
+            let path = entry.expect("read retained segment entry").path();
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("segment-"))
+                .then_some(path)
+        })
+        .expect("partitioned generation segment");
+    std::fs::remove_file(segment_path).expect("remove full-decode segment");
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let held_admission = registry

@@ -42,7 +42,8 @@ use super::{
     CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1,
     CodeIndexWorktreeSchedulerV1, DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1,
     LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, PendingHintsV1,
-    SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
+    RetainedTextGenerationRestoreV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile,
+    now_micros,
 };
 #[cfg(test)]
 use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
@@ -3612,7 +3613,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     hotpath::gauge!("daemon.code_index.artifact.slice.yield_to_reconcile_total")
                         .inc(1_u64);
                 }
-                if worker_text_generation
+                let refused_retained_text_metadata = if worker_text_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .is_none()
@@ -3625,7 +3626,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 &text_scheduler,
                                 &shutting_down,
                             )
-                            .map(|mut scheduler| scheduler.servable_retained_text_generation())
+                            .map(|mut scheduler| scheduler.restore_retained_text_generation())
                         }),
                         label = "daemon.code_index.text_restore"
                     )
@@ -3638,15 +3639,23 @@ impl CodeIndexSchedulerRegistryV1 {
                         );
                         return;
                     }
-                    if let Ok(Ok(Some(retained_text))) = retained_text {
-                        *worker_text_generation
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(retained_text);
-                        worker_wake.notify_one();
-                        continue;
+                    match retained_text {
+                        Ok(Ok(Some(RetainedTextGenerationRestoreV1::Servable(retained_text)))) => {
+                            *worker_text_generation
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(retained_text);
+                            worker_wake.notify_one();
+                            continue;
+                        }
+                        Ok(Ok(Some(RetainedTextGenerationRestoreV1::Refused(metadata)))) => {
+                            Some(metadata)
+                        }
+                        _ => None,
                     }
-                }
+                } else {
+                    None
+                };
                 let text_serving_ready = worker_text_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3690,8 +3699,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     && retained_text.as_ref().is_some_and(|text| {
                         text.uses_partitioned_manifest() && text.interactive_graph_store().is_err()
                     });
-                let retained_text_metadata =
-                    retained_text.as_ref().map(|text| text.metadata().clone());
+                let retained_text_metadata = retained_text
+                    .as_ref()
+                    .map(|text| text.metadata().clone())
+                    .or(refused_retained_text_metadata);
                 // Phase boundary: source reconciliation begins. Together with
                 // `code_index_generation_published` / `_interrupted` and
                 // `code_index_serving_generation_seated` this lets a status

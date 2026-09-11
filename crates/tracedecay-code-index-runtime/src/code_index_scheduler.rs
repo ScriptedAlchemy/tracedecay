@@ -5660,6 +5660,11 @@ enum FreshnessProbeVerdictV1 {
     Moved,
 }
 
+enum RetainedTextGenerationRestoreV1 {
+    Servable(LatestCodeTextGenerationV1),
+    Refused(VerifiedSealedTextGenerationMetadataV1),
+}
+
 pub struct CodeIndexWorktreeSchedulerV1 {
     project_id: ProjectId,
     project_root: PathBuf,
@@ -7148,7 +7153,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// This authenticates the complete sealed content address and only decodes
     /// its bounded manifest/snapshot header. Graph, record-index, attribution,
     /// and semantic owners retain the full-generation decode path.
-    pub fn servable_retained_text_generation(&mut self) -> Option<LatestCodeTextGenerationV1> {
+    fn restore_retained_text_generation(&mut self) -> Option<RetainedTextGenerationRestoreV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
@@ -7280,7 +7285,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !compatibility.may_serve_while_rebuilding() {
             text_control.retire();
             self.request_background_reconcile();
-            return None;
+            return Some(RetainedTextGenerationRestoreV1::Refused(metadata));
         }
         if !compatibility.is_reusable() {
             self.request_background_reconcile();
@@ -7297,30 +7302,39 @@ impl CodeIndexWorktreeSchedulerV1 {
             return None;
         }
         let metadata = Arc::new(metadata);
-        Some(LatestCodeTextGenerationV1 {
-            metadata,
-            sealed_format_revision,
-            query_owners: Arc::new(OnceLock::new()),
-            graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
-            text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
-            text_projection_failed: Arc::new(AtomicBool::new(false)),
-            text_control,
-            text_progress_state,
-            text_progress_slot: Arc::clone(&self.build_progress),
-            text_progress_owner_epoch,
-            text_progress_daemon_incarnation: self.progress_daemon_incarnation,
-            text_progress_producer_incarnation: self.progress_producer_incarnation,
-            text_artifact_store,
-            preopened_source: Arc::new(hotpath::mutex!(
-                Mutex::new(preopened_source),
-                label = "query.artifact.preopened_retained_source"
-            )),
-            publication_binding: Some(Arc::new(DurableActiveSealedGenerationBindingV1 {
-                generation_id,
-                generation_file: pointer.generation_file,
-                state_digest: ManifestDigest::new(pointer.state_digest).ok()?,
-            })),
-        })
+        Some(RetainedTextGenerationRestoreV1::Servable(
+            LatestCodeTextGenerationV1 {
+                metadata,
+                sealed_format_revision,
+                query_owners: Arc::new(OnceLock::new()),
+                graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
+                text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
+                text_projection_failed: Arc::new(AtomicBool::new(false)),
+                text_control,
+                text_progress_state,
+                text_progress_slot: Arc::clone(&self.build_progress),
+                text_progress_owner_epoch,
+                text_progress_daemon_incarnation: self.progress_daemon_incarnation,
+                text_progress_producer_incarnation: self.progress_producer_incarnation,
+                text_artifact_store,
+                preopened_source: Arc::new(hotpath::mutex!(
+                    Mutex::new(preopened_source),
+                    label = "query.artifact.preopened_retained_source"
+                )),
+                publication_binding: Some(Arc::new(DurableActiveSealedGenerationBindingV1 {
+                    generation_id,
+                    generation_file: pointer.generation_file,
+                    state_digest: ManifestDigest::new(pointer.state_digest).ok()?,
+                })),
+            },
+        ))
+    }
+
+    pub fn servable_retained_text_generation(&mut self) -> Option<LatestCodeTextGenerationV1> {
+        match self.restore_retained_text_generation()? {
+            RetainedTextGenerationRestoreV1::Servable(generation) => Some(generation),
+            RetainedTextGenerationRestoreV1::Refused(_) => None,
+        }
     }
 
     /// Canonical active publication generation id for tests that must observe
