@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_code_extraction::{
-    ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1, SchemaEvidenceIssueV1, SchemaEvidenceStatusV1,
+    ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1, SchemaEvidenceIssueV1,
+    SchemaEvidenceStatusV1, SqlSchemaObjectKindV1,
 };
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::provider::GenerationTestAttributionJoinReadPort;
@@ -335,13 +336,14 @@ fn schema_lanes(
     source: &GenerationView<'_>,
     destination: &GenerationView<'_>,
     candidate: &GenerationView<'_>,
+    ensure_active: &impl Fn() -> Result<(), NativeIntegrationPortError>,
 ) -> Result<
     (
         NativeIntegrationAnalysisLaneV1,
         NativeIntegrationAnalysisLaneV1,
         Vec<NativeIntegrationSemanticConflictV1>,
     ),
-    tracedecay_domain::DomainError,
+    NativeIntegrationPortError,
 > {
     let paths = changed_paths(base, source)
         .into_iter()
@@ -466,13 +468,68 @@ fn schema_lanes(
         )
     };
     let conflicts = schema_conflicts(
-        source,
-        destination,
+        &source.generation.manifest().generation_id,
+        &destination.generation.manifest().generation_id,
         &base_evidence,
         &source_evidence,
         &destination_evidence,
+        ensure_active,
     )?;
     Ok((schema, migrations, conflicts))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SchemaOverlapKey<'a> {
+    ProtobufMessage(&'a str),
+    ProtobufService(&'a str),
+    ProtobufFieldName(&'a str, &'a str),
+    ProtobufFieldTag(&'a str, u32),
+    ProtobufRpc(&'a str, &'a str),
+    SqlObject(SqlSchemaObjectKindV1, &'a str),
+}
+
+fn schema_overlap_keys(fact: &ExtractedSchemaFactV1) -> Vec<SchemaOverlapKey<'_>> {
+    match fact {
+        ExtractedSchemaFactV1::ProtobufMessage { qualified_name, .. } => {
+            vec![SchemaOverlapKey::ProtobufMessage(qualified_name)]
+        }
+        ExtractedSchemaFactV1::ProtobufField {
+            message_qualified_name,
+            name,
+            tag,
+            ..
+        } => vec![
+            SchemaOverlapKey::ProtobufFieldName(message_qualified_name, name),
+            SchemaOverlapKey::ProtobufFieldTag(message_qualified_name, *tag),
+        ],
+        ExtractedSchemaFactV1::ProtobufService { qualified_name, .. } => {
+            vec![SchemaOverlapKey::ProtobufService(qualified_name)]
+        }
+        ExtractedSchemaFactV1::ProtobufRpc {
+            service_qualified_name,
+            name,
+            ..
+        } => vec![SchemaOverlapKey::ProtobufRpc(service_qualified_name, name)],
+        ExtractedSchemaFactV1::SqlObjectChange {
+            object_kind,
+            qualified_name,
+            ..
+        } => vec![SchemaOverlapKey::SqlObject(*object_kind, qualified_name)],
+    }
+}
+
+fn index_schema_facts_by_overlap<'a>(
+    evidence: &'a BTreeMap<&str, &ExtractedSchemaEvidenceV1>,
+) -> BTreeMap<SchemaOverlapKey<'a>, Vec<(&'a str, &'a ExtractedSchemaFactV1)>> {
+    let mut indexed = BTreeMap::<_, Vec<_>>::new();
+    for (path, file) in evidence {
+        for fact in &file.facts {
+            for key in schema_overlap_keys(fact) {
+                indexed.entry(key).or_default().push((*path, fact));
+            }
+        }
+    }
+    indexed
 }
 
 fn schema_facts_overlap(left: &ExtractedSchemaFactV1, right: &ExtractedSchemaFactV1) -> bool {
@@ -626,60 +683,69 @@ fn schema_facts_semantically_equal(
 }
 
 fn schema_conflicts(
-    source: &GenerationView<'_>,
-    destination: &GenerationView<'_>,
+    source_generation_id: &tracedecay_domain::CodeGenerationId,
+    destination_generation_id: &tracedecay_domain::CodeGenerationId,
     base_evidence: &BTreeMap<&str, &ExtractedSchemaEvidenceV1>,
     source_evidence: &BTreeMap<&str, &ExtractedSchemaEvidenceV1>,
     destination_evidence: &BTreeMap<&str, &ExtractedSchemaEvidenceV1>,
-) -> Result<Vec<NativeIntegrationSemanticConflictV1>, tracedecay_domain::DomainError> {
+    ensure_active: &impl Fn() -> Result<(), NativeIntegrationPortError>,
+) -> Result<Vec<NativeIntegrationSemanticConflictV1>, NativeIntegrationPortError> {
     let mut conflicts = Vec::new();
-    let base_facts = base_evidence
-        .values()
-        .flat_map(|file| &file.facts)
-        .collect::<Vec<_>>();
+    let base_facts = index_schema_facts_by_overlap(base_evidence);
+    let destination_facts = index_schema_facts_by_overlap(destination_evidence);
     for (source_path, source_file) in source_evidence {
+        ensure_active()?;
         for source_fact in &source_file.facts {
-            for (destination_path, destination_file) in destination_evidence {
-                for destination_fact in &destination_file.facts {
-                    if !schema_facts_overlap(source_fact, destination_fact)
-                        || schema_facts_semantically_equal(source_fact, destination_fact)
-                        || base_facts.iter().any(|base_fact| {
-                            schema_facts_overlap(base_fact, source_fact)
-                                && (schema_facts_semantically_equal(base_fact, source_fact)
-                                    || schema_facts_semantically_equal(base_fact, destination_fact))
-                        })
-                    {
-                        continue;
-                    }
-                    conflicts.push(
-                        NativeIntegrationSemanticConflictV1 {
-                            kind: if matches!(
-                                source_fact,
-                                ExtractedSchemaFactV1::SqlObjectChange { .. }
-                            ) {
-                                NativeIntegrationSemanticConflictKindV1::MigrationOrder
-                            } else {
-                                NativeIntegrationSemanticConflictKindV1::DivergentSchema
-                            },
-                            source: NativeIntegrationAnalysisAnchorV1 {
-                                generation_id: source.generation.manifest().generation_id.clone(),
-                                logical_path: (*source_path).to_owned(),
-                                source_span: source_fact.span(),
-                            },
-                            destination: NativeIntegrationAnalysisAnchorV1 {
-                                generation_id: destination
-                                    .generation
-                                    .manifest()
-                                    .generation_id
-                                    .clone(),
-                                logical_path: (*destination_path).to_owned(),
-                                source_span: destination_fact.span(),
-                            },
-                            evidence_digest: ManifestDigest::zero()?,
-                        }
-                        .seal()?,
-                    );
+            let keys = schema_overlap_keys(source_fact);
+            let destination_candidates = keys
+                .iter()
+                .filter_map(|key| destination_facts.get(key))
+                .flatten()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let base_candidates = keys
+                .iter()
+                .filter_map(|key| base_facts.get(key))
+                .flatten()
+                .map(|(_, fact)| *fact)
+                .collect::<BTreeSet<_>>();
+            for (destination_path, destination_fact) in destination_candidates {
+                if !schema_facts_overlap(source_fact, destination_fact)
+                    || schema_facts_semantically_equal(source_fact, destination_fact)
+                    || base_candidates.iter().any(|base_fact| {
+                        schema_facts_semantically_equal(base_fact, source_fact)
+                            || schema_facts_semantically_equal(base_fact, destination_fact)
+                    })
+                {
+                    continue;
                 }
+                conflicts.push(
+                    NativeIntegrationSemanticConflictV1 {
+                        kind: if matches!(
+                            source_fact,
+                            ExtractedSchemaFactV1::SqlObjectChange { .. }
+                        ) {
+                            NativeIntegrationSemanticConflictKindV1::MigrationOrder
+                        } else {
+                            NativeIntegrationSemanticConflictKindV1::DivergentSchema
+                        },
+                        source: NativeIntegrationAnalysisAnchorV1 {
+                            generation_id: source_generation_id.clone(),
+                            logical_path: (*source_path).to_owned(),
+                            source_span: source_fact.span(),
+                        },
+                        destination: NativeIntegrationAnalysisAnchorV1 {
+                            generation_id: destination_generation_id.clone(),
+                            logical_path: destination_path.to_owned(),
+                            source_span: destination_fact.span(),
+                        },
+                        evidence_digest: ManifestDigest::zero().map_err(|error| {
+                            NativeIntegrationPortError::Native(error.to_string())
+                        })?,
+                    }
+                    .seal()
+                    .map_err(|error| NativeIntegrationPortError::Native(error.to_string()))?,
+                );
             }
         }
     }
@@ -991,7 +1057,7 @@ pub fn analyze_native_integration_generations(
         .unwrap_or_else(|| lane(NativeIntegrationAnalysisCoverageV1::Complete, Vec::new()));
     ensure_active()?;
     let (schema, migrations, schema_conflicts) =
-        schema_lanes(&base, &source, &destination, &candidate).map_err(domain)?;
+        schema_lanes(&base, &source, &destination, &candidate, &ensure_active)?;
     ensure_active()?;
     conflicts.extend(schema_conflicts);
     conflicts.sort_by(|left, right| {
@@ -1018,7 +1084,9 @@ pub fn analyze_native_integration_generations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::SourceSpan;
+    use std::cell::Cell;
+    use tracedecay_code_extraction::SchemaEvidenceLanguageV1;
+    use tracedecay_domain::{CodeGenerationId, SourceSpan, UtcMicros};
 
     fn protobuf_field(name: &str, tag: u32, start_byte: u64) -> ExtractedSchemaFactV1 {
         ExtractedSchemaFactV1::ProtobufField {
@@ -1042,5 +1110,62 @@ mod tests {
         assert!(schema_facts_semantically_equal(&original, &moved));
         assert!(schema_facts_overlap(&original, &reused_tag));
         assert!(!schema_facts_semantically_equal(&original, &reused_tag));
+    }
+
+    #[test]
+    fn schema_conflict_scan_honors_cancellation_between_source_files() {
+        let source_files = [
+            ExtractedSchemaEvidenceV1 {
+                logical_path: "schema/first.proto".to_owned(),
+                language: SchemaEvidenceLanguageV1::Protobuf,
+                status: SchemaEvidenceStatusV1::Complete,
+                issues: Vec::new(),
+                facts: vec![protobuf_field("first", 1, 1)],
+            },
+            ExtractedSchemaEvidenceV1 {
+                logical_path: "schema/second.proto".to_owned(),
+                language: SchemaEvidenceLanguageV1::Protobuf,
+                status: SchemaEvidenceStatusV1::Complete,
+                issues: Vec::new(),
+                facts: vec![protobuf_field("second", 2, 2)],
+            },
+        ];
+        let source_evidence = source_files
+            .iter()
+            .map(|file| (file.logical_path.as_str(), file))
+            .collect::<BTreeMap<_, _>>();
+        let empty = BTreeMap::new();
+        let cancellation =
+            CancellationSignal::active("cancel.native.schema-scan").expect("cancellation");
+        let checks = Cell::new(0_u8);
+        let ensure_active = || {
+            let current = checks.get();
+            checks.set(current.saturating_add(1));
+            if current == 1 {
+                cancellation.cancel(UtcMicros(1));
+            }
+            if cancellation.is_cancelled() {
+                Err(NativeIntegrationPortError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+
+        let result = schema_conflicts(
+            &CodeGenerationId::new("generation.source").expect("source generation"),
+            &CodeGenerationId::new("generation.destination").expect("destination generation"),
+            &empty,
+            &source_evidence,
+            &empty,
+            &ensure_active,
+        );
+
+        assert_eq!(result, Err(NativeIntegrationPortError::Cancelled));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            checks.get(),
+            2,
+            "the scan must stop at the next source file"
+        );
     }
 }
