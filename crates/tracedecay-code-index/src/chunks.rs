@@ -2365,9 +2365,14 @@ fn span_is_whitespace_only(source: &str, span: SourceSpan) -> bool {
 /// Fold whitespace-only `FileWindow` pieces into an adjacent retrievable
 /// grain so those bytes stay covered without minting an unreachable row.
 ///
-/// Prefer the preceding retrievable piece; a leading window folds forward.
-/// Overlapping fallback windows in one whitespace gap are attributed as
-/// one contiguous range. A window is left in place only when no retrievable
+/// The target is the nearest piece by span: the preceding retrievable
+/// piece whose `end_byte` equals the window start, otherwise the
+/// following retrievable piece whose `start_byte` equals the window end.
+/// Any retrievable grain, including [`CodeSearchChunkGrainV1::SymbolBody`],
+/// may be the target. Overlapping fallback windows in one whitespace gap
+/// are attributed as one contiguous range; a piece that merely overlaps the
+/// run without abutting it (possible only inside an oversized unowned
+/// region) is not a target. A window is left in place only when no such
 /// neighbor exists or folding it would exceed [`MAX_CHUNK_TEXT_BYTES`].
 fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChunk>) {
     let whitespace_windows: Vec<usize> = pending
@@ -2421,21 +2426,20 @@ fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChun
                 && !piece.span.is_empty()
                 && !span_is_whitespace_only(source, piece.span)
         };
-        // Adjacent or overlapping: oversized fallback windows share an
-        // overlap band, so a retrievable window may start inside a
-        // whitespace-only run rather than exactly at its end.
-        let preceding = pending.iter().enumerate().find_map(|(index, piece)| {
-            (retrievable(index, piece)
-                && (piece.span.end_byte == start
-                    || (piece.span.end_byte > start && piece.span.start_byte < start)))
-                .then_some(index)
-        });
-        let following = pending.iter().enumerate().find_map(|(index, piece)| {
-            (retrievable(index, piece)
-                && (piece.span.start_byte == end
-                    || (piece.span.start_byte < end && piece.span.end_byte > end)))
-                .then_some(index)
-        });
+        // Nearest by span, not pending-vector order: an enclosing parent
+        // can appear first and is not the abutting neighbor.
+        let preceding = pending
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| retrievable(*index, piece) && piece.span.end_byte == start)
+            .max_by_key(|(_, piece)| piece.span.start_byte)
+            .map(|(index, _)| index);
+        let following = pending
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| retrievable(*index, piece) && piece.span.start_byte == end)
+            .min_by_key(|(_, piece)| piece.span.end_byte)
+            .map(|(index, _)| index);
         let Some(target) = preceding.or(following) else {
             continue;
         };
@@ -3232,6 +3236,82 @@ mod tests {
         );
         assert_eq!(pending[1].grain, CodeSearchChunkGrainV1::FileWindow);
         assert!(span_is_whitespace_only(&source, pending[1].span));
+    }
+
+    #[test]
+    fn whitespace_window_folds_into_the_abutting_body_not_the_enclosing_parent() {
+        let source = "aaaa  bbbb";
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolSignature,
+                symbol: Some(0),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 10,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(1),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 4,
+                },
+                parent: Some((0, vec![])),
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: 4,
+                    end_byte: 6,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(2),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 6,
+                    end_byte: 10,
+                },
+                parent: Some((0, vec![])),
+            },
+        ];
+        attribute_whitespace_only_windows(source, &mut pending);
+        let body = pending
+            .iter()
+            .find(|piece| {
+                piece.grain == CodeSearchChunkGrainV1::SymbolBody && piece.symbol == Some(1)
+            })
+            .expect("abutting body remains");
+        assert_eq!(
+            body.span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 6,
+            },
+            "the window must fold into the abutting SymbolBody, not the enclosing parent"
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .find(|piece| piece.grain == CodeSearchChunkGrainV1::SymbolSignature)
+                .expect("parent remains")
+                .span
+                .end_byte,
+            10,
+            "the enclosing parent span must stay unchanged"
+        );
+        assert!(pending.iter().all(|piece| {
+            piece.grain != CodeSearchChunkGrainV1::FileWindow
+                || !span_is_whitespace_only(source, piece.span)
+        }));
     }
 
     #[test]
