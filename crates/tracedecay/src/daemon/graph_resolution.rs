@@ -29,6 +29,10 @@ fn sole_mounted_server_matching(
     Ok(Some(Arc::clone(server)))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Retained project resolution binds one request to the mounted server or a typed miss."
+)]
 pub(super) fn retained_project_server_resolver(
     administration: StoreAdministration,
 ) -> crate::mcp::server::RetainedProjectServerResolver {

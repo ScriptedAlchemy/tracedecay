@@ -488,6 +488,10 @@ impl DaemonInvocationState {
         clippy::too_many_arguments,
         reason = "Mount composition binds project identity, store, semantic lifetime and graph publication owners explicitly."
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Code-index mount is one generation-bind and scheduler-attach sequence."
+    )]
     pub(super) async fn mount_code_index(
         &self,
         project_id: tracedecay_domain::ProjectId,
@@ -631,6 +635,10 @@ impl DaemonInvocationState {
 
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.invocation_state.multi_root_execute", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Multi-root execute is one scoped dispatch across the admitted root set."
+    )]
     pub(super) async fn execute_multi_root_for_project(
         &self,
         store_administration: &StoreAdministration,

@@ -285,6 +285,10 @@ impl InProcessDaemonInvocationExecutor {
 }
 
 impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvocationExecutor {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The executor resolves the invocation target against this server's scope before any surface or daemon payload is dispatched."
+    )]
     fn invoke(
         &self,
         invocation: tracedecay_contracts::ApplicationInvocation,

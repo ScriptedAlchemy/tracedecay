@@ -162,6 +162,10 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 
 /// Registers code-index-independent owners for one newly inserted project.
 #[hotpath::measure(label = "daemon.project.owners.register", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Production owner registration is one ordered phase list for a project open."
+)]
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
@@ -785,6 +789,10 @@ pub(super) async fn register_project_open_production_owners(
 }
 
 #[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Semantic configuration owners are registered as one catalog-and-runtime bind."
+)]
 async fn register_semantic_configuration_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,

@@ -99,6 +99,10 @@ async fn apply_projectless_hermes_receipt_plan(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.replay")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Projectless Hermes replay is one receipt pass without a mounted project route."
+)]
 async fn replay_projectless_hermes_receipts(
     broker: &SharedHostAdmissionBroker,
     profile_root: &Path,
