@@ -245,7 +245,7 @@ pub async fn build_daemon_semantic_evaluation_candidate(
             label = "daemon.semantic.evaluation.candidate.code_snapshot"
         ))
         .await?
-        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
     if code.manifest().generation_id != snapshot.source_generation
         || code.projection().request().changes.manifest_digest != snapshot.source_manifest_digest
         || code.manifest().snapshot_digest != snapshot.snapshot_digest

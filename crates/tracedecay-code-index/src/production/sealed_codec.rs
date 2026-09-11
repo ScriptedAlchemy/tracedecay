@@ -7,6 +7,7 @@ use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
+use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, ExactTechnicalTermV1,
@@ -134,6 +135,8 @@ struct PersistedFileIndexArtifactsRefV2<'a> {
     edges: &'a [CanonicalRelationEdgeV1],
     edge_abstentions: &'a [CodeIndexEdgeAbstentionV1],
     imports: &'a [CodeIndexImportEvidenceV1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_evidence: Option<&'a ExtractedSchemaEvidenceV1>,
     unresolved_references: &'a [CodeIndexUnresolvedReferenceV1],
 }
 
@@ -145,6 +148,7 @@ struct PersistedFileIndexArtifactsV2 {
     edges: Vec<CanonicalRelationEdgeV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
+    schema_evidence: Option<ExtractedSchemaEvidenceV1>,
     #[serde(default)]
     unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
 }
@@ -326,6 +330,7 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
                 edges: &artifacts.edges,
                 edge_abstentions: &artifacts.edge_abstentions,
                 imports: &artifacts.imports,
+                schema_evidence: artifacts.schema_evidence.as_ref(),
                 unresolved_references: &artifacts.unresolved_references,
             },
         }
@@ -439,6 +444,7 @@ impl PersistedFileGenerationArtifactsV2 {
                 edges: artifacts.edges,
                 edge_abstentions: artifacts.edge_abstentions,
                 imports: artifacts.imports,
+                schema_evidence: artifacts.schema_evidence,
                 unresolved_references: artifacts.unresolved_references,
             },
         })
