@@ -29,11 +29,12 @@ pub use native_integration_surface::{
     NativeIntegrationApproveSurfaceRequest, NativeIntegrationCancelSurfaceRequest,
     NativeIntegrationCancellationProjectionV1, NativeIntegrationEvidenceRevisionsWireV1,
     NativeIntegrationPreflightSurfaceRequest, NativeIntegrationPreviewProjectionV1,
-    NativeIntegrationReceiptProjectionV1, NativeIntegrationSnapshotProjectionV1,
-    NativeIntegrationStackSnapshotService, NativeIntegrationStackSnapshotSurfaceRequest,
-    NativeIntegrationStatusProjectionV1, NativeIntegrationStatusSurfaceRequest,
-    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
-    native_integration_surface_catalog_contribution,
+    NativeIntegrationReceiptProjectionV1, NativeIntegrationSealedStackSnapshotProjectionV1,
+    NativeIntegrationSealedStackSnapshotV1, NativeIntegrationSelectionDeclarationV1,
+    NativeIntegrationSnapshotProjectionV1, NativeIntegrationStackSnapshotService,
+    NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusProjectionV1,
+    NativeIntegrationStatusSurfaceRequest, NativeIntegrationSurfaceResultV1,
+    NativeIntegrationSurfaceUnavailableV1, native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 pub use public_wire::{

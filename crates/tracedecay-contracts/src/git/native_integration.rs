@@ -23,8 +23,11 @@ use crate::{
     RequestContext, ResolvedScope,
 };
 
-/// Caller-visible selection proof. The topology authority resolves it into an
-/// immutable domain selection and never discovers roots or edges.
+/// Canonically sealed selection passed to the topology authority.
+///
+/// `stack_snapshot` requests carry declaration content; its boundary seals
+/// that declaration into this proof, and preflight accepts the proof verbatim.
+/// The topology authority never discovers roots or edges.
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "binding", rename_all = "snake_case")]
 pub enum NativeIntegrationSelectionBindingV1 {

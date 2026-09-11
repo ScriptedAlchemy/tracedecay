@@ -212,10 +212,12 @@ fn every_journey_operation_is_an_advertised_mcp_tool() {
     }
 }
 
-/// A minimally valid `stack_snapshot` body. Only exact typed identity appears:
-/// there is no path, branch display name, free-form SHA, or Git argument.
+/// A minimally valid declared-stack body. The caller supplies visible topology
+/// and typed commit identities; canonical order and digest stay daemon-owned.
 fn stack_snapshot_body() -> serde_json::Value {
     let digest = format!("sha256:{}", "ab".repeat(32));
+    let source_tip = "1".repeat(40);
+    let destination_tip = "2".repeat(40);
     json!({
         "source": {
             "project_id": "project.alpha",
@@ -237,11 +239,35 @@ fn stack_snapshot_body() -> serde_json::Value {
         "inventory_snapshot_id": "inventory.snapshot.1",
         "inventory_epoch": 7,
         "selection": {
-            "kind": "independent_branch",
+            "kind": "declared_stack_edge",
             "binding": {
-                "proposal_digest": digest,
-                "source_ref": "refs/heads/source",
-                "destination_ref": "refs/heads/destination"
+                "stack_id": "stack.alpha",
+                "revision_id": "stack-revision.alpha.1",
+                "nodes": [
+                    {
+                        "node_id": "node.destination",
+                        "project_id": "project.alpha",
+                        "repository_id": "repository.alpha",
+                        "reference": "refs/heads/destination",
+                        "tip": destination_tip,
+                        "worktree_id": "worktree.destination"
+                    },
+                    {
+                        "node_id": "node.source",
+                        "project_id": "project.alpha",
+                        "repository_id": "repository.alpha",
+                        "reference": "refs/heads/source",
+                        "tip": source_tip,
+                        "worktree_id": "worktree.source"
+                    }
+                ],
+                "edges": [{
+                    "dependency": "node.source",
+                    "dependent": "node.destination"
+                }],
+                "source_node_id": "node.source",
+                "destination_node_id": "node.destination",
+                "direction": "propagate_dependency_to_dependent"
             }
         },
         "grant_digest": digest,
@@ -269,6 +295,21 @@ fn stack_snapshot_decodes_into_the_typed_journey_request() {
         RequestedOutputFormat::Json,
     )
     .expect("stack_snapshot dispatch");
+}
+
+#[test]
+fn stack_snapshot_rejects_caller_supplied_canonical_revision_fields() {
+    let mut body = stack_snapshot_body();
+    body["selection"]["binding"]["canonical_order"] = json!(["node.source"]);
+    body["selection"]["binding"]["digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
+    assert!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
+            body,
+        )
+        .is_err(),
+        "canonical order and digest must be derived by the daemon"
+    );
 }
 
 #[test]
