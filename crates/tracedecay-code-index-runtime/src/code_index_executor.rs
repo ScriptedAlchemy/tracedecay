@@ -58,16 +58,7 @@ impl<A> McpSemanticExecutionControlV1<A> {
         };
         let expired = async {
             match self.deadline.as_ref() {
-                Some(deadline) => {
-                    let remaining = deadline
-                        .expires_at
-                        .0
-                        .saturating_sub(tracedecay_contracts::clock::now_micros().0);
-                    tokio::time::sleep(std::time::Duration::from_micros(
-                        u64::try_from(remaining).unwrap_or(0),
-                    ))
-                    .await;
-                }
+                Some(deadline) => crate::project_reads::sleep_until_deadline(deadline).await,
                 None => std::future::pending::<()>().await,
             }
         };
