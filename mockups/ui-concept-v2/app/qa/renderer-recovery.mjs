@@ -136,8 +136,8 @@ try {
     assert.deepEqual(collisions, []);
     console.log(`PASS caption bounds and HUD isolation ${width}x${height}`);
   }
-  await page.goto(`${base}/?surface=delivery&state=03`);
-  assert.match(await page.locator(".status").innerText(), /DATA\s+TraceDecay tracked scope/);
+  await page.goto(`${base}/?surface=delivery&data=fixture&state=03`);
+  assert.match(await page.locator(".status").innerText(), /DATA\s+design fixture/);
   const rspack = page.getByRole("button", { name: "Inspect Rspack", exact: true });
   await rspack.click();
   assert.equal(await rspack.getAttribute("aria-pressed"), "true");

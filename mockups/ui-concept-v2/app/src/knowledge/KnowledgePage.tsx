@@ -209,7 +209,7 @@ function GeometryCamera(props: { selected: ExampleFact; onSelect: (fact: Example
   };
   return (
     <section className="kn-well kn-fill" aria-label="Authored example claim geometry">
-      <header><b>CLAIM GEOMETRY</b><span>READY · 3 memberships · authored projection</span></header>
+      <header><b>CLAIM GEOMETRY</b><span>AUTHORED EXAMPLE · READY · 3 memberships</span></header>
       <div className="kn-geometry">
         <svg viewBox="0 0 100 100" aria-hidden="true"><path d="M23 55 Q38 28 53 32"/><path className="is-contradiction" d="M76 67 Q68 42 53 32"/></svg>
         {EXAMPLE_FACTS.map((fact) => <button type="button" key={fact.id} className={`${fact.id === props.selected.id ? "is-selected " : ""}is-${fact.state}`} style={{ left: `${positions[fact.id].x}%`, top: `${positions[fact.id].y}%` }} onClick={() => props.onSelect(fact)}><i/><b>{fact.subject}</b><span>{fact.state}</span></button>)}
@@ -223,7 +223,7 @@ function CurationCamera(props: { selected: ExampleFact; onSelect: (fact: Example
   const groups: FactState[] = ["superseded", "canonical", "contradicted"];
   return (
     <section className="kn-well kn-fill" aria-label="Authored example curation board">
-      <header><b>CURATION BOARD</b><span>READY · 3 exact fixture receipts</span></header>
+      <header><b>CURATION BOARD</b><span>AUTHORED EXAMPLE · READY · 3 exact fixture receipts</span></header>
       <div className="kn-curation">{groups.map((state) => <section key={state}><header><b>{state.toUpperCase()}</b><span>{EXAMPLE_FACTS.filter((fact) => fact.state === state).length}</span></header>{EXAMPLE_FACTS.filter((fact) => fact.state === state).map((fact) => <button type="button" key={fact.id} className={fact.id === props.selected.id ? "is-selected" : ""} onClick={() => props.onSelect(fact)}><strong>{fact.subject}</strong><span>{fact.content}</span><em>{fact.sources.length} sources</em></button>)}</section>)}</div>
     </section>
   );
@@ -238,7 +238,7 @@ function OplogCamera(props: { onSelect: (fact: ExampleFact) => void }) {
   ];
   return (
     <section className="kn-well kn-fill" aria-label="Authored example knowledge oplog">
-      <header><b>CLAIM OPLOG</b><span>READY · {events.length} exact fixture rows</span></header>
+      <header><b>CLAIM OPLOG</b><span>AUTHORED EXAMPLE · READY · {events.length} exact fixture rows</span></header>
       <ol className="kn-oplog">{events.map((event, index) => <li key={`${event.fact.id}-${index}`}><i/><button type="button" onClick={() => props.onSelect(event.fact)}><span>{event.revision.slice(0, 8)}</span><b>{event.action}</b><em>{event.fact.subject}</em></button></li>)}</ol>
     </section>
   );
