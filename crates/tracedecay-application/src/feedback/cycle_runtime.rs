@@ -823,6 +823,7 @@ fn graph_read_failure(error: CodeGraphReadError) -> FeedbackImpactPortOutcome {
 }
 
 struct VerifiedImpactEvidenceV1 {
+    seed_symbols: Vec<SymbolOccurrenceId>,
     file_paths: Vec<String>,
     affected_callers: Vec<SymbolOccurrenceId>,
     complete: bool,
@@ -831,18 +832,45 @@ struct VerifiedImpactEvidenceV1 {
 #[hotpath::measure(label = "usecases.feedback.impact_evidence")]
 fn read_verified_impact_evidence_v1(
     reader: &CodeGraphInteractiveReader,
-    symbol: &SymbolOccurrenceId,
+    file: &FileOccurrenceId,
+    symbol: Option<&SymbolOccurrenceId>,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
 ) -> Result<Option<VerifiedImpactEvidenceV1>, CodeGraphReadError> {
-    let Some(seed) = reader
-        .symbol_summary(symbol, Arc::clone(&cancellation))
-        .map_err(map_projection_error)?
-    else {
-        return Ok(None);
+    let (mut seeds, seeds_complete) = if let Some(symbol) = symbol {
+        let Some(seed) = reader
+            .symbol_summary(symbol, Arc::clone(&cancellation))
+            .map_err(map_projection_error)?
+        else {
+            return Ok(None);
+        };
+        if seed.binding.as_ref().map(|binding| &binding.file) != Some(file) {
+            return Ok(None);
+        }
+        (vec![seed], true)
+    } else {
+        let mut seeds = reader
+            .symbols_in_file(
+                file,
+                FEEDBACK_IMPACT_MAX_SYMBOLS_V1.saturating_add(1),
+                Arc::clone(&cancellation),
+            )
+            .map_err(map_projection_error)?;
+        if seeds.is_empty() {
+            return Ok(None);
+        }
+        let complete = seeds.len() <= FEEDBACK_IMPACT_MAX_SYMBOLS_V1;
+        seeds.truncate(FEEDBACK_IMPACT_MAX_SYMBOLS_V1);
+        (seeds, complete)
     };
+    seeds.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+    seeds.dedup_by(|left, right| left.occurrence == right.occurrence);
+    let seed_symbols = seeds
+        .iter()
+        .map(|seed| seed.occurrence.clone())
+        .collect::<Vec<_>>();
     let graph_impact = reader
         .impact(
-            std::slice::from_ref(symbol),
+            &seed_symbols,
             &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
             FEEDBACK_IMPACT_DEPTH_V1,
             FEEDBACK_IMPACT_MAX_SYMBOLS_V1,
@@ -852,7 +880,7 @@ fn read_verified_impact_evidence_v1(
         .map_err(map_projection_error)?;
     let caller_impact = reader
         .impact(
-            std::slice::from_ref(symbol),
+            &seed_symbols,
             &[RelationEdgeKindV1::Calls],
             FEEDBACK_IMPACT_DEPTH_V1,
             FEEDBACK_IMPACT_MAX_SYMBOLS_V1,
@@ -860,7 +888,8 @@ fn read_verified_impact_evidence_v1(
             cancellation,
         )
         .map_err(map_projection_error)?;
-    let impacted_summaries = std::iter::once(&seed)
+    let impacted_summaries = seeds
+        .iter()
         .chain(graph_impact.impacted.iter().map(|node| &node.summary))
         .collect::<Vec<_>>();
     let mut file_paths = impacted_summaries
@@ -882,10 +911,31 @@ fn read_verified_impact_evidence_v1(
     affected_callers.sort();
     affected_callers.dedup();
     Ok(Some(VerifiedImpactEvidenceV1 {
+        seed_symbols,
         file_paths,
         affected_callers,
-        complete: graph_impact.complete && caller_impact.complete && bindings_complete,
+        complete: seeds_complete
+            && graph_impact.complete
+            && caller_impact.complete
+            && bindings_complete,
     }))
+}
+
+fn combined_affected_tests_state(states: &[FeedbackImpactStateV1]) -> FeedbackImpactStateV1 {
+    if states.is_empty()
+        || states
+            .iter()
+            .all(|state| *state == FeedbackImpactStateV1::Unavailable)
+    {
+        FeedbackImpactStateV1::Unavailable
+    } else if states
+        .iter()
+        .all(|state| *state == FeedbackImpactStateV1::Complete)
+    {
+        FeedbackImpactStateV1::Complete
+    } else {
+        FeedbackImpactStateV1::Partial
+    }
 }
 
 impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
@@ -911,9 +961,6 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 ) {
                     return FeedbackImpactPortOutcome::Unavailable;
                 }
-                let Some(symbol) = request.input.target.symbol.clone() else {
-                    return FeedbackImpactPortOutcome::Unavailable;
-                };
                 let Some(generation) = request.input.target.generation_id.clone() else {
                     return FeedbackImpactPortOutcome::Unavailable;
                 };
@@ -940,14 +987,15 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 };
                 let evidence = match read_verified_impact_evidence_v1(
                     &reader,
-                    &symbol,
+                    &request.input.target.file,
+                    request.input.target.symbol.as_ref(),
                     Arc::clone(&cancellation),
                 ) {
                     Ok(Some(evidence)) => evidence,
                     Ok(None) => return FeedbackImpactPortOutcome::Unavailable,
                     Err(error) => return graph_read_failure(error),
                 };
-                let (affected_files, graph_state) = match self
+                let (mut affected_files, graph_state) = match self
                     .resolved_affected_files(&generation, &evidence.file_paths)
                     .await
                 {
@@ -967,12 +1015,16 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                         return FeedbackImpactPortOutcome::Stale;
                     }
                 };
+                affected_files.push(request.input.target.file.clone());
+                affected_files.sort();
+                affected_files.dedup();
                 match context.admission_at(request.input.observed_at) {
                     RequestAdmission::Admitted => {}
                     RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                     RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
                 }
                 let affected_callers = evidence.affected_callers;
+                let seed_symbols = evidence.seed_symbols;
 
                 let Ok(page) = PageRequest::first(100) else {
                     return FeedbackImpactPortOutcome::Unavailable;
@@ -994,27 +1046,54 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 ) {
                     return FeedbackImpactPortOutcome::Unavailable;
                 }
-                let tests = self.tests.affected_tests(
-                    &RetrievalPortContext {
-                        request: context,
-                        operation: &self.tests_operation,
-                    },
-                    &AffectedTestsRequest {
-                        symbol,
-                        generation,
-                        meta,
-                    },
-                );
-                let (affected_tests, affected_tests_state) = match affected_tests_outcome(tests) {
-                    DirectAffectedTestsOutcome::Evidence { tests, state } => (tests, state),
-                    DirectAffectedTestsOutcome::Cancelled => {
-                        return FeedbackImpactPortOutcome::Cancelled;
+                let mut affected_tests = Vec::new();
+                let mut affected_tests_states = Vec::with_capacity(seed_symbols.len());
+                for symbol in seed_symbols {
+                    match context.admission_at(request.input.observed_at) {
+                        RequestAdmission::Admitted => {}
+                        RequestAdmission::Cancelled => {
+                            return FeedbackImpactPortOutcome::Cancelled;
+                        }
+                        RequestAdmission::TimedOut => {
+                            return FeedbackImpactPortOutcome::TimedOut;
+                        }
                     }
-                    DirectAffectedTestsOutcome::TimedOut => {
-                        return FeedbackImpactPortOutcome::TimedOut;
+                    let tests = self.tests.affected_tests(
+                        &RetrievalPortContext {
+                            request: context,
+                            operation: &self.tests_operation,
+                        },
+                        &AffectedTestsRequest {
+                            symbol,
+                            generation: generation.clone(),
+                            meta: meta.clone(),
+                        },
+                    );
+                    match affected_tests_outcome(tests) {
+                        DirectAffectedTestsOutcome::Evidence { tests, state } => {
+                            affected_tests.extend(tests);
+                            affected_tests_states.push(state);
+                        }
+                        DirectAffectedTestsOutcome::Cancelled => {
+                            return FeedbackImpactPortOutcome::Cancelled;
+                        }
+                        DirectAffectedTestsOutcome::TimedOut => {
+                            return FeedbackImpactPortOutcome::TimedOut;
+                        }
+                        DirectAffectedTestsOutcome::Stale => {
+                            return FeedbackImpactPortOutcome::Stale;
+                        }
                     }
-                    DirectAffectedTestsOutcome::Stale => return FeedbackImpactPortOutcome::Stale,
-                };
+                }
+                affected_tests.sort();
+                affected_tests.dedup();
+                let tests_within_bound = affected_tests.len() <= FEEDBACK_IMPACT_MAX_SYMBOLS_V1;
+                affected_tests.truncate(FEEDBACK_IMPACT_MAX_SYMBOLS_V1);
+                let mut affected_tests_state =
+                    combined_affected_tests_state(&affected_tests_states);
+                if !tests_within_bound && affected_tests_state == FeedbackImpactStateV1::Complete {
+                    affected_tests_state = FeedbackImpactStateV1::Partial;
+                }
 
                 // The impact is complete only when both the graph and the
                 // affected-test evidence report complete coverage.
