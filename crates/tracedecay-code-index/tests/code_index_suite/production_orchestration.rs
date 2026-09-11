@@ -3186,6 +3186,40 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         PARTITIONED_FORMAT_SEGMENTS,
         "a file or evidence segment changed bytes"
     );
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+            .expect("partitioned text metadata parses")
+            .expect("revision seven partitioned manifest")
+            .generation_statistics(),
+        expected.generation_statistics().ok().as_ref(),
+        "a freshly sealed manifest carries the generation's own census"
+    );
+
+    // The same revision as a writer produced it before the census existed:
+    // these bytes minus that one field. Text owners still bind against it,
+    // and the census reads as unavailable rather than as a measured zero.
+    let mut pre_census: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    pre_census["generation"]
+        .as_object_mut()
+        .expect("generation payload")
+        .remove("statistics")
+        .expect("a fresh manifest carries a census to remove");
+    pre_census["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&pre_census["generation"]).expect("pre-census payload bytes")
+        ))
+    ));
+    let pre_census = serde_json::to_vec(&pre_census).expect("pre-census manifest bytes");
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&pre_census)
+            .expect("a manifest written without a census still authenticates")
+            .expect("revision seven partitioned manifest")
+            .generation_statistics(),
+        None,
+        "an absent census must read as unavailable, not as a measured zero"
+    );
 
     // Decode at width two with three file segments: the third file read must
     // reuse a slot from the first window, so the bound below covers cross-window
