@@ -1333,23 +1333,26 @@ fn with_index_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Res
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
-    let lock = lock_directory
-        .open_with(lock_name, &options)
-        .map(cap_std::fs::File::into_std)
-        .and_then(|file| {
-            let metadata = file.metadata()?;
-            if !metadata.is_file() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "automation pending index lock is not a regular file",
-                ));
-            }
-            fs2::FileExt::lock_exclusive(&file)?;
-            Ok(file)
-        })
-        .map_err(|error| {
-            contract_error(format!("automation pending index lock failed: {error}"))
-        })?;
+    // Concurrent index writers race the first creation of this lock; the
+    // shared helper absorbs the spurious Darwin `ENOENT` the losers are handed.
+    let lock = tracedecay_private_fs::capability_dir::open_or_create_with(
+        &lock_directory,
+        lock_name,
+        &options,
+    )
+    .map(cap_std::fs::File::into_std)
+    .and_then(|file| {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "automation pending index lock is not a regular file",
+            ));
+        }
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(file)
+    })
+    .map_err(|error| contract_error(format!("automation pending index lock failed: {error}")))?;
     let result = operation();
     let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
         contract_error(format!("automation pending index unlock failed: {error}"))
