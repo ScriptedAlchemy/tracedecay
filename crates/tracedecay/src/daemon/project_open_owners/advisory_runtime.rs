@@ -79,12 +79,12 @@ use crate::daemon::context_scout_lifecycle::{
 };
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
-use tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1;
-use tracedecay_agent_hosts::agents::context_scout_ports::{
+use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
+use tracedecay_agent_hosts::agents::context_scout::ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
 };
-use tracedecay_agent_hosts::agents::context_scout_v2::{
+use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
     ContextScoutTriggerV1,
 };
@@ -509,7 +509,7 @@ async fn install_project_open_context_scout_configuration(
     model_config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<()> {
     let admitted_model_config = pin.control().model_path.and_then(|expected| {
-        (tracedecay_agent_hosts::agents::context_scout_model::context_scout_backend_from_automation_config(
+        (tracedecay_agent_hosts::agents::context_scout::model::context_scout_backend_from_automation_config(
             model_config,
         ) == expected)
             .then_some(model_config)

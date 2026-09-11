@@ -245,7 +245,7 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&graph.store_layout)
         {
-            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+            let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 graph.db.clone(),
                 project_id,
                 tracedecay_domain::UtcMicros(

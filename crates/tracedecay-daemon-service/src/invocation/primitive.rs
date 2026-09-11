@@ -1,7 +1,7 @@
 //! application primitive, callable-code, and context-scout daemon invocation handlers.
 
 use super::*;
-use tracedecay_agent_hosts::agents::context_scout_v2::{
+use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
     ContextScoutMutationBindingV1, ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
     ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
@@ -494,7 +494,7 @@ pub(super) async fn execute_context_scout(
         }
     };
     let Some(configuration) =
-        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutConfigurationPinV1::from_current(&current)
     else {
         return DaemonInvocationResponse::problem(
             wire_request_id,
@@ -535,7 +535,7 @@ pub(super) async fn execute_context_scout(
     }
     let mut owner = None;
     for candidate in
-        tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+        tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
             address.project_id,
         )
     {
@@ -674,7 +674,7 @@ pub(super) async fn execute_context_scout(
 async fn execute_context_scout_mutation(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
-    owner: Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    owner: Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
     request: ContextScoutSurfaceRequestV1,
     authority: ContextScoutRequestAuthorityV1,
     configuration_revision: [u8; 32],
@@ -967,7 +967,7 @@ fn public_context_scout_claim(
 async fn execute_context_scout_state_transition(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
-    owner: Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    owner: Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
     control: &ContextScoutControlRequestV1,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
@@ -1085,7 +1085,7 @@ enum ContextScoutActivationReconciliationError {
 #[hotpath::measure(label = "daemon.service.context_scout.reconcile", future = true)]
 async fn reconcile_context_scout_configuration(
     runtime: &Arc<ProjectConfigurationRuntime>,
-    owner: &Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    owner: &Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
     registry: &Arc<ProjectContextScoutAddressRegistryV1>,
     address: ContextScoutAddressV1,
     scope: &ResolvedScope,
@@ -1097,7 +1097,7 @@ async fn reconcile_context_scout_configuration(
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
     let current = current.into_current_state();
     let refreshed =
-        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutConfigurationPinV1::from_current(&current)
             .ok_or(ContextScoutActivationReconciliationError::InvalidConfiguration)?;
     if !registry
         .advance_control_exact_address(address, scope, &refreshed)

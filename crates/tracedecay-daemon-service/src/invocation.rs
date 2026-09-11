@@ -77,7 +77,7 @@ use crate::project_runtime::{
     SemanticActivationOwnerWithdrawalV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
 };
-use tracedecay_agent_hosts::agents::context_scout_ports::{
+use tracedecay_agent_hosts::agents::context_scout::ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
 };
