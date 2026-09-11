@@ -4645,7 +4645,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         })
                         .await;
                         match handoff {
-                            Ok(Ok(Some(_)) | Ok(None)) => {}
+                            Ok(Ok(Some(_) | None)) => {}
                             Ok(Err(error)) => tracing::warn!(
                                 event = "code_index_semantic_retained_handoff_failed",
                                 error = %error,

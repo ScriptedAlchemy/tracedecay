@@ -1412,6 +1412,7 @@ fn callee_dispatch_usage(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn augment_callee_dispatch_page(
     latest: &LatestCompleteCodeIndexV1,
     page: NativeLanePageV1<NativeGraphRecordV1>,
