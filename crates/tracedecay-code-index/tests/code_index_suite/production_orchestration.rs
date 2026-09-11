@@ -2902,16 +2902,12 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         "a file or evidence segment changed bytes"
     );
 
-    let file_buffer_address = Cell::new(None);
     let evidence_buffer_address = Cell::new(None);
     let segment_reads = Cell::new(0_usize);
-    let largest_file_segment = Cell::new(0_usize);
     let largest_evidence_page = Cell::new(0_usize);
-    let file_buffer_capacity = Cell::new(0_usize);
     let evidence_buffer_capacity = Cell::new(0_usize);
     let restored =
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |request, buffer| {
-            let address = buffer as *const Vec<u8>;
             let (digest, offset, length, reading_file) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     (digest, 0, size_bytes, true)
@@ -2923,15 +2919,13 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                     ..
                 } => (digest, offset, length, false),
             };
-            let phase_address = if reading_file {
-                &file_buffer_address
-            } else {
-                &evidence_buffer_address
-            };
-            if let Some(first_address) = phase_address.get() {
-                assert_eq!(address, first_address, "each phase must reuse one Vec");
-            } else {
-                phase_address.set(Some(address));
+            if !reading_file {
+                let address = buffer as *const Vec<u8>;
+                if let Some(first_address) = evidence_buffer_address.get() {
+                    assert_eq!(address, first_address, "the evidence phase must reuse one Vec");
+                } else {
+                    evidence_buffer_address.set(Some(address));
+                }
             }
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
@@ -2941,8 +2935,14 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             buffer.clear();
             buffer.extend_from_slice(&bytes[start..end]);
             if reading_file {
-                largest_file_segment.set(largest_file_segment.get().max(bytes.len()));
-                file_buffer_capacity.set(buffer.capacity());
+                // File segments of one decode window are read into their own
+                // buffers so the pool can decode them concurrently; each
+                // buffer is sized to its segment, never to the whole store.
+                assert!(
+                    buffer.capacity() >= bytes.len()
+                        && buffer.capacity() <= bytes.len().next_power_of_two(),
+                    "a file read buffer must be sized to its own segment"
+                );
             } else {
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
                 evidence_buffer_capacity.set(buffer.capacity());
@@ -2953,11 +2953,6 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         .expect("partitioned bytes decode")
         .expect("revision seven partitioned manifest");
     assert_eq!(segment_reads.get(), PARTITIONED_FORMAT_SEGMENTS.len());
-    assert!(
-        file_buffer_capacity.get() >= largest_file_segment.get()
-            && file_buffer_capacity.get() <= largest_file_segment.get().next_power_of_two(),
-        "the file allocation must be bounded by the largest file segment"
-    );
     assert!(
         evidence_buffer_capacity.get() >= largest_evidence_page.get()
             && evidence_buffer_capacity.get() <= largest_evidence_page.get().next_power_of_two(),
