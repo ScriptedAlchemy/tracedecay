@@ -580,7 +580,7 @@ async fn write_proxy_request_result(
                 &responses,
                 binary_version()?,
             ) {
-                eprintln!("[tracedecay] warning: {warning}");
+                log_daemon_event("core_proxy_warning", &[("warning", warning)]);
             }
             for response in responses {
                 writer.write_line(&response).await?;
