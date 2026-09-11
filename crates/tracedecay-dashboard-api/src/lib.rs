@@ -16,7 +16,7 @@
 #[global_allocator]
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
-pub use tracedecay_application as application;
+use tracedecay_application as application;
 pub use tracedecay_application::git_query;
 pub use tracedecay_contracts::request_identity;
 pub(crate) use tracedecay_graph_query as graph;
