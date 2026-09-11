@@ -410,7 +410,7 @@ pub enum NativeIntegrationCancellationProjectionV1 {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum NativeIntegrationSurfaceResultV1 {
     StackSnapshot(Box<NativeIntegrationSealedStackSnapshotProjectionV1>),
-    Preview(NativeIntegrationPreviewProjectionV1),
+    Preview(Box<NativeIntegrationPreviewProjectionV1>),
     Approval(NativeIntegrationApprovalProjectionV1),
     Receipt(NativeIntegrationReceiptProjectionV1),
     Status(NativeIntegrationStatusProjectionV1),
@@ -476,9 +476,9 @@ impl NativeIntegrationSurfaceResultV1 {
         outcome: &NativeIntegrationPreflightOutcomeV1,
     ) -> Result<Self, ApplicationContractError> {
         Ok(match outcome {
-            NativeIntegrationPreflightOutcomeV1::Preview(preview) => {
-                Self::Preview(NativeIntegrationPreviewProjectionV1::project(preview)?)
-            }
+            NativeIntegrationPreflightOutcomeV1::Preview(preview) => Self::Preview(Box::new(
+                NativeIntegrationPreviewProjectionV1::project(preview)?,
+            )),
             NativeIntegrationPreflightOutcomeV1::Partial => {
                 Self::unavailable(NativeIntegrationSurfaceUnavailableV1::Partial)
             }
