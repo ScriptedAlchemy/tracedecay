@@ -1,5 +1,6 @@
 //! Application-admitted retrieval over one exact mounted session root.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -74,6 +75,17 @@ impl DaemonSessionRetrievalService {
 
 pub type SessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = SessionRetrievalServiceOutcome> + Send + 'a>>;
+pub type LcmRawStoreIdsFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    BTreeMap<(String, String), i64>,
+                    tracedecay_domain::errors::TraceDecayError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
@@ -157,6 +169,13 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
                 SessionRetrievalUnavailable::service_not_configured(),
             )
         })
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        _identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async { Ok(BTreeMap::new()) })
     }
 
     /// The refresh worker's serving state for this root — current, still
@@ -369,6 +388,23 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                 }
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
             }
+        })
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async move {
+            let snapshot = self.database.read_snapshot().await?;
+            tracedecay_lcm::raw::load_raw_message_store_ids_by_identity(&snapshot, &identities)
+                .await
+                .map_err(
+                    |error| tracedecay_domain::errors::TraceDecayError::Database {
+                        message: error.to_string(),
+                        operation: "resolve LCM raw-message store ids".to_owned(),
+                    },
+                )
         })
     }
 }
