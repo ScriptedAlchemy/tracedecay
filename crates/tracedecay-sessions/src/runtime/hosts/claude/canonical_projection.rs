@@ -94,10 +94,10 @@ pub(super) fn map_canonical_claude_record(
         let pre_tokens = compact_metadata
             .and_then(|metadata| metadata.get("preTokens"))
             .and_then(Value::as_i64);
-        let envelope_value = serde_json::to_value(envelope).unwrap_or(Value::Null);
-        let logical_parent_uuid = envelope_value
-            .pointer("/relations/parent_message_id")
-            .and_then(Value::as_str);
+        let logical_parent_uuid = envelope
+            .relations()
+            .parent_message_id()
+            .map(|parent| parent.as_str().to_owned());
         let mut metadata = Map::new();
         metadata.insert(
             "source".to_owned(),
@@ -112,12 +112,16 @@ pub(super) fn map_canonical_claude_record(
         if let Some(logical_parent_uuid) = logical_parent_uuid {
             metadata.insert(
                 "logical_parent_uuid".to_owned(),
-                Value::String(logical_parent_uuid.to_owned()),
+                Value::String(logical_parent_uuid),
             );
         }
         // LCM native-compaction recognition decodes this envelope to confirm
         // the boundary's preservedSegment.anchorUuid still names the summary.
-        metadata.insert("canonical_envelope".to_owned(), envelope_value);
+        // Never persist `canonical_envelope: null` — omit the key when the
+        // typed envelope cannot be serialized.
+        if let Ok(envelope_value) = serde_json::to_value(envelope) {
+            metadata.insert("canonical_envelope".to_owned(), envelope_value);
+        }
         let message = SessionMessageRecord {
             provider: PROVIDER.to_owned(),
             message_id: format!(
@@ -387,10 +391,11 @@ fn canonical_message_metadata_from_facts(
     {
         // Compact-summary rows keep the canonical envelope so LCM can read the
         // native flags and parent id without a second transcript pass.
-        metadata.insert(
-            "canonical_envelope".to_owned(),
-            serde_json::to_value(envelope).unwrap_or(Value::Null),
-        );
+        // Never persist `canonical_envelope: null` — omit the key when the
+        // typed envelope cannot be serialized.
+        if let Ok(envelope_value) = serde_json::to_value(envelope) {
+            metadata.insert("canonical_envelope".to_owned(), envelope_value);
+        }
     }
 
     metadata
