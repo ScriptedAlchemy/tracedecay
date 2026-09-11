@@ -944,7 +944,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .sealed_decode_count(),
             0,
-            "the retained revision-7 graph must recover before any partition decode"
+            "the retained partitioned graph must recover before any partition decode"
         );
 
         if dirty_before_restart {
