@@ -499,11 +499,7 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .compatibility()
                 .semantic
                 .as_ref()
-                .and_then(|pins| {
-                    pins.artifact_manifest_digest
-                        .as_str()
-                        .strip_prefix("sha256:")
-                })
+                .and_then(|pins| pins.artifact_manifest_digest.hex_suffix())
                 != Some(request.selected_profile.artifact_digest.as_str())
         {
             return Err(log_semantic_activation_failure(

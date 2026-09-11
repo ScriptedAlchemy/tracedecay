@@ -14,8 +14,8 @@ use crate::config::scope_control::{
 };
 use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
-    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
+    ScopeRevalidationEvidenceV1,
 };
 use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
@@ -595,7 +595,7 @@ fn derive_plan_id(
         created_at,
     ))
     .map_err(ConfigurationError::validation)?;
-    let encoded = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+    let encoded = digest.hex_suffix().ok_or_else(|| {
         ConfigurationError::validation_message("configuration plan digest missing prefix")
     })?;
     ChangePlanId::new(format!("configuration.plan.v1.{encoded}"))
@@ -609,11 +609,6 @@ mod tests {
 
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
-    use tracedecay_global_db::configuration::contracts::ports::{
-        ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
-        CurrentConfigurationMutationAuthorizationV1,
-    };
-    use tracedecay_global_db::configuration::contracts::types::ConfigurationSettlementAuthorityV1;
     use tracedecay_domain::configuration::{
         AnalyzerSettingsV1, AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
         ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1,
@@ -623,6 +618,11 @@ mod tests {
     use tracedecay_domain::{
         AccessPolicyDigest, ActorId, LocatorDigest, ManifestDigest, ProjectId,
     };
+    use tracedecay_global_db::configuration::contracts::ports::{
+        ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
+        CurrentConfigurationMutationAuthorizationV1,
+    };
+    use tracedecay_global_db::configuration::contracts::types::ConfigurationSettlementAuthorityV1;
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -801,10 +801,7 @@ mod tests {
             _sink: ConfigurationMutationSinkV1,
             _effect: ConfigurationMutationEffectV1,
             _now: UtcMicros,
-        ) -> ConfigurationOperationFuture<
-            '_,
-            CurrentConfigurationMutationAuthorizationV1,
-        > {
+        ) -> ConfigurationOperationFuture<'_, CurrentConfigurationMutationAuthorizationV1> {
             let current = self.current.clone();
             Box::pin(async move { Ok(current) })
         }
