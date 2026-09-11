@@ -1,6 +1,7 @@
 use std::path::{Component, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use crate::manifest::ResourceCeilingV1;
 use tracedecay_domain::canonical_text::default_true;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
@@ -68,6 +69,20 @@ impl Default for SemanticResourceCeilings {
             max_batch_size: 32,
             max_sequence_length: 512,
             load_deadline_ms: 30_000,
+        }
+    }
+}
+
+impl From<SemanticResourceCeilings> for ResourceCeilingV1 {
+    fn from(ceilings: SemanticResourceCeilings) -> Self {
+        Self {
+            max_model_bytes: ceilings.max_model_bytes,
+            max_tokenizer_bytes: ceilings.max_tokenizer_bytes,
+            max_resident_bytes: ceilings.max_resident_bytes,
+            max_threads: ceilings.max_threads,
+            max_batch_size: ceilings.max_batch_size,
+            max_sequence_length: ceilings.max_sequence_length,
+            load_deadline_ms: ceilings.load_deadline_ms,
         }
     }
 }
