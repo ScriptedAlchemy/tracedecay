@@ -162,6 +162,49 @@ pub enum GraphSeatGateV1 {
     RetainedTextOwnerWarming,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticEvaluationGenerationRefusalV1 {
+    ProjectRootCanonicalizationFailed,
+    ProjectRootNotMounted,
+    ScopeIdentityMismatch,
+    SourceUnverified,
+    SourceChanged,
+    SchedulerUnavailable,
+    GitAuthorityUnavailable,
+    GenerationUnavailable,
+    GenerationScopeMismatch,
+    WorkerJoinFailed,
+}
+
+impl SemanticEvaluationGenerationRefusalV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectRootCanonicalizationFailed => "project_root_canonicalization_failed",
+            Self::ProjectRootNotMounted => "project_root_not_mounted",
+            Self::ScopeIdentityMismatch => "scope_identity_mismatch",
+            Self::SourceUnverified => "source_unverified",
+            Self::SourceChanged => "source_changed",
+            Self::SchedulerUnavailable => "scheduler_unavailable",
+            Self::GitAuthorityUnavailable => "git_authority_unavailable",
+            Self::GenerationUnavailable => "generation_unavailable",
+            Self::GenerationScopeMismatch => "generation_scope_mismatch",
+            Self::WorkerJoinFailed => "worker_join_failed",
+        }
+    }
+}
+
+fn record_semantic_candidate_refusal(
+    project_root: &Path,
+    reason: SemanticEvaluationGenerationRefusalV1,
+) {
+    tracing::info!(
+        event = "code_index_semantic_candidate_unavailable",
+        project = %project_root.display(),
+        reason = reason.as_str(),
+        "semantic evaluation generation is unavailable"
+    );
+}
+
 impl GraphSeatGateV1 {
     #[hotpath::skip]
     pub const fn decide(
@@ -1557,6 +1600,25 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    #[cfg(test)]
+    pub async fn expire_source_freshness_for_test(&self, project_root: &Path) {
+        let project_root = project_root.canonicalize().expect("canonical test root");
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root).expect("mounted test worktree");
+        worktree
+            .source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .staleness_threshold = Duration::ZERO;
+        worktree
+            .scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .policy
+            .staleness_threshold = Duration::ZERO;
     }
 
     #[cfg(test)]
@@ -6876,18 +6938,37 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
-    ) -> Option<(
-        super::SemanticEvaluationCodeSnapshotV1,
-        Arc<CodeIndexPublishedGenerationV1>,
-    )> {
-        let project_root = project_root.canonicalize().ok()?;
+    ) -> Result<
+        (
+            super::SemanticEvaluationCodeSnapshotV1,
+            Arc<CodeIndexPublishedGenerationV1>,
+        ),
+        SemanticEvaluationGenerationRefusalV1,
+    > {
+        let requested_root = project_root;
+        let project_root = project_root
+            .canonicalize()
+            .map_err(|_| SemanticEvaluationGenerationRefusalV1::ProjectRootCanonicalizationFailed);
+        let project_root = match project_root {
+            Ok(project_root) => project_root,
+            Err(reason) => {
+                record_semantic_candidate_refusal(requested_root, reason);
+                return Err(reason);
+            }
+        };
         let (scheduler, source_freshness, shutting_down, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
-            let worktree = mounted.get(&project_root)?;
+            let Some(worktree) = mounted.get(&project_root) else {
+                let reason = SemanticEvaluationGenerationRefusalV1::ProjectRootNotMounted;
+                record_semantic_candidate_refusal(&project_root, reason);
+                return Err(reason);
+            };
             if worktree.repository_id != scope.repository_id
                 || worktree.worktree_id != scope.worktree_id
             {
-                return None;
+                let reason = SemanticEvaluationGenerationRefusalV1::ScopeIdentityMismatch;
+                record_semantic_candidate_refusal(&project_root, reason);
+                return Err(reason);
             }
             (
                 Arc::clone(&worktree.scheduler),
@@ -6897,38 +6978,65 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.pending_wake),
             )
         };
-        let freshness_root = project_root.clone();
         let scope = scope.clone();
         let task_shutting_down = Arc::clone(&shutting_down);
         let result = tokio::task::spawn_blocking(move || {
-            if !source_freshness.ready_without_stat(&freshness_root, &task_shutting_down) {
-                return None;
+            if task_shutting_down.load(Ordering::Acquire) {
+                return Err(SemanticEvaluationGenerationRefusalV1::SchedulerUnavailable);
             }
-            let scheduler =
-                Self::lock_scheduler_unless_shutting_down(&scheduler, &task_shutting_down).ok()?;
+            if source_freshness.source_change_pending() {
+                return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
+            }
+            let mut scheduler =
+                Self::lock_scheduler_unless_shutting_down(&scheduler, &task_shutting_down)
+                    .map_err(|_| SemanticEvaluationGenerationRefusalV1::SchedulerUnavailable)?;
             if !scheduler.git_authority_available() {
-                return None;
+                return Err(SemanticEvaluationGenerationRefusalV1::GitAuthorityUnavailable);
             }
-            let latest = scheduler.latest_complete()?;
-            if !source_freshness.ready_without_stat(&freshness_root, &task_shutting_down)
-                || !latest_matches_scope_identity(&latest, &scope)
-            {
-                return None;
+            match scheduler.freshness_probe_verdict() {
+                super::FreshnessProbeVerdictV1::Current => {}
+                super::FreshnessProbeVerdictV1::Unverified => {
+                    return Err(SemanticEvaluationGenerationRefusalV1::SourceUnverified);
+                }
+                super::FreshnessProbeVerdictV1::Moved => {
+                    return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
+                }
             }
-            Some((
+            let latest = scheduler
+                .latest_complete()
+                .ok_or(SemanticEvaluationGenerationRefusalV1::GenerationUnavailable)?;
+            if source_freshness.source_change_pending() {
+                return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
+            }
+            match scheduler.freshness_probe_verdict() {
+                super::FreshnessProbeVerdictV1::Current => {}
+                super::FreshnessProbeVerdictV1::Unverified => {
+                    return Err(SemanticEvaluationGenerationRefusalV1::SourceUnverified);
+                }
+                super::FreshnessProbeVerdictV1::Moved => {
+                    return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
+                }
+            }
+            if !latest_matches_scope_identity(&latest, &scope) {
+                return Err(SemanticEvaluationGenerationRefusalV1::GenerationScopeMismatch);
+            }
+            Ok((
                 latest.semantic_evaluation_snapshot(),
                 latest.generation_handle(),
             ))
         })
         .await
-        .ok()
-        .flatten();
-        if result.is_none() && !shutting_down.load(Ordering::Acquire) {
+        .map_err(|_| SemanticEvaluationGenerationRefusalV1::WorkerJoinFailed)
+        .and_then(|result| result);
+        if result.is_err() && !shutting_down.load(Ordering::Acquire) {
             Self::note_wake_if_idle(
                 &pending_wake,
                 &wake,
                 CodeIndexCadenceTriggerV1::QueryAdmission,
             );
+        }
+        if let Err(reason) = result.as_ref() {
+            record_semantic_candidate_refusal(&project_root, *reason);
         }
         result
     }
@@ -6946,6 +7054,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         self.semantic_evaluation_generation_for_scope(&root, scope)
             .await
+            .ok()
             .map(|(snapshot, _)| snapshot)
     }
 
