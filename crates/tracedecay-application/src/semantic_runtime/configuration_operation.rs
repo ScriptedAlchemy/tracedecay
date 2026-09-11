@@ -1490,6 +1490,7 @@ mod tests {
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "runtime.qualification-test.v1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
             dimensions: 4,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,

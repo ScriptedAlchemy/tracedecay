@@ -63,9 +63,9 @@ use tracedecay_domain::EmbeddingPrecisionV1;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1,
-    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-    EmbeddingPoolingV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, ManifestDigest,
-    PrivacyDomainId,
+    EmbeddingDocumentCompositionV1, EmbeddingExecutionProviderV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingProjectionKeyV1,
+    EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
 };
 use tracedecay_semantic_contracts::{
     ArtifactMemberRoleV1, ArtifactProfileKindV1, SemanticResourceCeilings, Sha256DigestHex,
@@ -266,6 +266,15 @@ fn resident_bytes_estimate_for(
         .clamp(1, resident_byte_ceiling.max(1))
 }
 
+fn lifecycle_execution_provider(backend: EmbeddingRuntimeFamilyV1) -> EmbeddingExecutionProviderV1 {
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
+    if backend == EmbeddingRuntimeFamilyV1::FastEmbedOrt {
+        return crate::execution_provider::resolved_execution_provider();
+    }
+    let _ = backend;
+    EmbeddingExecutionProviderV1::Cpu
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LifecycleInstallArtifactV1 {
     root: PathBuf,
@@ -329,6 +338,10 @@ impl VerifiedEmbeddingArtifactV1 {
 
     fn max_threads(&self) -> u32 {
         self.max_threads
+    }
+
+    pub(crate) fn execution_provider(&self) -> EmbeddingExecutionProviderV1 {
+        self.projection.embedding_key().execution_provider
     }
 
     fn max_concurrent_sessions(&self) -> u32 {
@@ -668,6 +681,7 @@ impl AdmittedProjectionArtifactV1 {
         // runtime/precision pins, so two backends serving the same upstream
         // package still produce distinct projection identities.
         let backend = model.backend.runtime_family();
+        let execution_provider = lifecycle_execution_provider(backend);
         let projection = EmbeddingProjectionKeyV1 {
             model_artifact_digest: manifest_digest(&catalog_package_digest(model))?,
             tokenizer_digest: manifest_digest(&tokenizer.sha256)?,
@@ -686,6 +700,7 @@ impl AdmittedProjectionArtifactV1 {
             runtime_backend: backend.runtime_family().to_owned(),
             runtime_build_revision: backend.build_revision().to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider,
             dimensions: model.expected_dimensions,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,
@@ -732,6 +747,10 @@ impl AdmittedProjectionArtifactV1 {
             self.runtime_artifact.max_concurrent_sessions(),
             self.runtime_artifact.resident_session_limit(),
         )
+    }
+
+    pub(crate) fn execution_provider(&self) -> EmbeddingExecutionProviderV1 {
+        self.runtime_artifact.execution_provider()
     }
 
     #[cfg(any(test, feature = "semantic-fastembed", feature = "semantic-model2vec"))]
@@ -1288,6 +1307,13 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
                 "the artifact has no permitted FastEmbed inference threads",
             ));
         }
+        if artifact.execution_provider() != crate::execution_provider::resolved_execution_provider()
+        {
+            return Err(fastembed_failure(
+                RuntimeFailureKindV1::IncompatibleRuntime,
+                "the resolved execution provider changed after projection admission",
+            ));
+        }
         Ok(())
     }
 
@@ -1314,7 +1340,9 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         let options = InitOptionsUserDefined::new()
             .with_max_length(artifact.truncation_length() as usize)
             .with_intra_threads(intra_threads)
-            .with_execution_providers(crate::execution_provider::requested_execution_providers());
+            .with_execution_providers(crate::execution_provider::execution_providers(
+                artifact.execution_provider(),
+            ));
         // Last boundary before the ORT constructor: an abandoned load drops
         // the buffered member bytes here instead of parsing and optimizing a
         // graph nobody will use.
@@ -2170,6 +2198,7 @@ mod tests {
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "ort-test-rev-1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: EmbeddingExecutionProviderV1::Cpu,
             dimensions,
             metric,
             normalization,
