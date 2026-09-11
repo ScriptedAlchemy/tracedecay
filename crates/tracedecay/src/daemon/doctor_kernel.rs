@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::PinnedRuntimeConfiguration;
+use crate::config::DaemonRuntimeConfiguration;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
@@ -56,7 +56,7 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 /// a fabricated healthy result.
 #[must_use]
 pub fn configuration_read_from_pin<E>(
-    resolved: &Result<PinnedRuntimeConfiguration, E>,
+    resolved: &Result<DaemonRuntimeConfiguration, E>,
 ) -> ConfigurationAuthorityReadV1 {
     match resolved {
         Ok(_) => ConfigurationAuthorityReadV1::Resolved {

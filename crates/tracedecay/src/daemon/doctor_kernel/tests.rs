@@ -18,7 +18,7 @@ use super::*;
 
 #[test]
 fn configuration_read_from_pin_absent_on_cold_cache() {
-    let missing: Result<crate::config::PinnedRuntimeConfiguration, &str> = Err("cold cache");
+    let missing: Result<crate::config::DaemonRuntimeConfiguration, &str> = Err("cold cache");
     assert_eq!(
         configuration_read_from_pin(&missing),
         ConfigurationAuthorityReadV1::Absent
